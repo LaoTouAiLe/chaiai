@@ -9,13 +9,14 @@
   ``reflection_node`` → ``completion_router``，再回到决策节点或产出回答。
 
 其余按计划落地：写/改/删除工具与安全 Shell 在 T06/T07，完整机械证据与幂等在 T08，
-审批节点在 T10，记忆节点在 T18，多步规划在 T20。
+审批节点在 T10，中期记忆召回在 T14B（本文件），记忆写入与遗忘在 T18，多步规划在 T20。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from typing import Any, cast
@@ -32,9 +33,15 @@ from langchain_core.messages.tool import ToolCall
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
+from local_agent.config import EmbeddingConfig, MediumTermMemoryConfig, resolve_api_key
 from local_agent.context.agents_loader import load_agents
 from local_agent.context.prompt_context import build_system_prompt
-from local_agent.exceptions import LocalAgentError, SecurityError
+from local_agent.exceptions import (
+    EmbeddingError,
+    LocalAgentError,
+    MemoryStoreError,
+    SecurityError,
+)
 from local_agent.graph.state import (
     AgentState,
     DecisionRecord,
@@ -54,8 +61,11 @@ from local_agent.graph.state import (
     tool_event_key,
     tool_result_key,
 )
+from local_agent.llm import embedding as embedding_module
 from local_agent.llm.models import TOOL_CALLING_UNAVAILABLE_REPLY, ModelCapabilities
+from local_agent.memory import medium_term, recall
 from local_agent.reflection.validators import ToolEvidence, summarize_trust, validate_tool_event
+from local_agent.scope import project_id_for
 from local_agent.security.approval import (
     ApprovalChoice,
     ApprovalRequest,
@@ -150,9 +160,114 @@ def load_agents_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
     return {}
 
 
-def recall_memory_node(state: AgentState) -> AgentState:
-    """召回中长期记忆（v0.1 透传，不访问任何记忆库；T14 接入向量召回）。"""
-    return {}
+#: 进程内复用的中期记忆库（键含路径、collection 与 embedding 身份）。
+_MEDIUM_TERM_STORES: dict[tuple[str, ...], medium_term.MediumTermStore] = {}
+#: 建库/加载模型的并发保护：两个 Streamlit 会话可能同时首次召回，不加锁会各建一个模型实例。
+_MEDIUM_TERM_STORES_LOCK = threading.Lock()
+
+
+def _credential_fingerprint(api_key: str | None) -> str:
+    """凭据变更标识：只放 Key 的完整哈希，**不把 Key 本体放进缓存键或日志**。
+
+    用完整 SHA-256（不截断）：截断会把"凭据已更换"压缩成 32 位碰撞空间，一旦碰撞就会复用
+    仍持有旧凭据的 Store；而完整摘要没有任何实际成本。
+    """
+    if not api_key:
+        return ""
+    return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+
+def _store_cache_key(
+    memory_config: MediumTermMemoryConfig,
+    embedding_config: EmbeddingConfig,
+    api_key: str | None,
+) -> tuple[str, ...]:
+    """商店缓存的键：任何影响"连哪个库、用哪套模型与凭据"的配置都要进键。
+
+    漏掉任一项都会拿到不该复用的旧实例：换端点（``base_url``/``api_key_env``/Key）会命中旧
+    Store，"先启用后关闭 embedding"也可能继续用旧实例。凭据只进完整哈希，不进原始 Key。
+    """
+    return (
+        memory_config.path,
+        memory_config.collection,
+        str(embedding_config.enabled),
+        embedding_config.provider,
+        embedding_config.model,
+        embedding_config.base_url,
+        embedding_config.api_key_env,
+        embedding_config.cache_dir,
+        str(embedding_config.local_files_only),
+        _credential_fingerprint(api_key),
+    )
+
+
+def medium_term_store(context: RuntimeContext) -> medium_term.MediumTermStore:
+    """取（必要时创建）本进程复用的中期记忆库。
+
+    复用是必需的：embedding 模型按进程惰性加载并复用（T14A），每次节点调用都新建适配器
+    等于每轮重新加载一遍模型。整个"查缓存 + 建库"过程加锁：并发首次召回只会建一个实例
+    （锁会在首次加载模型/下载时被持有，这正是我们要的串行化）。
+    """
+    memory_config = context.app_config.memory.medium_term
+    embedding_config = context.app_config.embedding
+    api_key = (
+        resolve_api_key(embedding_config)
+        if embedding_config.enabled and embedding_config.provider == "openai_compatible"
+        else None
+    )
+    key = _store_cache_key(memory_config, embedding_config, api_key)
+    with _MEDIUM_TERM_STORES_LOCK:
+        cached = _MEDIUM_TERM_STORES.get(key)
+        if cached is not None:
+            return cached
+        store = medium_term.open_store(
+            memory_config,
+            embedding_function=embedding_module.build_embedding_function(
+                embedding_config, api_key=api_key
+            ),
+        )
+        _MEDIUM_TERM_STORES[key] = store
+        return store
+
+
+def recall_memory_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
+    """召回中期记忆并写入 ``memory_refs``（架构 §10.2）。
+
+    - 关闭时直接透传：**不打开记忆库、不加载模型**（架构 §5：关闭的层不访问相应库）；
+    - 召回失败（模型下载/缓存失败、collection 不兼容等）不让整轮对话失败：记一条错误事件
+      并把 ``memory_refs`` 置空，页面据此说明"本轮没有用上记忆"以及原因（架构 §11.6：
+      必须明确报错，不允许静默回退到别的模型或 provider）。
+    """
+    context = runtime.context
+    memory_config = context.app_config.memory.medium_term
+    if not memory_config.enabled:
+        return {}
+    query = str(state.get("normalized_request") or state.get("user_input") or "").strip()
+    if not query:
+        return {"memory_refs": []}
+    try:
+        store = medium_term_store(context)
+        references = recall.recall_memory(
+            store,
+            query=query,
+            config=memory_config,
+            workspace_root=context.workspace_root,
+            project_id=project_id_for(context.workspace_root),
+            user_id=context.user_id,
+            now=context.current_time,
+        )
+    except (EmbeddingError, MemoryStoreError) as exc:
+        return {
+            "memory_refs": [],
+            "error_events": [
+                make_error_event(
+                    str(state.get("run_id") or ""),
+                    stage=RECALL_MEMORY,
+                    message=f"记忆召回失败，本轮不注入记忆：{exc}",
+                )
+            ],
+        }
+    return {"memory_refs": references}
 
 
 def compression_node(state: AgentState) -> AgentState:
@@ -171,6 +286,7 @@ def chat_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState
         mode=state.get("mode", "chat"),
         context=context,
         route_reason=str(state.get("route_reason", "")),
+        memory_refs=state.get("memory_refs") or (),
     )
     messages = [
         SystemMessage(content=prompt.system_prompt),
@@ -216,6 +332,7 @@ def agent_decision_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
         mode=state.get("mode", "tool"),
         context=context,
         route_reason=str(state.get("route_reason", "")),
+        memory_refs=state.get("memory_refs") or (),
     )
     response = model.invoke(
         [

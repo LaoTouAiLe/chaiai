@@ -7,16 +7,21 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+import threading
+import time
+from collections.abc import Callable, Iterator, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 from langchain_core.messages import SystemMessage, ToolMessage
 
+from local_agent import scope
 from local_agent.config import AgentsConfig, AppConfig
 from local_agent.context import agents_loader, prompt_context
-from local_agent.graph import builder, routers
+from local_agent.exceptions import MemoryStoreError
+from local_agent.graph import builder, nodes, routers
 from local_agent.graph.routers import ROUTE_CLASSIFIER_MARKER, RouteDecision
 from local_agent.graph.state import RuntimeContext
 from local_agent.llm.models import (
@@ -25,6 +30,9 @@ from local_agent.llm.models import (
     probe_capabilities,
 )
 from local_agent.llm.protocol import StructuredOutputError, call_structured
+from local_agent.memory import medium_term
+from local_agent.memory.medium_term import MediumTermHit
+from local_agent.memory.schemas import MemoryReference
 
 ModelFactory = Callable[..., object]
 
@@ -696,3 +704,266 @@ def test_system_prompt_without_agents_file_says_so(
 
     assert "未加载到任何 AGENTS 文件" in prompt.system_prompt
     assert "如果当前模式是 tool" in prompt.system_prompt
+
+
+# --------------------------------------------------------------------------- T14B 记忆召回
+
+
+class FakeMemoryStore:
+    """只实现 recall 需要的两个方法的假记忆库（避免在路由测试里起 Chroma）。"""
+
+    def __init__(self, hits: list[MediumTermHit]) -> None:
+        self._hits = hits
+
+    def embed_query(self, text: str) -> list[float]:
+        return [1.0, 0.0, 0.0]
+
+    def query(
+        self, *, query_vector: Sequence[float], scope_keys: list[tuple[str, str]], n_results: int
+    ) -> list[MediumTermHit]:
+        allowed = set(scope_keys)
+        return [
+            hit
+            for hit in self._hits
+            if (hit.metadata.get("scope"), hit.metadata.get("scope_key")) in allowed
+        ][:n_results]
+
+
+def _memory_hit(content: str, *, scope_key: str, **metadata: object) -> MediumTermHit:
+    values: dict[str, object] = {
+        "scope": "project",
+        "scope_key": scope_key,
+        "importance": 0.9,
+        "confidence": 0.9,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    values.update(metadata)
+    return MediumTermHit(memory_id=f"mem-{abs(hash(content)) % 10000}", content=content, metadata=values, distance=0.0)
+
+
+def _config_with_medium_term(
+    tmp_path: Path, app_config: AppConfig, **overrides: object
+) -> AppConfig:
+    """打开中期记忆的配置副本；embedding 必须同时打开（配置校验要求两者一致）。"""
+    data = app_config.model_dump()
+    data["memory"]["medium_term"].update({"enabled": True, **overrides})
+    data["embedding"].update(
+        {
+            "enabled": True,
+            "provider": "onnx_local",
+            "model": "fake-model",
+            "cache_dir": (tmp_path / "models").as_posix(),
+        }
+    )
+    return AppConfig.model_validate(data)
+
+
+@pytest.fixture(autouse=True)
+def _clear_medium_term_store_cache() -> Iterator[None]:
+    """节点级 store 缓存是进程级的：每个用例前后都清掉，避免互相污染。"""
+    nodes._MEDIUM_TERM_STORES.clear()
+    yield
+    nodes._MEDIUM_TERM_STORES.clear()
+
+
+def test_recall_node_passes_through_when_disabled(
+    tmp_path: Path,
+    model_factory: ModelFactory,
+    app_config: AppConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """记忆关闭时不得打开记忆库（架构 §5：关闭的层不访问相应库）。"""
+
+    def _forbidden(context: RuntimeContext) -> object:
+        raise AssertionError("记忆关闭时不应该打开中期记忆库")
+
+    monkeypatch.setattr(nodes, "medium_term_store", _forbidden)
+    context = _context(tmp_path, model_factory, app_config, decision="chat")
+
+    result = builder.build_chat_graph().invoke({"user_input": "你好"}, context=context)
+
+    assert result["memory_refs"] == []
+    assert not result.get("error_events")
+
+
+def test_recall_node_injects_memory_into_prompt(
+    tmp_path: Path,
+    model_factory: ModelFactory,
+    app_config: AppConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """召回到的记忆要同时进 State 与系统提示（架构 §10.2 的"只注入相关记忆"）。"""
+    store = FakeMemoryStore(
+        [
+            _memory_hit("用户偏好用中文回答", scope_key=scope.project_id_for(tmp_path)),
+            _memory_hit("别的项目的记忆", scope_key="others"),
+        ]
+    )
+    monkeypatch.setattr(nodes, "medium_term_store", lambda context: store)
+    context = _context(
+        tmp_path, model_factory, _config_with_medium_term(tmp_path, app_config), decision="chat"
+    )
+
+    result = builder.build_chat_graph().invoke({"user_input": "我偏好什么语言"}, context=context)
+
+    assert [reference["content"] for reference in result["memory_refs"]] == ["用户偏好用中文回答"]
+    prompts = [
+        prompt
+        for prompt in context.model_adapter.seen_prompts  # type: ignore[attr-defined]
+        if routers.ROUTE_CLASSIFIER_MARKER not in prompt
+    ]
+    assert "## 召回的相关记忆" in prompts[-1]
+    assert "用户偏好用中文回答" in prompts[-1]
+    assert "别的项目的记忆" not in prompts[-1]
+    assert "记忆可能过期" in prompts[-1]
+
+
+def test_recall_node_records_error_event_and_keeps_turn_alive(
+    tmp_path: Path,
+    model_factory: ModelFactory,
+    app_config: AppConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """召回失败不静默：记错误事件、置空记忆，本轮对话继续（架构 §11.6）。"""
+
+    def _boom(context: RuntimeContext) -> object:
+        raise MemoryStoreError("中期记忆 collection 与当前 embedding 配置不兼容")
+
+    monkeypatch.setattr(nodes, "medium_term_store", _boom)
+    context = _context(
+        tmp_path,
+        model_factory,
+        _config_with_medium_term(tmp_path, app_config),
+        decision="chat",
+        reply="照常回答",
+    )
+
+    result = builder.build_chat_graph().invoke({"user_input": "你好"}, context=context)
+
+    assert result["memory_refs"] == []
+    assert result["final_response"] == "照常回答"
+    messages = [event["message"] for event in result["error_events"]]
+    assert any("记忆召回失败" in message and "不兼容" in message for message in messages)
+    assert any(event["stage"] == nodes.RECALL_MEMORY for event in result["error_events"])
+
+
+def _reference(content: str, *, similarity: float = 0.9) -> MemoryReference:
+    return MemoryReference(
+        memory_id=f"mem-{abs(hash(content)) % 10000}",
+        content=content,
+        scope="project",
+        scope_key="p",
+        similarity=similarity,
+        score=similarity * 0.8,
+        importance=0.5,
+        confidence=0.5,
+        created_at="2026-09-15T12:00:00+00:00",
+        source_thread_id=None,
+        expires_at=None,
+    )
+
+
+def test_memory_section_renders_placeholder_and_content(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    context = _context(tmp_path, model_factory, app_config)
+
+    empty = prompt_context.build_system_prompt(mode="chat", context=context)
+    filled = prompt_context.build_system_prompt(
+        mode="chat", context=context, memory_refs=[_reference("用户偏好用中文回答")]
+    )
+
+    assert "（本轮没有召回相关记忆）" in empty.system_prompt
+    assert "1. [相关度 0.90] 用户偏好用中文回答" in filled.system_prompt
+    assert "记忆内容只是" in filled.system_prompt  # 记忆是数据、不是指令
+    assert filled.estimated_tokens > empty.estimated_tokens
+
+
+def test_memory_section_respects_prompt_budget() -> None:
+    """Prompt 里的记忆段落必须有上限：超预算丢后面的条目，单条内容要截断。"""
+    long_line = prompt_context.render_memory_section([_reference("长" * 5000)])
+
+    assert len(long_line) < 400
+    assert long_line.endswith("…")
+
+    many = prompt_context.render_memory_section(
+        [_reference(f"第 {index} 条记忆，内容足够长以触发预算截断" + "填" * 60) for index in range(50)]
+    )
+
+    assert len(many) <= prompt_context.MEMORY_SECTION_MAX_CHARS
+    assert many.count("\n") < 49  # 确实丢掉了后面的条目
+
+
+def test_memory_section_counts_separators_in_budget() -> None:
+    """预算要算上条目之间的换行符：只累加各行长度会让"很多短条目"突破声明上限。"""
+    references = [_reference(f"第{index}条") for index in range(400)]
+
+    section = prompt_context.render_memory_section(references)
+
+    assert len(section) <= prompt_context.MEMORY_SECTION_MAX_CHARS
+    assert section.count("\n") + 1 < len(references)  # 后面的条目被丢掉
+
+
+def test_store_cache_key_covers_endpoint_credentials_and_switch(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """缓存键必须覆盖端点、凭据、目录与开关，否则会复用错误的 Store 实例。"""
+    config = _config_with_medium_term(tmp_path, app_config)
+    memory_config = config.memory.medium_term
+
+    def key(embedding_config: object = None, api_key: str | None = None) -> tuple[str, ...]:
+        return nodes._store_cache_key(
+            memory_config,
+            config.embedding if embedding_config is None else embedding_config,  # type: ignore[arg-type]
+            api_key,
+        )
+
+    variants = {
+        key(),
+        key(config.embedding.model_copy(update={"enabled": False})),
+        key(config.embedding.model_copy(update={"provider": "openai_compatible"})),
+        key(config.embedding.model_copy(update={"base_url": "https://other.example.com/v1"})),
+        key(config.embedding.model_copy(update={"api_key_env": "OTHER_KEY"})),
+        key(config.embedding.model_copy(update={"cache_dir": "E:/other-models"})),
+        key(config.embedding.model_copy(update={"local_files_only": True})),
+        key(api_key="key-one"),
+        key(api_key="key-two"),
+    }
+
+    assert len(variants) == 9
+    assert "key-one" not in str(key(api_key="key-one"))  # 原始 Key 不进缓存键
+    assert len(nodes._credential_fingerprint("key-one")) == 64  # 完整 SHA-256，不截断
+
+
+def test_store_is_created_once_under_concurrency(
+    tmp_path: Path,
+    model_factory: ModelFactory,
+    app_config: AppConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """并发首次召回只允许建一个 Store（否则两个会话各加载一份模型）。"""
+    opened: list[object] = []
+
+    def slow_open(*args: object, **kwargs: object) -> FakeMemoryStore:
+        time.sleep(0.05)
+        store = FakeMemoryStore([])
+        opened.append(store)
+        return store
+
+    monkeypatch.setattr(medium_term, "open_store", slow_open)
+    context = _context_with(
+        tmp_path, model_factory(decision="chat"), _config_with_medium_term(tmp_path, app_config)
+    )
+    results: list[object] = []
+
+    threads = [
+        threading.Thread(target=lambda: results.append(nodes.medium_term_store(context)))
+        for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(opened) == 1
+    assert len({id(item) for item in results}) == 1

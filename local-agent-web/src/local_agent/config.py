@@ -175,14 +175,22 @@ class ShortTermMemoryConfig(_StrictModel):
 
 
 class MediumTermMemoryConfig(_StrictModel):
-    """中期记忆：Chroma 向量库（T14 启用）。"""
+    """中期记忆：Chroma 向量库（T14B 启用）。"""
 
     enabled: bool = False
     backend: Literal["chroma"] = "chroma"
     path: str = "data/chroma"
     collection: str = "agent_memory"
     top_k: int = Field(default=8, gt=0)
-    min_score: float = Field(default=0.72, ge=0.0, le=1.0)
+    #: 召回的最低语义相似度（越大越相关，**真实余弦**）。
+    #:
+    #: 0.53 是按默认模型 ``BAAI/bge-small-zh-v1.5``（FastEmbed）**实测标定**的：5 组中文查询里
+    #: 相关记忆落在 0.560–0.772，无关记忆落在 0.242–0.497，取两者之间。该模型的相关性基线偏高
+    #: （无关内容也有 0.3–0.5），所以照 OpenAI 系 embedding 量级写的 0.72 会把结果全部筛掉，
+    #: 而"看起来很低"的 0.1 又会把无关记忆放进来。**这组数字只来自 5 组查询，换模型或换成真实
+    #: 记忆库必须重新标定**（做法：``medium_term.configured_distance_space`` 确认距离度量是 cosine，
+    #: 再打印原始命中的 ``1 - distance`` 分布找间隔）。
+    min_score: float = Field(default=0.53, ge=0.0, le=1.0)
     decay_half_life_days: int = Field(default=30, gt=0)
     write_on: list[str] = Field(default_factory=list)
 
@@ -318,6 +326,20 @@ class AppConfig(_StrictModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     rag: RagConfig = Field(default_factory=RagConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+
+    @model_validator(mode="after")
+    def _require_embedding_for_medium_term(self) -> AppConfig:
+        """中期记忆要用向量，没有 embedding 就拿不到向量。
+
+        在配置加载阶段就失败闭合：否则要等到每轮对话触发召回时才报错，而页面（T19 之前）
+        根本看不到原因。
+        """
+        if self.memory.medium_term.enabled and not self.embedding.enabled:
+            raise ValueError(
+                "memory.medium_term.enabled 为 true 时需要 embedding.enabled 也为 true"
+                "（中期记忆必须显式配置 embedding provider）"
+            )
+        return self
 
 
 def load_dotenv_file(env_path: Path = DEFAULT_ENV_PATH) -> bool:

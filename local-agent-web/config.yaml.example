@@ -57,7 +57,9 @@ memory:
     path: "data/chroma"
     collection: "agent_memory"
     top_k: 8
-    min_score: 0.72
+    # 召回的最低语义相似度（真实余弦）。0.53 按默认模型 bge-small-zh-v1.5 实测标定：
+    # 相关 0.560~0.772、无关 0.242~0.497（该模型相关性基线偏高）；换模型要重新标定。
+    min_score: 0.53
     decay_half_life_days: 30
     write_on:
       - "task_completed"

@@ -27,8 +27,20 @@
 归一化：两种 provider 的输出都由本模块做 L2 归一化，因此 :attr:`EmbeddingInfo.normalized`
 恒为 ``True``，不依赖具体模型是否自带归一化（写进 collection 元数据时才有意义，架构 §10.2）。
 
-适配器对外只暴露"文本 → 向量"（:meth:`~EmbeddingFunction.__call__` 等）；向量库要的元信息由
-:meth:`EmbeddingFunction.info` 提供，本模块不导入 ``chromadb``。
+Chroma 协议（T14B 实测 1.5.9，三条都是硬要求）：
+
+1. 必须有 ``name()``——只有 ``__call__`` 会直接 ``AttributeError``；
+2. ``__call__`` 的**参数名必须叫 ``input``**——Chroma 逐个比对 ``__call__`` 的参数名，
+   叫 ``texts`` 之类会直接 ``ValueError``；
+3. 持久化 collection 配置时读 ``get_config()``。
+
+三个成员都不导入 ``chromadb``，返回内容也不含任何密钥（``openai_compatible`` 只给 model/base_url）。
+距离度量是 collection 创建参数，不在本模块。
+
+**已知的 DeprecationWarning**：Chroma 把"只实现 ``__call__`` + ``name`` + ``get_config``"的 EF 判为
+legacy 并告警。实测这条路是**半截协议**——补上 ``is_legacy()`` 后它接着要 ``default_space``，后面还有
+``supported_spaces`` / ``validate_config`` / ``build_from_config``。本任务只接 legacy 路径（功能正常，
+仅一条告警）；要接非 legacy 协议需要单独一次改动 + 契约测试。
 """
 
 from __future__ import annotations
@@ -200,6 +212,23 @@ class EmbeddingInfo:
     #: API provider 的端点标识（不是密钥）；``onnx_local`` 为 ``None``。
     #: 同一个模型名在不同兼容端点上可能代表完全不同的向量空间，所以兼容身份必须带上它。
     endpoint: str | None = None
+
+    def collection_metadata(self) -> dict[str, str | int | bool]:
+        """可写入 collection metadata 的键值（维度未知时不写该键）。
+
+        "距离度量"由 :mod:`local_agent.memory.medium_term` 负责写进 Chroma 认的键，
+        因为它是 collection 创建参数，不属于 embedding 本身。
+        """
+        metadata: dict[str, str | int | bool] = {
+            "embedding_provider": self.provider,
+            "embedding_model": self.model,
+            "embedding_normalized": self.normalized,
+        }
+        if self.dimension is not None:
+            metadata["embedding_dimension"] = self.dimension
+        if self.endpoint:
+            metadata["embedding_endpoint"] = self.endpoint
+        return metadata
 
 
 class EmbeddingFunction(Protocol):

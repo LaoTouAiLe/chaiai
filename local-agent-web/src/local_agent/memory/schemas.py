@@ -13,7 +13,8 @@
 
 T13 未定的语义（不在这里猜，留给后续任务）：
 
-- ``status`` 的取值集合由写入方（T14 中期、T15 长期）确定，本模块只声明它是字符串。
+- ``status`` 的取值集合：中期记忆由 T14B 定为下面的 ``MEDIUM_TERM_STATUS_*``（至少这两个）；
+  长期事实（``facts``）的取值集合仍由 T15/T18 确定，本模块只声明它是字符串。
 - ``entities`` 的 ``(scope, scope_key, entity_type, name)`` 是否唯一属于 T15 的 CRUD 语义，
   因此 T13 只建普通索引，不建唯一约束。
 - ``value_json`` / ``evidence_json`` 是 **JSON 文本**（列名即契约），不是已解析的对象；
@@ -23,8 +24,35 @@ T13 未定的语义（不在这里猜，留给后续任务）：
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypedDict
 
 from local_agent.scope import MemoryScope
+
+#: 中期记忆的 ``status`` 取值（架构 §10.2 的 ``status`` 字段，T14B 定稿）。
+#: 召回只取 ``active``，软删除用 ``deleted``；物理淘汰（忘掉、压缩）由 T18 负责。
+MEDIUM_TERM_STATUS_ACTIVE = "active"
+MEDIUM_TERM_STATUS_DELETED = "deleted"
+
+
+class MemoryReference(TypedDict):
+    """一条召回结果（架构 §4.2 的 ``memory_refs`` 元素；字段由 T14B 定义，架构 §4.3 未固定）。
+
+    只放"当前轮 Prompt 与页面需要"的最小集合：``content`` 是原文，
+    ``similarity`` 是"越大越相关"的语义相似度，``score`` 是叠加作用域/重要度/时间/置信度
+    系数后的排序分数（同样越大越相关）。两者都只在当前轮有效，不写回记忆库。
+    """
+
+    memory_id: str
+    content: str
+    scope: MemoryScope
+    scope_key: str
+    similarity: float
+    score: float
+    importance: float
+    confidence: float
+    created_at: str
+    source_thread_id: str | None
+    expires_at: str | None
 
 
 @dataclass(frozen=True, kw_only=True)

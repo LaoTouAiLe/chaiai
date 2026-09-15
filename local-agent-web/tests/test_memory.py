@@ -22,6 +22,7 @@ import sqlite3
 import sys
 from collections.abc import Iterator, Sequence
 from dataclasses import fields
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar
@@ -34,6 +35,7 @@ from local_agent.config import (
     AppConfig,
     ConfigError,
     EmbeddingConfig,
+    MediumTermMemoryConfig,
     resolve_api_key,
 )
 from local_agent.exceptions import (
@@ -44,7 +46,7 @@ from local_agent.exceptions import (
     MemoryUnavailableError,
 )
 from local_agent.llm import embedding as embedding_module
-from local_agent.memory import long_term, medium_term, schemas
+from local_agent.memory import long_term, medium_term, recall, schemas
 from local_agent.persistence import checkpoint, migrations
 from local_agent.persistence.session_store import SessionStore
 
@@ -474,6 +476,17 @@ def test_embedding_cache_dir_must_be_absolute_when_enabled(tmp_path: Path) -> No
     assert disabled.cache_dir == "E:/hf-cache/x"
 
 
+def test_medium_term_requires_enabled_embedding(app_config: AppConfig) -> None:
+    """中期记忆打开但没有 embedding：配置阶段就失败闭合，别等每轮对话才报错。"""
+    data = app_config.model_dump()
+    data["memory"]["medium_term"]["enabled"] = True
+
+    with pytest.raises(ValidationError) as error:
+        AppConfig.model_validate(data)
+
+    assert "embedding.enabled" in str(error.value)
+
+
 def test_example_config_keeps_embedding_disabled(app_config: AppConfig) -> None:
     """示例配置必须保持关闭：加载它不得导入 fastembed、不得触发下载。"""
     config = app_config.embedding
@@ -618,6 +631,526 @@ def test_fake_embedding_is_deterministic_and_normalized() -> None:
 # --------------------------------------------------------------- T14B 中期记忆存储与召回
 
 #: 测试用的固定时间：新建记忆用这个，便于计算时间衰减。
+NOW = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
+NOW_ISO = NOW.isoformat(timespec="seconds")
+
+#: "无关"文本的向量（与查询向量正交 → 余弦相似度 0）。
+FAR_VECTOR = [0.0, 0.0, 1.0]
+
+#: 查询文本与其向量（同一向量 → 相似度 1）。
+QUERY_TEXT = "项目里保存了什么记忆"
+CLOSE_VECTOR = [1.0, 0.0, 0.0]
+
+
+class ScriptedEmbedding:
+    """按文本查表给向量的假 Embedding：用来精确控制相似度（不联网、不加载模型）。
+
+    未登记的文本一律给 :data:`FAR_VECTOR`，所以"无关记忆"天然落在 ``min_score`` 之下。
+    """
+
+    def __init__(self, vectors: dict[str, list[float]] | None = None, *, dimension: int = 3) -> None:
+        self._vectors = dict(vectors or {})
+        self._dimension = dimension
+
+    @property
+    def info(self) -> embedding_module.EmbeddingInfo:
+        return embedding_module.EmbeddingInfo(
+            provider="fake",
+            model="scripted",
+            dimension=self._dimension,
+            normalized=True,
+            cache_dir=None,
+            local_files_only=False,
+        )
+
+    def name(self) -> str:
+        return "fake-scripted"
+
+    def get_config(self) -> dict[str, Any]:
+        return {"provider": "fake", "model": "scripted"}
+
+    def __call__(self, input: Sequence[str]) -> list[list[float]]:
+        return self.embed_documents(input)
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        return [list(self._vectors.get(text, FAR_VECTOR)) for text in texts]
+
+    def embed_query(self, texts: str | Sequence[str]) -> list[list[float]]:
+        items = [texts] if isinstance(texts, str) else list(texts)
+        return [list(self._vectors.get(text, CLOSE_VECTOR)) for text in items]
+
+    def prepare(self) -> None:
+        """假实现没有加载阶段。"""
+
+
+class ScriptedEmbeddingWithInfo(ScriptedEmbedding):
+    """同上，但把 ``info`` 换成自定义元信息（用来模拟"换过 embedding 模型/维度"）。"""
+
+    def __init__(self, vectors: dict[str, list[float]], info: Any) -> None:
+        super().__init__(vectors)
+        self._info = info
+
+    @property
+    def info(self) -> Any:
+        return self._info
+
+
+class CountingEmbedding(ScriptedEmbedding):
+    """记录 ``embed_documents`` 被调用了几次（验证向量由适配器统一计算）。"""
+
+    def __init__(self, vectors: dict[str, list[float]] | None = None) -> None:
+        super().__init__(vectors)
+        self.document_calls = 0
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        self.document_calls += 1
+        return super().embed_documents(texts)
+
+
+class WrongDimensionEmbedding(ScriptedEmbedding):
+    """对特定内容吐出错误维度（用来触发 Chroma 的维度校验）。"""
+
+    WRONG_TEXT = "错维度"
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        return [
+            [1.0, 0.0] if text == self.WRONG_TEXT else [1.0, 0.0, 0.0] for text in texts
+        ]
+
+
+class UnknownDimensionEmbedding(ScriptedEmbedding):
+    """维度既不在元信息里、也探测不出来（用来验证"没维度就拒绝建 collection"）。"""
+
+    def __init__(self) -> None:
+        super().__init__({})
+
+    @property
+    def info(self) -> Any:
+        return embedding_module.EmbeddingInfo(
+            provider="fake",
+            model="unknown-dimension",
+            dimension=None,
+            normalized=True,
+            cache_dir=None,
+            local_files_only=False,
+        )
+
+    def resolve_dimension(self) -> int | None:
+        return None
+
+    def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+
+def _memory_config(tmp_path: Path, **overrides: Any) -> MediumTermMemoryConfig:
+    """一份可用的中期记忆配置（collection 落在临时目录）。"""
+    values: dict[str, Any] = {
+        "enabled": True,
+        "backend": "chroma",
+        "path": (tmp_path / "chroma").as_posix(),
+        "collection": "test_memory",
+        "top_k": 6,
+        "min_score": 0.5,
+        "decay_half_life_days": 30,
+    }
+    values.update(overrides)
+    return MediumTermMemoryConfig(**values)
+
+
+def _project_record(
+    memory_id: str, content: str, *, project_id: str, **overrides: Any
+) -> schemas.MediumTermRecord:
+    """一条 ``project`` 作用域的记忆（默认重要度/置信度 0.5、无过期）。"""
+    values: dict[str, Any] = {
+        "id": memory_id,
+        "content": content,
+        "scope": scope.SCOPE_PROJECT,
+        "scope_key": project_id,
+        "importance": 0.5,
+        "confidence": 0.5,
+        "created_at": NOW_ISO,
+        "status": schemas.MEDIUM_TERM_STATUS_ACTIVE,
+    }
+    values.update(overrides)
+    return schemas.MediumTermRecord(**values)
+
+
+@pytest.fixture
+def memory_store(tmp_path: Path) -> Iterator[medium_term.MediumTermStore]:
+    """可用的 Chroma 库（用假 Embedding，不加载真实模型、不联网）。
+
+    Chroma 的 ``PersistentClient`` 没有 ``close()``（1.5.9 实测），所以这里不显式清理：
+    临时目录里的句柄会随进程结束释放，既有测试同样是这个模式。
+    """
+    store = medium_term.open_store(
+        _memory_config(tmp_path),
+        embedding_function=ScriptedEmbedding({QUERY_TEXT: CLOSE_VECTOR}),
+    )
+    yield store
+
+
+def _recall(
+    store: medium_term.MediumTermStore,
+    *,
+    config: MediumTermMemoryConfig,
+    workspace: Path,
+    query: str = QUERY_TEXT,
+    **overrides: Any,
+) -> list[Any]:
+    return recall.recall_memory(
+        store,
+        query=query,
+        config=config,
+        workspace_root=workspace,
+        **overrides,
+    )
+
+
+def test_medium_term_round_trip_and_metadata(memory_store, tmp_path: Path) -> None:
+    """写入/读回：可选字段为空时不写进向量库记录（架构 §10.2 末段）。"""
+    project_id = scope.project_id_for(tmp_path)
+    memory_store.upsert(
+        [
+            _project_record("mem-1", "用户偏好用中文回答", project_id=project_id),
+            _project_record(
+                "mem-2",
+                "项目用 uv 管理依赖",
+                project_id=project_id,
+                user_id=scope.LOCAL_USER_ID,
+                source_thread_id="thread-x",
+                expires_at="2026-12-31T00:00:00+00:00",
+            ),
+        ]
+    )
+
+    assert memory_store.count() == 2
+
+    stored = memory_store.collection.get(ids=["mem-1", "mem-2"], include=["metadatas"])
+    first, second = stored["metadatas"]
+
+    assert first["scope"] == scope.SCOPE_PROJECT
+    assert first["scope_key"] == project_id
+    assert first["created_at"] == NOW_ISO
+    assert first["status"] == schemas.MEDIUM_TERM_STATUS_ACTIVE
+    assert "user_id" not in first  # 空值不写
+    assert "expires_at" not in first
+    assert second["user_id"] == scope.LOCAL_USER_ID
+    assert second["source_thread_id"] == "thread-x"
+    assert second["expires_at"] == "2026-12-31T00:00:00+00:00"
+
+
+def test_medium_term_query_filters_by_scope_and_status(memory_store, tmp_path: Path) -> None:
+    project_id = scope.project_id_for(tmp_path)
+    other_project = scope.project_id_for(tmp_path / "other")
+    memory_store.upsert(
+        [
+            _project_record("mine", QUERY_TEXT, project_id=project_id, importance=0.9),
+            _project_record("theirs", QUERY_TEXT, project_id=other_project),
+            _project_record(
+                "global", QUERY_TEXT, project_id=project_id, scope=scope.SCOPE_GLOBAL, scope_key="global"
+            ),
+            _project_record(
+                "deleted",
+                QUERY_TEXT,
+                project_id=project_id,
+                status=schemas.MEDIUM_TERM_STATUS_DELETED,
+            ),
+        ]
+    )
+
+    references = _recall(
+        memory_store, config=_memory_config(tmp_path), workspace=tmp_path, now=NOW
+    )
+    ids = [reference["memory_id"] for reference in references]
+
+    assert ids == ["mine", "global"]  # 别的项目与软删除的都看不到
+    assert references[0]["scope"] == scope.SCOPE_PROJECT
+
+
+def test_recall_drops_expired_low_score_and_unreadable_expiry(
+    memory_store, tmp_path: Path
+) -> None:
+    project_id = scope.project_id_for(tmp_path)
+    memory_store.upsert(
+        [
+            _project_record("ok", QUERY_TEXT, project_id=project_id),
+            _project_record("expired", QUERY_TEXT, project_id=project_id, expires_at="2026-01-01T00:00:00+00:00"),
+            _project_record("unparsable", QUERY_TEXT, project_id=project_id, expires_at="不是时间"),
+            _project_record("far", "与查询无关的内容", project_id=project_id),
+        ]
+    )
+
+    references = _recall(
+        memory_store, config=_memory_config(tmp_path), workspace=tmp_path, now=NOW
+    )
+
+    assert [reference["memory_id"] for reference in references] == ["ok"]
+
+
+def test_recall_scores_importance_and_time(memory_store, tmp_path: Path) -> None:
+    """排序分数 = 相似度 × 作用域 × 重要度 × 时间衰减 × 置信度（架构 §10.2）。"""
+    project_id = scope.project_id_for(tmp_path)
+    memory_store.upsert(
+        [
+            _project_record("recent", QUERY_TEXT, project_id=project_id, importance=0.9),
+            _project_record(
+                "old",
+                QUERY_TEXT,
+                project_id=project_id,
+                importance=0.9,
+                created_at=datetime(2025, 3, 1, tzinfo=timezone.utc).isoformat(timespec="seconds"),
+            ),
+            _project_record("low_importance", QUERY_TEXT, project_id=project_id, importance=0.1),
+        ]
+    )
+
+    references = _recall(
+        memory_store, config=_memory_config(tmp_path), workspace=tmp_path, now=NOW
+    )
+    ids = [reference["memory_id"] for reference in references]
+
+    assert ids == ["recent", "low_importance", "old"]
+    scores = [reference["score"] for reference in references]
+    assert scores == sorted(scores, reverse=True)
+    assert references[0]["similarity"] == pytest.approx(1.0)
+    assert references[0]["score"] <= references[0]["similarity"]  # 系数只减不增
+
+
+def test_recall_respects_top_k(memory_store, tmp_path: Path) -> None:
+    project_id = scope.project_id_for(tmp_path)
+    memory_store.upsert(
+        [
+            _project_record(f"mem-{index}", QUERY_TEXT, project_id=project_id)
+            for index in range(5)
+        ]
+    )
+
+    references = _recall(
+        memory_store,
+        config=_memory_config(tmp_path, top_k=2),
+        workspace=tmp_path,
+        now=NOW,
+    )
+
+    assert len(references) == 2
+
+
+def test_recall_returns_nothing_for_empty_query(memory_store, tmp_path: Path) -> None:
+    project_id = scope.project_id_for(tmp_path)
+    memory_store.upsert([_project_record("mem", QUERY_TEXT, project_id=project_id)])
+
+    assert _recall(memory_store, config=_memory_config(tmp_path), workspace=tmp_path, query="  ") == []
+
+
+def test_visible_scope_keys_cover_four_scopes(tmp_path: Path) -> None:
+    keys = recall.visible_scope_keys(user_id=None, project_id="p1", workspace_root=tmp_path)
+
+    assert [item[0] for item in keys] == [
+        scope.SCOPE_GLOBAL,
+        scope.SCOPE_USER,
+        scope.SCOPE_PROJECT,
+        scope.SCOPE_WORKSPACE,
+    ]
+    assert keys[0][1] == "global"
+    assert keys[1][1] == scope.LOCAL_USER_ID
+    assert keys[2][1] == "p1"
+    assert keys[3][1] == scope.stable_hash(scope.normalize_path(tmp_path))
+
+
+def test_open_store_rejects_incompatible_collection(tmp_path: Path) -> None:
+    """换过 embedding 模型/维度后必须拒绝复用旧 collection 并提示重建（架构 §10.2、§11.6）。"""
+    config = _memory_config(tmp_path)
+    first = medium_term.open_store(
+        config, embedding_function=ScriptedEmbedding({QUERY_TEXT: CLOSE_VECTOR})
+    )
+    first.upsert(
+        [
+            _project_record(
+                "mem", QUERY_TEXT, project_id=scope.project_id_for(tmp_path)
+            )
+        ]
+    )
+
+    other_model = embedding_module.EmbeddingInfo(
+        provider="fake",
+        model="另一个模型",
+        dimension=3,
+        normalized=True,
+        cache_dir=None,
+        local_files_only=False,
+    )
+    with pytest.raises(MemoryStoreError) as error:
+        medium_term.open_store(
+            config,
+            embedding_function=ScriptedEmbeddingWithInfo({QUERY_TEXT: CLOSE_VECTOR}, other_model),
+        )
+
+    message = str(error.value)
+    assert "不兼容" in message
+    assert "embedding_model" in message
+    assert "重建索引" in message
+
+
+def test_upsert_reports_dimension_mismatch(tmp_path: Path) -> None:
+    """维度不一致时要给出"换过模型就重建"的可读错误，而不是裸 Chroma 异常。
+
+    Chroma 只在 collection 里已经有向量之后才校验维度，所以先写一条合法记录。
+    这里用一个"元信息说 3 维、实际吐 2 维向量"的适配器来触发 Chroma 的维度错误
+    （自带向量的情况另有用例，那条会先被来源校验拦下）。
+    """
+    project_id = scope.project_id_for(tmp_path)
+    store = medium_term.open_store(
+        _memory_config(tmp_path),
+        embedding_function=WrongDimensionEmbedding({QUERY_TEXT: CLOSE_VECTOR}),
+    )
+    store.upsert([_project_record("ok", QUERY_TEXT, project_id=project_id)])
+
+    with pytest.raises(MemoryStoreError) as error:
+        store.upsert(
+            [
+                _project_record(
+                    "wrong-dim", WrongDimensionEmbedding.WRONG_TEXT, project_id=project_id
+                )
+            ]
+        )
+
+    message = str(error.value)
+    assert "写入失败" in message
+    assert "重建索引" in message
+
+
+def test_medium_term_delete_removes_records(memory_store, tmp_path: Path) -> None:
+    project_id = scope.project_id_for(tmp_path)
+    memory_store.upsert([_project_record("mem", QUERY_TEXT, project_id=project_id)])
+
+    assert memory_store.delete(["mem"]) == 1
+    assert memory_store.count() == 0
+
+
+def test_upsert_rejects_foreign_vector(tmp_path: Path) -> None:
+    """同维度但来源不明的预计算向量必须被拒（架构 §10.2：不得混用不同模型的向量）。
+
+    只靠 collection 元数据检测不出这种混淆（维度可能完全一样），所以必须在写入侧拦。
+    """
+    store = medium_term.open_store(
+        _memory_config(tmp_path), embedding_function=ScriptedEmbedding({QUERY_TEXT: CLOSE_VECTOR})
+    )
+    project_id = scope.project_id_for(tmp_path)
+
+    with pytest.raises(MemoryStoreError) as error:
+        store.upsert(
+            [
+                _project_record(
+                    "foreign", QUERY_TEXT, project_id=project_id, embedding=[0.0, 0.0, 1.0]
+                )
+            ]
+        )
+
+    assert "自带的向量" in str(error.value)
+    assert store.count() == 0
+
+
+def test_upsert_computes_vectors_even_when_record_carries_one(tmp_path: Path) -> None:
+    """自带向量与适配器算出来的一致时接受（等价于冗余），但向量始终由适配器计算。"""
+    embedding = CountingEmbedding({QUERY_TEXT: CLOSE_VECTOR})
+    store = medium_term.open_store(_memory_config(tmp_path), embedding_function=embedding)
+    project_id = scope.project_id_for(tmp_path)
+
+    store.upsert(
+        [
+            _project_record(
+                "with-vector", QUERY_TEXT, project_id=project_id, embedding=list(CLOSE_VECTOR)
+            )
+        ]
+    )
+
+    assert embedding.document_calls == 1  # 仍然走适配器，不信任传进来的向量
+    assert store.count() == 1
+
+
+def test_collection_uses_explicit_cosine_space(tmp_path: Path) -> None:
+    """距离度量必须真的设成 cosine。
+
+    这里是复审抓到的真回归：只写我们自己的 ``embedding_distance`` 键不生效，Chroma 会退回默认
+    ``l2``，于是 ``1 - distance`` 换算出来的根本不是余弦相似度。用**非正交**向量验证——45° 夹角
+    的余弦相似度是 0.7071，而默认 l2（平方距离）给的是 0.586，只测"完全相同/完全正交"发现不了。
+    """
+    vector_45 = [math.sqrt(0.5), math.sqrt(0.5)]
+    config = _memory_config(tmp_path, min_score=0.0)
+    store = medium_term.open_store(
+        config,
+        embedding_function=ScriptedEmbedding({"查询": [1.0, 0.0], "接近": vector_45}, dimension=2),
+    )
+    project_id = scope.project_id_for(tmp_path)
+    store.upsert([_project_record("close", "接近", project_id=project_id)])
+
+    assert medium_term.configured_distance_space(store.collection) == "cosine"
+
+    hits = store.query(
+        query_vector=store.embed_query("查询"),
+        scope_keys=recall.visible_scope_keys(
+            user_id=None, project_id=project_id, workspace_root=tmp_path
+        ),
+        n_results=1,
+    )
+    assert hits[0].distance == pytest.approx(1 - math.sqrt(0.5), abs=1e-4)
+
+    references = recall.recall_memory(
+        store, query="查询", config=config, workspace_root=tmp_path, project_id=project_id, now=NOW
+    )
+    assert references[0]["similarity"] == pytest.approx(math.sqrt(0.5), abs=1e-4)
+
+
+def test_open_store_rejects_collection_from_older_schema(tmp_path: Path) -> None:
+    """旧版本建的 collection（没有距离度量/维度记录）必须失效并提示重建。"""
+    import chromadb
+
+    config = _memory_config(tmp_path)
+    client = chromadb.PersistentClient(path=config.path)
+    client.get_or_create_collection(
+        name=config.collection,
+        embedding_function=ScriptedEmbedding({QUERY_TEXT: CLOSE_VECTOR}),
+        metadata={"memory_schema_version": 1},  # 1 = 距离度量修正之前的版本
+    )
+
+    with pytest.raises(MemoryStoreError) as error:
+        medium_term.open_store(
+            config, embedding_function=ScriptedEmbedding({QUERY_TEXT: CLOSE_VECTOR})
+        )
+
+    message = str(error.value)
+    assert "不兼容" in message
+    assert "重建索引" in message
+
+
+def test_open_store_rejects_collection_bound_to_other_embedding_function(tmp_path: Path) -> None:
+    """被别的 embedding 函数绑定的 collection（例如 Chroma 默认 EF）要给出可读的拒绝原因。"""
+    import chromadb
+
+    config = _memory_config(tmp_path)
+    client = chromadb.PersistentClient(path=config.path)
+    client.get_or_create_collection(name=config.collection)  # 用 Chroma 默认 EF 建
+
+    with pytest.raises(MemoryStoreError) as error:
+        medium_term.open_store(
+            config, embedding_function=ScriptedEmbedding({QUERY_TEXT: CLOSE_VECTOR})
+        )
+
+    message = str(error.value)
+    assert "打开中期记忆 collection" in message
+    assert "重建索引" in message
+
+
+def test_open_store_requires_dimension(tmp_path: Path) -> None:
+    """维度拿不到就拒绝建 collection：没有维度就无法校验"不混用不同模型向量"。"""
+    with pytest.raises(MemoryStoreError) as error:
+        medium_term.open_store(
+            _memory_config(tmp_path), embedding_function=UnknownDimensionEmbedding()
+        )
+
+    assert "维度" in str(error.value)
+
+
 def test_prepare_hf_cache_keeps_auxiliary_cache_inside_cache_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
