@@ -1,0 +1,20 @@
+# 本地虚拟环境与工具缓存
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 本地密钥与私有配置（示例文件与 uv.lock 必须保留在版本库中）
+.env
+config.yaml
+data/
+
+# 编辑器
+.idea/
+.vscode/

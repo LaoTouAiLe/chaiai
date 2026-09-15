@@ -1,0 +1,822 @@
+"""T05–T07 验收：文件工具与安全 Shell 的正常、错误与边界行为。
+
+全部使用临时工作区，不联网、不触碰真实项目文件。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+from local_agent.config import DEFAULT_SHELL_TIMEOUT_SECONDS, AppConfig, ConfigError
+from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
+from local_agent.security import shell_guard
+from local_agent.security.approval import action_fingerprint
+from local_agent.security.policy import SecurityPolicy
+from local_agent.tools import file_tools
+from local_agent.tools.file_tools import (
+    MAX_RECURSIVE_DEPTH,
+    build_file_tools,
+    delete_file_target,
+    edit_file_content,
+    list_dir_entries,
+    read_file_content,
+    write_file_content,
+)
+from local_agent.tools.shell_tools import build_shell_tools, run_shell_command
+
+
+@pytest.fixture
+def policy(tmp_path: Path, app_config: AppConfig) -> SecurityPolicy:
+    return SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+
+
+def _config_with_workspace(app_config: AppConfig, **overrides: object) -> AppConfig:
+    data = app_config.model_dump()
+    data["workspace"].update(overrides)
+    return AppConfig.model_validate(data)
+
+
+def _config_with_large_edit(app_config: AppConfig, max_changed_lines: int) -> AppConfig:
+    data = app_config.model_dump()
+    data["security"]["large_edit"]["max_changed_lines_without_approval"] = max_changed_lines
+    return AppConfig.model_validate(data)
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# --------------------------------------------------------------------------- list_dir
+
+
+def test_list_dir_reports_entries(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / ".hidden").write_text("h", encoding="utf-8")
+
+    result = list_dir_entries(".", policy=policy)
+
+    assert [entry.name for entry in result.entries] == ["a.txt", "sub"]
+    assert result.total_entries == 2  # 默认不返回隐藏项
+    kinds = {entry.name: entry.kind for entry in result.entries}
+    assert kinds == {"a.txt": "file", "sub": "dir"}
+    assert not result.truncated
+    assert result.path == "."
+
+
+def test_list_dir_includes_hidden_when_requested(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / ".hidden").write_text("h", encoding="utf-8")
+
+    result = list_dir_entries(".", policy=policy, include_hidden=True)
+
+    assert [entry.name for entry in result.entries] == [".hidden"]
+    assert result.total_entries == 1
+
+
+def test_list_dir_truncates_at_max_entries(tmp_path: Path, policy: SecurityPolicy) -> None:
+    for index in range(5):
+        (tmp_path / f"f{index}.txt").write_text("x", encoding="utf-8")
+
+    result = list_dir_entries(".", policy=policy, max_entries=2)
+
+    assert result.total_entries == 5
+    assert len(result.entries) == 2
+    assert result.truncated
+    assert "截断" in (result.note or "")
+
+
+def test_list_dir_recursive_limits_depth(tmp_path: Path, policy: SecurityPolicy) -> None:
+    deep = tmp_path
+    for index in range(MAX_RECURSIVE_DEPTH + 2):
+        deep = deep / f"d{index}"
+        deep.mkdir()
+
+    result = list_dir_entries(".", policy=policy, recursive=True)
+
+    assert result.truncated
+    assert "递归深度" in (result.note or "")
+
+
+def test_list_dir_rejects_parent_traversal(tmp_path: Path, policy: SecurityPolicy) -> None:
+    with pytest.raises(WorkspaceBoundaryError):
+        list_dir_entries("..", policy=policy)
+
+
+def test_list_dir_rejects_file_target(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+
+    with pytest.raises(SecurityError):
+        list_dir_entries("a.txt", policy=policy)
+
+
+# --------------------------------------------------------------------------- read_file
+
+
+def test_read_file_returns_content_hash_and_lines(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    path = tmp_path / "a.txt"
+    # newline="" 避免 Windows 把换行转成 \r\n，否则断言的是测试自己的写入行为
+    path.write_text("第一行\n第二行\n", encoding="utf-8", newline="")
+
+    result = read_file_content("a.txt", policy=policy)
+
+    assert result.content == "第一行\n第二行\n"
+    assert result.line_count == 2
+    assert result.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert result.encoding == "utf-8"
+    assert not result.truncated
+    assert not result.is_binary
+    assert result.path == "a.txt"
+
+
+def test_read_file_selects_line_range(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "a.txt").write_text("l1\nl2\nl3\nl4\n", encoding="utf-8", newline="")
+
+    result = read_file_content("a.txt", policy=policy, start_line=2, end_line=3)
+
+    assert result.content == "l2\nl3\n"
+    assert result.line_count == 4
+
+
+def test_read_file_rejects_invalid_line_range(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "a.txt").write_text("l1\nl2\n", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        read_file_content("a.txt", policy=policy, start_line=3, end_line=2)
+
+
+def test_read_file_truncates_at_max_chars(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "a.txt").write_text("x" * 100, encoding="utf-8")
+
+    result = read_file_content("a.txt", policy=policy, max_chars=10)
+
+    assert result.content == "x" * 10
+    assert result.truncated
+    assert "截断" in (result.note or "")
+
+
+def test_read_file_marks_binary_without_content(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "blob.bin").write_bytes(b"\x00\x01\x02\x03")
+
+    result = read_file_content("blob.bin", policy=policy)
+
+    assert result.is_binary
+    assert result.content == ""
+    assert "二进制" in (result.note or "")
+
+
+def test_read_file_reports_unknown_encoding(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "weird.txt").write_bytes(b"\xff\xfe\x41\x42")
+
+    result = read_file_content("weird.txt", policy=policy)
+
+    assert not result.is_binary
+    assert result.content == ""
+    assert "无法按 UTF-8 解码" in (result.note or "")
+
+
+def test_read_file_respects_max_file_size(tmp_path: Path, app_config: AppConfig) -> None:
+    policy = SecurityPolicy.from_config(
+        _config_with_workspace(app_config, max_file_size_bytes=4),
+        workspace_root=tmp_path,
+        environ={},
+    )
+    (tmp_path / "a.txt").write_text("0123456789", encoding="utf-8")
+
+    result = read_file_content("a.txt", policy=policy)
+
+    assert result.truncated
+    assert result.content == "0123"
+    assert "超过" in (result.note or "")
+
+
+def test_read_file_blocks_secret_files(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / ".env").write_text("DEEPSEEK_API_KEY=sk-real", encoding="utf-8")
+
+    with pytest.raises(SecurityError) as excinfo:
+        read_file_content(".env", policy=policy)
+
+    assert "禁止读取" in str(excinfo.value)
+    assert "sk-real" not in str(excinfo.value)
+
+
+def test_read_file_rejects_outside_path(tmp_path: Path, policy: SecurityPolicy) -> None:
+    with pytest.raises(WorkspaceBoundaryError):
+        read_file_content("../outside.txt", policy=policy)
+
+
+def test_read_file_reports_missing_file(tmp_path: Path, policy: SecurityPolicy) -> None:
+    with pytest.raises(SecurityError):
+        read_file_content("nope.txt", policy=policy)
+
+
+def test_policy_refuses_external_paths_flag(tmp_path: Path, app_config: AppConfig) -> None:
+    config = _config_with_workspace(app_config, allow_external_paths=True)
+
+    with pytest.raises(ConfigError):
+        SecurityPolicy.from_config(config, workspace_root=tmp_path, environ={})
+
+
+# --------------------------------------------------------------------------- 工具包装
+
+
+def test_built_tools_match_architecture_signatures(policy: SecurityPolicy) -> None:
+    tools = {tool.name: tool for tool in build_file_tools(policy) + build_shell_tools(policy)}
+
+    assert list(tools) == [
+        "list_dir",
+        "read_file",
+        "edit_file",
+        "write_file",
+        "delete_file",
+        "run_shell",
+    ]
+    assert list(tools["list_dir"].args) == ["path", "recursive", "include_hidden", "max_entries"]
+    assert list(tools["read_file"].args) == ["path", "start_line", "end_line", "max_chars"]
+    assert list(tools["edit_file"].args) == [
+        "path",
+        "old_text",
+        "new_text",
+        "replace_all",
+        "expected_sha256",
+        "reason",
+    ]
+    assert list(tools["write_file"].args) == ["path", "content", "overwrite", "reason"]
+    assert list(tools["delete_file"].args) == ["path", "recursive", "reason"]
+    assert list(tools["run_shell"].args) == ["command", "cwd", "timeout_seconds", "env_keys"]
+
+
+def test_tool_invocation_returns_json(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "a.txt").write_text("内容", encoding="utf-8")
+    tools = {tool.name: tool for tool in build_file_tools(policy)}
+
+    payload = tools["read_file"].invoke({"name": "read_file", "args": {"path": "a.txt"}, "id": "c1", "type": "tool_call"})
+
+    assert "内容" in payload.content
+    assert payload.tool_call_id == "c1"
+
+
+def test_tool_invocation_still_enforces_boundary(policy: SecurityPolicy) -> None:
+    tools = {tool.name: tool for tool in build_file_tools(policy)}
+
+    with pytest.raises(WorkspaceBoundaryError):
+        tools["read_file"].invoke({"name": "read_file", "args": {"path": "../x"}, "id": "c1", "type": "tool_call"})
+
+
+# --------------------------------------------------------------------------- edit_file
+
+
+def test_edit_file_replaces_and_reports_diff(tmp_path: Path, policy: SecurityPolicy) -> None:
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\ny = 2\n", encoding="utf-8", newline="")
+    sha = _sha256(target)
+
+    result = edit_file_content(
+        "a.py",
+        policy=policy,
+        old_text="x = 1",
+        new_text="x = 42",
+        expected_sha256=sha,
+        reason="改配置",
+    )
+
+    assert target.read_text(encoding="utf-8") == "x = 42\ny = 2\n"
+    assert result.replaced_count == 1
+    assert result.changed_lines == 2
+    assert result.old_sha256 == sha
+    assert result.new_sha256 == _sha256(target)
+    assert result.new_sha256 != result.old_sha256
+    assert "-x = 1" in result.diff and "+x = 42" in result.diff
+    assert result.reason == "改配置"
+    assert result.path == "a.py"
+
+
+def test_edit_file_requires_expected_sha256(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8", newline="")
+
+    with pytest.raises(SecurityError) as excinfo:
+        edit_file_content("a.py", policy=policy, old_text="x = 1", new_text="x = 2")
+
+    assert "expected_sha256" in str(excinfo.value)
+
+
+def test_edit_file_rejects_stale_hash(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8", newline="")
+
+    with pytest.raises(SecurityError) as excinfo:
+        edit_file_content(
+            "a.py", policy=policy, old_text="x = 1", new_text="x = 2", expected_sha256="0" * 64
+        )
+
+    assert "不一致" in str(excinfo.value)
+
+
+def test_edit_file_rejects_missing_and_ambiguous_match(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    target = tmp_path / "a.py"
+    target.write_text("alpha\nbeta\nalpha\n", encoding="utf-8", newline="")
+    sha = _sha256(target)
+
+    with pytest.raises(SecurityError) as missing:
+        edit_file_content(
+            "a.py", policy=policy, old_text="gamma", new_text="x", expected_sha256=sha
+        )
+    assert "没有精确匹配" in str(missing.value)
+
+    with pytest.raises(SecurityError) as ambiguous:
+        edit_file_content(
+            "a.py", policy=policy, old_text="alpha", new_text="x", expected_sha256=sha
+        )
+    assert "匹配到 2 处" in str(ambiguous.value)
+
+
+def test_edit_file_replace_all_rewrites_every_match(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    target = tmp_path / "a.py"
+    target.write_text("alpha\nbeta\nalpha\n", encoding="utf-8", newline="")
+
+    result = edit_file_content(
+        "a.py",
+        policy=policy,
+        old_text="alpha",
+        new_text="omega",
+        replace_all=True,
+        expected_sha256=_sha256(target),
+    )
+
+    assert result.replaced_count == 2
+    assert target.read_text(encoding="utf-8") == "omega\nbeta\nomega\n"
+
+
+def test_edit_file_rejects_whole_file_replacement(tmp_path: Path, policy: SecurityPolicy) -> None:
+    content = "x = 1\ny = 2\n"
+    target = tmp_path / "a.py"
+    target.write_text(content, encoding="utf-8", newline="")
+
+    with pytest.raises(SecurityError) as excinfo:
+        edit_file_content(
+            "a.py",
+            policy=policy,
+            old_text=content,
+            new_text="z = 3\n",
+            expected_sha256=_sha256(target),
+        )
+
+    assert "整份文件" in str(excinfo.value)
+
+
+def test_edit_file_rejects_identical_text(tmp_path: Path, policy: SecurityPolicy) -> None:
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\n", encoding="utf-8", newline="")
+
+    with pytest.raises(SecurityError) as excinfo:
+        edit_file_content(
+            "a.py",
+            policy=policy,
+            old_text="x = 1",
+            new_text="x = 1",
+            expected_sha256=_sha256(target),
+        )
+
+    assert "没有需要修改的内容" in str(excinfo.value)
+
+
+def test_edit_file_rejects_binary_sensitive_and_outside(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    (tmp_path / "blob.bin").write_bytes(b"\x00\x01")
+    with pytest.raises(SecurityError):
+        edit_file_content(
+            "blob.bin",
+            policy=policy,
+            old_text="a",
+            new_text="b",
+            expected_sha256=_sha256(tmp_path / "blob.bin"),
+        )
+
+    (tmp_path / ".env").write_text("A=1\n", encoding="utf-8", newline="")
+    with pytest.raises(SecurityError) as secret:
+        edit_file_content(
+            ".env",
+            policy=policy,
+            old_text="A=1",
+            new_text="A=2",
+            expected_sha256=_sha256(tmp_path / ".env"),
+        )
+    assert "禁止修改" in str(secret.value)
+
+    with pytest.raises(WorkspaceBoundaryError):
+        edit_file_content(
+            "../x.py", policy=policy, old_text="a", new_text="b", expected_sha256="0" * 64
+        )
+
+
+def test_edit_file_rejects_large_change(tmp_path: Path, app_config: AppConfig) -> None:
+    policy = SecurityPolicy.from_config(
+        _config_with_large_edit(app_config, max_changed_lines=2),
+        workspace_root=tmp_path,
+        environ={},
+    )
+    target = tmp_path / "a.py"
+    target.write_text("line\n", encoding="utf-8", newline="")
+
+    with pytest.raises(SecurityError) as excinfo:
+        edit_file_content(
+            "a.py",
+            policy=policy,
+            old_text="line",
+            new_text="\n".join(f"l{index}" for index in range(20)),
+            expected_sha256=_sha256(target),
+        )
+
+    assert "大范围修改" in str(excinfo.value)
+
+
+def test_edit_file_preserves_crlf_line_endings(tmp_path: Path, policy: SecurityPolicy) -> None:
+    target = tmp_path / "crlf.py"
+    target.write_bytes(b"a = 1\r\nb = 2\r\n")
+
+    edit_file_content(
+        "crlf.py",
+        policy=policy,
+        old_text="a = 1",
+        new_text="a = 9",
+        expected_sha256=_sha256(target),
+    )
+
+    assert target.read_bytes() == b"a = 9\r\nb = 2\r\n"
+
+
+# --------------------------------------------------------------------------- write_file
+
+
+def test_write_file_creates_new_file(tmp_path: Path, policy: SecurityPolicy) -> None:
+    result = write_file_content("new.txt", policy=policy, content="你好\n", reason="新建")
+
+    created = tmp_path / "new.txt"
+    assert created.read_text(encoding="utf-8") == "你好\n"
+    assert result.sha256 == _sha256(created)
+    assert result.size_bytes > 0
+    assert result.line_count == 1
+    assert result.path == "new.txt"
+    assert result.reason == "新建"
+
+
+def test_write_file_refuses_existing_file(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "exists.txt").write_text("old", encoding="utf-8", newline="")
+
+    with pytest.raises(SecurityError) as excinfo:
+        write_file_content("exists.txt", policy=policy, content="new")
+
+    message = str(excinfo.value)
+    assert "文件已存在" in message
+    assert "edit_file" in message
+    assert (tmp_path / "exists.txt").read_text(encoding="utf-8") == "old"
+
+
+def test_write_file_refuses_overwrite_flag(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "exists.txt").write_text("old", encoding="utf-8", newline="")
+
+    with pytest.raises(SecurityError) as excinfo:
+        write_file_content("exists.txt", policy=policy, content="new", overwrite=True)
+
+    assert "审批" in str(excinfo.value)
+
+
+def test_write_file_refuses_bad_targets(tmp_path: Path, policy: SecurityPolicy) -> None:
+    with pytest.raises(SecurityError) as parent:
+        write_file_content("no/such/dir/f.txt", policy=policy, content="x")
+    assert "父目录不存在" in str(parent.value)
+
+    with pytest.raises(SecurityError):
+        write_file_content(".env", policy=policy, content="A=1")
+
+    with pytest.raises(WorkspaceBoundaryError):
+        write_file_content("../x.txt", policy=policy, content="x")
+
+    (tmp_path / "adir").mkdir()
+    with pytest.raises(SecurityError):
+        write_file_content("adir", policy=policy, content="x")
+
+
+def test_write_file_enforces_size_limit(tmp_path: Path, app_config: AppConfig) -> None:
+    policy = SecurityPolicy.from_config(
+        _config_with_workspace(app_config, max_file_size_bytes=4),
+        workspace_root=tmp_path,
+        environ={},
+    )
+
+    with pytest.raises(SecurityError) as excinfo:
+        write_file_content("big.txt", policy=policy, content="12345")
+
+    assert "超过上限" in str(excinfo.value)
+    assert not (tmp_path / "big.txt").exists()
+
+
+# --------------------------------------------------------------------------- delete_file
+
+
+def test_delete_file_always_refuses_and_keeps_the_file(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    target = tmp_path / "note.txt"
+    target.write_text("保留我", encoding="utf-8", newline="")
+
+    with pytest.raises(SecurityError) as excinfo:
+        delete_file_target("note.txt", policy=policy)
+
+    assert target.is_file()
+    message = str(excinfo.value)
+    assert "审批" in message
+    assert target.resolve().as_posix() in message
+
+
+def test_delete_file_reports_recursive_scope(tmp_path: Path, policy: SecurityPolicy) -> None:
+    folder = tmp_path / "pkg"
+    folder.mkdir()
+    (folder / "a.txt").write_text("a", encoding="utf-8", newline="")
+    (folder / "sub").mkdir()
+
+    with pytest.raises(SecurityError) as excinfo:
+        delete_file_target("pkg", policy=policy, recursive=True)
+
+    message = str(excinfo.value)
+    assert "1 个文件" in message
+    assert "1 个子目录" in message
+    assert folder.is_dir()
+
+
+# --------------------------------------------------------------------------- run_shell
+
+
+def _shell_policy(
+    tmp_path: Path,
+    app_config: AppConfig,
+    *,
+    whitelist: list[dict[str, object]],
+    max_output_chars: int = 30_000,
+    default_timeout_seconds: int = DEFAULT_SHELL_TIMEOUT_SECONDS,
+) -> SecurityPolicy:
+    data = app_config.model_dump()
+    data["security"]["shell"]["whitelist"] = whitelist
+    data["security"]["shell"]["max_output_chars"] = max_output_chars
+    data["security"]["shell"]["default_timeout_seconds"] = default_timeout_seconds
+    return SecurityPolicy.from_config(
+        AppConfig.model_validate(data), workspace_root=tmp_path, environ={}
+    )
+
+
+def _entry(*args: str, executable: str = "python") -> dict[str, object]:
+    return {
+        "platform": ["windows", "posix"],
+        "executable": executable,
+        "args": list(args),
+        "match": "exact",
+    }
+
+
+def test_run_shell_executes_whitelisted_command(tmp_path: Path, app_config: AppConfig) -> None:
+    policy = _shell_policy(tmp_path, app_config, whitelist=[_entry("--version")])
+
+    result = run_shell_command("python --version", policy=policy)
+
+    assert result.exit_code == 0
+    assert "Python" in result.stdout
+    assert not result.timed_out
+    assert result.duration_ms >= 0
+    assert Path(result.cwd) == tmp_path.resolve()
+    # 执行的是判定阶段解析出的绝对路径，而不是再搜一次 PATH
+    assert Path(result.argv[0]).is_file()
+    assert Path(result.argv[0]).name.casefold().startswith("python")
+    assert result.argv[1:] == ["--version"]
+    assert result.executor == "argv"  # 免审命令不做 Shell 适配
+
+
+def test_run_shell_keeps_semicolon_inside_quotes(tmp_path: Path, app_config: AppConfig) -> None:
+    """引号内的分号是普通参数内容，不应被当成 Shell 语法拒绝。"""
+    policy = _shell_policy(tmp_path, app_config, whitelist=[_entry("-c", "import sys; sys.exit(3)")])
+
+    result = run_shell_command('python -c "import sys; sys.exit(3)"', policy=policy)
+
+    assert result.exit_code == 3
+
+
+def test_run_shell_marks_timeout(tmp_path: Path, app_config: AppConfig) -> None:
+    policy = _shell_policy(
+        tmp_path,
+        app_config,
+        whitelist=[_entry("-c", "import time; time.sleep(5)")],
+        default_timeout_seconds=2,
+    )
+
+    result = run_shell_command(
+        'python -c "import time; time.sleep(5)"', policy=policy, timeout_seconds=1
+    )
+
+    assert result.timed_out
+    assert result.exit_code is None
+    assert result.note is not None and "未结束" in result.note
+
+
+def test_run_shell_truncates_output(tmp_path: Path, app_config: AppConfig) -> None:
+    policy = _shell_policy(
+        tmp_path,
+        app_config,
+        whitelist=[_entry("-c", "print('x' * 500)")],
+        max_output_chars=50,
+    )
+
+    result = run_shell_command("python -c \"print('x' * 500)\"", policy=policy)
+
+    assert result.truncated
+    assert len(result.stdout) == 50
+    assert result.note is not None and "截断" in result.note
+
+
+def test_run_shell_refuses_non_whitelisted_command(
+    tmp_path: Path, app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = _shell_policy(tmp_path, app_config, whitelist=[_entry("--version")])
+    # 固定解析结果：这条断言只关心"不在白名单 → 需要审批"，不该依赖启动方式（PATH）
+    monkeypatch.setattr(shell_guard.shutil, "which", lambda name: str(tmp_path / name))
+
+    with pytest.raises(SecurityError) as excinfo:
+        # 可解析但不在白名单（参数与白名单不一致）→ 需要审批
+        run_shell_command("python -V", policy=policy)
+
+    assert "白名单" in str(excinfo.value)
+
+
+def test_run_shell_does_not_inherit_api_key(
+    tmp_path: Path, app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """子进程环境不得带上 API Key，且只透传基础变量。"""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-should-not-leak")
+    policy = _shell_policy(
+        tmp_path,
+        app_config,
+        whitelist=[_entry("-c", "import os; print('|'.join(sorted(os.environ)))")],
+    )
+
+    result = run_shell_command(
+        "python -c \"import os; print('|'.join(sorted(os.environ)))\"", policy=policy
+    )
+
+    assert "DEEPSEEK_API_KEY" not in result.stdout
+    assert "PATH" in result.stdout
+    assert "sk-should-not-leak" not in result.stdout
+
+
+def test_new_file_creation_is_atomic_and_never_overwrites(tmp_path: Path) -> None:
+    """原子新建：目标已存在时必须失败，绝不覆盖（架构 §6.4）。"""
+    target = tmp_path / "note.txt"
+    file_tools._create_new_file(target, b"first")  # 直接验证原子创建语义
+
+    with pytest.raises(SecurityError):
+        file_tools._create_new_file(target, b"second")
+
+    assert target.read_bytes() == b"first"
+
+
+def test_write_file_refuses_file_created_after_existence_check(
+    tmp_path: Path, policy: SecurityPolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """检查与落盘之间被别的进程创建同名文件时，不得无审批覆盖（TOCTOU）。"""
+    target = tmp_path / "note.txt"
+    target.write_text("别人写的", encoding="utf-8", newline="")
+
+    real_exists = Path.exists
+
+    def fake_exists(self: Path) -> bool:
+        return False if self == target else real_exists(self)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    with pytest.raises(SecurityError) as excinfo:
+        write_file_content("note.txt", policy=policy, content="我的内容")
+
+    assert "文件已存在" in str(excinfo.value)
+    assert target.read_text(encoding="utf-8") == "别人写的"
+
+
+# --------------------------------------------------------------------------- T12 批准后执行
+
+
+def _fingerprint(policy: SecurityPolicy, command: str) -> str:
+    return action_fingerprint(
+        "run_shell", {"command": command, "cwd": ".", "env_keys": []}, policy=policy
+    )
+
+
+def test_run_shell_uses_config_default_timeout(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """省略超时时用配置值：配置调小到 30 秒，白名单命令照样直接执行。
+
+    修前这里会按出厂常量 60 秒判定，直接报"超时不能超过 30 秒"。
+    """
+    policy = _shell_policy(
+        tmp_path, app_config, whitelist=[_entry("--version")], default_timeout_seconds=30
+    )
+
+    result = run_shell_command("python --version", policy=policy)
+
+    assert result.exit_code == 0
+
+
+def test_run_shell_refuses_shell_syntax_without_approval(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """管道类命令即使不在白名单也不能直接执行，必须走人工审批（架构 §6.6）。"""
+    policy = _shell_policy(tmp_path, app_config, whitelist=[])
+    command = "echo hi | findstr hi" if os.name == "nt" else "echo hi | grep hi"
+
+    with pytest.raises(SecurityError) as excinfo:
+        run_shell_command(command, policy=policy)
+
+    assert "Shell 语法" in str(excinfo.value)
+
+
+def test_run_shell_executes_approved_shell_syntax_command(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """批准后由平台适配器真执行（T12 验收：当前平台真执行、另一平台解析单测）。"""
+    policy = _shell_policy(tmp_path, app_config, whitelist=[])
+    command = "echo hi | findstr hi" if os.name == "nt" else "echo hi | grep hi"
+    fingerprint = _fingerprint(policy, command)
+
+    policy.grant(fingerprint)
+    try:
+        result = run_shell_command(command, policy=policy)
+    finally:
+        policy.revoke(fingerprint)
+
+    assert result.exit_code == 0
+    assert "hi" in result.stdout
+    if os.name == "nt":
+        assert result.executor == "cmd"
+        assert Path(result.argv[0]).name.casefold() == "cmd.exe"
+        assert result.argv[1:4] == ["/d", "/s", "/c"]
+    else:
+        assert result.executor == "sh"
+        assert result.argv[1] == "-c"
+
+
+def test_run_shell_approval_is_one_shot(tmp_path: Path, app_config: AppConfig) -> None:
+    """批准是一次性的：撤销后同一条命令重新被拒（架构 §6.5 的“恰好执行一次”）。"""
+    policy = _shell_policy(tmp_path, app_config, whitelist=[])
+    command = "echo hi | findstr hi" if os.name == "nt" else "echo hi | grep hi"
+    fingerprint = _fingerprint(policy, command)
+
+    policy.grant(fingerprint)
+    policy.revoke(fingerprint)
+
+    with pytest.raises(SecurityError):
+        run_shell_command(command, policy=policy)
+
+
+def test_run_shell_approved_absolute_path_runs_that_path(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """带路径的命令批准后按解析出的 argv 执行，免审白名单不参与放行。"""
+    policy = _shell_policy(tmp_path, app_config, whitelist=[])
+    command = f'"{sys.executable}" --version'
+    fingerprint = _fingerprint(policy, command)
+
+    with pytest.raises(SecurityError):
+        run_shell_command(command, policy=policy)
+
+    policy.grant(fingerprint)
+    try:
+        result = run_shell_command(command, policy=policy)
+    finally:
+        policy.revoke(fingerprint)
+
+    assert result.exit_code == 0
+    assert "Python" in result.stdout
+    assert result.argv == [str(Path(sys.executable).resolve()), "--version"]
+    assert result.executor == "argv"
+
+
+def test_run_shell_approval_is_bound_to_the_command(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """批准绑在动作指纹上：换一条命令不能复用同一份批准。"""
+    policy = _shell_policy(tmp_path, app_config, whitelist=[])
+    approved = "echo hi | findstr hi" if os.name == "nt" else "echo hi | grep hi"
+    other = "echo bye | findstr bye" if os.name == "nt" else "echo bye | grep bye"
+
+    policy.grant(_fingerprint(policy, approved))
+    try:
+        with pytest.raises(SecurityError):
+            run_shell_command(other, policy=policy)
+    finally:
+        policy.revoke(_fingerprint(policy, approved))

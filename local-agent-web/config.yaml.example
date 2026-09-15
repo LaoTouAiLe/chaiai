@@ -1,0 +1,144 @@
+# local-agent-web 配置示例
+#
+# 复制为 config.yaml 再按需修改；config.yaml 已被 .gitignore 排除，不会提交。
+# API Key 不写在这里：这里只写“存放 Key 的环境变量名”，Key 的值放在 .env。
+# 默认配置对接 DeepSeek；换成其他 OpenAI 兼容端点只需改 llm.base_url 与 llm.model。
+
+llm:
+  provider: openai_compatible
+  base_url: "https://api.deepseek.com"
+  api_key_env: "DEEPSEEK_API_KEY"
+  model: "deepseek-flash"          # 该 key 实测可用：deepseek-flash、deepseek-v4-pro
+  temperature: 0.2
+  max_tokens: 4096
+  timeout_seconds: 120
+  retry_count: 2
+
+embedding:
+  enabled: false                   # v0.1a 未启用中期记忆，不调用 embedding
+  provider: openai_compatible
+  base_url: "https://api.deepseek.com"
+  api_key_env: "DEEPSEEK_API_KEY"
+  model: ""                        # 启用 embedding 时必须填写
+
+workspace:
+  root: "."
+  allow_external_paths: false
+  max_file_size_bytes: 2000000
+
+agents:
+  enabled: true
+  filenames:
+    - "AGENTS.md"
+    - "AGENTS.override.md"
+  max_file_chars: 20000
+  max_total_chars: 60000
+  precedence:
+    closer_directory_wins: true
+    override_wins: true
+
+memory:
+  short_term:
+    enabled: true
+    backend: "sqlite_checkpoint"
+    path: "data/checkpoints.sqlite"
+    preserve_checkpoint_messages: true
+    prompt_window_messages: 100
+
+  medium_term:
+    enabled: false                 # v0.1a / v0.1b 保持关闭，节点透传
+    backend: "chroma"
+    path: "data/chroma"
+    collection: "agent_memory"
+    top_k: 8
+    min_score: 0.72
+    decay_half_life_days: 30
+    write_on:
+      - "task_completed"
+      - "important_fact_changed"
+      - "explicit_user_preference"
+
+  long_term:
+    enabled: false                 # v0.1a / v0.1b 保持关闭
+    backend: "sqlite"
+    path: "data/memories.sqlite"
+    confidence_threshold: 0.75
+    importance_threshold: 0.5
+    aging_enabled: true
+    forget_after_days: 180
+
+  compression:
+    enabled: false                 # v0.1a / v0.1b 保持关闭
+    trigger_ratio: 0.8
+    preserve_recent_turns: 8
+    summary_max_chars: 12000
+
+security:
+  # 四项必须为 true：代码层强制审批策略，不能由配置关闭。
+  require_approval:
+    delete_file: true
+    destructive_shell: true
+    large_batch_edit: true
+    overwrite_existing_file: true
+
+  large_edit:
+    max_files_without_approval: 3
+    max_changed_lines_without_approval: 200
+
+  shell:
+    platform: "auto"
+    # 执行器偏好（架构 §6.6）：
+    #   argv_preferred = 能 argv 就 argv；命令含 Shell 语法时用平台默认适配器
+    #                    （Windows→cmd.exe /d /s /c、POSIX→/bin/sh -c）
+    #   cmd / pwsh / sh = 显式指定 Shell 语法命令交给哪个适配器执行；
+    #                     适配器与运行平台不匹配时直接拒绝（失败闭合）
+    executor: "argv_preferred"
+    default_timeout_seconds: 60
+    max_output_chars: 30000
+    # 白名单按 平台 + 可执行名（归一化大小写与 .exe/.cmd 后缀）+ 参数结构（exact）+ 可选 cwd 匹配。
+    # match: exact 表示参数必须完全一致：pytest 带任意测试参数、git diff 带额外参数都不会免审。
+    # 不写 cwd 表示不限目录；写了则只在那个工作目录（相对 workspace.root）下免审。
+    whitelist:
+      - platform: ["windows", "posix"]
+        executable: "python"
+        args: ["--version"]
+        match: "exact"
+      - platform: ["windows", "posix"]
+        executable: "pytest"
+        args: ["--version"]
+        match: "exact"
+      - platform: ["windows", "posix"]
+        executable: "git"
+        args: ["status"]
+        match: "exact"
+      - platform: ["windows", "posix"]
+        executable: "git"
+        args: ["diff"]
+        match: "exact"
+      - platform: ["windows", "posix"]
+        executable: "ruff"
+        args: ["check"]
+        match: "exact"
+    blocked_patterns:
+      - "rm -rf"
+      - "del /s"
+      - "format "
+      - "shutdown"
+      - "chmod"
+      - "curl "
+      - "wget "
+
+  secrets:
+    redact_environment_values: true
+    block_known_secret_files: true
+
+rag:
+  enabled: false
+  backend: "tree_sitter"
+  index_path: "data/code_index"
+  max_results: 8
+
+agent:
+  max_tool_loops: 20
+  max_retries_per_step: 2
+  require_evidence_for_completion: true

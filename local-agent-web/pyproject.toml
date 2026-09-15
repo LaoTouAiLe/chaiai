@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-agent-web"
+version = "0.1.0"
+description = "Local learning-oriented web Agent"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10,<4"
+dependencies = [
+  "langchain-core>=1.0,<2",
+  "langchain-openai>=1.0,<2",
+  "langgraph>=1.0,<2",
+  "langgraph-checkpoint-sqlite>=3.0,<4",
+  "streamlit",
+  "pydantic",
+  "pydantic-settings",
+  "pyyaml",
+  "python-dotenv",
+  "filelock",
+]
+
+[project.optional-dependencies]
+memory = ["chromadb", "tiktoken"]
+rag = ["tree-sitter", "tree-sitter-language-pack", "langchain-text-splitters"]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "real_resolution: 用例依赖真实的可执行文件解析结果（PATH / 文件系统），不使用稳定的解析替身",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+# 与运行/测试使用的解释器一致。项目声明支持 3.10+，但传递依赖 numpy 2.x 的类型存根
+# 使用 PEP 695 语法（需 py3.12+），py3.10 目标下无法解析；语法层面的 3.10 兼容
+# 由 ruff 的 target-version = "py310" 把关。
+python_version = "3.13"
+disallow_untyped_defs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+# 无类型存根或会带进大量可选依赖的间接依赖，按 Any 处理：
+# streamlit（带进 pandas/pyarrow 等）、yaml（无存根）、tiktoken（langchain-openai 的间接依赖）。
+[[tool.mypy.overrides]]
+module = ["streamlit", "streamlit.*", "yaml", "yaml.*", "tiktoken", "tiktoken.*"]
+follow_imports = "skip"
+ignore_missing_imports = true

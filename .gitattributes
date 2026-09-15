@@ -1,0 +1,8 @@
+# 全仓库统一用 LF 存储与检出：保证 Windows 与 POSIX 下内容一致，
+# uv.lock 的可复现性（uv lock --check）依赖这一点。
+* text=auto eol=lf
+
+# 数据库文件按二进制处理，不做任何行尾转换
+*.sqlite binary
+*.sqlite-wal binary
+*.sqlite-shm binary
