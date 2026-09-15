@@ -37,9 +37,8 @@ from local_agent.persistence.session_store import (
     STATUS_IDLE,
     TITLE_MAX_CHARS,
     SessionStore,
-    find_git_root,
-    project_id_for,
 )
+from local_agent.scope import find_git_root, project_id_for
 from local_agent.security.approval import ApprovalDecision, action_fingerprint
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.result_types import ToolResultRecord

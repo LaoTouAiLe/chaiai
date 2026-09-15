@@ -52,8 +52,18 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 
 # 无类型存根或会带进大量可选依赖的间接依赖，按 Any 处理：
-# streamlit（带进 pandas/pyarrow 等）、yaml（无存根）、tiktoken（langchain-openai 的间接依赖）。
+# streamlit（带进 pandas/pyarrow 等）、yaml（无存根）、tiktoken（langchain-openai 的间接依赖）、
+# chromadb（可选依赖 memory extra，默认不装；memory/medium_term.py 只做延迟导入）。
 [[tool.mypy.overrides]]
-module = ["streamlit", "streamlit.*", "yaml", "yaml.*", "tiktoken", "tiktoken.*"]
+module = [
+  "streamlit",
+  "streamlit.*",
+  "yaml",
+  "yaml.*",
+  "tiktoken",
+  "tiktoken.*",
+  "chromadb",
+  "chromadb.*",
+]
 follow_imports = "skip"
 ignore_missing_imports = true

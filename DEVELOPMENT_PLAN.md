@@ -39,6 +39,7 @@ local-agent-web/
 │       ├── web.py
 │       ├── config.py
 │       ├── exceptions.py
+│       ├── scope.py                 # 作用域与稳定标识（project_id / scope_key），只依赖标准库
 │       │
 │       ├── graph/
 │       │   ├── __init__.py
@@ -133,6 +134,7 @@ local-agent-web/
 - `reflection/`：实现独立反思逻辑。
 - `llm/`：隔离模型供应商和 API 差异。
 - `persistence/`：处理 Checkpoint 和会话隔离。
+- `scope.py`：作用域与稳定标识（路径规范化、稳定 Hash、`project_id`、`scope_key`），被 `persistence` 与 `memory` 共用，只依赖标准库。T11 时这份规则在 `persistence/session_store.py`，T13 归位到这里：放进 `memory` 或 `persistence` 任一侧都会造成包之间的反向依赖，而复制两份会让 §10.2 的规则漂移。
 - `rag/`：可选代码检索，不影响核心 Agent。
 - `web.py`：Streamlit 网页入口，只负责把页面操作转成 Graph 调用并展示结果。
 - `ui/`：负责网页聊天、工具结果与 diff 展示、流式输出和审批交互。

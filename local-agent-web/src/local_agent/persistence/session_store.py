@@ -9,6 +9,7 @@
 - ``thread_id`` 是 LangGraph Checkpoint 的恢复键，``session_id`` 是面向用户的会话标识；
   恢复流程固定为「先查 sessions 拿 thread_id，再用它调用 Graph」（架构 §10.6）。
 - 待审批的会话只能经 ``Command(resume=...)`` 恢复，这个判断在 ``web.py``，本模块不参与。
+- ``project_id`` 与路径规范化由 :mod:`local_agent.scope` 统一实现：记忆层要用同一份规则。
 
 两个约定（架构未写明、由 T11 确定）：
 
@@ -20,7 +21,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,6 +28,10 @@ from pathlib import Path
 from uuid import uuid4
 
 from local_agent.exceptions import SessionStoreError
+
+#: ``project_id`` / ``normalize_path`` 等稳定标识在 :mod:`local_agent.scope` 统一实现：
+#: 记忆层要用同一份规则，放在这里会造成两侧各算一次而漂移。
+from local_agent.scope import normalize_path, project_id_for
 
 #: 新会话的默认标题；第一次提交消息后会自动命名（之后仍可手动重命名）。
 DEFAULT_TITLE = "新会话"
@@ -71,32 +75,6 @@ class Session:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
-
-def find_git_root(path: Path) -> Path | None:
-    """向上查找 Git 根目录（``.git`` 目录或 worktree 的 ``.git`` 文件）。"""
-    resolved = Path(path).resolve()
-    for candidate in (resolved, *resolved.parents):
-        if (candidate / ".git").exists():
-            return candidate
-    return None
-
-
-def normalize_path(path: Path) -> str:
-    """规范化路径文本：先 resolve，再统一成 posix 形式（Windows 用正斜杠）。"""
-    return Path(path).resolve().as_posix()
-
-
-def stable_hash(text: str, *, length: int = 16) -> str:
-    """稳定 Hash：同一文本在任何时候都得到同一结果（架构 §10.2 的稳定 Hash 规则）。"""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:length]
-
-
-def project_id_for(workspace_root: Path) -> str:
-    """生成 ``project_id``：优先 Git 根目录，无 Git 时用规范化工作区路径（架构 §10.2）。"""
-    root = Path(workspace_root).resolve()
-    basis = normalize_path(find_git_root(root) or root)
-    return stable_hash(basis)
 
 
 def _clean_title(title: str) -> str:

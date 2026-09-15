@@ -21,3 +21,15 @@ class WorkspaceBoundaryError(SecurityError):
 
 class SessionStoreError(LocalAgentError):
     """会话索引操作被拒绝：会话不存在、名称为空或超长等。"""
+
+
+class MemoryStoreError(LocalAgentError):
+    """记忆操作被拒绝：作用域无法确定、记忆层未启用、可选依赖缺失等。"""
+
+
+class MemoryDisabledError(MemoryStoreError):
+    """配置里该层记忆为关闭状态，调用方应改走透传分支而不是打开存储。"""
+
+
+class MemoryUnavailableError(MemoryStoreError):
+    """该层记忆已启用，但运行环境缺少必需的依赖（例如未安装 ``chromadb``）。"""

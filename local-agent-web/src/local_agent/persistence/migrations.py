@@ -1,10 +1,15 @@
-"""SQLite 结构迁移与版本记录（架构 §10.6、开发文档 T11）。
+"""SQLite 结构迁移与版本记录（架构 §10.3、§10.6，开发文档 T11、T13）。
 
 - 会话索引与 LangGraph Checkpoint 共用同一个数据库文件：一个连接、一个事务边界，
   避免多连接互相加锁（``session_store`` 与 Checkpoint 由 ``checkpoint.open_database``
   一起装配）。
-- 迁移按版本号顺序执行，版本记录在 ``schema_migrations``；重复调用幂等，
-  已应用的版本会跳过。
+- 长期记忆按架构 §10.3 使用**独立**的 SQLite 文件，所以这里有两套互不相干的迁移：
+  :func:`apply_migrations`（聊天库：Checkpoint + 会话索引）与
+  :func:`apply_long_term_migrations`（长期库：entities / facts / task_conclusions）。
+  两套迁移必须应用到**不同的数据库文件**，调用方由 ``checkpoint.open_database`` 与
+  ``memory.long_term.open_store`` 分别封装；同一个文件只会被其中一套应用。
+- 迁移按版本号顺序执行，版本记录在 ``schema_migrations``（每个库文件各自持有）；重复调用
+  幂等，已应用的版本会跳过。
 - 本模块只做结构变更，不写业务数据（首个会话的初始化在 ``session_store``）。
 """
 
@@ -13,8 +18,17 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-#: 当前代码期望的库结构版本（等于最后一个迁移的编号）。
-SCHEMA_VERSION = 1
+#: 聊天库（Checkpoint + 会话索引）当前代码期望的结构版本（等于最后一个迁移的编号）。
+CHAT_SCHEMA_VERSION = 1
+
+#: 长期记忆库当前代码期望的结构版本。
+LONG_TERM_SCHEMA_VERSION = 1
+
+#: 兼容既有调用：未加前缀的 ``SCHEMA_VERSION`` 指聊天库。
+SCHEMA_VERSION = CHAT_SCHEMA_VERSION
+
+#: 长期记忆库的表名（架构 §10.3）；初始化脚本与测试用它做结构自检。
+LONG_TERM_TABLES: tuple[str, ...] = ("entities", "facts", "task_conclusions")
 
 _SESSIONS_SQL = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -32,8 +46,63 @@ CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions (status);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions (updated_at);
 """
 
-#: (版本号, 该版本的结构变更 SQL)；只允许在末尾追加，不允许改写已发布的版本。
-_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _SESSIONS_SQL),)
+#: 长期记忆三张表（架构 §10.3 字段逐条对应，字段名不要改）。
+#:
+#: 只建"查询路径"上的普通索引：实体按作用域查、事实按实体查、结论按项目查。
+#: 唯一约束（同键是否可重复）属于 T15 的 CRUD 语义，本版本不预设。
+_LONG_TERM_SQL = """
+CREATE TABLE IF NOT EXISTS entities (
+    id TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_entities_scope ON entities (scope, scope_key);
+CREATE INDEX IF NOT EXISTS idx_entities_name ON entities (name);
+
+CREATE TABLE IF NOT EXISTS facts (
+    id TEXT PRIMARY KEY,
+    entity_id TEXT NOT NULL,
+    "key" TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    importance REAL NOT NULL,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_accessed_at TEXT,
+    expires_at TEXT,
+    status TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_facts_entity ON facts (entity_id);
+CREATE INDEX IF NOT EXISTS idx_facts_status ON facts (status);
+
+CREATE TABLE IF NOT EXISTS task_conclusions (
+    id TEXT PRIMARY KEY,
+    task_title TEXT NOT NULL,
+    conclusion TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    project_scope TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_conclusions_project ON task_conclusions (project_scope);
+"""
+
+#: 聊天库的迁移；(版本号, 该版本的结构变更 SQL)，只允许在末尾追加，不允许改写已发布的版本。
+_CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _SESSIONS_SQL),)
+
+#: 长期记忆库的迁移；规则同上（独立文件、独立版本号）。
+_LONG_TERM_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _LONG_TERM_SQL),)
+
+_SCHEMA_MIGRATIONS_SQL = (
+    "CREATE TABLE IF NOT EXISTS schema_migrations ("
+    "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+)
 
 
 def _now() -> str:
@@ -51,24 +120,21 @@ def current_version(connection: sqlite3.Connection) -> int:
     return int(row[0]) if row is not None else 0
 
 
-def apply_migrations(connection: sqlite3.Connection) -> int:
-    """把库结构升到当前版本，返回升级后的版本号。
+def table_names(connection: sqlite3.Connection) -> frozenset[str]:
+    """该连接上已存在的表名（用于初始化自检与测试断言）。"""
+    rows = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    return frozenset(str(row[0]) for row in rows)
 
-    Args:
-        connection: 目标数据库连接（与 Checkpoint 共用）。
 
-    Returns:
-        应用完成后的版本号；已是最新时直接返回原版本。
-
-    Raises:
-        sqlite3.Error: 结构变更失败（例如库文件只读）。
-    """
-    connection.execute(
-        "CREATE TABLE IF NOT EXISTS schema_migrations ("
-        "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
-    )
+def _apply(
+    connection: sqlite3.Connection, migrations: tuple[tuple[int, str], ...]
+) -> int:
+    """在一条连接上按顺序应用一组迁移，返回应用后的版本号。"""
+    connection.execute(_SCHEMA_MIGRATIONS_SQL)
     version = current_version(connection)
-    for target, script in _MIGRATIONS:
+    for target, script in migrations:
         if target <= version:
             continue
         connection.executescript(script)
@@ -80,3 +146,36 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
         version = target
     connection.commit()
     return version
+
+
+def apply_migrations(connection: sqlite3.Connection) -> int:
+    """把**聊天库**结构升到当前版本，返回升级后的版本号。
+
+    Args:
+        connection: 目标数据库连接（与 Checkpoint 共用）。
+
+    Returns:
+        应用完成后的版本号；已是最新时直接返回原版本。
+
+    Raises:
+        sqlite3.Error: 结构变更失败（例如库文件只读）。
+    """
+    return _apply(connection, _CHAT_MIGRATIONS)
+
+
+def apply_long_term_migrations(connection: sqlite3.Connection) -> int:
+    """把**长期记忆库**结构升到当前版本，返回升级后的版本号。
+
+    必须使用 :data:`LONG_TERM_TABLES` 所在的独立数据库文件；调用方一般直接用
+    ``local_agent.memory.long_term.open_store``，不需要自己开连接。
+
+    Args:
+        connection: 长期记忆库的数据库连接。
+
+    Returns:
+        应用完成后的版本号；已是最新时直接返回原版本。
+
+    Raises:
+        sqlite3.Error: 结构变更失败（例如库文件只读）。
+    """
+    return _apply(connection, _LONG_TERM_MIGRATIONS)

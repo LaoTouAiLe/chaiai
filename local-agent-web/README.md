@@ -24,7 +24,8 @@
 | v0.1b / T10 | 三出口人工审批（批准 / 修改 / 拒绝）+ 动作指纹 | 已完成 |
 | v0.1b / T11 | 会话索引与侧栏（新建 / 切换 / 恢复 / 重命名） | 已完成 |
 | v0.1b / T12 | 跨平台 Shell（argv 直执行 / cmd.exe / pwsh / sh）+ 阶段回归 | 已完成 |
-| v0.2 及以后 | 三层记忆与压缩、完整反思、代码 RAG | 未开始 |
+| v0.2 / T13 | 作用域规则、记忆库初始化（长期 SQLite 迁移 / Chroma 惰性适配层 / `scripts/init_db.py`） | 部分完成（B2：未含向量召回） |
+| v0.2 及以后 | 中期召回、长期事实、摘要压缩、完整反思、代码 RAG | 未开始 |
 
 **现在能做什么**：本机网页里和模型多轮闲聊；刷新/重启后会话仍在，可新建、切换、重命名会话；加载 AGENTS 规则；列目录、读文件、精确串替换改文件、新建文件、执行安全命令（白名单内免审直执行，其余批准后执行，含管道/重定向的走平台 Shell 适配器）；删除、覆盖写、大范围编辑、白名单外命令与危险命令会**暂停等待你在页面上批准 / 修改参数 / 拒绝**。
 **现在不能做什么**：工作区外的路径、密钥文件、未获批准的命令一律拒绝；没有三层记忆与代码检索（v0.2/v0.3）、没有会话删除或归档、没有公网部署与账号体系。
@@ -171,6 +172,22 @@ python -m streamlit run src/local_agent/web.py --server.address=127.0.0.1 --serv
   ```
 - 已避免使用系统环境变量存放密钥：Key 只从项目根目录的 `.env` 读取。
 
+## 数据库初始化
+
+三层记忆的库都在 `data/`（已被 `.gitignore` 排除），首次使用或升级后可先初始化（幂等，可反复执行）：
+
+```powershell
+uv run python scripts/init_db.py            # 建库 / 升级到当前结构版本
+uv run python scripts/init_db.py --check    # 只检查，不改动任何文件（未就绪时退出码 1）
+```
+
+- 只初始化 SQLite：聊天库（Checkpoint + 会话索引，`memory.short_term.path`）与长期记忆库
+  （`entities` / `facts` / `task_conclusions`，`memory.long_term.path`）；**配置里关闭的层不会建库**。
+- 长期记忆必须使用**独立**的数据库文件：如果把它指到聊天库文件上，脚本会直接报错并说明原因。
+- 中期记忆是 Chroma 目录（`memory.medium_term.path`）：只有 `memory.medium_term.enabled` 为 `true`
+  时才需要，且要先装可选依赖 `uv sync --extra memory`；日常链路不会因为没装它而失败
+  （未安装时给出可读提示，而不是 `ImportError`）。
+
 ## 质量命令
 
 ```powershell
@@ -209,3 +226,8 @@ python -m mypy src
   SQLite 是单文件数据库，不适合高并发写入，本机单用户足够。
 - 模型能力（Tool Calling、结构化输出）在启动时探测；不支持 Tool Calling 的模型在工具模式下
   失败闭合，并给出明确提示。
+- 三层记忆目前只有"库与契约"：中期向量召回（T14）、长期事实 CRUD（T15）、摘要压缩（T16）
+  尚未接入对话链路，`memory.medium_term.enabled` / `memory.long_term.enabled` /
+  `memory.compression.enabled` 保持 `false`，节点按透传处理。
+- 长期记忆库与聊天库是两套迁移、各自持有 `schema_migrations`，必须使用不同的文件
+  （`scripts/init_db.py` 会在指向同一个文件时报错）。

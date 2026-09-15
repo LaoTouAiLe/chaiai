@@ -81,3 +81,22 @@ def open_database(database_path: Path, *, workspace_root: Path) -> ChatDatabase:
         checkpointer=saver,
         sessions=SessionStore(connection, workspace_root=workspace_root),
     )
+
+
+def current_schema_version(database_path: Path) -> int | None:
+    """只读地读取聊天库的结构版本。
+
+    Args:
+        database_path: 数据库文件路径。
+
+    Returns:
+        已应用的最高版本；文件还不存在时返回 ``None``（**不会创建文件**）。
+    """
+    path = Path(database_path)
+    if not path.is_file():
+        return None
+    connection = sqlite3.connect(str(path))
+    try:
+        return migrations.current_version(connection)
+    finally:
+        connection.close()
