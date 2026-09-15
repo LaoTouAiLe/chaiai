@@ -12,7 +12,7 @@
 
 - `src/local_agent/` 包布局；`pyproject.toml` 写 `requires-python`、运行依赖和开发依赖；`requirements.txt` 只保留基础安装入口。用 `uv lock` 生成并提交 `uv.lock`，用 `uv lock --check` 与 `uv sync` 验证可复现环境（架构 §3、§9）。
 - 所有公开函数/方法有类型标注与 docstring；每次提交通过 `python -m pytest`、`python -m ruff check .`、`python -m mypy src`。每个新增模块至少覆盖正常、错误和安全边界测试，测试目录见 §3。
-- `config.yaml` 只存非秘密配置；API Key 由 `llm.api_key_env` / `embedding.api_key_env` 指定的环境变量读取。日志、页面、Checkpoint 不泄露密钥。
+- `config.yaml` 只存非秘密配置；聊天模型的 API Key 由 `llm.api_key_env` 指定的环境变量读取，只有 `embedding.provider=openai_compatible` 时才使用 `embedding.api_key_env`；`onnx_local` 不读取 API Key。日志、页面、Checkpoint 不泄露密钥。
 - 每任务一个 Conventional Commits 提交，提交里附测试命令与结果；任务不能只创建空文件。不同阶段可以只创建已实现的模块，§3 是最终目录，不要求 v0.1a 全部落盘。
 - 对 LangGraph、langchain-core、Streamlit、Chroma 等具体构造参数或调用签名，先以安装版本的官方文档与包内签名核实，再写最小契约测试。本计划不把不确定 API 写成既定事实。
 - 默认自动测试使用临时工作区、隔离 SQLite 和假模型；真实 API 的端到端测试作为手动验收，不能让 PR 测试依赖密钥、网络或模型输出稳定性。
@@ -50,6 +50,7 @@ local-agent-web/
 │       │   └── routers.py
 │       │
 │       ├── llm/
+│       │   ├── embedding.py
 │       │   ├── factory.py
 │       │   ├── models.py
 │       │   └── protocol.py
@@ -132,7 +133,7 @@ local-agent-web/
 - `security/`：集中处理路径、Shell、diff 和审批策略。
 - `memory/`：实现三层记忆和记忆生命周期。
 - `reflection/`：实现独立反思逻辑。
-- `llm/`：隔离模型供应商和 API 差异。
+- `llm/`：隔离聊天模型、Embedding provider 和 API 差异；`embedding.py` 在 T14A 落地本地 ONNX 与 OpenAI 兼容 Embedding 适配。
 - `persistence/`：处理 Checkpoint 和会话隔离。
 - `scope.py`：作用域与稳定标识（路径规范化、稳定 Hash、`project_id`、`scope_key`），被 `persistence` 与 `memory` 共用，只依赖标准库。T11 时这份规则在 `persistence/session_store.py`，T13 归位到这里：放进 `memory` 或 `persistence` 任一侧都会造成包之间的反向依赖，而复制两份会让 §10.2 的规则漂移。
 - `rag/`：可选代码检索，不影响核心 Agent。
@@ -263,12 +264,19 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 - 关键接口：中期记录的 scope/scope_key/user_id/project_id/workspace_root 与 entities.scope_key、facts、task_conclusions 字段按架构 §10；无 Git 根目录时 project_id 用 workspace.root 稳定 Hash；不把未验证对话直接入库。
 - 前置：T11、T12。验收：`python -m pytest tests/test_memory.py tests/test_graph_resume.py`；初始化幂等、旧 Checkpoint 可恢复、跨项目隔离、记忆关闭不建向量索引；§2 命令通过。
 
-### T14｜中期向量记忆与召回（L）
+### T14A｜本地 Embedding 适配器与配置（M）
+
+- 目标：交付显式 Embedding 适配器和 provider 条件配置；默认 `onnx_local` 可在本机 CPU 推理，同时保留 `openai_compatible`，且不让 Chroma 隐式选择或下载模型（架构 §10.2）。
+- 涉及文件：src/local_agent/llm/embedding.py、src/local_agent/config.py、src/local_agent/exceptions.py、config.yaml.example、pyproject.toml、uv.lock、tests/test_memory.py、tests/test_web.py（既有 embedding 校验用例随 provider 口径调整）。
+- 关键接口：embedding.* 按 §8。`onnx_local` 使用 FastEmbed 和 `BAAI/bge-small-zh-v1.5`，模型实例按应用进程惰性创建并复用；`openai_compatible` 保留。FastEmbed 的具体构造参数、缓存参数和模型元数据读取方式在安装并锁定版本后核实，以契约测试固定，不提前编造 API。
+- 前置：T13。验收：`python -m pytest tests/test_memory.py`；自动测试使用假 Embedding 且不访问网络；两种 provider 的必填字段分别校验，YAML 显式提供当前 provider 不适用的字段时失败；关闭时不导入 FastEmbed、不下载模型；`config.yaml.example` 必须保持 `embedding.enabled=false` 和 `memory.medium_term.enabled=false`，可以预填 `onnx_local`、模型和缓存字段，但加载示例配置不得初始化 FastEmbed、访问网络或下载模型，启用状态测试使用独立临时配置；§2 命令通过。手动验收首次下载只写入显式 `cache_dir`、断网后可复用缓存、`local_files_only=true` 不发起网络请求、缓存缺失/损坏时后端返回可读状态与失败原因、输出为 512 维有限数值，并记录首次与复用加载耗时。T14A 不负责网页展示，页面状态和错误展示由 T19 验收。
+
+### T14B｜Chroma 中期向量记忆与召回（L）
 
 - 目标：保存已验证对话摘要、任务片段与近期偏好；recall_memory 按作用域、top_k、min_score 召回，并只将相关记忆注入 Prompt（架构 §10.2）。
-- 涉及文件：src/local_agent/memory/medium_term.py、src/local_agent/memory/recall.py、src/local_agent/graph/nodes.py、src/local_agent/context/prompt_context.py、tests/test_memory.py、tests/test_router.py。
-- 关键接口：memory_refs 按架构 §4.2 覆盖并去重；embedding.*、memory.medium_term.* 按 §8。Chroma/Embedding 具体 API 在安装后核实。
-- 前置：T13。验收：`python -m pytest tests/test_memory.py tests/test_router.py`；相关问题召回，跨项目/过期/低分记忆不召回，关闭时节点透传，Prompt 不超预算；§2 命令通过。
+- 涉及文件：src/local_agent/memory/medium_term.py、src/local_agent/memory/recall.py、src/local_agent/memory/schemas.py、src/local_agent/graph/nodes.py、src/local_agent/graph/state.py、src/local_agent/context/prompt_context.py、src/local_agent/llm/embedding.py（补齐 Chroma EF 协议成员）、src/local_agent/config.py、config.yaml.example、pyproject.toml、uv.lock、tests/test_memory.py、tests/test_router.py。
+- 关键接口：memory_refs 按架构 §4.2 覆盖并去重；memory.medium_term.* 按 §8；显式使用 T14A 的 Embedding 适配器。Chroma 的具体构造参数、自定义 Embedding 协议、距离语义和 collection 元数据读写方式在锁定版本后核实，以契约测试固定。
+- 前置：T14A。验收：`python -m pytest tests/test_memory.py tests/test_router.py`；自动测试使用假 Embedding 且不访问网络；相关问题召回，跨项目/过期/低分记忆不召回，关闭时节点透传，Prompt 不超预算；`min_score` 使用“越大越相关”的统一分数；collection 的 provider、模型、维度、归一化或距离度量不匹配时拒绝复用并提示重建；§2 命令通过。手动验收使用本地中文模型时，中文近义内容排在无关内容之前。
 
 ### T15｜长期实体事实 CRUD 与冲突（L）
 
@@ -282,7 +290,7 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 - 目标：达到 memory.compression.trigger_ratio 时生成 conversation_summary，只压缩模型输入窗口，Checkpoint 原始 messages 保持不变（架构 §10.1、§10.5）。
 - 涉及文件：src/local_agent/context/token_budget.py、src/local_agent/memory/summarizer.py、src/local_agent/memory/short_term.py、src/local_agent/graph/nodes.py、src/local_agent/context/prompt_context.py、tests/test_memory.py、tests/test_graph_resume.py。
 - 关键接口：conversation_summary、context_version、compression_count、context_budget 按架构 §4.2；prompt_window_messages、compression.* 按 §8。
-- 前置：T14。验收：`python -m pytest tests/test_memory.py tests/test_graph_resume.py`；闲聊和工具循环均实际经过 `compression_node`，压缩后原始消息数不减，Prompt 窗口缩小但保留目标/约束，关闭时透传；§2 命令通过。
+- 前置：T14B。验收：`python -m pytest tests/test_memory.py tests/test_graph_resume.py`；闲聊和工具循环均实际经过 `compression_node`，压缩后原始消息数不减，Prompt 窗口缩小但保留目标/约束，关闭时透传；§2 命令通过。
 
 ### T17｜完整反思与动态重规划（L）
 
@@ -296,14 +304,14 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 - 目标：任务完成、闲聊中固定偏好变化或用户要求记住时先形成 memory_write_intent，再经 reflection_node 验证为 MemoryCandidate，最后由 memory_write_node 写入；实现时间/重要度降权、过期淘汰、人工删除（架构 §5.2、§10.2–§10.4）。
 - 涉及文件：src/local_agent/reflection/memory_candidates.py、src/local_agent/memory/writer.py、src/local_agent/memory/forgetting.py、src/local_agent/memory/medium_term.py、src/local_agent/memory/long_term.py、src/local_agent/graph/nodes.py、tests/test_memory.py、tests/test_reflection.py。
 - 关键接口：memory_write_candidates 按架构 §4.2；候选携来源事件、置信度和重要度，写入作用域由已验证意图与 RuntimeContext 推导，不向 MemoryCandidate 或 State 增加字段。memory_write_intent 是触发事件，不新增 State 字段。
-- 前置：T14、T15、T17。验收：`python -m pytest tests/test_memory.py tests/test_reflection.py tests/test_router.py`；普通闲聊不每轮写，用户在闲聊中明确要求记住时经过反思节点后可写，作用域不确定则拒绝写入；未验证输入不入长期库、重复事件不重写、过期/人工删除不召回、低重要度随时间降权；§2 命令通过。
+- 前置：T14B、T15、T17。验收：`python -m pytest tests/test_memory.py tests/test_reflection.py tests/test_router.py`；普通闲聊不每轮写，用户在闲聊中明确要求记住时经过反思节点后可写，作用域不确定则拒绝写入；未验证输入不入长期库、重复事件不重写、过期/人工删除不召回、低重要度随时间降权；§2 命令通过。
 
 ### T19｜三层记忆集成与阶段验收（M）
 
-- 目标：接通 Checkpoint、Chroma、长期 SQLite、召回、压缩与反思；任意层关闭不影响其他层（架构 §5、§10）。
-- 涉及文件：src/local_agent/graph/builder.py、src/local_agent/graph/nodes.py、src/local_agent/context/prompt_context.py、src/local_agent/web.py、tests/test_memory.py、tests/test_graph_resume.py、README.md。
+- 目标：接通 Checkpoint、Chroma、长期 SQLite、召回、压缩与反思，并在网页展示本地 Embedding 模型准备状态和错误；任意层关闭不影响其他层（架构 §5、§10）。
+- 涉及文件：src/local_agent/graph/builder.py、src/local_agent/graph/nodes.py、src/local_agent/context/prompt_context.py、src/local_agent/web.py、src/local_agent/ui/renderer.py、tests/test_memory.py、tests/test_graph_resume.py、tests/test_web.py、README.md。
 - 关键接口：保持架构 §4.2 State、§8 memory.*.enabled / rag.enabled 配置。
-- 前置：T16、T18。验收：`python -m pytest` 与 §2 命令；跨会话同项目可召回已验证偏好，跨项目不可，Checkpoint 原文恢复，关闭各层不访问相应库；真实模型手动演示写入与下一会话召回。
+- 前置：T16、T18。验收：`python -m pytest` 与 §2 命令；跨会话同项目可召回已验证偏好，跨项目不可，Checkpoint 原文恢复，关闭各层不访问相应库；真实模型手动演示写入与下一会话召回。首次准备本地模型时，页面可见模型名称、目标缓存目录和当前状态；下载、缓存或加载失败时展示明确原因，不能表现为无响应。
 
 阶段演示：完成项目任务 → 审核后写入中期摘要/长期结论 → 新会话提问召回相关记忆 → 人工删除后不再召回；压缩前后 Checkpoint 消息完整。
 
@@ -350,7 +358,7 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 
 ## 8. 配置文件与密钥
 
-下面展示启用 v0.2 记忆能力后的目标配置。v0.1a / v0.1b 将 `memory.medium_term.enabled`、`memory.long_term.enabled` 和 `memory.compression.enabled` 设为 `false`，对应节点按架构 §5 透传。
+下面展示启用 v0.2 记忆能力后的目标配置。T14A / T14B 落地后该结构已可用；仓库里的 `config.yaml.example` 仍保持 `embedding.enabled=false` 与 `memory.medium_term.enabled=false`（加载示例配置不得初始化 FastEmbed、访问网络或下载模型），启用前请按 §8.1 逐项验证，并先确认 `embedding.cache_dir` 指向本机可写的绝对路径。v0.1a / v0.1b 将 `memory.medium_term.enabled`、`memory.long_term.enabled` 和 `memory.compression.enabled` 设为 `false`，对应节点按架构 §5 透传。
 
 ```yaml
 llm:
@@ -365,10 +373,10 @@ llm:
 
 embedding:
   enabled: true
-  provider: openai_compatible
-  base_url: "https://api.example.com/v1"
-  api_key_env: "EMBEDDING_API_KEY"
-  model: "your-embedding-model"
+  provider: onnx_local
+  model: "BAAI/bge-small-zh-v1.5"
+  cache_dir: "E:/hf-cache/local-agent-web"  # 替换为本机可写的绝对目录
+  local_files_only: false
 
 workspace:
   root: "."
@@ -400,7 +408,11 @@ memory:
     path: "data/chroma"
     collection: "agent_memory"
     top_k: 8
-    min_score: 0.72
+    # 召回的最低语义相似度（真实余弦，越大越相关）。
+    # 0.53 是 BAAI/bge-small-zh-v1.5 在当前小样本上的**初始值**：相关记忆 0.560~0.772、
+    # 无关记忆 0.242~0.497（该模型相关性基线偏高，照 OpenAI 系量级写的 0.72 会把结果全筛掉）。
+    # 换 embedding 模型或接入真实语料后必须重新标定。
+    min_score: 0.53
     decay_half_life_days: 30
     write_on:
       - task_completed
@@ -484,7 +496,20 @@ agent:
   require_evidence_for_completion: true
 ```
 
-API Key 不直接写入 YAML，应通过环境变量提供。
+上述配置以 `onnx_local` 作为 v0.2 默认方案。`cache_dir` 必须是本机可写的绝对路径；模型文件不进入 Git，也不放在项目源码目录。`local_files_only=false` 允许首次缺失时下载，设为 `true` 后只读本地缓存，缺失或损坏必须明确失败。
+
+如需改用 OpenAI 兼容 Embedding API，只替换 `embedding` 段：
+
+```yaml
+embedding:
+  enabled: true
+  provider: openai_compatible
+  base_url: "https://api.example.com/v1"
+  api_key_env: "EMBEDDING_API_KEY"
+  model: "your-embedding-model"
+```
+
+配置校验按 provider 区分，判定口径是“**显式提供且给出了实际内容**”：空字符串与 `false` 属于无效占位（`model_dump()` 后再 `model_validate()` 就会这样出现），不算使用该字段，不算冲突；填写了真实内容才校验失败。`onnx_local` 要求 `model`、`cache_dir`（启用时必须是绝对路径），填了 `base_url` 或 `api_key_env` 时失败；`openai_compatible` 要求 `model`、`base_url`、`api_key_env`，填了 `cache_dir` 或 `local_files_only=true` 时失败。不得静默忽略当前 provider 不适用的字段。所有 API Key 都不得直接写入 YAML，必须通过对应的环境变量提供。
 
 ---
 
@@ -492,7 +517,7 @@ API Key 不直接写入 YAML，应通过环境变量提供。
 
 - v0.1a：以示例 YAML 为起点，memory.medium_term.enabled、memory.long_term.enabled、memory.compression.enabled、embedding.enabled 均设为 false；rag.enabled 维持 false。llm.api_key_env 指向环境变量名，绝不在 YAML 写入值。security.require_approval 的四项始终为 true；v0.1a 对这些动作固定拒绝，v0.1b 才进入审批。任一项改为 false 应在配置校验时失败。
 - v0.1b：启用网页审批和 sessions 索引，保持记忆/压缩/RAG 关闭；逐项验证 shell.whitelist 的平台与参数结构。
-- v0.2：先配置 embedding API 再打开 medium_term；long_term 和 compression 可分别打开，关闭任一层仍须可运行。prompt_window_messages 限制 Prompt 窗口而非 Checkpoint 消息数。
+- v0.2：先配置并验证 embedding provider 再打开 medium_term；默认 `onnx_local`，首次运行允许下载模型，严格离线环境先准备缓存并设置 `local_files_only=true`。long_term 和 compression 可分别打开，关闭任一层仍须可运行。prompt_window_messages 限制 Prompt 窗口而非 Checkpoint 消息数。
 - v0.3：rag.enabled 可选打开；若没有语言解析器或索引损坏，必须给出可见错误或降级检索，不得伪称已检索。
 - 配置缺字段、超出工作区路径、缺少环境变量或模型能力不匹配，在启动/提交时给出可理解的错误；不允许用默认值掩盖危险配置。具体配置键以上方 YAML 为准。
 
@@ -528,7 +553,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-memory = ["chromadb", "tiktoken"]
+memory = ["chromadb>=1.5,<1.6", "tiktoken", "fastembed>=0.8,<0.9"]
 rag = ["tree-sitter", "tree-sitter-language-pack", "langchain-text-splitters"]
 
 [dependency-groups]
@@ -551,7 +576,7 @@ v0.2 安装记忆可选组：`uv sync --extra memory`；v0.3 全功能验收：`
 ### 9.1 依赖分层与锁定
 
 - v0.1a 基础组包含上方 `[project].dependencies`；`filelock` 仅在需要进程间文件协调时调用，不得替代 SQLite 事务或安全审批。每新增运行依赖同步 `pyproject.toml`、`uv.lock` 和安装说明；`requirements.txt` 保持 `-e .` 入口，无需复制依赖名单。
-- v0.2 安装 `memory` 可选组，v0.3 根据 `rag.enabled` 安装 `rag` 组；关掉 RAG 时不应强制安装 Tree-sitter。运行全量测试必须同步两个可选组。
+- v0.2 安装 `memory` 可选组，其中 FastEmbed 只服务于 `onnx_local`；版本范围已在 T14A / T14B 用目标 Python 版本实际安装、核实 API 后锁定为 `chromadb>=1.5,<1.6` 与 `fastembed>=0.8,<0.9`（实现依赖这两版实测到的具体行为：`hnsw:space` 距离度量键、自定义 Embedding 函数的 `name()` 与 `__call__(self, input)` 协议、`cache_dir` / `local_files_only` 构造参数），不直接依赖其传递依赖。v0.3 根据 `rag.enabled` 安装 `rag` 组；关掉 RAG 时不应强制安装 Tree-sitter。运行全量测试必须同步两个可选组。
 - 开发工具 pytest、pytest-asyncio、ruff、mypy 归 `[dependency-groups].dev`，随 `uv sync` 安装；T01 和 T24 都必须检查 `uv lock --check`。用新虚拟环境实际安装，并记录 Python 版本、`uv` 版本和依赖冲突；本文版本范围是方案约束，安装后的实际 API 仍需以该版本核实。
 - 待批准：unidiff。默认 T22 采用自定义 Patch 应用器，不偷偷引入 unidiff；若选择它，先批准并补版本、测试与许可检查。
 
@@ -564,7 +589,8 @@ v0.2 安装记忆可选组：`uv sync --extra memory`；v0.3 全功能验收：`
 | 删除、覆盖、大改、危险 Shell | T07 拒绝；T10 审批 | tests/test_security.py、tests/test_graph_resume.py | 未批准不执行；批准后目标变化重新审批；递归删除二次确认；拒绝不循环 |
 | Checkpoint 与多会话 | T03；T11 | tests/test_graph_resume.py、tests/test_web.py | 重启恢复，跨会话消息/审批/工具状态不串线 |
 | 模型能力与错误输出 | T09 | tests/test_router.py、tests/test_web.py | 不支持 Tool Calling 不能伪装完成；JSON 错误有界重试 |
-| 中长期记忆召回和写入 | T14–T19 | tests/test_memory.py、tests/test_reflection.py | 普通闲聊不写；闲聊中明确“记住”经反思后可写；仅相关且作用域匹配的已验证记忆进入 Prompt，删除后不召回 |
+| 本地 Embedding 与模型缓存 | T14A；页面 T19 | tests/test_memory.py（假 Embedding）+ 手动真实模型验收 | 自动测试不联网；首次下载只写显式缓存目录；断网可复用；准备状态与失败原因在 T19 页面可见 |
+| 中长期记忆召回和写入 | T14B–T19 | tests/test_memory.py、tests/test_reflection.py | 普通闲聊不写；闲聊中明确“记住”经反思后可写；仅相关且作用域匹配的已验证记忆进入 Prompt，模型/维度/距离契约不匹配时拒绝旧索引，删除后不召回 |
 | 摘要压缩 | T16 | tests/test_memory.py、tests/test_graph_resume.py | Prompt 窗口变短，Checkpoint 原消息不减 |
 | 反思、重规划和循环上限 | T17；T20 | tests/test_reflection.py、tests/test_router.py | 错误工具不能 verified；失败可调整计划；循环有明确终点 |
 | 可选 RAG 与 AST | T21 | tests/test_rag.py | 开启可定位来源，关闭时无索引依赖/访问 |
@@ -577,7 +603,7 @@ v0.2 安装记忆可选组：`uv sync --extra memory`；v0.3 全功能验收：`
 1. **安全失败闭合**（架构 §6、§11.1）：路径穿越、软链接逃逸、Windows/POSIX 命令歧义、审批被跳过，任一复现即阻止阶段交付；仅在隔离临时工作区复现破坏性测试。
 2. **模型与 API 差异**（架构 §11.7）：兼容端点不等于支持 Tool Calling/严格 JSON/Streaming。T09 之前只承诺已验证模型；探测结果需可见，不能自动“假执行”工具。
 3. **恢复与幂等**（架构 §4.2、§5.3）：刷新、重试和人工审批按钮重复提交可能重放写入/删除/Shell。用事件 ID、Checkpoint 和执行前后证据测试；“副作用已发生但 Checkpoint 未提交”的崩溃窗口无法仅凭 State 保证恰好一次，必须暂停自动重放并要求用户核对。未通过不得开放危险操作。
-4. **记忆污染与召回噪声**（架构 §10、§11.3/§11.6）：写入需来源与反思审核；召回需作用域、相似度、时间和重要度过滤。跨用户/项目串线或已删除记忆再召回即停止发布。
+4. **记忆污染与召回噪声**（架构 §10、§11.3/§11.6）：写入需来源与反思审核；召回需作用域、相似度、时间和重要度过滤。跨用户/项目串线、已删除记忆再召回、混用不兼容 Embedding 向量或把 Chroma distance 反向当成 score，即停止发布。本地模型下载还需记录来源与锁定版本，缓存损坏不得静默换模型。
 5. **上下文超限与幻觉**（架构 §10.5、§11.2/§11.4）：Prompt 窗口与 Checkpoint 分离；证据必须来自工具事件，模型判断不能覆盖机械失败。
 6. **无限循环与成本**（架构 §11.5）：每步重试和总循环上限可配置；同一错误重复出现应停止并询问用户，不无限烧 Token。
 7. **跨平台和可选依赖**：不把 Windows 实测当作 POSIX 已验证；Tree-sitter/Chroma 等可选能力缺包或关开关时给清晰错误或退化路径。`unidiff` 未批准前不得偷偷加入依赖。
@@ -585,7 +611,7 @@ v0.2 安装记忆可选组：`uv sync --extra memory`；v0.3 全功能验收：`
 ## 12. 实施顺序与变更控制
 
 - 严格依 T01→T07 形成可运行 Web 基线；T08/T09 可并行，T10 依赖二者，T11/T12 之后进入记忆。
-- T13 后 T14/T15 可并行，T16 依赖 T14，T17 依赖 T16，T18 依赖 T14/T15/T17，T19 做集成。
+- T13 后 T14A/T15 可并行，T14B 依赖 T14A；T16 依赖 T14B，T17 依赖 T16，T18 依赖 T14B/T15/T17，T19 做网页与三层记忆集成。T14A、T14B 各对应一个独立 Conventional Commits 提交和独立验收结果。
 - T20/T21 可并行，T22 依赖 T20，T23 汇总，T24 发布回归。并行任务不能同时修改同一 State/Graph 文件而不协调，合并时重跑全量测试。
 - 修改架构 §4 State、§5 边、§6 工具契约或 §10 存储字段，先改架构文档并说明迁移/兼容策略，再改本开发文档任务和测试；不要在实现中悄悄新增字段或配置键。
 - 每阶段退出前确认文档、配置样例、依赖清单和真实运行结果一致；用户未确认的范围扩张（例如多 Agent、外部 Trace 服务）单独立项，不夹带进任务。

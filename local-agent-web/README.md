@@ -24,11 +24,13 @@
 | v0.1b / T10 | 三出口人工审批（批准 / 修改 / 拒绝）+ 动作指纹 | 已完成 |
 | v0.1b / T11 | 会话索引与侧栏（新建 / 切换 / 恢复 / 重命名） | 已完成 |
 | v0.1b / T12 | 跨平台 Shell（argv 直执行 / cmd.exe / pwsh / sh）+ 阶段回归 | 已完成 |
-| v0.2 / T13 | 作用域规则、记忆库初始化（长期 SQLite 迁移 / Chroma 惰性适配层 / `scripts/init_db.py`） | 部分完成（B2：未含向量召回） |
-| v0.2 及以后 | 中期召回、长期事实、摘要压缩、完整反思、代码 RAG | 未开始 |
+| v0.2 / T13 | 作用域规则、记忆库初始化（长期 SQLite 迁移 / Chroma 惰性适配层 / `scripts/init_db.py`） | 已完成 |
+| v0.2 / T14A | 本地 ONNX Embedding 适配器（FastEmbed + `BAAI/bge-small-zh-v1.5`、provider 条件配置、缓存目录受控） | 已完成 |
+| v0.2 / T14B | 中期向量记忆写入与召回（Chroma、作用域隔离、`memory_refs` 注入 Prompt） | 已完成 |
+| v0.2 及以后 | 自动记忆写入、长期事实 CRUD、摘要压缩、完整反思、代码 RAG | 未开始 |
 
 **现在能做什么**：本机网页里和模型多轮闲聊；刷新/重启后会话仍在，可新建、切换、重命名会话；加载 AGENTS 规则；列目录、读文件、精确串替换改文件、新建文件、执行安全命令（白名单内免审直执行，其余批准后执行，含管道/重定向的走平台 Shell 适配器）；删除、覆盖写、大范围编辑、白名单外命令与危险命令会**暂停等待你在页面上批准 / 修改参数 / 拒绝**。
-**现在不能做什么**：工作区外的路径、密钥文件、未获批准的命令一律拒绝；没有三层记忆与代码检索（v0.2/v0.3）、没有会话删除或归档、没有公网部署与账号体系。
+**现在不能做什么**：工作区外的路径、密钥文件、未获批准的命令一律拒绝；尚未实现自动记忆写入（T18/T19）、长期事实 CRUD（T15）、摘要压缩（T16）和代码 RAG（v0.3）；没有会话删除或归档、没有公网部署与账号体系。
 
 ## 环境要求
 
@@ -226,8 +228,12 @@ python -m mypy src
   SQLite 是单文件数据库，不适合高并发写入，本机单用户足够。
 - 模型能力（Tool Calling、结构化输出）在启动时探测；不支持 Tool Calling 的模型在工具模式下
   失败闭合，并给出明确提示。
-- 三层记忆目前只有"库与契约"：中期向量召回（T14）、长期事实 CRUD（T15）、摘要压缩（T16）
-  尚未接入对话链路，`memory.medium_term.enabled` / `memory.long_term.enabled` /
+- 中期向量召回（T14B）已接入对话链路：按作用域、`top_k`、`min_score`（默认 `0.53`）召回，
+  并只把相关记忆注入 Prompt；但**自动写入记忆要等 T18/T19 的写入节点**，现在库里不会自己长出
+  记忆。启用它需要 `memory.medium_term.enabled=true` 且 embedding 可用：`onnx_local` 走本地
+  FastEmbed（`uv sync --extra memory`），`embedding.cache_dir` 必须是本机可写的绝对路径，
+  模型权重与 HuggingFace 附属缓存都只落在该目录下。
+- 长期事实 CRUD（T15）与摘要压缩（T16）尚未接入对话链路，`memory.long_term.enabled` /
   `memory.compression.enabled` 保持 `false`，节点按透传处理。
 - 长期记忆库与聊天库是两套迁移、各自持有 `schema_migrations`，必须使用不同的文件
   （`scripts/init_db.py` 会在指向同一个文件时报错）。

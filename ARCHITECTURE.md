@@ -122,7 +122,7 @@ flowchart TD
 | AGENTS 加载模块 | 向上扫描 Git 根目录，多层合并规则 | 上下文注入、优先级、提示词工程 |
 | HITL 审批模块 | 对危险操作暂停并等待用户批准 | `interrupt()`、可恢复工作流 |
 | LangGraph 状态与持久化 | 保存会话消息、计划、工具结果和审批状态 | StateGraph、Checkpointer、Thread |
-| 中期记忆模块 | 存储摘要、任务片段、偏好片段并进行向量召回 | Embedding、Vector Search、RAG |
+| 中期记忆模块 | 通过显式 Embedding 适配器生成向量，使用 Chroma 存储摘要、任务片段、偏好片段并进行召回 | Embedding、ONNX 推理、Vector Search、RAG |
 | 长期结构化记忆模块 | SQLite 存储实体、偏好、项目事实、任务结论 | 结构化记忆、CRUD、实体关系 |
 | 反思节点模块 | 检查任务完成度、工具结果可信度和后续规划 | Reflection、Reflexion、Self-Correction |
 | 上下文压缩模块 | 接近 Token 上限时总结和替换旧消息 | Context Engineering、摘要记忆 |
@@ -720,11 +720,11 @@ AGENTS 文件可以约束工作方式，但不能覆盖系统安全策略、人�
 
 ## 8. 配置契约
 
-模型、工作区、AGENTS、记忆、安全、RAG 和 Agent 的配置键及可运行样例统一维护在 [开发文档 §8](DEVELOPMENT_PLAN.md#8-配置文件与密钥)。架构硬约束：密钥仅来自环境变量；v0.1a/v0.1b 中长期记忆与压缩关闭；危险操作不得仅靠配置或 Prompt 绕过代码级安全检查。
+模型、工作区、AGENTS、记忆、安全、RAG 和 Agent 的配置键及可运行样例统一维护在 [开发文档 §8](DEVELOPMENT_PLAN.md#8-配置文件与密钥)。架构硬约束：密钥仅来自环境变量；本地 Embedding 必须显式指定模型缓存目录且不需要 API Key；v0.1a/v0.1b 中长期记忆与压缩关闭；危险操作不得仅靠配置或 Prompt 绕过代码级安全检查。
 
 ## 9. 依赖与 Python 版本
 
-依赖、版本范围、可选依赖和 `pyproject.toml` / `requirements.txt` 示例统一维护在 [开发文档 §9](DEVELOPMENT_PLAN.md#9-依赖与环境)。实现不得使用旧版 LangChain Agent；模型接入基于 `langchain-core`、`langchain-openai`，编排基于 LangGraph。
+依赖、版本范围、可选依赖和 `pyproject.toml` / `requirements.txt` 示例统一维护在 [开发文档 §9](DEVELOPMENT_PLAN.md#9-依赖与环境)。实现不得使用旧版 LangChain Agent；聊天模型接入基于 `langchain-core`、`langchain-openai`，本地 Embedding 通过 `memory` 可选依赖提供，编排基于 LangGraph。
 
 ## 10. 三层记忆系统设计
 
@@ -756,7 +756,22 @@ AGENTS 文件可以约束工作方式，但不能覆盖系统安全策略、人�
 
 ### 10.2 中期记忆
 
-使用 Chroma 存储：
+中期记忆由“显式 Embedding 适配器 + Chroma”组成：适配器负责把文本转换为向量，Chroma 只负责向量与元数据的持久化和检索。不得向 Chroma 传入空的 Embedding 实现并触发其默认模型或隐式下载；模型选择、缓存位置、错误处理和离线行为必须由本项目配置控制。
+
+Embedding provider 支持：
+
+- `onnx_local`：v0.2 默认方案，内部使用 FastEmbed 在本机 CPU 上执行 ONNX 推理；默认模型为 `BAAI/bge-small-zh-v1.5`。FastEmbed 是实现细节，对外配置使用能力名称 `onnx_local`，避免替换底层库时破坏配置契约。
+- `openai_compatible`：保留 OpenAI 兼容 Embedding API 接入；仅该 provider 要求 `base_url` 和 `api_key_env`。
+
+`onnx_local` 的模型权重不进入 Git，也不写入项目源码目录；首次使用时允许下载到 `embedding.cache_dir` 指定的本机绝对路径，后续从该目录离线加载。`embedding.local_files_only=true` 时禁止网络下载，模型缺失或缓存损坏必须返回可理解的错误，不能静默切换 provider 或模型。网页应明确展示首次模型准备状态、目标缓存目录和失败原因，不能让下载表现为无响应。
+
+每个 Chroma collection 必须保存并校验 Embedding 兼容信息，至少包括 provider、模型标识、向量维度、归一化方式和距离度量；模型修订标识或内容 Hash 在所用实现能够可靠取得时一并保存。任一必需信息与现有 collection 不一致时停止读写并提示重建索引，不得在同一 collection 中混用不同模型产生的向量。
+
+召回层统一向上返回“越大越相关”的分数。T14B 实现前必须核实锁定版 Chroma 的距离语义，显式完成距离到相关度的转换，并用契约测试固定 `min_score` 的方向；不得直接把“越小越近”的 distance 当作 score。
+
+自动测试使用确定性的假 Embedding，不下载模型、不依赖网络；真实模型首次下载、指定缓存目录和断网复用属于 T14A 手动验收，中文召回质量属于 T14B 手动验收。
+
+Chroma 存储以下内容：
 
 - 对话摘要。
 - 已完成任务片段。
@@ -999,6 +1014,8 @@ ToolEvidence
 - 按用户、项目和工作区进行作用域过滤。
 - 使用重要度、时间衰减和来源可信度重排。
 - 召回记忆标记为“待验证上下文”。
+- Embedding 模型、维度、归一化或距离度量不一致时拒绝复用旧 collection，避免不可比较的向量产生伪相关结果。
+- 本地模型首次下载失败、缓存损坏或离线缺失时明确报错，不允许回退到 Chroma 默认模型或外部 API。
 
 ### 11.7 模型兼容性
 
@@ -1034,7 +1051,7 @@ Streaming 不可用时回退为非流式输出，不影响任务正确性。
 
 - **v0.1a**：本地网页、模型配置、闲聊/工具双分支、六工具安全子集、最小机械反思、单会话 Checkpoint 恢复。
 - **v0.1b**：三出口审批、完整机械证据、模型能力协商、会话索引与切换、跨平台 Shell 边界。
-- **v0.2**：Chroma 中期记忆、SQLite 长期记忆、召回/写入/遗忘、Prompt 窗口压缩、LLM 反思。
+- **v0.2**：本地 ONNX Embedding 适配器、Chroma 中期记忆、SQLite 长期记忆、召回/写入/遗忘、Prompt 窗口压缩、LLM 反思。
 - **v0.3**：多步骤规划与重规划、可选代码 RAG/AST、可观测性与评测。
 
 每阶段的任务、前置条件、命令和验收证据见 [开发文档 §4–§7](DEVELOPMENT_PLAN.md#4-v01a图跑通)。§14 为预留能力，不属于上述交付范围。
