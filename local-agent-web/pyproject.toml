@@ -23,7 +23,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-memory = ["chromadb", "tiktoken"]
+# memory：中期向量记忆（T14A 起含本地 ONNX Embedding 的 FastEmbed）。
+# chromadb 按小版本锁定：实现依赖 1.5.9 实测到的具体行为（`hnsw:space` 元数据键、自定义 EF
+# 必须有 `name()` 且 `__call__` 参数名必须是 `input`、get_or_create_collection 不覆盖已有
+# metadata、维度校验时机），换小版本必须重新核实。
+# fastembed 同理：它还是 0.x，构造参数（cache_dir / local_files_only / 模型元数据）在 0.8 上核实。
+memory = ["chromadb>=1.5,<1.6", "tiktoken", "fastembed>=0.8,<0.9"]
 rag = ["tree-sitter", "tree-sitter-language-pack", "langchain-text-splitters"]
 
 [dependency-groups]

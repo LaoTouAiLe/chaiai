@@ -153,7 +153,8 @@ def test_require_approval_cannot_be_disabled(tmp_path: Path) -> None:
 
 
 def test_embedding_requires_fields_when_enabled(tmp_path: Path) -> None:
-    path = _write_config(tmp_path, MINIMAL_CONFIG + "embedding:\n  enabled: true\n")
+    body = MINIMAL_CONFIG + 'embedding:\n  enabled: true\n  provider: "openai_compatible"\n'
+    path = _write_config(tmp_path, body)
 
     with pytest.raises(ConfigError) as excinfo:
         load_config(path)

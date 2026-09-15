@@ -15,11 +15,17 @@ llm:
   retry_count: 2
 
 embedding:
-  enabled: false                   # v0.1a 未启用中期记忆，不调用 embedding
-  provider: openai_compatible
-  base_url: "https://api.deepseek.com"
-  api_key_env: "DEEPSEEK_API_KEY"
-  model: ""                        # 启用 embedding 时必须填写
+  # 示例保持关闭：加载示例配置不会导入 fastembed、不访问网络、不下载模型。
+  # 打开前先确认 cache_dir 是本机可写目录；模型权重只落那里，不进 Git、不进源码目录。
+  enabled: false
+  provider: "onnx_local"           # onnx_local（本地 ONNX，默认）| openai_compatible
+  model: "BAAI/bge-small-zh-v1.5"  # onnx_local 用 FastEmbed 模型名；openai_compatible 用 API 模型名
+  cache_dir: "E:/hf-cache/local-agent-web"   # onnx_local 必填：本机绝对路径
+  local_files_only: false          # true：禁止下载，只从 cache_dir 加载（缺模型即失败）
+  # 改用 OpenAI 兼容 Embedding API 时，把上面四行换成下面三行（provider 决定可用字段）：
+  # provider: "openai_compatible"
+  # base_url: "https://api.example.com/v1"
+  # api_key_env: "EMBEDDING_API_KEY"
 
 workspace:
   root: "."

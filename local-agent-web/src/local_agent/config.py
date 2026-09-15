@@ -46,27 +46,97 @@ class LlmConfig(_StrictModel):
     retry_count: int = Field(default=2, ge=0, le=10)
 
 
+#: Embedding provider（架构 §10.2）：本地 ONNX / OpenAI 兼容 API。
+EmbeddingProvider = Literal["onnx_local", "openai_compatible"]
+
+#: 只有 ``onnx_local`` 使用的字段；``openai_compatible`` 里出现即视为配置错误。
+_ONNX_LOCAL_ONLY_FIELDS = ("cache_dir", "local_files_only")
+#: 只有 ``openai_compatible`` 使用的字段；``onnx_local`` 里出现即视为配置错误。
+_OPENAI_COMPATIBLE_ONLY_FIELDS = ("base_url", "api_key_env")
+
+
 class EmbeddingConfig(_StrictModel):
-    """中期记忆使用的 embedding；v0.1a 保持关闭。"""
+    """中期记忆使用的 embedding（架构 §10.2、开发文档 §8）。
+
+    校验按 ``provider`` 区分，**不静默忽略**当前 provider 不适用的字段。判定口径是
+    "**显式提供且给出了实际内容**"：空字符串与 ``false`` 属于无效占位（``model_dump()`` 后
+    再 ``model_validate()`` 就会这样出现），不算使用该字段；填了真实内容才会失败。
+
+    - ``onnx_local``（v0.2 默认）：要求 ``model`` 与 ``cache_dir``（启用时必须是绝对路径，
+      模型权重只落在该目录，不进 Git、不进项目源码目录）；填了 ``base_url`` 或
+      ``api_key_env`` 会校验失败。
+    - ``openai_compatible``：要求 ``model``、``base_url``、``api_key_env``；填了
+      ``cache_dir`` 或 ``local_files_only=true`` 会校验失败。
+
+    必填项只在 ``enabled=true`` 时检查（关掉的层不需要填全），但"不适用字段"无论在
+    启用与否都会报错，避免关掉开关时把配置错误藏起来。
+    """
 
     enabled: bool = False
-    provider: Literal["openai_compatible"] = "openai_compatible"
+    provider: EmbeddingProvider = "onnx_local"
     base_url: str = ""
     api_key_env: str = ""
     model: str = ""
+    #: ``onnx_local`` 的模型缓存目录；首次下载与离线加载都用它，必须是本机绝对路径。
+    cache_dir: str = ""
+    #: ``true`` 时禁止任何网络下载，只从 ``cache_dir`` 读取（缺模型即失败，不静默换源）。
+    local_files_only: bool = False
 
     @model_validator(mode="after")
-    def _require_fields_when_enabled(self) -> EmbeddingConfig:
-        if not self.enabled:
+    def _check_provider_fields(self) -> EmbeddingConfig:
+        if self.provider == "onnx_local":
+            forbidden = self._foreign_fields(_OPENAI_COMPATIBLE_ONLY_FIELDS)
+            if forbidden:
+                raise ValueError(
+                    "embedding.provider 为 onnx_local 时不能使用：" + "、".join(forbidden)
+                )
+            missing = [
+                name for name in ("model", "cache_dir") if not getattr(self, name).strip()
+            ]
+            if self.enabled and missing:
+                raise ValueError("embedding.enabled 为 true 时必须填写：" + "、".join(missing))
+            # 只在真正启用时要求绝对路径：关掉的层不该因为示例里的机器相关路径而在别的
+            # 平台（例如 POSIX 上的 "E:/..."）连配置都加载不了
+            if self.enabled and self.cache_dir.strip() and not Path(self.cache_dir).is_absolute():
+                raise ValueError(
+                    f"embedding.cache_dir 必须是绝对路径（当前：{self.cache_dir}）；"
+                    "相对路径会随启动目录漂移"
+                )
             return self
+
+        forbidden = self._foreign_fields(_ONNX_LOCAL_ONLY_FIELDS)
+        if forbidden:
+            raise ValueError(
+                "embedding.provider 为 openai_compatible 时不能使用：" + "、".join(forbidden)
+            )
         missing = [
             name
             for name in ("base_url", "api_key_env", "model")
             if not getattr(self, name).strip()
         ]
-        if missing:
+        if self.enabled and missing:
             raise ValueError("embedding.enabled 为 true 时必须填写：" + "、".join(missing))
         return self
+
+    def _foreign_fields(self, names: tuple[str, ...]) -> list[str]:
+        """找出"属于另一个 provider 且给出了实际内容"的字段。
+
+        只有"显式出现**且有值**"才算冲突：空的 ``base_url=""`` / ``cache_dir=""`` 与默认值
+        等价，``model_dump()`` 后再 ``model_validate()`` 就会这样出现——若把空值也判为冲突，
+        配置对象就无法无损往返（既有的"dump 再校验"用例会全部失败，用户照着 dump 写 YAML
+        也会撞错）。真正会给错结果的是"填了内容却不会被使用"，那才是要拦的。
+        """
+        found: list[str] = []
+        for name in names:
+            if name not in self.model_fields_set:
+                continue
+            value = getattr(self, name)
+            if isinstance(value, str):
+                if value.strip():
+                    found.append(name)
+            elif value:
+                found.append(name)
+        return found
 
 
 class WorkspaceConfig(_StrictModel):
@@ -298,11 +368,14 @@ def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
         raise ConfigError(_format_validation_error(display_path, exc)) from exc
 
 
-def resolve_api_key(config: LlmConfig, environ: Mapping[str, str] | None = None) -> str:
+def resolve_api_key(
+    config: LlmConfig | EmbeddingConfig, environ: Mapping[str, str] | None = None
+) -> str:
     """从环境变量取出 API Key。
 
     Args:
-        config: ``llm`` 配置节，提供 ``api_key_env``。
+        config: ``llm`` 或 ``embedding`` 配置节；两者都用 ``api_key_env`` 指变量名。
+            ``embedding.provider=onnx_local`` 时不读 Key，调用方也不应调用本函数。
         environ: 环境变量映射，默认取 ``os.environ``；调用方可注入以便测试。
 
     Returns:

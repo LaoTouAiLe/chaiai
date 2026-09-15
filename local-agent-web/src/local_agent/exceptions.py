@@ -33,3 +33,15 @@ class MemoryDisabledError(MemoryStoreError):
 
 class MemoryUnavailableError(MemoryStoreError):
     """该层记忆已启用，但运行环境缺少必需的依赖（例如未安装 ``chromadb``）。"""
+
+
+class EmbeddingError(LocalAgentError):
+    """Embedding 适配层的失败基类（架构 §10.2）。"""
+
+
+class EmbeddingUnavailableError(EmbeddingError):
+    """Embedding 未启用或缺少可选依赖，调用方应改走关闭分支而不是继续。"""
+
+
+class EmbeddingLoadError(EmbeddingError):
+    """模型下载、缓存或推理失败；消息必须带上 ``cache_dir`` 与可执行的下一步。"""
