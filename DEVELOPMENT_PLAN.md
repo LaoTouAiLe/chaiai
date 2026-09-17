@@ -288,7 +288,7 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 ### T15｜长期实体事实 CRUD 与冲突（L）
 
 - 目标：实现 entities/facts/task_conclusions 的写入、查询、更新、版本记录、冲突检测、过期处理及人工删除（架构 §10.3）。
-- 涉及文件：src/local_agent/memory/long_term.py、src/local_agent/memory/schemas.py、src/local_agent/memory/recall.py、src/local_agent/persistence/migrations.py、tests/test_memory.py。
+- 涉及文件：src/local_agent/memory/long_term.py、src/local_agent/memory/schemas.py、src/local_agent/memory/recall.py、src/local_agent/persistence/migrations.py、tests/test_memory.py、README.md。
 - 关键接口：表和字段名按架构 §10.3，不新增 AgentState 字段。
 - 前置：T14C。验收：`python -m pytest tests/test_memory.py`；同键更新保留版本、冲突不静默覆盖、删除后不召回、跨项目隔离、旧库迁移通过；§2 命令通过。
 

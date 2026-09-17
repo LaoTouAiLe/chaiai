@@ -1,6 +1,6 @@
-"""中期记忆召回与打分（架构 §10.2，开发文档 T14B）。
+"""中期与长期记忆召回与打分（架构 §10.2–§10.3，开发文档 T14B、T15）。
 
-召回顺序（架构 §10.2 末段）：
+中期（向量）召回顺序（架构 §10.2 末段）：
 
 1. **作用域精确过滤**：只用本次运行可见的 ``(scope, scope_key)`` 组合查询
    （``global`` / 逻辑用户 / 项目 / 工作区），不把别的项目或工作区的私有记忆混进 Prompt；
@@ -23,16 +23,32 @@
 过期与状态：``status`` 不是 ``active`` 的由存储层的 where 条件挡掉；``expires_at`` 已过期的
 在这里丢掉。``expires_at`` 存在但解析不了时**按已过期处理**——宁可少召回，也不把"读不出有效期"
 的记忆注入 Prompt（架构 §11.6：已删除/过期的记忆不得再召回）。
+
+长期（结构化）记忆（T15，架构 §10.3）与中期不同：事实**没有向量**，因此
+:func:`recall_long_term` 不接收查询文本、也没有相似度下限。它按作用域（事实走四种作用域，
+任务结论只按当前项目）过滤后，用 ``confidence × importance`` 排序；任务结论没有重要度字段，
+按**有效重要度 1.0** 处理（分数就等于 ``confidence``）。
+``memory.long_term`` 的 ``confidence_threshold`` / ``importance_threshold`` **只做召回过滤**，
+不影响写入，也不参与冲突裁决。
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from local_agent.config import MediumTermMemoryConfig
+from local_agent.config import LongTermMemoryConfig, MediumTermMemoryConfig
+from local_agent.memory.long_term import LongTermStore
 from local_agent.memory.medium_term import MediumTermHit, MediumTermStore
-from local_agent.memory.schemas import MemoryReference
+from local_agent.memory.schemas import (
+    EntityRecord,
+    FactRecord,
+    LongTermReference,
+    MemoryReference,
+    TaskConclusionRecord,
+)
 from local_agent.scope import (
     SCOPE_GLOBAL,
     SCOPE_PROJECT,
@@ -58,6 +74,12 @@ MAX_CANDIDATES = 200
 
 #: 元数据缺失时的默认重要度/置信度。
 _DEFAULT_VALUE = 0.5
+
+#: 长期记忆一次召回的默认条数上限（``memory.long_term`` 配置节没有 ``top_k``，由调用方决定）。
+DEFAULT_TOP_K = 8
+
+#: ``task_conclusions`` 没有 ``importance`` 列，召回时统一按有效重要度 1.0 处理。
+CONCLUSION_IMPORTANCE = 1.0
 
 
 def visible_scope_keys(
@@ -100,7 +122,7 @@ def recall_memory(
     text = query.strip()
     if not text or config.top_k <= 0:
         return []
-    moment = now or datetime.now(timezone.utc)
+    moment = _moment(now)
     scope_keys = visible_scope_keys(
         user_id=user_id,
         project_id=project_id or project_id_for(workspace_root),
@@ -172,6 +194,120 @@ def _top_references(references: list[MemoryReference], top_k: int) -> list[Memor
     return ordered[:top_k]
 
 
+def recall_long_term(
+    store: LongTermStore,
+    *,
+    config: LongTermMemoryConfig,
+    workspace_root: Path,
+    project_id: str | None = None,
+    user_id: str | None = None,
+    top_k: int = DEFAULT_TOP_K,
+    now: datetime | None = None,
+) -> list[LongTermReference]:
+    """按作用域召回长期事实与任务结论，返回按分数倒序的引用列表。
+
+    事实按本次运行可见的四种作用域精确过滤（与中期记忆同一套 ``scope_key`` 规则）；
+    任务结论**只按当前项目的 ``project_scope``** 召回，不做其他作用域扩展。
+
+    Args:
+        store: 已打开的长期记忆库（:func:`~local_agent.memory.long_term.open_store`）。
+        config: ``memory.long_term`` 配置节，提供两个召回阈值。
+        workspace_root: 工作区根目录，用于推导工作区作用域键。
+        project_id: 项目标识；省略时按 ``workspace_root`` 现算（与会话索引同一规则）。
+        user_id: 逻辑用户；``None`` 时按 ``local`` 处理。
+        top_k: 结果条数上限（与中期结果合并进 Prompt 时由调用方决定）。
+        now: 当前时间，默认取 UTC 现在；测试可注入。
+
+    Returns:
+        当前轮可注入 Prompt 的长期记忆引用；没有可用结果时返回空列表。
+    """
+    if top_k <= 0:
+        return []
+    moment = _moment(now)
+    project_scope = project_id or project_id_for(workspace_root)
+    scope_keys = visible_scope_keys(
+        user_id=user_id, project_id=project_scope, workspace_root=workspace_root
+    )
+    references: list[LongTermReference] = []
+    for entity, fact in store.active_facts_with_entities(scope_keys, now=moment):
+        if _long_term_usable(fact.confidence, fact.importance, config) and not _is_expired(
+            fact.expires_at, moment
+        ):
+            references.append(_fact_reference(entity, fact))
+    for conclusion in store.list_task_conclusions(project_scope=project_scope):
+        if conclusion.confidence >= config.confidence_threshold:
+            references.append(_conclusion_reference(conclusion, project_scope))
+    return _top_long_term(references, top_k)
+
+
+def _long_term_usable(
+    confidence: float, importance: float, config: LongTermMemoryConfig
+) -> bool:
+    """两个阈值都满足才召回（阈值只做过滤，不阻止写入、也不参与冲突裁决）。"""
+    return (
+        confidence >= config.confidence_threshold
+        and importance >= config.importance_threshold
+    )
+
+
+def _fact_reference(entity: EntityRecord, fact: FactRecord) -> LongTermReference:
+    """事实 → 引用：内容带上实体名与键，否则只看值判断不出说的是什么。"""
+    return LongTermReference(
+        memory_id=fact.id,
+        kind="fact",
+        content=f"{entity.name} 的 {fact.key}：{_value_text(fact.value_json)}",
+        scope=entity.scope,
+        scope_key=entity.scope_key,
+        importance=fact.importance,
+        confidence=fact.confidence,
+        created_at=fact.created_at,
+        updated_at=fact.updated_at,
+        expires_at=fact.expires_at,
+        score=round(fact.confidence * fact.importance, 6),
+    )
+
+
+def _conclusion_reference(
+    conclusion: TaskConclusionRecord, project_scope: str
+) -> LongTermReference:
+    """任务结论 → 引用：没有 ``importance`` 列，按有效重要度 1.0（分数即 ``confidence``）。"""
+    return LongTermReference(
+        memory_id=conclusion.id,
+        kind="task_conclusion",
+        content=f"{conclusion.task_title}：{conclusion.conclusion}",
+        scope=SCOPE_PROJECT,
+        scope_key=project_scope,
+        importance=CONCLUSION_IMPORTANCE,
+        confidence=conclusion.confidence,
+        created_at=conclusion.created_at,
+        updated_at=conclusion.updated_at,
+        expires_at=None,
+        score=round(conclusion.confidence * CONCLUSION_IMPORTANCE, 6),
+    )
+
+
+def _top_long_term(
+    references: list[LongTermReference], top_k: int
+) -> list[LongTermReference]:
+    """去重后按分数倒序取前 ``top_k`` 条（``memory_refs`` 需去重）。"""
+    unique: dict[str, LongTermReference] = {}
+    for reference in references:
+        unique.setdefault(reference["memory_id"], reference)
+    ordered = sorted(unique.values(), key=lambda item: (-item["score"], item["memory_id"]))
+    return ordered[:top_k]
+
+
+def _value_text(value_json: str) -> str:
+    """把 ``value_json`` 变成可读文本：字符串值原样，其余用 JSON 文本。"""
+    try:
+        value: Any = json.loads(value_json)
+    except ValueError:
+        return value_json
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
 def _similarity(distance: float) -> float:
     """把 Chroma 的 cosine 距离换成"越大越相关"的相似度（架构 §10.2）。"""
     return _clamp(1.0 - distance)
@@ -194,6 +330,17 @@ def _is_expired(expires_at: str | None, now: datetime) -> bool:
     if expires is None:
         return True
     return expires <= now
+
+
+def _moment(now: datetime | None) -> datetime:
+    """当前时刻；显式传入的**朴素时间按 UTC 解释**。
+
+    与 :func:`local_agent.memory.long_term._moment` 同一口径。不归一化的话，调用方传一个
+    无时区的 ``now`` 会和带时区的 ``expires_at`` 比较时直接抛 ``TypeError``（生产路径传的是
+    ``None``，所以只有测试注入或外部调用会踩到，但公开 API 不该有这种不一致）。
+    """
+    moment = now or datetime.now(timezone.utc)
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
 
 def _parse_time(text: str) -> datetime | None:
@@ -236,10 +383,13 @@ def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
 
 
 __all__ = [
+    "CONCLUSION_IMPORTANCE",
+    "DEFAULT_TOP_K",
     "FACTOR_FLOOR",
     "MAX_CANDIDATES",
     "OVERFETCH_FACTOR",
     "SCOPE_MATCH_FACTOR",
+    "recall_long_term",
     "recall_memory",
     "visible_scope_keys",
 ]

@@ -1,4 +1,4 @@
-"""T13/T14A 验收：作用域与记忆库初始化、显式 Embedding 适配器（架构 §10.2–§10.3）。
+"""T13–T15 验收：作用域与记忆库初始化、Embedding 适配器、三层记忆的存储与召回。
 
 覆盖：
 
@@ -7,6 +7,8 @@
   ``scripts/init_db.py`` 的初始化与 ``--check``。
 - T14A：embedding 按 provider 的条件校验、适配器惰性加载与参数透传（cache_dir /
   local_files_only）、L2 归一化与零向量、缺依赖与缺缓存时的可读错误。
+- T14B：Chroma 存储层与召回（作用域过滤、打分、阈值、距离度量、collection 兼容性）。
+- T15：长期事实 CRUD 的版本记录与冲突不静默覆盖、过期处理、软删除、召回与旧库迁移。
 
 全部使用临时目录与临时 SQLite；不依赖网络，也不加载真实模型：``fastembed`` 用假模块替身，
 ``chromadb`` 不会被导入。
@@ -20,6 +22,7 @@ import math
 import os
 import sqlite3
 import sys
+import threading
 from collections.abc import Iterator, Sequence
 from dataclasses import fields
 from datetime import datetime, timezone
@@ -35,6 +38,7 @@ from local_agent.config import (
     AppConfig,
     ConfigError,
     EmbeddingConfig,
+    LongTermMemoryConfig,
     MediumTermMemoryConfig,
     resolve_api_key,
 )
@@ -1309,6 +1313,821 @@ def test_onnx_adapter_accepts_huggingface_hub_frozen_at_cache_dir(
     assert adapter.hf_cache_paths["HF_HUB_CACHE"] == (home / "hub").as_posix()
 
 
+# --------------------------------------------------------------- T15 长期事实 CRUD
+
+#: T15 用的固定时刻，比 T14B 的 :data:`NOW` 晚，便于断言"最近变化的在前"。
+LATER = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+#: 远晚于测试里的 ``expires_at``，用来触发过期。
+MUCH_LATER = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
+
+#: 旧版（v1）长期库的结构，**刻意冻结在测试里**：它代表升级前真实存在过的库文件，
+#: 不引用 ``migrations`` 的当前建表语句，才能测出"旧库能直接升到当前版本"。
+_LEGACY_V1_SQL = """
+CREATE TABLE entities (
+    id TEXT PRIMARY KEY,
+    entity_type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_key TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE facts (
+    id TEXT PRIMARY KEY,
+    entity_id TEXT NOT NULL,
+    "key" TEXT NOT NULL,
+    value_json TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    importance REAL NOT NULL,
+    source TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_accessed_at TEXT,
+    expires_at TEXT,
+    status TEXT NOT NULL
+);
+CREATE TABLE task_conclusions (
+    id TEXT PRIMARY KEY,
+    task_title TEXT NOT NULL,
+    conclusion TEXT NOT NULL,
+    evidence_json TEXT NOT NULL,
+    project_scope TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+INSERT INTO schema_migrations (version, applied_at) VALUES (1, '2026-01-01T00:00:00+00:00');
+"""
+
+
+def _long_term_config(**overrides: Any) -> LongTermMemoryConfig:
+    """一份可用的长期记忆配置（默认阈值 0.75 / 0.5）。"""
+    return LongTermMemoryConfig(enabled=True, **overrides)
+
+
+def _project_entity(
+    store: long_term.LongTermStore, project_id: str, *, name: str = "chaiai"
+) -> schemas.EntityRecord:
+    """一个项目作用域的实体（facts 通过它继承作用域）。"""
+    return store.record_entity(
+        entity_type="project",
+        name=name,
+        scope=scope.SCOPE_PROJECT,
+        project_id=project_id,
+        now=NOW,
+    )
+
+
+def _write_fact(
+    store: long_term.LongTermStore,
+    entity: schemas.EntityRecord,
+    *,
+    key: str = "language",
+    value: Any = "中文",
+    confidence: float = 0.9,
+    importance: float = 0.8,
+    now: datetime | None = None,
+    **overrides: Any,
+) -> schemas.FactWriteResult:
+    return store.upsert_fact(
+        entity_id=entity.id,
+        key=key,
+        value=value,
+        confidence=confidence,
+        importance=importance,
+        source="test",
+        now=now,
+        **overrides,
+    )
+
+
+def _status(store: long_term.LongTermStore, fact_id: str) -> str:
+    record = store.get_fact(fact_id)
+    assert record is not None
+    return record.status
+
+
+def _insert_raw_fact(
+    store: long_term.LongTermStore,
+    entity: schemas.EntityRecord,
+    *,
+    key: str,
+    value_json: str,
+    confidence: float = 0.9,
+    importance: float = 0.8,
+    expires_at: str | None = None,
+    status: str = schemas.FACT_STATUS_ACTIVE,
+    updated_at: str = "2026-01-01T00:00:00+00:00",
+    fact_id: str | None = None,
+) -> str:
+    """绕过写入路径直接插一行（模拟旧库/被别的程序写坏的脏数据）。"""
+    fact_id = fact_id or f"raw-{key}-{status}"
+    with store.connection:
+        store.connection.execute(
+            'INSERT INTO facts (id, entity_id, "key", value_json, confidence, importance,'
+            " source, created_at, updated_at, last_accessed_at, expires_at, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                fact_id,
+                entity.id,
+                key,
+                value_json,
+                confidence,
+                importance,
+                "raw",
+                "2026-01-01T00:00:00+00:00",
+                updated_at,
+                None,
+                expires_at,
+                status,
+            ),
+        )
+    return fact_id
+
+
+def _recall_long_term(
+    store: long_term.LongTermStore,
+    workspace: Path,
+    *,
+    project_id: str | None = None,
+    config: LongTermMemoryConfig | None = None,
+    top_k: int = recall.DEFAULT_TOP_K,
+    now: datetime = LATER,
+) -> list[schemas.LongTermReference]:
+    return recall.recall_long_term(
+        store,
+        config=config if config is not None else _long_term_config(),
+        workspace_root=workspace,
+        project_id=project_id,
+        top_k=top_k,
+        now=now,
+    )
+
+
+def test_record_entity_reuses_identity_within_scope(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """同一作用域下重复写同一实体复用同一行；不同项目互不影响（架构 §10.3）。"""
+    project_a = scope.project_id_for(tmp_path / "project-a")
+    project_b = scope.project_id_for(tmp_path / "project-b")
+
+    first = _project_entity(store, project_a)
+    again = _project_entity(store, project_a)
+    other = _project_entity(store, project_b)
+
+    assert again == first
+    assert other.id != first.id
+    assert store.get_entity(first.id) == first
+    assert (
+        store.find_entity(
+            entity_type="project",
+            name="chaiai",
+            scope=scope.SCOPE_PROJECT,
+            project_id=project_b,
+        )
+        == other
+    )
+    assert (
+        store.find_entity(
+            entity_type="project",
+            name="chaiai",
+            scope=scope.SCOPE_PROJECT,
+            project_id="missing",
+        )
+        is None
+    )
+    with pytest.raises(MemoryStoreError):
+        # 缺 project_id：作用域无法确定 → 不写入
+        store.record_entity(entity_type="project", name="chaiai", scope=scope.SCOPE_PROJECT)
+
+
+def test_upsert_fact_treats_same_value_as_duplicate(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """同值按 JSON 语义比较（键顺序无关）→ 不新增行、不产生假冲突。"""
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+
+    created = _write_fact(store, entity, value={"lang": "zh", "tone": "neutral"}, now=NOW)
+    assert created.outcome == "created"
+    assert created.record.status == schemas.FACT_STATUS_ACTIVE
+
+    again = _write_fact(store, entity, value={"tone": "neutral", "lang": "zh"}, now=LATER)
+
+    assert again.outcome == "duplicate"
+    assert again.record == created.record
+    assert again.previous is None
+    assert store.fact_history(entity_id=entity.id, key="language") == [created.record]
+
+
+def test_upsert_fact_keeps_versions_and_replaces_only_with_higher_confidence(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """置信度更高才取代；被取代的旧值留在库里当版本历史（架构 §10.3）。"""
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+    older = _write_fact(store, entity, value="中文", confidence=0.6, now=NOW)
+
+    newer = _write_fact(store, entity, value="English", confidence=0.9, now=LATER)
+
+    assert newer.outcome == "replaced"
+    assert newer.previous is not None and newer.previous.id == older.record.id
+    assert newer.record.status == schemas.FACT_STATUS_ACTIVE
+    assert _status(store, older.record.id) == schemas.FACT_STATUS_SUPERSEDED
+    assert [item.value_json for item in store.list_facts(entity_id=entity.id)] == ['"English"']
+    assert [item.value_json for item in store.fact_history(entity_id=entity.id, key="language")] == [
+        '"English"',
+        '"中文"',
+    ]
+
+
+def test_upsert_fact_does_not_silently_overwrite_on_conflict(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """置信度不高于当前值（含相等）时不覆盖，新说法记为 ``conflicted``（架构 §10.3）。"""
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+    current = _write_fact(store, entity, value="中文", confidence=0.9, now=NOW)
+
+    weaker = _write_fact(store, entity, value="English", confidence=0.6, now=LATER)
+
+    assert weaker.outcome == "conflicted"
+    assert weaker.previous is not None and weaker.previous.id == current.record.id
+    assert weaker.record.status == schemas.FACT_STATUS_CONFLICTED
+    assert _status(store, current.record.id) == schemas.FACT_STATUS_ACTIVE
+    # 当前值没有被改写，冲突说法也留在库里（两者都能查出来）
+    assert [item.value_json for item in store.list_facts(entity_id=entity.id)] == ['"中文"']
+    assert len(store.fact_history(entity_id=entity.id, key="language")) == 2
+
+    tied = _write_fact(store, entity, value="English", confidence=0.9, now=LATER)
+
+    assert tied.outcome == "conflicted"  # 平票也不算"严格更高"
+    assert _status(store, current.record.id) == schemas.FACT_STATUS_ACTIVE
+
+
+def test_expired_facts_leave_the_current_value_and_get_marked_overdue(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """过期实时生效（不依赖定时处理），``expire_overdue()`` 负责把它落库。"""
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+    expiring = _write_fact(
+        store, entity, value="旧值", expires_at=LATER.isoformat(), now=NOW
+    )
+    assert store.list_facts(entity_id=entity.id, now=NOW) == [expiring.record]
+
+    # 定时处理还没跑：查询路径必须自己排除已到期记录
+    assert store.list_facts(entity_id=entity.id, now=MUCH_LATER) == []
+    assert store.expire_overdue(now=MUCH_LATER) == 1
+    assert _status(store, expiring.record.id) == schemas.FACT_STATUS_EXPIRED
+    assert store.expire_overdue(now=MUCH_LATER) == 0  # 幂等：已经处理过的不再改动
+
+    # 非法格式在写入时就被拒绝：否则会留下"写得进、却永远不参与召回"的静默失效记录
+    with pytest.raises(MemoryStoreError) as error:
+        _write_fact(store, entity, key="tone", value="正式", expires_at="下个月", now=NOW)
+    assert "ISO-8601" in str(error.value)
+
+    # 但库里**已有**的非法值仍按已过期处理（旧数据路径保持 fail-closed）
+    broken_id = _insert_raw_fact(
+        store, entity, key="tone", value_json='"正式"', expires_at="下个月"
+    )
+    assert store.list_facts(entity_id=entity.id, now=NOW) == []
+    assert _status(store, broken_id) == schemas.FACT_STATUS_ACTIVE
+    assert store.expire_overdue(now=NOW) == 1
+    assert _status(store, broken_id) == schemas.FACT_STATUS_EXPIRED
+
+
+def test_expired_value_does_not_block_a_new_one(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """已到期的当前值不算"当前值"：即使新来源置信度更低也能正常写入并成为 active。"""
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+    stale = _write_fact(
+        store, entity, value="旧值", confidence=0.99, expires_at=LATER.isoformat(), now=NOW
+    )
+
+    fresh = _write_fact(store, entity, value="新值", confidence=0.1, now=MUCH_LATER)
+
+    assert fresh.outcome == "created"
+    assert _status(store, stale.record.id) == schemas.FACT_STATUS_EXPIRED
+    assert _status(store, fresh.record.id) == schemas.FACT_STATUS_ACTIVE
+    assert [item.value_json for item in store.list_facts(entity_id=entity.id, now=MUCH_LATER)] == [
+        '"新值"'
+    ]
+
+
+def test_deleted_facts_and_entities_are_not_recalled(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """人工删除是软删除，且删除后不再召回（架构 §11.6）。"""
+    project_id = scope.project_id_for(tmp_path)
+    entity = _project_entity(store, project_id)
+    kept = _write_fact(store, entity, key="language", value="中文", now=NOW)
+    removed = _write_fact(store, entity, key="tone", value="正式", now=NOW)
+
+    assert store.delete_fact(removed.record.id) is True
+    assert store.delete_fact(removed.record.id) is False  # 重复删除不再改动
+    assert _status(store, removed.record.id) == schemas.FACT_STATUS_DELETED
+    assert store.list_facts(entity_id=entity.id) == [kept.record]
+    assert [item["memory_id"] for item in _recall_long_term(store, tmp_path, project_id=project_id)] == [
+        kept.record.id
+    ]
+
+    # 删除实体：保留身份行（entities 没有状态字段），把它的 facts 全部软删除
+    assert store.delete_entity(entity.id) == 1
+    assert store.delete_entity(entity.id) == 0
+    assert store.get_entity(entity.id) is not None
+    assert store.list_facts(entity_id=entity.id) == []
+    assert _recall_long_term(store, tmp_path, project_id=project_id) == []
+
+
+def test_deleting_the_current_value_does_not_restore_older_versions(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """删除当前值后不自动回滚到 ``superseded`` 版本；后续写入产生新的 active 行。"""
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+    older = _write_fact(store, entity, value="中文", confidence=0.6, now=NOW)
+    newer = _write_fact(store, entity, value="English", confidence=0.9, now=LATER)
+
+    assert store.delete_fact(newer.record.id) is True
+
+    assert store.list_facts(entity_id=entity.id) == []
+    assert _status(store, older.record.id) == schemas.FACT_STATUS_SUPERSEDED  # 仍是历史行
+
+    revived = _write_fact(store, entity, value="日本語", confidence=0.4, now=MUCH_LATER)
+
+    assert revived.outcome == "created"
+    assert _status(store, revived.record.id) == schemas.FACT_STATUS_ACTIVE
+
+
+def test_recall_long_term_filters_by_scope_and_thresholds(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """跨项目隔离；两个阈值只做召回过滤，不阻止写入（架构 §10.2–§10.3）。"""
+    project_a = scope.project_id_for(tmp_path / "project-a")
+    project_b = scope.project_id_for(tmp_path / "project-b")
+    entity_a = _project_entity(store, project_a)
+    entity_b = _project_entity(store, project_b, name="other")
+    visible = _write_fact(store, entity_a, key="language", value="中文", now=NOW)
+    _write_fact(store, entity_b, key="language", value="English", now=NOW)
+    low_confidence = _write_fact(store, entity_a, key="editor", value="vscode", confidence=0.5, now=NOW)
+    low_importance = _write_fact(
+        store, entity_a, key="theme", value="dark", confidence=0.9, importance=0.2, now=NOW
+    )
+
+    references = _recall_long_term(store, tmp_path, project_id=project_a)
+
+    assert [item["memory_id"] for item in references] == [visible.record.id]
+    assert references[0]["kind"] == "fact"
+    assert references[0]["scope"] == scope.SCOPE_PROJECT
+    assert references[0]["scope_key"] == project_a
+    assert "中文" in references[0]["content"]
+    assert references[0]["score"] == pytest.approx(0.9 * 0.8)
+    # 阈值只影响召回：被过滤掉的行照样写进了库里
+    assert {item.id for item in store.list_facts(entity_id=entity_a.id)} == {
+        visible.record.id,
+        low_confidence.record.id,
+        low_importance.record.id,
+    }
+
+
+def test_recall_long_term_sorts_by_score_and_respects_top_k(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """排序分数 = ``confidence × importance``（越大越优先），``top_k`` 截断。"""
+    project_id = scope.project_id_for(tmp_path)
+    entity = _project_entity(store, project_id)
+    _write_fact(store, entity, key="a", value=1, confidence=0.8, importance=0.6, now=NOW)
+    high = _write_fact(store, entity, key="b", value=2, confidence=0.9, importance=0.9, now=NOW)
+    mid = _write_fact(store, entity, key="c", value=3, confidence=0.8, importance=0.8, now=NOW)
+
+    references = _recall_long_term(store, tmp_path, project_id=project_id, top_k=2)
+
+    assert [item["memory_id"] for item in references] == [high.record.id, mid.record.id]
+    assert references[0]["score"] == pytest.approx(0.81)
+    assert _recall_long_term(store, tmp_path, project_id=project_id, top_k=0) == []
+
+
+def test_task_conclusions_are_recalled_by_project_scope(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """任务结论只按 ``project_scope`` 召回，没有重要度列就按 1.0 计分（T15 口径）。"""
+    project_a = scope.project_id_for(tmp_path / "project-a")
+    project_b = scope.project_id_for(tmp_path / "project-b")
+    kept = store.record_task_conclusion(
+        task_title="接通长期记忆",
+        conclusion="CRUD 与冲突处理已完成",
+        project_scope=project_a,
+        confidence=0.8,
+        evidence=[{"file": "memory/long_term.py"}],
+        now=NOW,
+    )
+    store.record_task_conclusion(
+        task_title="别的项目", conclusion="不该被召回", project_scope=project_b, confidence=0.9, now=NOW
+    )
+    weak = store.record_task_conclusion(
+        task_title="未验证结论", conclusion="仅供参考", project_scope=project_a, confidence=0.4, now=LATER
+    )
+
+    references = _recall_long_term(store, tmp_path, project_id=project_a)
+
+    assert [item["memory_id"] for item in references] == [kept.id]
+    reference = references[0]
+    assert reference["kind"] == "task_conclusion"
+    assert reference["scope"] == scope.SCOPE_PROJECT
+    assert reference["scope_key"] == project_a
+    assert reference["importance"] == recall.CONCLUSION_IMPORTANCE == 1.0
+    assert reference["score"] == pytest.approx(kept.confidence)
+    assert reference["expires_at"] is None
+    assert "CRUD 与冲突处理已完成" in reference["content"]
+    assert kept.evidence_json == '[{"file": "memory/long_term.py"}]'
+    # 阈值只过滤召回：低置信度结论仍在库里（且该表没有 status / importance 列）
+    assert [item.id for item in store.list_task_conclusions(project_scope=project_a)] == [
+        weak.id,
+        kept.id,
+    ]
+    columns = _columns(store.connection, "task_conclusions")
+    assert "status" not in columns
+    assert "importance" not in columns
+
+
+def test_upsert_fact_rejects_invalid_input(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+
+    with pytest.raises(MemoryStoreError):
+        _write_fact(store, entity, key="   ")
+    with pytest.raises(MemoryStoreError):
+        _write_fact(store, entity, confidence=1.5)
+    with pytest.raises(MemoryStoreError):
+        _write_fact(store, entity, value=object())
+    for non_json in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(MemoryStoreError):  # NaN / Infinity 不是合法 JSON
+            _write_fact(store, entity, value={"x": non_json})
+    with pytest.raises(MemoryStoreError):
+        store.record_task_conclusion(
+            task_title="坏证据",
+            conclusion="x",
+            project_scope="project-a",
+            confidence=0.5,
+            evidence=float("nan"),
+        )
+    with pytest.raises(MemoryStoreError):
+        store.upsert_fact(
+            entity_id="missing",
+            key="language",
+            value="中文",
+            confidence=0.9,
+            importance=0.8,
+            source="test",
+        )
+    assert store.list_facts(entity_id=entity.id) == []
+
+
+def test_concurrent_entity_writes_keep_one_identity(
+    store: long_term.LongTermStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """两个线程同时写同一实体时只能产生一行。
+
+    sqlite3 的隐式事务到第一条 DML 才开始，所以"先查后插"之间存在窗口：没有进程内互斥锁时
+    两个线程会各插一行（同一实体出现两条记录）。这里用栅栏把两个线程的入口对齐，再验证写入
+    路径真的被串行化。
+    """
+    project_id = scope.project_id_for(tmp_path)
+    barrier = threading.Barrier(2)
+    original = store.record_entity
+
+    def synchronized(**kwargs: Any) -> schemas.EntityRecord:
+        barrier.wait(timeout=5)  # 两个线程都在锁外就绪
+        return original(**kwargs)
+
+    monkeypatch.setattr(store, "record_entity", synchronized)
+    results: list[schemas.EntityRecord] = []
+    guard = threading.Lock()
+
+    def worker() -> None:
+        record = synchronized(
+            entity_type="project",
+            name="chaiai",
+            scope=scope.SCOPE_PROJECT,
+            project_id=project_id,
+            now=NOW,
+        )
+        with guard:
+            results.append(record)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert len(results) == 2
+    assert len({record.id for record in results}) == 1
+    assert store.connection.execute("SELECT COUNT(*) FROM entities").fetchone() == (1,)
+
+
+def test_multiple_active_facts_converge_by_confidence(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """同键多条 active 的脏数据收敛要按**置信度**选当前值。
+
+    只按"最近更新"选的话，一次脏数据修复就会把 0.9 的当前值降级、让 0.5 的旧说法变成 active，
+    正好违背"只有置信度严格更高才取代"。
+    """
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+    sure = _insert_raw_fact(
+        store, entity, key="language", value_json='"中文"', confidence=0.9, fact_id="raw-sure"
+    )
+    weak = _insert_raw_fact(
+        store,
+        entity,
+        key="language",
+        value_json='"English"',
+        confidence=0.5,
+        updated_at="2026-09-10T00:00:00+00:00",
+        fact_id="raw-weak",
+    )
+
+    result = _write_fact(store, entity, key="language", value="日本語", confidence=0.6, now=LATER)
+
+    assert result.outcome == "conflicted"  # 0.6 不高于当前值 0.9
+    assert result.previous is not None and result.previous.id == sure
+    assert _status(store, sure) == schemas.FACT_STATUS_ACTIVE
+    assert _status(store, weak) == schemas.FACT_STATUS_SUPERSEDED
+
+
+def test_two_stores_writing_the_same_database_keep_one_identity(tmp_path: Path) -> None:
+    """两个 ``LongTermStore``（各自一条连接、同一文件）同时写，也不能插出重复实体。
+
+    实例级锁管不到另一个实例，必须靠 SQLite 的写锁：写入事务用 ``BEGIN IMMEDIATE``，第二个
+    写入者等到第一个提交之后再查询，于是能看见刚插入的身份行。
+    """
+    path = tmp_path / "data" / "memories.sqlite"
+    first = long_term.open_store(path)
+    second = long_term.open_store(path)
+    try:
+        project_id = scope.project_id_for(tmp_path)
+        barrier = threading.Barrier(2)
+        ids: list[str] = []
+        guard = threading.Lock()
+
+        def worker(store: long_term.LongTermStore) -> None:
+            barrier.wait(timeout=5)
+            record = store.record_entity(
+                entity_type="project",
+                name="chaiai",
+                scope=scope.SCOPE_PROJECT,
+                project_id=project_id,
+                now=NOW,
+            )
+            with guard:
+                ids.append(record.id)
+
+        threads = [threading.Thread(target=worker, args=(store,)) for store in (first, second)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+        assert len(ids) == 2
+        assert len(set(ids)) == 1
+        assert first.connection.execute("SELECT COUNT(*) FROM entities").fetchone() == (1,)
+    finally:
+        first.close()
+        second.close()
+
+
+def test_two_stores_writing_the_same_key_keep_one_active_fact(tmp_path: Path) -> None:
+    """两个 store 同时写同一实体的同一 key：一个 ``created``、一个 ``conflicted``。
+
+    只覆盖实体身份还不够——同键的"查当前值 → 判定 → 写入"是另一条写路径，也要靠
+    ``BEGIN IMMEDIATE`` 串行化；否则会留下同键两条 ``active``。
+    """
+    path = tmp_path / "data" / "memories.sqlite"
+    first = long_term.open_store(path)
+    second = long_term.open_store(path)
+    try:
+        project_id = scope.project_id_for(tmp_path)
+        entity = first.record_entity(
+            entity_type="project",
+            name="chaiai",
+            scope=scope.SCOPE_PROJECT,
+            project_id=project_id,
+            now=NOW,
+        )
+        barrier = threading.Barrier(2)
+        outcomes: list[str] = []
+        guard = threading.Lock()
+
+        def worker(store: long_term.LongTermStore, value: str) -> None:
+            barrier.wait(timeout=5)
+            result = store.upsert_fact(
+                entity_id=entity.id,
+                key="language",
+                value=value,
+                # 同置信度：结果与线程调度无关（先写的 created，后写的因"不高于"记 conflicted）
+                confidence=0.9,
+                importance=0.8,
+                source="test",
+                now=NOW,
+            )
+            with guard:
+                outcomes.append(result.outcome)
+
+        threads = [
+            threading.Thread(target=worker, args=(first, "中文")),
+            threading.Thread(target=worker, args=(second, "English")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+        assert sorted(outcomes) == ["conflicted", "created"]
+        statuses = first.connection.execute(
+            'SELECT "status", COUNT(*) FROM facts GROUP BY "status"'
+        ).fetchall()
+        assert sorted(statuses) == [("active", 1), ("conflicted", 1)]
+        assert first.list_facts(entity_id=entity.id, now=NOW) == second.list_facts(
+            entity_id=entity.id, now=NOW
+        )
+        assert len(first.list_facts(entity_id=entity.id, now=NOW)) == 1
+    finally:
+        first.close()
+        second.close()
+
+
+def test_reads_wait_for_the_write_transaction(
+    store: long_term.LongTermStore, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """写事务进行中时，同一 store 的读方法必须等它结束。
+
+    否则会读到"旧值已置 ``superseded``、新值还没插入"的中间态——那条记忆会瞬时从库里消失
+    （复审探针实证：并发 ``list_facts()`` 返回空列表，召回可能漏掉当前事实）。
+    """
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+    current = _write_fact(store, entity, value="中文", confidence=0.9, now=NOW)
+
+    started = threading.Event()
+    release = threading.Event()
+    original_insert = long_term.LongTermStore._insert_fact
+
+    def paused_insert(self: long_term.LongTermStore, **kwargs: Any) -> schemas.FactRecord:
+        started.set()
+        assert release.wait(timeout=10)
+        return original_insert(self, **kwargs)
+
+    monkeypatch.setattr(long_term.LongTermStore, "_insert_fact", paused_insert)
+
+    written: list[schemas.FactWriteResult] = []
+    observed: list[list[schemas.FactRecord]] = []
+
+    def write() -> None:
+        written.append(_write_fact(store, entity, value="English", confidence=0.95, now=LATER))
+
+    def read() -> None:
+        observed.append(store.list_facts(entity_id=entity.id, now=LATER))
+
+    writer = threading.Thread(target=write)
+    writer.start()
+    assert started.wait(timeout=10)  # 事务已开始：旧值已被置为 superseded，新值还没插入
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    try:
+        reader.join(timeout=1)
+        assert reader.is_alive()  # 读被写事务挡住，没有返回中间态
+    finally:
+        release.set()
+        writer.join(timeout=10)
+        reader.join(timeout=10)
+
+    assert written[0].outcome == "replaced"
+    assert [item.value_json for item in observed[0]] == ['"English"']
+    assert _status(store, current.record.id) == schemas.FACT_STATUS_SUPERSEDED
+
+
+def test_legacy_long_term_v1_database_upgrades_to_v2(tmp_path: Path) -> None:
+    """旧库（v1：只有表结构）能直接升到当前版本，数据保留、查询索引补齐。"""
+    path = tmp_path / "data" / "memories.sqlite"
+    path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.executescript(_LEGACY_V1_SQL)
+        connection.execute(
+            "INSERT INTO entities (id, entity_type, name, scope, scope_key, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("entity-old", "project", "chaiai", scope.SCOPE_PROJECT, "project-a", "2026-01-01", "2026-01-01"),
+        )
+        connection.execute(
+            'INSERT INTO facts (id, entity_id, "key", value_json, confidence, importance,'
+            " source, created_at, updated_at, last_accessed_at, expires_at, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "fact-old",
+                "entity-old",
+                "language",
+                '"中文"',
+                0.9,
+                0.8,
+                "legacy",
+                "2026-01-01",
+                "2026-01-02",
+                None,
+                None,
+                schemas.FACT_STATUS_ACTIVE,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    opened = long_term.open_store(path)
+    try:
+        assert opened.schema_version == migrations.LONG_TERM_SCHEMA_VERSION
+        indexes = {
+            str(row[0])
+            for row in opened.connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+        assert {
+            "idx_entities_scope_identity",
+            "idx_facts_entity_key",
+            "idx_facts_expires_at",
+            "idx_task_conclusions_scope_time",
+        } <= indexes
+        assert opened.get_entity("entity-old") is not None
+        assert opened.get_fact("fact-old") is not None
+        # 旧身份行会被复用，不会因为升级产生重复实体
+        reused = opened.record_entity(
+            entity_type="project",
+            name="chaiai",
+            scope=scope.SCOPE_PROJECT,
+            project_id="project-a",
+            now=NOW,
+        )
+        assert reused.id == "entity-old"
+    finally:
+        opened.close()
+
+
+def test_open_store_rejects_database_with_missing_columns(tmp_path: Path) -> None:
+    """自称 v2 但缺列的库必须**打开时就**明确失败，不能拖到第一次 CRUD 才裸抛。"""
+    path = tmp_path / "data" / "memories.sqlite"
+    path.parent.mkdir(parents=True)
+    connection = sqlite3.connect(str(path))
+    try:
+        connection.executescript(
+            """
+            CREATE TABLE entities (entity_type TEXT NOT NULL, name TEXT NOT NULL);
+            CREATE TABLE facts (id TEXT PRIMARY KEY, entity_id TEXT NOT NULL);
+            CREATE TABLE task_conclusions (id TEXT PRIMARY KEY);
+            CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+            INSERT INTO schema_migrations (version, applied_at)
+                VALUES (2, '2026-01-01T00:00:00+00:00');
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(MemoryStoreError) as error:
+        long_term.open_store(path)
+
+    message = str(error.value)
+    assert "缺少列" in message
+    assert "entities" in message and "id" in message
+    assert "版本号在这里不可信" in message
+    assert "scripts/init_db.py" in message
+    # 失败不应改动文件：表还在、结构版本仍是它自称的那个
+    connection = sqlite3.connect(str(path))
+    try:
+        assert migrations.current_version(connection) == 2
+        assert "entities" in migrations.table_names(connection)
+    finally:
+        connection.close()
+
+
+def test_recall_accepts_naive_now(store: long_term.LongTermStore, tmp_path: Path) -> None:
+    """显式传入无时区的 ``now`` 时按 UTC 解释（与 ``long_term`` 同一口径），不能抛 TypeError。"""
+    project_id = scope.project_id_for(tmp_path)
+    entity = _project_entity(store, project_id)
+    fact = _write_fact(
+        store, entity, key="language", value="中文", now=NOW, expires_at=LATER.isoformat()
+    )
+
+    assert recall._moment(NOW.replace(tzinfo=None)) == NOW
+    references = recall.recall_long_term(
+        store,
+        config=_long_term_config(),
+        workspace_root=tmp_path,
+        project_id=project_id,
+        now=NOW.replace(tzinfo=None),
+    )
+
+    assert [item["memory_id"] for item in references] == [fact.record.id]
+
+
 # --------------------------------------------------------------- 初始化脚本
 
 
@@ -1418,16 +2237,18 @@ def test_init_db_reports_long_term_pointing_at_chat_database(
     assert init_db.main(["--config", str(config_path)]) == init_db.EXIT_SETUP_PROBLEM
 
 
-def test_session_store_still_scopes_sessions_per_workspace(tmp_path: Path) -> None:
-    """作用域工具搬家后，会话索引的隔离语义不能变（防止重构走样）。"""
+def test_session_store_binds_one_workspace_per_session(tmp_path: Path) -> None:
+    """作用域工具搬家后，工作区与会话的绑定语义不能走样（T14C：当前会话全库唯一）。"""
     connection = sqlite3.connect(":memory:")
     migrations.apply_migrations(connection)
-    store_a = SessionStore(connection, workspace_root=tmp_path / "a")
-    store_b = SessionStore(connection, workspace_root=tmp_path / "b")
+    store = SessionStore(connection, workspace_root=tmp_path / "a")
 
-    session_a = store_a.ensure_active(legacy_thread_id=checkpoint.DEFAULT_THREAD_ID)
-    session_b = store_b.ensure_active(legacy_thread_id=checkpoint.DEFAULT_THREAD_ID)
+    session_a = store.ensure_active(legacy_thread_id=checkpoint.DEFAULT_THREAD_ID)
+    session_b = store.switch_workspace(tmp_path / "b")
 
     assert session_a.project_id == scope.project_id_for(tmp_path / "a")
-    assert session_a.project_id != session_b.project_id
+    # 不比 project_id：同一 Git 根下的两个目录会算出同一个 project_id，那是既有规则
+    assert session_a.session_id != session_b.session_id
     assert session_a.thread_id != session_b.thread_id
+    assert session_b.workspace_root == (tmp_path / "b").resolve().as_posix()
+    assert store.active() is not None and store.active().session_id == session_b.session_id

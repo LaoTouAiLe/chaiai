@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 CHAT_SCHEMA_VERSION = 2
 
 #: 长期记忆库当前代码期望的结构版本。
-LONG_TERM_SCHEMA_VERSION = 1
+LONG_TERM_SCHEMA_VERSION = 2
 
 #: 兼容既有调用：未加前缀的 ``SCHEMA_VERSION`` 指聊天库。
 SCHEMA_VERSION = CHAT_SCHEMA_VERSION
@@ -93,6 +93,20 @@ CREATE TABLE IF NOT EXISTS task_conclusions (
 CREATE INDEX IF NOT EXISTS idx_task_conclusions_project ON task_conclusions (project_scope);
 """
 
+#: 长期库 v2（T15）：只加**查询路径**上的索引，不改列、不加表——架构 §10.3 的字段表保持不变。
+#: 取实体（按作用域 + 身份）、同键取版本与冲突判定（entity_id + key + status）、过期淘汰
+#: （expires_at）都按这些条件过滤；v1 库升级只需建索引，已有数据不动。
+_LONG_TERM_V2_INDEXES_SQL = """
+CREATE INDEX IF NOT EXISTS idx_entities_scope_identity
+    ON entities (scope, scope_key, entity_type, name);
+CREATE INDEX IF NOT EXISTS idx_facts_entity_key
+    ON facts (entity_id, "key", status);
+CREATE INDEX IF NOT EXISTS idx_facts_expires_at
+    ON facts (expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_task_conclusions_scope_time
+    ON task_conclusions (project_scope, created_at);
+"""
+
 #: 聊天库 v2（T14C）：把"当前会话"从"每个工作区各一个"改成**整个库唯一**（架构 §10.6）。
 #: 先归一历史多 active，再用部分唯一索引防止复发；工作区列表按 ``workspace_root`` 去重，
 #: 因此补一条索引。``sessions`` 的字段与 v1 完全一致，升级只改数据与索引。
@@ -115,7 +129,10 @@ _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
 )
 
 #: 长期记忆库的迁移；规则同上（独立文件、独立版本号）。
-_LONG_TERM_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _LONG_TERM_SQL),)
+_LONG_TERM_MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (1, _LONG_TERM_SQL),
+    (2, _LONG_TERM_V2_INDEXES_SQL),
+)
 
 _SCHEMA_MIGRATIONS_SQL = (
     "CREATE TABLE IF NOT EXISTS schema_migrations ("
