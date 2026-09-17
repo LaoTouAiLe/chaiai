@@ -647,6 +647,200 @@ def _has_pending_approval(page: object) -> bool:
     return any("需要你确认的动作" in element.value for element in page.warning)
 
 
+class _FakeGraph:
+    """记录 ``invoke`` 收到的上下文（测试替身，不做任何图逻辑）。"""
+
+    def __init__(self) -> None:
+        self.calls: list[object] = []
+
+    def invoke(self, payload: object, *, config: object = None, context: object = None) -> dict:
+        self.calls.append(context)
+        return {"messages": []}
+
+
+class _FakeChatApp:
+    """只满足 ``turn_workspace`` / ``run_chat_turn`` / ``resume_turn`` 需要的最小面。"""
+
+    def __init__(self, *, app_config, workspace_root: Path, sessions: SessionStore | None) -> None:
+        self.app_config = app_config
+        self.model = object()
+        self.workspace_root = workspace_root
+        self.capabilities = object()
+        self.graph = _FakeGraph()
+        self.checkpointer_enabled = False
+        self.sessions = sessions
+
+
+def _switch_workspace(page: object, path: Path) -> object:
+    """在页面上输入工作区绝对路径并点击"切换到此工作区"。"""
+    page = page.sidebar.text_input(key="session-workspace-path").set_value(str(path)).run()
+    return page.sidebar.button(key="session-workspace-apply").click().run()
+
+
+def test_page_workspace_switch_keeps_pending_approval_isolated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
+) -> None:
+    """验收 4：A 中挂起的审批在 B 不展示，切回 A 后仍可继续恢复（架构 §1.5、§10.6）。"""
+    workspace_b = tmp_path / "b"
+    workspace_b.mkdir()
+    _write_config(tmp_path, MINIMAL_CONFIG)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
+    monkeypatch.setattr(
+        factory,
+        "build_chat_model",
+        lambda _config, _api_key: model_factory(
+            decision="tool",
+            reply="好的",
+            tool_calls=[{"name": "delete_file", "args": {"path": "aa.txt"}, "id": "call-1"}],
+        ),
+    )
+    _run_page(tmp_path, monkeypatch)  # 建立工作区 A 的会话
+    target = tmp_path / "aa.txt"
+    target.write_text("别删我", encoding="utf-8", newline="")
+
+    page = _run_page(tmp_path, monkeypatch)
+    page.chat_input[0].set_value("删除 aa.txt").run()
+    assert _has_pending_approval(page)
+    assert target.is_file()  # 挂起期间不执行
+
+    # 切到 B：新工作区、新会话，A 的挂起审批不在这里出现
+    page = _switch_workspace(page, workspace_b)
+    assert not page.exception
+    assert not _has_pending_approval(page)
+    active = _session_store(tmp_path).active()
+    assert active is not None
+    assert Path(active.workspace_root) == workspace_b.resolve()
+    assert target.is_file()
+
+    # 切回 A：恢复 A 的最近会话，审批重新可见，并且可以继续执行
+    page = _switch_workspace(page, tmp_path)
+    assert not page.exception
+    assert _has_pending_approval(page)
+
+    page.button[0].click().run()  # 批准删除
+
+    assert not page.exception
+    assert not target.exists()
+
+
+def test_page_invalid_workspace_keeps_current_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """验收 5：非法工作区只提示，不改变当前 active 会话（架构 §1.5）。"""
+    _write_config(tmp_path, MINIMAL_CONFIG)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
+    page = _run_page(tmp_path, monkeypatch)
+    before = _session_store(tmp_path).active()
+    assert before is not None
+
+    page = _switch_workspace(page, tmp_path / "missing-dir")
+
+    assert not page.exception
+    assert any("会话操作失败" in element.value for element in page.error)
+    store = _session_store(tmp_path)
+    active = store.active()
+    assert active is not None and active.session_id == before.session_id
+    assert len(store.list_sessions()) == 1
+
+
+def test_turns_use_the_session_workspace(tmp_path: Path, monkeypatch, app_config) -> None:
+    """验收 6：``run_chat_turn`` 与 ``resume_turn`` 都用会话绑定的工作区构造上下文。"""
+    workspace_a = tmp_path / "a"
+    workspace_b = tmp_path / "b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    database = checkpoint.open_database(
+        tmp_path / "data" / "checkpoints.sqlite", workspace_root=workspace_a
+    )
+    try:
+        store = database.sessions
+        store.ensure_active(legacy_thread_id=checkpoint.DEFAULT_THREAD_ID)
+        session_b = store.switch_workspace(workspace_b)
+
+        captured: list[tuple[Path, Path]] = []
+        monkeypatch.setattr(
+            web.builder,
+            "build_runtime_context",
+            lambda **kwargs: captured.append(
+                (kwargs["workspace_root"], kwargs["current_cwd"])
+            )
+            or object(),
+        )
+        app = _FakeChatApp(
+            app_config=app_config, workspace_root=workspace_a.resolve(), sessions=store
+        )
+
+        web.run_chat_turn(
+            app,
+            thread_id=session_b.thread_id,
+            user_text="你好",
+            session_id=session_b.session_id,
+        )
+        web.resume_turn(
+            app,
+            thread_id=session_b.thread_id,
+            resume_value={"decision": "approve"},
+            session_id=session_b.session_id,
+        )
+    finally:
+        database.connection.close()
+
+    expected = workspace_b.resolve()
+    assert captured == [(expected, expected), (expected, expected)]
+
+
+def test_turn_workspace_falls_back_to_config_without_short_term(tmp_path: Path) -> None:
+    """验收 7：关闭短期记忆时没有会话索引，工作区回到配置的启动默认值（架构 §10.6）。"""
+    app = _FakeChatApp(
+        app_config=None, workspace_root=tmp_path.resolve(), sessions=None
+    )
+
+    assert web.current_session(app) is None
+    assert (
+        web.turn_workspace(app, session_id=None, thread_id=web.DEFAULT_THREAD_ID)
+        == tmp_path.resolve()
+    )
+
+
+def test_turn_workspace_rejects_unusable_default_without_short_term(tmp_path: Path) -> None:
+    """T14C 复审：关闭短期记忆时，配置默认工作区失效也要失败闭合（每轮都校验）。"""
+    missing = tmp_path / "gone"
+    app = _FakeChatApp(app_config=None, workspace_root=missing, sessions=None)
+
+    with pytest.raises(web.SessionStoreError):
+        web.turn_workspace(app, session_id=None, thread_id=web.DEFAULT_THREAD_ID)
+
+
+def test_page_temporary_workspace_without_short_term(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """关闭短期记忆时仍可选工作区，但只在本页面生命周期内有效（架构 §10.6）。"""
+    workspace_b = tmp_path / "b"
+    workspace_b.mkdir()
+    _write_config(tmp_path, MINIMAL_CONFIG + "memory:\n  short_term:\n    enabled: false\n")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
+
+    page = _run_page(tmp_path, monkeypatch)
+    assert not page.exception
+    assert not page.error, [element.value for element in page.error]
+    assert page.sidebar.text_input, "关闭短期记忆时也必须在侧栏渲染工作区选择器"
+    assert not (tmp_path / "data" / "checkpoints.sqlite").exists()  # 没有持久会话索引
+
+    page = _switch_workspace(page, workspace_b)
+    assert not page.exception
+    captions = [element.value for element in page.sidebar.caption]
+    assert any(workspace_b.as_posix() in text for text in captions)
+
+    page.run()  # 普通重绘：页面临时选择保留
+    captions = [element.value for element in page.sidebar.caption]
+    assert any(workspace_b.as_posix() in text for text in captions)
+
+    # 重新启动服务（新的页面会话）→ 回到配置的默认工作区
+    restarted = _run_page(tmp_path, monkeypatch)
+    captions = [element.value for element in restarted.sidebar.caption]
+    assert not any(workspace_b.as_posix() in text for text in captions)
+
+
 def test_page_keeps_one_session_across_rerun_and_restart(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -751,7 +945,14 @@ def test_page_renames_current_session(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
 
     page = _run_page(tmp_path, monkeypatch)
-    page = page.sidebar.text_input[0].set_value("我的调研会话").run()
+    # 侧栏现在有两个输入框（工作区绝对路径 + 会话重命名），按 key 定位，不依赖顺序
+    session_before = _session_store(tmp_path).active()
+    assert session_before is not None
+    page = (
+        page.sidebar.text_input(key=f"session-title-{session_before.session_id}")
+        .set_value("我的调研会话")
+        .run()
+    )
     page = page.sidebar.button(key="session-rename").click().run()
 
     assert not page.exception

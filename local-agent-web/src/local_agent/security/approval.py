@@ -108,7 +108,9 @@ def action_fingerprint(
 ) -> str:
     """按架构 §5.3 分工具计算动作指纹。"""
     args = dict(arguments or {})
-    parts: list[str] = [tool_name]
+    # 工作区根目录必须是指纹的一部分：同一个相对路径在不同工作区是两个不同的动作，
+    # 否则"在 A 里批准过"的指纹会复用到 B（架构 §1.5、T14C）。
+    parts: list[str] = [tool_name, policy.workspace_root.as_posix()]
 
     if tool_name in {"edit_file", "write_file"}:
         path = _normalized_path(policy, str(args.get("path") or ""))
@@ -151,6 +153,9 @@ def action_fingerprint(
             cwd=str(args.get("cwd") or "."),
             timeout_seconds=requested_timeout,
             env_keys=[str(key) for key in (args.get("env_keys") or [])],
+            # 与安全判定/执行同一套 cwd 语义：允许外部路径时外部 cwd 才解析得出可执行文件，
+            # 否则指纹里的 executable_path 会与执行阶段不一致（架构 §5.3）。
+            allow_external_cwd=policy.allow_external_paths,
         )
         parts += [
             # 原始命令原文必须进指纹：`split_command` 会丢掉管道/重定向等 Shell 运算符，
@@ -178,21 +183,35 @@ def describe_impact(
     decision: SafetyDecision,
     policy: SecurityPolicy,
 ) -> str:
-    """给用户看的影响范围说明（架构 §6.5 要求显示绝对路径与影响范围）。"""
+    """给用户看的影响范围说明（架构 §6.5 要求显示绝对路径与影响范围）。
+
+    工作区外目标必须一眼可见（架构 §1.5）：加前缀标记，并在说明里带上规范化绝对路径。
+    """
     args = dict(arguments or {})
     path_text = _normalized_path(policy, str(args.get("path") or "")) if "path" in args else ""
 
     if tool_name == "delete_file":
         recursive = bool(args.get("recursive"))
-        return f"删除 {path_text}（{_delete_target_summary(path_text)}）{'，递归删除' if recursive else ''}"
-    if tool_name == "run_shell":
+        marker = _external_marker(policy, path_text)
         return (
-            f"执行命令：{args.get('command')}"
-            f"（工作目录 {_normalized_path(policy, str(args.get('cwd') or '.'))}）"
+            f"{marker}删除 {path_text}（{_delete_target_summary(path_text)}）"
+            f"{'，递归删除' if recursive else ''}"
         )
+    if tool_name == "run_shell":
+        cwd_text = _normalized_path(policy, str(args.get("cwd") or "."))
+        marker = _external_marker(policy, cwd_text)
+        return f"{marker}执行命令：{args.get('command')}（工作目录 {cwd_text}）"
     if tool_name in {"edit_file", "write_file"}:
-        return f"写入 {path_text}：{decision.reason}"
+        marker = _external_marker(policy, path_text)
+        return f"{marker}写入 {path_text}：{decision.reason}"
     return f"{tool_name}：{decision.reason}"
+
+
+def _external_marker(policy: SecurityPolicy, path_text: str) -> str:
+    """工作区外目标的审批标记（空字符串表示在工作区内）。"""
+    if not path_text:
+        return ""
+    return "【工作区外路径】" if policy.is_external(Path(path_text)) else ""
 
 
 def requires_second_confirmation(tool_name: str, arguments: Mapping[str, Any]) -> bool:
@@ -241,6 +260,11 @@ def find_approval(
     return None
 
 
+#: 删除目标摘要允许扫描的条目上限：超过就停止并标注 ``capped``。
+#: 摘要只用于审批展示与指纹，不该对大目录（更不该对用户主目录）做无界递归。
+DELETE_SUMMARY_SCAN_LIMIT = 500
+
+
 def _normalized_path(policy: SecurityPolicy, raw: str) -> str:
     """尽量给出规范化绝对路径；越界或无路径时退回原字符串（指纹仍然稳定）。"""
     try:
@@ -263,7 +287,12 @@ def _file_digest(path_text: str) -> str:
 
 
 def _delete_target_summary(path_text: str) -> str:
-    """删除目标的状态摘要：类型、大小、修改时间与父目录状态。"""
+    """删除目标的状态摘要：类型、大小、修改时间与父目录状态。
+
+    目录只做**一次有上限的扫描**（:data:`DELETE_SUMMARY_SCAN_LIMIT` 条就停，并标注 ``capped``）：
+    这个摘要只用于审批展示与动作指纹，对用户主目录这类大目录递归整棵树会让页面在等待审批时
+    卡死（T14C 复审）。
+    """
     if not path_text:
         return "no-path"
     path = Path(path_text)
@@ -276,9 +305,18 @@ def _delete_target_summary(path_text: str) -> str:
         parent_state = f"parent-exists:{parent.is_dir()}"
         count = ""
         if path.is_dir():
-            files = sum(1 for item in path.rglob("*") if item.is_file())
-            dirs = sum(1 for item in path.rglob("*") if item.is_dir())
-            count = f"files:{files},dirs:{dirs}"
+            files = 0
+            dirs = 0
+            for item in path.rglob("*"):
+                if item.is_dir():
+                    dirs += 1
+                elif item.is_file():
+                    files += 1
+                if files + dirs >= DELETE_SUMMARY_SCAN_LIMIT:
+                    count = f"files:{files},dirs:{dirs}+,capped"
+                    break
+            else:
+                count = f"files:{files},dirs:{dirs}"
         return f"{kind}:{stat.st_size}:{int(stat.st_mtime)}:{parent_state}:{count}"
     except OSError:
         return "unreadable"

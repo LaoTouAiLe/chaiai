@@ -23,14 +23,19 @@ from typing import Any
 
 from local_agent.config import (
     AppConfig,
-    ConfigError,
     SecurityConfig,
     WorkspaceConfig,
     redact_secrets,
 )
-from local_agent.exceptions import SecurityError
+from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
 from local_agent.security.diff_guard import count_changed_lines
-from local_agent.security.path_guard import is_sensitive_path, resolve_within_workspace
+from local_agent.security.path_guard import (
+    assert_not_protected_target,
+    is_sensitive_path,
+    is_within,
+    protected_target_reason,
+    resolve_target,
+)
 from local_agent.security.shell_guard import prepare_shell
 
 #: 只读工具。
@@ -71,16 +76,12 @@ class SecurityPolicy:
         workspace: WorkspaceConfig,
         secret_values: tuple[str, ...] = (),
     ) -> None:
-        if workspace.allow_external_paths:
-            # 架构 §6.1 要求所有路径都在 workspace_root 内；本版本不支持放开该边界，
-            # 与其静默忽略配置，不如启动时就报错。
-            raise ConfigError(
-                "本版本不支持 workspace.allow_external_paths: true"
-                "（文件工具一律限制在工作区内）"
-            )
         self.workspace_root = workspace_root
         self.security = security
         self.workspace = workspace
+        #: ``workspace.allow_external_paths``：是否允许**显式绝对路径**访问工作区外目标。
+        #: 为真不等于关闭安全校验：越界判定、受保护目标、外部副作用强制审批都照旧生效。
+        self.allow_external_paths = bool(workspace.allow_external_paths)
         self._secret_values = secret_values
         #: 本次执行中被人工批准的动作指纹（一次性授权，执行完立即撤销）。
         self._granted: set[str] = set()
@@ -101,10 +102,8 @@ class SecurityPolicy:
             environ: 环境变量映射，默认取 ``os.environ``。
 
         Returns:
-            构造好的策略对象。
-
-        Raises:
-            ConfigError: 配置要求放开工作区边界（本版本不支持）。
+            构造好的策略对象。``workspace.allow_external_paths`` 只是打开"显式绝对路径的受控
+            外部访问"（架构 §1.5），不放松越界判定本身。
         """
         env = os.environ if environ is None else environ
         secret_names = [
@@ -125,14 +124,35 @@ class SecurityPolicy:
     # ------------------------------------------------------------------ 路径
 
     def resolve_path(self, path: str) -> Path:
-        """把路径解析为工作区内的绝对路径（目标可以不存在）。
+        """把路径解析为规范化绝对路径（目标可以不存在）。
+
+        工作区外的目标仅在 ``allow_external_paths=true`` **且原始输入是绝对路径**时放行
+        （架构 §1.5）；其余越界输入一律失败。
 
         Raises:
-            WorkspaceBoundaryError: 路径在工作区之外。
+            WorkspaceBoundaryError: 空路径，或路径在工作区之外且不被允许。
         """
-        return resolve_within_workspace(
-            path, base_dir=self.workspace_root, workspace_root=self.workspace_root
-        )
+        return resolve_target(
+            path,
+            base_dir=self.workspace_root,
+            workspace_root=self.workspace_root,
+            allow_external=self.allow_external_paths,
+        ).path
+
+    def is_external(self, path: Path) -> bool:
+        """该规范化路径是否在当前工作区之外（用于外部路径的审批与展示）。"""
+        return not is_within(path, self.workspace_root)
+
+    def require_side_effect_target(self, path: Path) -> None:
+        """副作用的执行前复核：受保护目标硬拒绝（架构 §1.5）。
+
+        安全判定、动作指纹与执行三处都必须用同一个规范化目标，所以这里再查一次——
+        审批通过也不能写/改/删受保护目标。
+
+        Raises:
+            SecurityError: 目标是受保护目录（或其内部）。
+        """
+        assert_not_protected_target(path, verb="修改")
 
     def resolve_readable_file(self, path: str) -> Path:
         """解析只读文件路径，并拦下敏感文件。
@@ -154,6 +174,7 @@ class SecurityPolicy:
         """
         resolved = self.resolve_path(path)
         self._reject_sensitive(resolved, verb="修改")
+        self.require_side_effect_target(resolved)
         if not resolved.is_file():
             raise SecurityError(f"目标文件不存在或不是普通文件：{resolved.as_posix()}")
         return resolved
@@ -166,6 +187,7 @@ class SecurityPolicy:
         """
         resolved = self.resolve_path(path)
         self._reject_sensitive(resolved, verb="写入")
+        self.require_side_effect_target(resolved)
         return resolved
 
     # ------------------------------------------------------------------ 工具分类
@@ -187,19 +209,56 @@ class SecurityPolicy:
         if tool_name in SHELL_TOOLS:
             return self._classify_shell(args)
         if tool_name in ALWAYS_APPROVAL_TOOLS:
+            concern = self._external_side_effect_decision(
+                str(args.get("path", "")), verb="删除"
+            )
+            if concern is not None:
+                return concern
             return SafetyDecision(
                 allowed=False,
                 requires_approval=True,
-                reason=(
-                    f"{tool_name} 属于强制审批动作，本版本尚未接入审批流程（T10），"
-                    "因此不会执行删除"
-                ),
+                reason=f"{tool_name} 属于强制审批动作，必须人工批准后才执行",
             )
         return SafetyDecision(
             allowed=False,
             requires_approval=False,
             reason=f"工具 {tool_name} 尚未接入或不在放行清单内",
         )
+
+    def _external_side_effect_decision(
+        self, path: str, *, verb: str
+    ) -> SafetyDecision | None:
+        """工作区外副作用与受保护目标的统一判定；``None`` 表示按常规规则继续判。
+
+        - 受保护目标（根目录、主目录、Git 元数据、系统关键目录）→ **硬拒绝**，不可审批；
+        - 工作区外的普通目标 → 强制人工审批，且不参与免审白名单；
+        - 工作区内目标 → ``None``，交给各工具自己的风险规则。
+        """
+        if not path.strip():
+            # 没给路径（或空串）：交给工具自身的解析去报错，这里不抢先判定，
+            # 否则"只按文本判定"的调用（例如只传 old_text/new_text）会被误判为缺路径。
+            return None
+        try:
+            target = self.resolve_path(path)
+        except WorkspaceBoundaryError as exc:
+            return SafetyDecision(allowed=False, requires_approval=False, reason=str(exc))
+        reason = protected_target_reason(target)
+        if reason:
+            return SafetyDecision(
+                allowed=False,
+                requires_approval=False,
+                reason=f"禁止{verb}受保护目标（{reason}）：{target.as_posix()}",
+            )
+        if self.is_external(target):
+            return SafetyDecision(
+                allowed=False,
+                requires_approval=True,
+                reason=(
+                    f"工作区外路径：{target.as_posix()}；{verb}工作区外目标必须人工审批"
+                    "（架构 §1.5）"
+                ),
+            )
+        return None
 
     def _classify_edit(self, args: Mapping[str, Any]) -> SafetyDecision:
         old_text = args.get("old_text")
@@ -208,6 +267,9 @@ class SecurityPolicy:
             return SafetyDecision(
                 allowed=False, requires_approval=False, reason="edit_file 缺少 old_text 或 new_text"
             )
+        concern = self._external_side_effect_decision(str(args.get("path", "")), verb="修改")
+        if concern is not None:
+            return concern
         changed_lines = count_changed_lines(old_text, new_text)
         limit = self.security.large_edit.max_changed_lines_without_approval
         if changed_lines > limit:
@@ -226,11 +288,14 @@ class SecurityPolicy:
         )
 
     def _classify_write(self, args: Mapping[str, Any]) -> SafetyDecision:
+        concern = self._external_side_effect_decision(str(args.get("path", "")), verb="写入")
+        if concern is not None:
+            return concern
         if args.get("overwrite"):
             return SafetyDecision(
                 allowed=False,
                 requires_approval=True,
-                reason="覆盖已有文件需要人工审批（T10）",
+                reason="覆盖已有文件需要人工审批",
             )
         return SafetyDecision(
             allowed=True, requires_approval=False, reason="创建新文件，未覆盖任何已有内容"
@@ -253,7 +318,18 @@ class SecurityPolicy:
             cwd=str(args.get("cwd") or "."),
             timeout_seconds=as_int(args.get("timeout_seconds")),
             env_keys=env_keys,
+            allow_external_cwd=self.allow_external_paths,
         )
+        if plan.cwd is not None and self.is_external(plan.cwd):
+            # 工作区外 cwd 不受免审白名单影响：必须人工批准（架构 §1.5）
+            return SafetyDecision(
+                allowed=False,
+                requires_approval=True,
+                reason=(
+                    f"工作区外工作目录（{plan.cwd.as_posix()}）：{plan.reason}；"
+                    "必须人工审批"
+                ),
+            )
         return SafetyDecision(
             allowed=plan.allowed,
             requires_approval=plan.requires_approval,

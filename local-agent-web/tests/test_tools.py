@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from local_agent.config import DEFAULT_SHELL_TIMEOUT_SECONDS, AppConfig, ConfigError
+from local_agent.config import DEFAULT_SHELL_TIMEOUT_SECONDS, AppConfig
 from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
 from local_agent.security import shell_guard
 from local_agent.security.approval import action_fingerprint
@@ -84,7 +84,8 @@ def test_list_dir_truncates_at_max_entries(tmp_path: Path, policy: SecurityPolic
 
     result = list_dir_entries(".", policy=policy, max_entries=2)
 
-    assert result.total_entries == 5
+    # 有界枚举：最多读"额度 + 1"项，所以 total_entries 是"已枚举到的条数"，不再是目录真总数
+    assert result.total_entries == 3
     assert len(result.entries) == 2
     assert result.truncated
     assert "截断" in (result.note or "")
@@ -206,6 +207,149 @@ def test_read_file_blocks_secret_files(tmp_path: Path, policy: SecurityPolicy) -
     assert "sk-real" not in str(excinfo.value)
 
 
+def _counting_iterdir(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
+    """统计 ``Path.iterdir()`` 实际产出的条目：验证"枚举"有界，而不仅是返回值有界。"""
+    seen: list[Path] = []
+    original = Path.iterdir
+
+    def counting(self: Path):
+        for child in original(self):
+            seen.append(child)
+            yield child
+
+    monkeypatch.setattr(Path, "iterdir", counting)
+    return seen
+
+
+def test_list_dir_stops_early_at_entry_limit(
+    tmp_path: Path, policy: SecurityPolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """大目录：只读"额度 + 1"项就停，既不遍历整棵树也不枚举整个目录（复审要求）。"""
+    for index in range(40):
+        (tmp_path / f"f{index:02d}.txt").write_text("x", encoding="utf-8", newline="")
+    deep = tmp_path / "deep"
+    deep.mkdir()
+    (deep / "deep.txt").write_text("x", encoding="utf-8", newline="")
+    seen = _counting_iterdir(monkeypatch)
+
+    result = list_dir_entries(".", policy=policy, recursive=True, max_entries=5)
+
+    assert len(result.entries) == 5
+    assert result.total_entries == 5  # 没有继续枚举，所以"总数"就是已枚举到的条数
+    assert result.truncated and result.note is not None
+    assert "未继续遍历" in result.note
+    assert "deep.txt" not in "|".join(str(entry) for entry in result.entries)
+    assert len(seen) <= 6  # 40 个条目里最多读"额度 + 1"项
+
+
+def test_list_dir_non_recursive_also_bounds_enumeration(
+    tmp_path: Path, policy: SecurityPolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """非递归分支同样有界：目录很大也不会先把整个目录枚举出来（复审要求）。"""
+    for index in range(40):
+        (tmp_path / f"f{index:02d}.txt").write_text("x", encoding="utf-8", newline="")
+    seen = _counting_iterdir(monkeypatch)
+
+    result = list_dir_entries(".", policy=policy, max_entries=5)
+
+    assert len(result.entries) == 5
+    assert result.truncated
+    assert len(seen) <= 6
+
+
+def test_list_dir_does_not_descend_past_depth_limit(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """不进入 ``MAX_RECURSIVE_DEPTH`` 以下的层级，且明确告知被省略（复审要求）。"""
+    current = tmp_path
+    for level in range(1, MAX_RECURSIVE_DEPTH + 2):
+        current = current / f"l{level}"
+        current.mkdir()
+        (current / f"file-{level}.txt").write_text("x", encoding="utf-8", newline="")
+
+    result = list_dir_entries(".", policy=policy, recursive=True, max_entries=500)
+
+    rendered = "|".join(str(entry) for entry in result.entries)
+    assert f"file-{MAX_RECURSIVE_DEPTH}.txt" in rendered
+    assert f"file-{MAX_RECURSIVE_DEPTH + 1}.txt" not in rendered
+    # 超深目录**本身**也不该出现在结果里（与提示口径一致）
+    assert f"l{MAX_RECURSIVE_DEPTH + 1}" not in rendered
+    assert result.note is not None and "递归深度超过" in result.note
+
+
+def _link_directory(link: Path, target: Path) -> bool:
+    """尽量创建指向 ``target`` 的目录链接：先试符号链接，Windows 上退回 Junction。
+
+    Junction（``mklink /J``）不需要管理员或开发者模式，这样主开发平台不会总是跳过该用例。
+    """
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError):
+        pass
+    if os.name == "nt":
+        import subprocess
+
+        completed = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0 and link.exists():
+            return True
+    return False
+
+
+def test_list_dir_does_not_follow_directory_links_outside_workspace(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """T14C 复审：严格模式递归列目录不得跟着目录符号链接/Junction 越出工作区。
+
+    关键是场景要塞对：``outside`` 必须是 **workspace 的兄弟目录**，否则它本来就在工作区内，
+    遍历它是合法行为。只看 ``is_symlink()`` 也不够：Windows Junction 未必被识别为符号链接，
+    所以实现必须在入栈前解析真实目标并确认仍位于本次列举根目录内。
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("外部机密", encoding="utf-8", newline="")
+    policy = SecurityPolicy.from_config(app_config, workspace_root=workspace, environ={})
+    link = workspace / "link"
+    if not _link_directory(link, outside):
+        pytest.skip("当前环境无法创建目录链接（符号链接需权限，Junction 也失败）")
+
+    result = list_dir_entries(".", policy=policy, recursive=True)
+
+    rendered = "|".join(str(entry) for entry in result.entries)
+    assert "secret.txt" not in rendered  # 外部的名字/大小/时间都不能泄露
+    assert "link" in rendered  # 链接本身仍是工作区内的一项
+
+
+def test_delete_hard_rejected_target_does_not_scan_or_fingerprint(
+    tmp_path: Path, app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T14C 复审：硬拒绝的删除立即失败——不算动作指纹、不描述目标（两者都会遍历目录）。"""
+    config = _config_with_workspace(app_config, allow_external_paths=True)
+    policy = SecurityPolicy.from_config(config, workspace_root=tmp_path, environ={})
+    calls: list[str] = []
+    monkeypatch.setattr(
+        file_tools,
+        "action_fingerprint",
+        lambda *args, **kwargs: calls.append("fingerprint") or "stub",
+    )
+    monkeypatch.setattr(
+        file_tools, "_describe_target", lambda *args, **kwargs: calls.append("describe") or ""
+    )
+
+    with pytest.raises(SecurityError) as excinfo:
+        delete_file_target(Path.home().as_posix(), policy=policy, recursive=True)
+
+    assert "受保护目标" in str(excinfo.value)
+    assert calls == []
+
+
 def test_read_file_rejects_outside_path(tmp_path: Path, policy: SecurityPolicy) -> None:
     with pytest.raises(WorkspaceBoundaryError):
         read_file_content("../outside.txt", policy=policy)
@@ -216,11 +360,42 @@ def test_read_file_reports_missing_file(tmp_path: Path, policy: SecurityPolicy) 
         read_file_content("nope.txt", policy=policy)
 
 
-def test_policy_refuses_external_paths_flag(tmp_path: Path, app_config: AppConfig) -> None:
+def test_external_paths_flag_allows_only_absolute_targets(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """T14C：打开 allow_external_paths 只放行**显式绝对路径**的外部目标，副作用仍需审批。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    note = outside / "note.txt"
+    note.write_text("外部内容", encoding="utf-8")
     config = _config_with_workspace(app_config, allow_external_paths=True)
+    policy = SecurityPolicy.from_config(config, workspace_root=workspace, environ={})
 
-    with pytest.raises(ConfigError):
-        SecurityPolicy.from_config(config, workspace_root=tmp_path, environ={})
+    # 只读：绝对路径的外部目标放行，并且能被识别为"外部"
+    assert policy.resolve_readable_file(str(note)).read_text(encoding="utf-8") == "外部内容"
+    assert policy.is_external(note)
+    assert not policy.is_external(workspace / "inside.txt")
+
+    # `~` 与相对路径逃逸不能当作外部路径放行
+    for raw in ("~/x.txt", "../outside/note.txt"):
+        with pytest.raises(WorkspaceBoundaryError):
+            policy.resolve_path(raw)
+
+    # 外部副作用必须人工审批（不能因为"新建文件"就免审）
+    decision = policy.classify_tool("write_file", {"path": str(note), "content": "改"})
+    assert decision.requires_approval and not decision.allowed
+    assert "工作区外" in decision.reason
+
+    # 受保护目标（当前用户主目录）即使批准也不执行
+    with pytest.raises(SecurityError):
+        policy.resolve_writable_path(str(Path.home()))
+
+    # 严格模式（默认配置）下同一个绝对外部路径直接拒绝
+    strict = SecurityPolicy.from_config(app_config, workspace_root=workspace, environ={})
+    with pytest.raises(WorkspaceBoundaryError):
+        strict.resolve_path(str(note))
 
 
 # --------------------------------------------------------------------------- 工具包装

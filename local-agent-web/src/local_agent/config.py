@@ -140,7 +140,13 @@ class EmbeddingConfig(_StrictModel):
 
 
 class WorkspaceConfig(_StrictModel):
-    """工作区边界；相对路径以启动进程的当前目录为准。"""
+    """工作区边界（架构 §1.5）；相对路径以**当前会话绑定的工作区**为根。
+
+    ``root`` 只是启动默认值：T14C 起网页可以选择工作区并随会话保存，每个会话只绑定一个
+    工作区。``allow_external_paths`` 打开的是"**显式绝对路径**的受控外部访问"，不是关闭安全
+    校验：``~``、相对路径逃逸与 Windows 盘符相对路径仍被拒绝，外部副作用一律人工审批，
+    根目录/主目录/系统目录/ Git 元数据即使用户批准也不执行。
+    """
 
     root: str = "."
     allow_external_paths: bool = False

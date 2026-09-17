@@ -21,6 +21,7 @@ from langchain_core.tools import BaseTool, tool
 from local_agent.exceptions import SecurityError
 from local_agent.security.approval import action_fingerprint
 from local_agent.security.diff_guard import build_unified_diff, count_changed_lines
+from local_agent.security.path_guard import assert_not_protected_target, is_within
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.result_types import (
     DeleteFileResult,
@@ -50,11 +51,11 @@ def list_dir_entries(
     """列出目录项。
 
     Args:
-        path: 相对工作区根目录的路径或绝对路径，必须位于工作区内。
+        path: 相对工作区根目录的路径或绝对路径；配置允许时可使用显式绝对的外部路径。
         policy: 安全策略，负责边界与敏感文件判定。
         recursive: 是否递归列出子目录，最多 :data:`MAX_RECURSIVE_DEPTH` 层。
         include_hidden: 是否包含以点开头的隐藏项。
-        max_entries: 最多返回多少条。
+        max_entries: 最多返回多少条；**达到上限即停止遍历**，不会先走完整棵树。
 
     Returns:
         目录项列表、总数与截断标记。
@@ -68,26 +69,62 @@ def list_dir_entries(
 
     candidates: list[Path] = []
     depth_limited = False
+    truncated = False
     if recursive:
-        for candidate in sorted(resolved.rglob("*")):
-            if not include_hidden and _is_hidden_relative(candidate, resolved):
-                continue
-            if _depth(candidate, resolved) > MAX_RECURSIVE_DEPTH:
-                depth_limited = True
-                continue
-            candidates.append(candidate)
+        # 有界遍历：显式栈逐层展开，达到条目上限或深度上限**立即停止**；每一层也只读"剩余
+        # 额度 + 1"项再排序，不先枚举整个目录。否则在大目录（尤其外部盘符/主目录）上会遍历
+        # 整棵树、占满内存并长时间无响应，配置里的上限就不是真正的执行限制。
+        stack: list[tuple[Path, int]] = [(resolved, 0)]
+        while stack and not truncated:
+            current, depth = stack.pop()
+            raw, stream_stopped = _bounded_children(current, max_entries - len(candidates))
+            if stream_stopped:
+                truncated = True  # 目录里还有没读的条目：结果不完整，必须如实标注
+            for child in sorted(raw):
+                if not include_hidden and child.name.startswith("."):
+                    continue
+                if child.is_dir() and depth + 1 > MAX_RECURSIVE_DEPTH:
+                    # 超深目录**本身**也不进结果，才与"超过 N 层的条目已省略"一致
+                    depth_limited = True
+                    continue
+                candidates.append(child)
+                if len(candidates) >= max_entries:
+                    truncated = True
+                    break
+                if not child.is_dir():
+                    continue
+                # 目录符号链接 / Windows Junction 可能指向工作区外：**入栈前解析真实目标**，
+                # 只有仍位于本次列举的根目录内才继续。只看 ``is_symlink()`` 挡不住 Junction
+                # （它未必被识别为符号链接），严格模式下就会泄露外部目录里的文件名与大小。
+                try:
+                    real = child.resolve(strict=True)
+                except OSError:
+                    continue
+                if not is_within(real, resolved):
+                    continue
+                stack.append((child, depth + 1))
     else:
+        raw, stream_stopped = _bounded_children(resolved, max_entries)
         candidates = [
             candidate
-            for candidate in sorted(resolved.iterdir())
+            for candidate in sorted(raw)
             if include_hidden or not candidate.name.startswith(".")
         ]
+        if stream_stopped:
+            truncated = True
 
     total = len(candidates)
-    entries = [_dir_entry(candidate, resolved, policy.workspace_root) for candidate in candidates[:max_entries]]
+    entries = [
+        _dir_entry(candidate, resolved, policy.workspace_root)
+        for candidate in candidates[:max_entries]
+    ]
 
     notes: list[str] = []
-    if total > max_entries:
+    if truncated:
+        notes.append(
+            f"结果已截断：已达上限，只返回前 {max_entries} 项，未继续遍历剩余目录"
+        )
+    elif total > max_entries:
         notes.append(f"结果已截断：共 {total} 项，只返回前 {max_entries} 项")
     if depth_limited:
         notes.append(f"递归深度超过 {MAX_RECURSIVE_DEPTH} 层的条目已省略")
@@ -112,7 +149,8 @@ def read_file_content(
     """读取工作区内的文本文件。
 
     Args:
-        path: 相对工作区根目录的路径或绝对路径，必须位于工作区内且不是敏感文件。
+        path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，
+            且不是敏感文件。
         policy: 安全策略。
         start_line: 起始行（1 基，含）；省略表示从头开始。
         end_line: 结束行（1 基，含）；省略表示到文件末尾。
@@ -213,14 +251,15 @@ def edit_file_content(
         "new_text": new_text,
         "replace_all": replace_all,
     }
+    # 先解析目标：越界（WorkspaceBoundaryError）、敏感文件与受保护目标（SecurityError）
+    # 必须在看审批之前就失败闭合；判定、指纹与执行三处都用这一个规范化路径（架构 §1.5）。
+    resolved = policy.resolve_writable_file(path)
     decision = policy.classify_tool("edit_file", arguments)
     # 大范围修改属于强制审批动作：只有持有效人工批准（同一次调用 + 指纹一致）才执行
     if not decision.allowed and not policy.is_granted(
         action_fingerprint("edit_file", arguments, policy=policy)
     ):
         raise SecurityError(decision.reason)
-
-    resolved = policy.resolve_writable_file(path)
     data = resolved.read_bytes()
     original = _decode_text(data)
     current_sha256 = hashlib.sha256(data).hexdigest()
@@ -295,7 +334,7 @@ def write_file_content(
     审批动作，在 T10 接入审批前一律拒绝。
 
     Args:
-        path: 工作区内的目标路径。
+        path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，工作区外写入需要人工审批。
         policy: 安全策略。
         content: 文件内容。
         overwrite: 是否允许覆盖已有文件（本版本只用于给出更明确的拒绝原因）。
@@ -308,13 +347,13 @@ def write_file_content(
         SecurityError: 任何安全校验不通过。
     """
     arguments = {"path": path, "content": content, "overwrite": overwrite}
+    # 先解析目标：越界、敏感文件与受保护目标在看审批之前失败闭合（架构 §1.5）
+    resolved = policy.resolve_writable_path(path)
     decision = policy.classify_tool("write_file", arguments)
-    # 覆盖已有文件属于强制审批动作：只有持有效人工批准才执行
+    # 覆盖已有文件与工作区外写入都属于强制审批动作：只有持有效人工批准才执行
     granted = policy.is_granted(action_fingerprint("write_file", arguments, policy=policy))
     if not decision.allowed and not granted:
         raise SecurityError(decision.reason)
-
-    resolved = policy.resolve_writable_path(path)
     overwriting = resolved.exists()
     if overwriting:
         if resolved.is_dir():
@@ -371,12 +410,18 @@ def delete_file_target(
     """
     arguments = {"path": path, "recursive": recursive}
     decision = policy.classify_tool("delete_file", arguments)
+    if not decision.allowed and not decision.requires_approval:
+        # 硬拒绝（受保护目标、越界、敏感文件…）：立即失败，**不算指纹、不描述目标**——
+        # 这两件事都要遍历目标目录，对主目录那种目标会直接卡死（T14C 复审）。
+        raise SecurityError(policy.redact(decision.reason))
+
     fingerprint = action_fingerprint("delete_file", arguments, policy=policy)
     if not policy.is_granted(fingerprint):
-        target = _describe_target(policy.resolve_path(path), recursive)
+        resolved_for_message = policy.resolve_path(path)
+        target = _describe_target(resolved_for_message, recursive)
         detail = f"；原因：{reason}" if reason else ""
         raise SecurityError(
-            f"{decision.reason}。目标：{policy.resolve_path(path).as_posix()}（{target}）{detail}"
+            f"{decision.reason}。目标：{resolved_for_message.as_posix()}（{target}）{detail}"
         )
 
     resolved = policy.resolve_path(path)
@@ -403,11 +448,16 @@ def delete_file_target(
 
 
 def _assert_deletable(path: Path, workspace_root: Path, recursive: bool) -> None:
-    """架构 §6.5：根目录、Git 目录与工作区根目录禁止删除。"""
+    """架构 §6.5、§1.5：工作区根、根/主目录/系统目录与 Git 目录禁止删除。
+
+    这里是**执行前**的复核：即使已经拿到人工批准，受保护目标也照样拒绝（架构 §1.5 的
+    "不可审批目标"），因此判定、指纹与执行三处都以同一个规范化路径为准。
+    """
     if path == _normalized_root(workspace_root):
         raise SecurityError("禁止删除工作区根目录")
     if path.name == ".git" or ".git" in path.parts:
         raise SecurityError("禁止删除 Git 目录")
+    assert_not_protected_target(path, verb="删除")
     if not path.exists():
         raise SecurityError(f"目标不存在：{path.as_posix()}")
     if path.is_dir() and not recursive:
@@ -435,10 +485,10 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
         include_hidden: bool = False,
         max_entries: int = 200,
     ) -> str:
-        """列出工作区内的目录项，返回名称、类型、大小与修改时间。
+        """列出目录项，返回名称、类型、大小与修改时间。
 
         Args:
-            path: 相对工作区根目录的路径或绝对路径，必须位于工作区内。
+            path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径（工作区外操作需要人工审批）。
             recursive: 是否递归列出子目录，最多 5 层。
             include_hidden: 是否包含以点开头的隐藏项。
             max_entries: 最多返回多少条。
@@ -458,10 +508,10 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
         end_line: int | None = None,
         max_chars: int = 50000,
     ) -> str:
-        """读取工作区内某个文本文件的内容，返回内容、编码、Hash 与行数。
+        """读取某个文本文件的内容，返回内容、编码、Hash 与行数。
 
         Args:
-            path: 相对工作区根目录的路径或绝对路径，必须位于工作区内，且不能是密钥文件。
+            path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径（工作区外操作需要人工审批），且不能是密钥文件。
             start_line: 起始行（1 基，含）；省略表示从头开始。
             end_line: 结束行（1 基，含）；省略表示到文件末尾。
             max_chars: 返回内容的最大字符数，超出时截断。
@@ -483,10 +533,10 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
         expected_sha256: str | None = None,
         reason: str = "",
     ) -> str:
-        """用精确字符串替换修改工作区内已有文件，返回变更行数与 unified diff。
+        """用精确字符串替换修改已有文件，返回变更行数与 unified diff。
 
         Args:
-            path: 工作区内的目标文件，必须位于工作区内且不是密钥文件。
+            path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，工作区外修改需要人工审批，且不能是密钥文件。
             old_text: 要被替换的原文片段，必须与文件内容精确一致（含缩进与换行）。
             new_text: 替换后的文本。
             replace_all: 是否替换全部匹配；默认要求 old_text 在文件中唯一。
@@ -505,10 +555,10 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
 
     @tool
     def write_file(path: str, content: str, overwrite: bool = False, reason: str = "") -> str:
-        """在工作区内创建新文件，返回文件 Hash 与大小；不能覆盖已有文件。
+        """创建新文件，返回文件 Hash 与大小；不能覆盖已有文件。
 
         Args:
-            path: 工作区内的目标路径。
+            path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，工作区外写入需要人工审批。
             content: 文件内容。
             overwrite: 是否覆盖已有文件；覆盖属于强制审批动作，本版本会被拒绝。
             reason: 创建原因。
@@ -519,10 +569,10 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
 
     @tool
     def delete_file(path: str, recursive: bool = False, reason: str = "") -> str:
-        """删除工作区内的文件或目录；必须经过人工审批，未获批准时一律拒绝。
+        """删除文件或目录；必须经过人工审批，未获批准时一律拒绝。
 
         Args:
-            path: 工作区内的目标路径。
+            path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，工作区外删除需要人工审批。
             recursive: 是否递归删除目录（删除目录必须显式开启）。
             reason: 删除原因。
         """
@@ -585,16 +635,55 @@ def _create_new_file(path: Path, data: bytes) -> None:
         raise
 
 
+#: 删除目标"影响范围"的扫描上限：这是给用户看的有界摘要，不是精确清点。
+DELETE_IMPACT_SCAN_LIMIT = 500
+
+
+def _bounded_children(directory: Path, limit: int) -> tuple[list[Path], bool]:
+    """读取目录的前 ``limit + 1`` 个条目（**不排序**），返回 ``(条目, 是否还有未读条目)``。
+
+    不能直接 ``sorted(directory.iterdir())``：那会先把整个目录枚举并保存下来再裁剪，条目上限
+    只限制返回数量、挡不住超大目录（外部盘符、用户主目录）的卡顿与内存占用。这里只多读一项
+    用于判断"是否被截断"，随后只对这个小集合排序。
+    """
+    items: list[Path] = []
+    stopped = False
+    try:
+        stream = directory.iterdir()
+        for child in stream:
+            items.append(child)
+            if len(items) > limit:
+                stopped = True
+                break
+    except OSError:  # 不可读的目录按"空目录"处理，不影响其余结果
+        return items, stopped
+    return items, stopped
+
+
 def _describe_target(path: Path, recursive: bool) -> str:
-    """描述删除目标的影响范围（架构 §6.5 要求展示数量与范围）。"""
+    """描述删除目标的影响范围（架构 §6.5 要求展示数量与范围，但有界）。
+
+    目录只做**一次有上限**的扫描（:data:`DELETE_IMPACT_SCAN_LIMIT` 条就停并标"至少"）：这是给
+    用户看的未批准/审批提示，不该为了精确数量遍历整棵目录树（大目录、主目录会卡住，T14C 复审）。
+    """
     if not path.exists():
         return "目标不存在"
     if path.is_file():
         return f"文件，{path.stat().st_size} 字节"
     if not recursive:
         return "目录（未开启递归，不会删除）"
-    files = sum(1 for item in path.rglob("*") if item.is_file())
-    directories = sum(1 for item in path.rglob("*") if item.is_dir())
+    files = 0
+    directories = 0
+    for item in path.rglob("*"):
+        if item.is_dir():
+            directories += 1
+        elif item.is_file():
+            files += 1
+        if files + directories >= DELETE_IMPACT_SCAN_LIMIT:
+            return (
+                f"目录，至少含 {files} 个文件与 {directories} 个子目录"
+                "（已达扫描上限，影响范围为有界摘要；递归删除需要二次确认）"
+            )
     return f"目录，含 {files} 个文件与 {directories} 个子目录（递归删除需要二次确认）"
 
 

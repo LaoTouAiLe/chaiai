@@ -19,7 +19,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 #: 聊天库（Checkpoint + 会话索引）当前代码期望的结构版本（等于最后一个迁移的编号）。
-CHAT_SCHEMA_VERSION = 1
+CHAT_SCHEMA_VERSION = 2
 
 #: 长期记忆库当前代码期望的结构版本。
 LONG_TERM_SCHEMA_VERSION = 1
@@ -93,8 +93,26 @@ CREATE TABLE IF NOT EXISTS task_conclusions (
 CREATE INDEX IF NOT EXISTS idx_task_conclusions_project ON task_conclusions (project_scope);
 """
 
+#: 聊天库 v2（T14C）：把"当前会话"从"每个工作区各一个"改成**整个库唯一**（架构 §10.6）。
+#: 先归一历史多 active，再用部分唯一索引防止复发；工作区列表按 ``workspace_root`` 去重，
+#: 因此补一条索引。``sessions`` 的字段与 v1 完全一致，升级只改数据与索引。
+_CHAT_V2_SQL = """
+UPDATE sessions SET status = 'idle'
+WHERE status = 'active'
+  AND session_id <> (
+      SELECT session_id FROM sessions WHERE status = 'active'
+      ORDER BY updated_at DESC, created_at DESC, session_id DESC LIMIT 1
+  );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_single_active
+    ON sessions (status) WHERE status = 'active';
+CREATE INDEX IF NOT EXISTS idx_sessions_workspace ON sessions (workspace_root);
+"""
+
 #: 聊天库的迁移；(版本号, 该版本的结构变更 SQL)，只允许在末尾追加，不允许改写已发布的版本。
-_CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _SESSIONS_SQL),)
+_CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (1, _SESSIONS_SQL),
+    (2, _CHAT_V2_SQL),
+)
 
 #: 长期记忆库的迁移；规则同上（独立文件、独立版本号）。
 _LONG_TERM_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _LONG_TERM_SQL),)

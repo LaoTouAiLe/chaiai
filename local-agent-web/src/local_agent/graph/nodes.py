@@ -399,9 +399,12 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
         name = call["name"]
         arguments = dict(call.get("args") or {})
         decision = policy.classify_tool(name, arguments)
-        fingerprint = action_fingerprint(name, arguments, policy=policy)
 
         if decision.requires_approval:
+            # 指纹**只在确实要进审批时**才算：它包含删除目标的目录摘要（对目录是递归扫描），
+            # 而硬拒绝的动作（越界、受保护目标、敏感文件…）根本不会进审批，不该为此扫描整棵
+            # 目录树——对用户主目录这类目标会把页面卡死（T14C 复审）。
+            fingerprint = action_fingerprint(name, arguments, policy=policy)
             if find_rejection(history, fingerprint) is not None:
                 # 架构 §5.3：拒绝按动作指纹匹配，模型换一个 tool_call_id 也不能绕开
                 reason = policy.redact(

@@ -71,6 +71,7 @@ def run_shell_command(
         cwd=cwd,
         timeout_seconds=requested_timeout,
         env_keys=env_keys,
+        allow_external_cwd=policy.allow_external_paths,
     )
     if plan.cwd is None:
         # 判定没给出可执行目录（命令为空、cwd 非法、超时超限等）→ 失败闭合
@@ -87,6 +88,11 @@ def run_shell_command(
         },
         policy=policy,
     )
+    if policy.is_external(plan.cwd) and not policy.is_granted(fingerprint):
+        # 执行侧再拦一次：工作区外 cwd 即使被判为免审也不执行（架构 §1.5）
+        raise SecurityError(
+            f"工作区外工作目录（{plan.cwd.as_posix()}）必须人工审批：{plan.reason}"
+        )
     if not plan.allowed and not policy.is_granted(fingerprint):
         raise SecurityError(plan.reason)
 
@@ -155,7 +161,7 @@ def build_shell_tools(policy: SecurityPolicy) -> list[BaseTool]:
         timeout_seconds: int | None = None,
         env_keys: list[str] | None = None,
     ) -> str:
-        """在工作区内执行一条命令，返回退出码、标准输出与错误输出。
+        """执行一条命令，返回退出码、标准输出与错误输出。
 
         命中安全白名单的简单命令（如 `python --version`、`git status`）直接执行；
         管道、重定向、命令替换、带路径的可执行文件与不在白名单内的命令都需要人工批准，
@@ -163,7 +169,7 @@ def build_shell_tools(policy: SecurityPolicy) -> list[BaseTool]:
 
         Args:
             command: 命令字符串。
-            cwd: 相对工作区根目录的执行目录，必须位于工作区内。
+            cwd: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，工作区外工作目录必须人工审批。
             timeout_seconds: 超时秒数；省略时用 `security.shell.default_timeout_seconds`，
                 不得超过同一配置值。
             env_keys: 需要额外透传的环境变量名，禁止密钥类变量名。

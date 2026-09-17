@@ -113,7 +113,16 @@ def _row_to_session(row: tuple[object, ...]) -> Session:
 
 
 class SessionStore:
-    """``sessions`` 表的读写；连接由调用方持有（与 Checkpoint 共用一个库）。"""
+    """``sessions`` 表的读写；连接由调用方持有（与 Checkpoint 共用一个库）。
+
+    T14C 起的语义（架构 §10.6）：
+
+    - ``status=active`` 是**整个库唯一**的当前会话（聊天库 v2 的部分唯一索引兜底），
+      不再"每个工作区各有一个当前会话"；
+    - 会话与工作区一对一绑定：切换工作区 = 切到该工作区的会话或新建一个，绝不改写已有会话的
+      ``workspace_root``（否则同一 Checkpoint 会跨工作区污染 AGENTS、记忆与文件上下文）；
+    - 构造时传入的 ``workspace_root`` 是**启动默认值**（新会话的默认绑定目标），不再是过滤条件。
+    """
 
     def __init__(self, connection: sqlite3.Connection, *, workspace_root: Path) -> None:
         self._connection = connection
@@ -122,14 +131,38 @@ class SessionStore:
 
     # ------------------------------------------------------------------ 查询
 
-    def list_sessions(self) -> list[Session]:
-        """本工作区的会话，按最后活动时间倒序（最近使用的在前面）。"""
-        rows = self._connection.execute(
-            f"SELECT {_COLUMNS} FROM sessions WHERE workspace_root = ? "
-            "ORDER BY updated_at DESC, created_at DESC",
-            (normalize_path(self.workspace_root),),
-        ).fetchall()
+    def list_sessions(self, *, workspace_root: Path | None = None) -> list[Session]:
+        """列出会话，按最后活动时间倒序（最近使用的在前面）。
+
+        Args:
+            workspace_root: 只看该工作区的会话；``None``（默认）列出**库内全部**会话。
+
+        默认列全部是 T14C 的语义变化：当前会话在库内唯一，切换工作区就是切换会话，所以
+        侧栏看到的是整库的会话而不是"当前工作区的会话"。需要按工作区过滤时显式传参。
+        """
+        if workspace_root is None:
+            rows = self._connection.execute(
+                f"SELECT {_COLUMNS} FROM sessions ORDER BY updated_at DESC, created_at DESC"
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                f"SELECT {_COLUMNS} FROM sessions WHERE workspace_root = ? "
+                "ORDER BY updated_at DESC, created_at DESC",
+                (normalize_path(workspace_root),),
+            ).fetchall()
         return [_row_to_session(row) for row in rows]
+
+    def list_workspaces(self) -> list[str]:
+        """已使用过的工作区（规范化路径，去重，最近使用的在前）。
+
+        T14C 起工作区与会话绑定，列表直接从 ``sessions.workspace_root`` 去重生成：不另建表，
+        也不新增 State 字段（架构 §10.6）。
+        """
+        rows = self._connection.execute(
+            "SELECT workspace_root, MAX(updated_at) AS last_used FROM sessions "
+            "GROUP BY workspace_root ORDER BY last_used DESC, workspace_root ASC"
+        ).fetchall()
+        return [str(row[0]) for row in rows]
 
     def get(self, session_id: str) -> Session | None:
         """按 ``session_id`` 取一条记录；不存在返回 ``None``。"""
@@ -139,11 +172,15 @@ class SessionStore:
         return _row_to_session(row) if row is not None else None
 
     def active(self) -> Session | None:
-        """当前会话；没有（例如库是新建的）返回 ``None``。"""
+        """当前会话；没有（例如库是新建的）返回 ``None``。
+
+        T14C 起 ``status='active'`` 表示**整个库内唯一**的当前会话，不再按工作区各算一个；
+        聊天库 v2 迁移加了部分唯一索引保证这一点（架构 §10.6）。
+        """
         row = self._connection.execute(
-            f"SELECT {_COLUMNS} FROM sessions WHERE workspace_root = ? AND status = ? "
+            f"SELECT {_COLUMNS} FROM sessions WHERE status = ? "
             "ORDER BY updated_at DESC LIMIT 1",
-            (normalize_path(self.workspace_root), STATUS_ACTIVE),
+            (STATUS_ACTIVE,),
         ).fetchone()
         return _row_to_session(row) if row is not None else None
 
@@ -196,23 +233,32 @@ class SessionStore:
             thread_id=legacy if adopt else None,
         )
 
-    def create(self, *, title: str | None = None, thread_id: str | None = None) -> Session:
+    def create(
+        self,
+        *,
+        title: str | None = None,
+        thread_id: str | None = None,
+        workspace_root: Path | None = None,
+    ) -> Session:
         """新建会话并切换过去（原来的当前会话变为 ``idle``）。
 
         Args:
             title: 会话名；缺省用 :data:`DEFAULT_TITLE`。
             thread_id: 指定 Checkpoint 恢复键；缺省按 ``thread-<session_id>`` 生成。
+            workspace_root: 新会话绑定的工作区；缺省用本 store 的启动默认工作区。
+                T14C 起一个会话只绑定一个工作区，``project_id`` 由它算出。
 
         Returns:
             新建的会话记录。
         """
+        root = self.workspace_root if workspace_root is None else Path(workspace_root).resolve()
         session_id = uuid4().hex[:12]
         record = Session(
             session_id=session_id,
             thread_id=thread_id or f"thread-{session_id}",
             title=_clean_title(title) if title else DEFAULT_TITLE,
-            workspace_root=normalize_path(self.workspace_root),
-            project_id=self.project_id,
+            workspace_root=normalize_path(root),
+            project_id=project_id_for(root),
             created_at=_now(),
             updated_at=_now(),
             last_checkpoint_id=None,
@@ -248,6 +294,30 @@ class SessionStore:
                 (STATUS_ACTIVE, session_id),
             )
         return self._require(session_id)
+
+    def switch_workspace(self, workspace_root: Path, *, title: str | None = None) -> Session:
+        """把当前会话切到指定工作区：该工作区已有会话就切过去，否则新建一个。
+
+        归一化（``resolve()`` 真实路径解析）后比较，避免 Windows 大小写、分隔符、尾部分隔符
+        或可解析的符号链接入口产生重复的工作区身份（架构 §1.5）。会话只绑定一个工作区，
+        所以这里**不会**改写已有会话的 ``workspace_root``。
+
+        Args:
+            workspace_root: 目标工作区目录。
+            title: 新建会话时的名字（已有会话时忽略）。
+
+        Returns:
+            切换后的当前会话。
+        """
+        root = Path(workspace_root).resolve()
+        row = self._connection.execute(
+            f"SELECT {_COLUMNS} FROM sessions WHERE workspace_root = ? "
+            "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+            (normalize_path(root),),
+        ).fetchone()
+        if row is not None:
+            return self.switch(_row_to_session(row).session_id)
+        return self.create(title=title, workspace_root=root)
 
     def rename(self, session_id: str, title: str) -> Session:
         """重命名会话（不改变最后活动时间）。"""
@@ -294,8 +364,11 @@ class SessionStore:
         return record
 
     def _deactivate_all(self) -> None:
-        """把本工作区的所有会话置为 ``idle``（保证当前会话唯一）。"""
+        """把库内所有会话置为 ``idle``（T14C 起当前会话在整个库内唯一，架构 §10.6）。
+
+        同一事务里"先停用旧记录、再激活目标记录"，与聊天库 v2 的部分唯一索引一起保证
+        ``active`` 不会同时出现两条。
+        """
         self._connection.execute(
-            "UPDATE sessions SET status = ? WHERE workspace_root = ?",
-            (STATUS_IDLE, normalize_path(self.workspace_root)),
+            "UPDATE sessions SET status = ? WHERE status = ?", (STATUS_IDLE, STATUS_ACTIVE)
         )

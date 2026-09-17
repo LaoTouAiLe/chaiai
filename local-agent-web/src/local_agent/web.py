@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -46,6 +47,7 @@ from local_agent.ui.renderer import (
     render_message,
     render_model_status,
     render_session_sidebar,
+    render_workspace_picker,
 )
 
 DEFAULT_CONFIG_PATH = config_module.DEFAULT_CONFIG_PATH
@@ -138,12 +140,17 @@ def run_chat_turn(
 
     Returns:
         状态值字典（``messages``、``tool_results``、``final_response`` 等）。
+
+    本轮工作区由 :func:`turn_workspace` 决定（会话绑定；关闭短期记忆时用页面临时选择），
+    调用方**不能**覆盖——否则 A 的 Checkpoint 可能跑在 B 的工作区上，污染 AGENTS、记忆作用域
+    与文件上下文（架构 §10.6）。
     """
+    turn_root = turn_workspace(app, session_id=session_id, thread_id=thread_id)
     context = builder.build_runtime_context(
         app_config=app.app_config,
         model_adapter=app.model,
-        workspace_root=app.workspace_root,
-        current_cwd=Path.cwd(),
+        workspace_root=turn_root,
+        current_cwd=turn_root,
         model_capabilities=app.capabilities,
         request_id=uuid4().hex,
     )
@@ -185,18 +192,26 @@ def thread_interrupt(app: ChatApp, thread_id: str) -> dict[str, Any] | None:
 
 
 def resume_turn(
-    app: ChatApp, *, thread_id: str, resume_value: Mapping[str, Any]
+    app: ChatApp,
+    *,
+    thread_id: str,
+    resume_value: Mapping[str, Any],
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """按人工决策恢复图（``Command(resume=...)``）。
 
     只在存在挂起审批、且用户明确点击按钮时调用：按钮双击不会重复执行，
     因为恢复之后图不再处于挂起状态。
+
+    恢复同样以**当前会话的工作区**构造 RuntimeContext，且同样不允许调用方覆盖：在工作区 A
+    挂起的审批，切到 B 再回 A 时，判定、指纹与执行仍以 A 为根目录（架构 §1.5、§10.6）。
     """
+    turn_root = turn_workspace(app, session_id=session_id, thread_id=thread_id)
     context = builder.build_runtime_context(
         app_config=app.app_config,
         model_adapter=app.model,
-        workspace_root=app.workspace_root,
-        current_cwd=Path.cwd(),
+        workspace_root=turn_root,
+        current_cwd=turn_root,
         model_capabilities=app.capabilities,
         request_id=uuid4().hex,
     )
@@ -229,8 +244,125 @@ def thread_checkpoint_id(app: ChatApp, thread_id: str) -> str | None:
     return str(value) if value else None
 
 
+#: 关闭短期记忆时的页面临时工作区（``st.session_state`` 的键，架构 §10.6）。
+PAGE_WORKSPACE_KEY = "workspace"
+
+
+def verify_workspace(path: Path) -> Path:
+    """校验工作区目录**仍然**存在、是目录且可访问（架构 §1.5、§10.6）。
+
+    每一轮运行前都要过这里：页面只检查 ``is_dir()`` 挡不住直接调用 ``run_chat_turn`` /
+    ``resume_turn`` 的路径。POSIX 上目录还需要 ``X_OK``——没有执行位就进不去、也遍历不了。
+
+    Raises:
+        SessionStoreError: 目录不存在、不是目录或当前进程不可访问。
+    """
+    try:
+        resolved = Path(path).resolve(strict=True)
+    except OSError as exc:
+        raise SessionStoreError(f"当前工作区不存在或无法访问：{Path(path).as_posix()}") from exc
+    if not resolved.is_dir():
+        raise SessionStoreError(f"当前工作区不是目录：{resolved.as_posix()}")
+    required = os.R_OK | (os.X_OK if os.name != "nt" else 0)
+    if not os.access(resolved, required):
+        raise SessionStoreError(f"当前工作区不可访问（需要读取与进入权限）：{resolved.as_posix()}")
+    return resolved
+
+
+def _page_workspace_value() -> str | None:
+    """读取页面临时工作区；没有脚本上下文（直接函数调用/测试）时返回 ``None``。"""
+    try:
+        value = st.session_state.get(PAGE_WORKSPACE_KEY)
+    except Exception:  # noqa: BLE001 — 无 ScriptRunContext 时按"未选择"处理
+        return None
+    return value if isinstance(value, str) and value else None
+
+
+def temporary_workspace(default: Path) -> Path:
+    """关闭短期记忆时的页面临时工作区：只在本页面生命周期内有效（架构 §10.6）。
+
+    页面上选过的目录失效就回到配置默认值；**默认值同样要过校验**——配置目录被删或失去权限时
+    也不能带着失效工作区进 Graph（架构 §1.5 的"每轮校验工作区"）。两处都不可用时抛错，
+    由调用方（页面）提示用户换工作区。
+
+    Raises:
+        SessionStoreError: 页面临时选择与配置默认值都不可用。
+    """
+    value = _page_workspace_value()
+    if value:
+        try:
+            return verify_workspace(Path(value))
+        except SessionStoreError:
+            pass  # 选过的目录已失效 → 回退到默认值，下面一起校验
+    return verify_workspace(default)
+
+
+def turn_workspace(app: ChatApp, *, session_id: str | None, thread_id: str) -> Path:
+    """本轮使用的工作区（架构 §10.6）。
+
+    - 启用会话索引：由会话绑定决定，**不接受调用方覆盖**；并且必须校验 ``session_id`` 存在、
+      且 ``record.thread_id == thread_id``。否则可以拿 A 会话的 Checkpoint 在 B 的工作区里跑，
+      污染 AGENTS、记忆作用域与文件上下文。
+    - 关闭短期记忆：用页面临时工作区（没有选过时是配置的启动默认值）。
+
+    Raises:
+        SessionStoreError: 会话不存在、会话与线程不匹配，或工作区目录不可用。
+    """
+    store = app.sessions
+    if store is None:
+        return temporary_workspace(app.workspace_root)
+    if not session_id:
+        raise SessionStoreError("启用会话索引时必须提供 session_id（工作区由会话绑定）")
+    record = store.get(session_id)
+    if record is None:
+        raise SessionStoreError(f"会话不存在：{session_id}")
+    if record.thread_id != thread_id:
+        raise SessionStoreError(
+            f"会话与线程不匹配：会话 {session_id} 绑定 {record.thread_id}，"
+            f"本次运行的是 {thread_id}；切换工作区必须切换或新建会话（架构 §10.6）"
+        )
+    return verify_workspace(Path(record.workspace_root))
+
+
+def workspace_options(store: SessionStore) -> list[str]:
+    """已使用的工作区（去重、最近使用在前；架构 §10.6 的两级展示）。"""
+    return store.list_workspaces()
+
+
+def validate_workspace(raw_path: str) -> Path:
+    """校验用户输入的工作区目录：必须是**原始输入即绝对路径**、存在、是目录、可访问。
+
+    判定绝对路径在展开 ``~`` 之前做，因此 ``~`` 与相对路径都会被拒（与文案一致）；
+    非法输入只提示，**不切换会话**——不能把当前会话弄丢（架构 §1.5）。
+
+    Raises:
+        SessionStoreError: 路径为空、非绝对路径，或 :func:`verify_workspace` 的任一条件不满足。
+    """
+    text = raw_path.strip().strip('"').strip("'")
+    if not text:
+        raise SessionStoreError("请填写工作区绝对路径，例如 E:/projects/demo")
+    if not Path(text).is_absolute():
+        raise SessionStoreError(f"工作区必须是绝对路径：{text}")
+    return verify_workspace(Path(text))
+
+
+def apply_temporary_workspace(app: ChatApp, action: SessionAction) -> None:
+    """关闭短期记忆时切换页面临时工作区：只写 ``session_state``，不落库（架构 §10.6）。"""
+    try:
+        resolved = validate_workspace(action.workspace_path or "")
+    except SessionStoreError as exc:
+        st.error(f"工作区不可用：{exc}")
+        return
+    st.session_state[PAGE_WORKSPACE_KEY] = resolved.as_posix()
+    st.rerun()
+
+
 def session_options(store: SessionStore, active: Session) -> list[SessionOption]:
-    """把会话记录映射成侧栏展示数据（时间按本机时区显示）。"""
+    """把会话记录映射成侧栏展示数据（**只看当前工作区**，时间按本机时区显示）。
+
+    两级展示的下半层：工作区选择器决定当前工作区，这里只列它的会话，避免把多个项目的同名会话
+    平铺混在一起（架构 §10.6）。全库查询能力仍保留在 :meth:`SessionStore.list_sessions`。
+    """
     return [
         SessionOption(
             session_id=record.session_id,
@@ -239,22 +371,28 @@ def session_options(store: SessionStore, active: Session) -> list[SessionOption]
             detail=f"最后活动 {_display_time(record.updated_at)}",
             is_active=record.session_id == active.session_id,
         )
-        for record in store.list_sessions()
+        for record in store.list_sessions(workspace_root=Path(active.workspace_root))
     ]
 
 
 def apply_session_action(store: SessionStore, action: SessionAction) -> None:
     """把侧栏选择落到会话索引；成功后重跑脚本，让页面显示新会话。
 
-    会话索引写入失败（例如名字为空）时只提示，不改动当前会话。
+    会话索引写入失败（例如名字为空）或工作区目录非法时只提示，不改动当前会话。
+    切换工作区复用该工作区最近的会话，没有才新建（架构 §10.6）。
     """
     try:
         if action.kind == "create":
-            store.create()
+            current = store.active()
+            store.create(
+                workspace_root=Path(current.workspace_root) if current is not None else None
+            )
         elif action.kind == "switch" and action.session_id:
             store.switch(action.session_id)
         elif action.kind == "rename" and action.session_id:
             store.rename(action.session_id, action.title or "")
+        elif action.kind == "select_workspace":
+            store.switch_workspace(validate_workspace(action.workspace_path or ""))
     except SessionStoreError as exc:
         st.error(f"会话操作失败：{exc}")
         return
@@ -338,15 +476,41 @@ def main() -> None:
             ),
         )
 
-    # 会话侧栏：先处理用户选择，再按当前会话的 thread_id 读取状态。
+    # 侧栏：启用短期记忆时是"工作区选择器 + 当前工作区的会话列表"；关闭短期记忆时也必须能选
+    # 工作区，只是选择只在本页面生命周期内有效（架构 §10.6）。
     session = current_session(app)
     store = app.sessions if app is not None else None
     if store is not None and session is not None:
-        action = render_session_sidebar(session_options(store, session))
+        action = render_session_sidebar(
+            session_options(store, session),
+            workspaces=workspace_options(store),
+            current_workspace=session.workspace_root,
+        )
         if action is not None:
             apply_session_action(store, action)
             return
+    elif app is not None:
+        action = render_workspace_picker(
+            workspaces=(),
+            current_workspace=temporary_workspace(app.workspace_root).as_posix(),
+        )
+        if action is not None:
+            apply_temporary_workspace(app, action)
+            return
+
     thread_id = session.thread_id if session is not None else DEFAULT_THREAD_ID
+    if app is not None:
+        # 本轮工作区统一在这里校验（页面调用与直接调用同一入口，架构 §1.5）：目录被删/被移走、
+        # 会话与线程不匹配都在跑图之前失败闭合。
+        try:
+            turn_workspace(
+                app,
+                session_id=session.session_id if session is not None else None,
+                thread_id=thread_id,
+            )
+        except SessionStoreError as exc:
+            st.error(f"当前工作区不可用：{exc}；请在上方选择其它工作区，或新建会话。")
+            return
 
     state: dict[str, Any] = (
         thread_state(app, thread_id)
@@ -380,6 +544,7 @@ def main() -> None:
                         app,
                         thread_id=thread_id,
                         resume_value=decision.as_payload(),
+                        session_id=session.session_id if session is not None else None,
                     )
                 except Exception as exc:  # noqa: BLE001 — 页面边界：恢复失败也要给提示
                     detail = config_module.redact_secrets(str(exc), app.secret_values)

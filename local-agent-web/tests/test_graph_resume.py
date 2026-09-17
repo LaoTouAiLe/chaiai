@@ -193,6 +193,162 @@ def test_graph_without_checkpointer_is_stateless(tmp_path: Path) -> None:
     assert _texts(second["messages"]) == ["乙", "human=1"]
 
 
+def test_delete_target_summary_stops_scanning_at_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """删除目标摘要对有上限扫描：大目录不会在展示审批前被整棵遍历（T14C 复审）。"""
+    from local_agent.security import approval as approval_module
+
+    target = tmp_path / "big"
+    target.mkdir()
+    for index in range(10):
+        (target / f"f{index}.txt").write_text("x", encoding="utf-8", newline="")
+    monkeypatch.setattr(approval_module, "DELETE_SUMMARY_SCAN_LIMIT", 3)
+
+    summary = approval_module._delete_target_summary(target.as_posix())
+
+    assert "files:3" in summary
+    assert summary.endswith(",capped")
+
+
+def _external_config(app_config: AppConfig) -> AppConfig:
+    """打开 ``workspace.allow_external_paths`` 的配置（T14C 外部路径用例用）。"""
+    data = app_config.model_dump()
+    data["workspace"]["allow_external_paths"] = True
+    return AppConfig.model_validate(data)
+
+
+def test_external_write_requires_approval_then_executes(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """T14C：工作区外的写入必须人工审批，批准后按同一个规范化目标执行（图级回归）。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "note.txt"
+    graph = builder.build_chat_graph(checkpoint.open_checkpointer(_database(tmp_path)))
+    model = model_factory(
+        decision="tool",
+        reply="好的",
+        tool_calls=[
+            {
+                "name": "write_file",
+                "args": {"path": target.as_posix(), "content": "外部内容"},
+                "id": "call-1",
+            }
+        ],
+    )
+    context = _context_for(workspace, model, _external_config(app_config))
+
+    first = graph.invoke(
+        {"user_input": "写一个工作区外的文件", "thread_id": THREAD},
+        config=_config(THREAD),
+        context=context,
+    )
+
+    assert first["pending_approval"]["tool_name"] == "write_file"
+    assert "工作区外" in first["pending_approval"]["impact_summary"]
+    assert not target.exists()  # 审批之前不执行
+
+    approved = graph.invoke(
+        Command(resume={"decision": "approve"}), config=_config(THREAD), context=context
+    )
+
+    assert target.read_text(encoding="utf-8") == "外部内容"
+    assert [item["decision"] for item in approved["approval_history"]] == ["approve"]
+
+
+def test_external_delete_of_protected_target_is_hard_rejected(
+    tmp_path: Path,
+    model_factory: ModelFactory,
+    app_config: AppConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T14C：受保护目标（当前用户主目录）即使在工作区外也不进审批——直接硬拒绝。
+
+    硬拒绝的动作**不该**计算删除目标摘要：那会对目录做递归扫描，主目录那种规模会直接卡死
+    （T14C 复审）。这里把它换成"一调用就失败"，同时让用例不会真的去扫主目录。
+    """
+    from local_agent.security import approval as approval_module
+
+    def _forbidden(text: str) -> str:
+        raise AssertionError("硬拒绝的动作不该调用 _delete_target_summary（会递归扫描大目录）")
+
+    monkeypatch.setattr(approval_module, "_delete_target_summary", _forbidden)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    home = Path.home()
+    graph = builder.build_chat_graph(checkpoint.open_checkpointer(_database(tmp_path)))
+    model = model_factory(
+        decision="tool",
+        reply="好的",
+        tool_calls=[
+            {
+                "name": "delete_file",
+                "args": {"path": home.as_posix(), "recursive": True},
+                "id": "call-1",
+            }
+        ],
+    )
+    context = _context_for(workspace, model, _external_config(app_config))
+
+    result = graph.invoke(
+        {"user_input": "删掉主目录", "thread_id": THREAD},
+        config=_config(THREAD),
+        context=context,
+    )
+
+    assert not result.get("pending_approval")  # 不可审批
+    assert home.is_dir()  # 目标完好
+    results = list(result.get("tool_results") or [])
+    assert results and "受保护目标" in str(results[0])
+
+
+def test_external_shell_cwd_requires_approval(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """T14C：工作区外的 ``run_shell.cwd`` 必须人工审批（图级回归）。
+
+    这里的关键证据是审批原因带"工作区外"——白名单命中也不会让它免审。
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    graph = builder.build_chat_graph(checkpoint.open_checkpointer(_database(tmp_path)))
+    model = model_factory(
+        decision="tool",
+        reply="好的",
+        tool_calls=[
+            {
+                "name": "run_shell",
+                "args": {"command": "python --version", "cwd": outside.as_posix()},
+                "id": "call-1",
+            }
+        ],
+    )
+    context = _context_for(workspace, model, _external_config(app_config))
+
+    first = graph.invoke(
+        {"user_input": "在外部目录里跑个命令", "thread_id": THREAD},
+        config=_config(THREAD),
+        context=context,
+    )
+
+    assert first["pending_approval"]["tool_name"] == "run_shell"
+    assert "工作区外" in first["pending_approval"]["impact_summary"]
+
+    rejected = graph.invoke(
+        Command(resume={"decision": "reject", "reason": "不在外部目录跑"}),
+        config=_config(THREAD),
+        context=context,
+    )
+
+    assert [item["decision"] for item in rejected["approval_history"]] == ["reject"]
+    assert not rejected.get("tool_results")  # 拒绝后不执行
+
+
 def _delete_flow(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> tuple[builder.ChatGraph, dict[str, Any], Path, RuntimeContext, Path]:
@@ -1230,24 +1386,168 @@ def test_new_session_has_own_thread_id_and_switches_active(tmp_path: Path) -> No
     assert stored_second is not None and stored_second.is_active is False
 
 
-def test_sessions_are_scoped_per_workspace(tmp_path: Path) -> None:
-    """同一个库被两个工作区共用时：各自只看得到自己的会话，thread_id 不能撞。"""
+def test_workspace_switching_binds_one_session_per_workspace(tmp_path: Path) -> None:
+    """T14C：会话与工作区一对一绑定，当前会话在整个库内唯一，等价路径不产生新身份。"""
     connection = sqlite3.connect(":memory:")
     migrations.apply_migrations(connection)
-    store_a = SessionStore(connection, workspace_root=tmp_path / "a")
-    store_b = SessionStore(connection, workspace_root=tmp_path / "b")
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    store = SessionStore(connection, workspace_root=root_a)
 
-    session_a = store_a.ensure_active(legacy_thread_id=checkpoint.DEFAULT_THREAD_ID)
-    session_b = store_b.ensure_active(legacy_thread_id=checkpoint.DEFAULT_THREAD_ID)
+    session_a = store.ensure_active(legacy_thread_id=checkpoint.DEFAULT_THREAD_ID)
+    session_b = store.switch_workspace(root_b)
 
-    assert session_a.project_id != session_b.project_id
-    assert session_a.thread_id != session_b.thread_id  # 第二个工作区退回自动生成的键
-    assert [item.session_id for item in store_a.list_sessions()] == [session_a.session_id]
-    assert [item.session_id for item in store_b.list_sessions()] == [session_b.session_id]
-    active_a = store_a.active()
-    active_b = store_b.active()
-    assert active_a is not None and active_a.session_id == session_a.session_id
-    assert active_b is not None and active_b.session_id == session_b.session_id
+    # 不断言 project_id 不同：两个目录可能属于同一个 Git 仓库（甚至同一个仓库外目录），
+    # project_id 由 Git 根决定，可能天然相同；这里要验的是"会话 ⇄ 工作区"的绑定。
+    assert session_a.session_id != session_b.session_id
+    assert session_a.thread_id != session_b.thread_id
+    assert {session_a.workspace_root, session_b.workspace_root} == {
+        root_a.resolve().as_posix(),
+        root_b.resolve().as_posix(),
+    }
+    # 当前会话全库唯一：切到 b 之后 a 自动变为 idle
+    assert len(store.list_sessions()) == 2
+    active = store.active()
+    assert active is not None and active.session_id == session_b.session_id
+
+    # 等价路径（``a/../b``）复用同一个会话，不新建、不产生重复工作区身份
+    same = store.switch_workspace(root_b / ".." / "b")
+    assert same.session_id == session_b.session_id
+    assert len(store.list_sessions()) == 2
+
+    # 切回原工作区复用原会话
+    back = store.switch_workspace(root_a)
+    assert back.session_id == session_a.session_id
+    assert len(store.list_sessions()) == 2
+
+    # 工作区列表从 sessions 去重生成，最近使用的在前
+    assert [Path(item) for item in store.list_workspaces()] == [
+        root_a.resolve(),
+        root_b.resolve(),
+    ]
+
+
+def test_session_lists_are_separated_by_workspace(tmp_path: Path) -> None:
+    """验收 1：A/B 两个工作区的会话不会混在同一列表；全库查询能力仍然保留。"""
+    connection = sqlite3.connect(":memory:")
+    migrations.apply_migrations(connection)
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    store = SessionStore(connection, workspace_root=root_a)
+
+    session_a = store.ensure_active(legacy_thread_id=checkpoint.DEFAULT_THREAD_ID)
+    session_b = store.switch_workspace(root_b)
+
+    assert [item.session_id for item in store.list_sessions(workspace_root=root_a)] == [
+        session_a.session_id
+    ]
+    assert [item.session_id for item in store.list_sessions(workspace_root=root_b)] == [
+        session_b.session_id
+    ]
+    assert {item.session_id for item in store.list_sessions()} == {
+        session_a.session_id,
+        session_b.session_id,
+    }
+
+
+def test_switch_workspace_restores_the_latest_session_of_that_workspace(
+    tmp_path: Path,
+) -> None:
+    """验收 2：切回工作区时恢复它的**最近**会话（而不是该工作区的第一条）。"""
+    connection = sqlite3.connect(":memory:")
+    migrations.apply_migrations(connection)
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    store = SessionStore(connection, workspace_root=root_a)
+
+    older = store.ensure_active(legacy_thread_id=checkpoint.DEFAULT_THREAD_ID)
+    newer = store.create(workspace_root=root_a)
+    # 直接把它的活动时间推到未来：`_now()` 只有秒级精度，同一秒内创建的两条会排不出先后
+    connection.execute(
+        "UPDATE sessions SET updated_at = '2999-01-01T00:00:00+00:00' WHERE session_id = ?",
+        (newer.session_id,),
+    )
+    connection.commit()
+    store.switch_workspace(root_b)
+
+    back = store.switch_workspace(root_a)
+
+    assert back.session_id == newer.session_id
+    assert back.session_id != older.session_id
+    active = store.active()
+    assert active is not None and active.session_id == newer.session_id
+
+
+def test_only_one_active_session_in_the_whole_database(tmp_path: Path) -> None:
+    """验收 3：新建、切会话、切工作区之后，全库始终只有一个 active。"""
+    connection = sqlite3.connect(":memory:")
+    migrations.apply_migrations(connection)
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    store = SessionStore(connection, workspace_root=root_a)
+
+    store.ensure_active(legacy_thread_id=checkpoint.DEFAULT_THREAD_ID)
+    store.create(workspace_root=root_a)
+    store.switch_workspace(root_b)
+    store.create(workspace_root=root_b)
+    store.switch(store.list_sessions(workspace_root=root_a)[0].session_id)
+
+    count = connection.execute(
+        "SELECT COUNT(*) FROM sessions WHERE status = 'active'"
+    ).fetchone()[0]
+    assert count == 1
+    assert len(store.list_sessions()) == 4
+
+
+def test_chat_v2_normalizes_multiple_active_sessions() -> None:
+    """T14C：旧库里的多 active 升级后只留最新一条，并用唯一约束防止复发（架构 §10.6）。"""
+    connection = sqlite3.connect(":memory:")
+    # v1 的会话表结构（升级前的真实形态），故意插入两条 active
+    connection.executescript(
+        """
+CREATE TABLE sessions (
+    session_id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    workspace_root TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_checkpoint_id TEXT,
+    status TEXT NOT NULL DEFAULT 'idle'
+);
+"""
+    )
+    for session_id, updated_at, status in (
+        ("first", "2026-09-01T10:00:00+00:00", "active"),
+        ("second", "2026-09-02T10:00:00+00:00", "active"),
+        ("third", "2026-09-03T10:00:00+00:00", "idle"),
+    ):
+        connection.execute(
+            "INSERT INTO sessions (session_id, thread_id, title, workspace_root, project_id,"
+            " created_at, updated_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, f"thread-{session_id}", session_id, "E:/ws", "pid", updated_at, updated_at, status),
+        )
+
+    assert migrations.apply_migrations(connection) == migrations.CHAT_SCHEMA_VERSION
+
+    remaining = connection.execute(
+        "SELECT session_id FROM sessions WHERE status = 'active'"
+    ).fetchall()
+    assert [row[0] for row in remaining] == ["second"]  # 只保留 updated_at 最新的一条
+
+    with pytest.raises(sqlite3.IntegrityError):
+        connection.execute("UPDATE sessions SET status = 'active' WHERE session_id = 'first'")
+
+    connection.close()
 
 
 def test_rename_validates_title(tmp_path: Path) -> None:

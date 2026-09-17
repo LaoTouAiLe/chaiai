@@ -36,7 +36,11 @@ from local_agent.config import (
     ShellWhitelistEntry,
 )
 from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
-from local_agent.security.path_guard import resolve_within_workspace
+from local_agent.security.path_guard import (
+    protected_target_reason,
+    resolve_target,
+    resolve_within_workspace,
+)
 
 #: 引号**之外**出现任意一个，就说明这不是一条可以直接 argv 执行的命令。
 #: 引号内的同名符号是普通参数内容（例如 ``python -c "import sys; sys.exit(0)"``）。
@@ -147,6 +151,7 @@ def prepare_shell(
     timeout_seconds: int | None = None,
     env_keys: list[str] | None = None,
     platform: str | None = None,
+    allow_external_cwd: bool = False,
 ) -> ShellPlan:
     """解析并判定一条 Shell 命令。
 
@@ -158,6 +163,10 @@ def prepare_shell(
         timeout_seconds: 请求的超时；不得超过配置上限。
         env_keys: 需要额外透传的环境变量名。
         platform: 覆盖平台判定（测试用），默认按配置与当前系统决定。
+        allow_external_cwd: ``workspace.allow_external_paths``；为真时接受**绝对**的外部
+            工作目录（受保护目标仍然硬拒绝）。审批与免审白名单的处理在调用方：判定侧
+            (:meth:`SecurityPolicy.classify_tool`) 与执行侧 (``run_shell_command``) 都要求
+            外部 cwd 必须持有一次性人工批准。
 
     Returns:
         判定结果与执行参数；不抛异常，拒绝原因放在 ``reason``。
@@ -181,11 +190,26 @@ def prepare_shell(
         return ShellPlan(False, False, "命令解析后为空", timeout_seconds=timeout)
 
     try:
-        resolved_cwd = resolve_within_workspace(
-            cwd, base_dir=workspace_root, workspace_root=workspace_root
+        cwd_target = resolve_target(
+            cwd,
+            base_dir=workspace_root,
+            workspace_root=workspace_root,
+            allow_external=allow_external_cwd,
         )
     except WorkspaceBoundaryError as exc:
         return ShellPlan(False, False, f"工作目录不合法：{exc}", timeout_seconds=timeout)
+    resolved_cwd = cwd_target.path
+    if cwd_target.external:
+        # 工作区外工作目录：受保护目标（根目录、主目录、系统目录…）直接拒绝，
+        # 其余由调用方强制审批（架构 §1.5）。
+        protected = protected_target_reason(resolved_cwd)
+        if protected:
+            return ShellPlan(
+                False,
+                False,
+                f"禁止在受保护目标（{protected}）下执行命令：{resolved_cwd.as_posix()}",
+                timeout_seconds=timeout,
+            )
     if not resolved_cwd.is_dir():
         return ShellPlan(
             False,

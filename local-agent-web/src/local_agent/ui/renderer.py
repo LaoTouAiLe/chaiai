@@ -255,6 +255,51 @@ def render_model_status(*, configured: bool, text: str) -> None:
 # --------------------------------------------------------------------------- 会话侧栏
 
 
+def render_workspace_picker(
+    *,
+    workspaces: Sequence[str],
+    current_workspace: str | None,
+    key_prefix: str = "session",
+) -> SessionAction | None:
+    """工作区选择器：已使用工作区列表 + 绝对路径输入（架构 §1.5、§10.6）。
+
+    列表用 ``selectbox`` 而不是单选控件：会话列表仍占着页面上的单选控件，两个同级单选会让
+    用户分不清哪个是"切会话"、哪个是"切工作区"。
+
+    关闭短期记忆时没有持久会话索引，页面仍然渲染它（只传 ``workspaces=()``），选择结果只写在
+    ``st.session_state`` 里，重启回到配置的默认工作区。
+
+    自己负责进侧栏：它既被 :func:`render_session_sidebar` 调用（那里已经在 ``st.sidebar`` 里，
+    嵌套无副作用），也被页面在"关闭短期记忆"分支单独调用——那时没有外层侧栏上下文，不自己进
+    侧栏就会把控件渲染到主区域。
+    """
+    with st.sidebar:
+        st.subheader("工作区")
+        if current_workspace:
+            st.caption(f"当前工作区：{current_workspace}")
+
+        known = list(workspaces)
+        if known:
+            selected = st.selectbox(
+                "已使用的工作区（切换即恢复该工作区的最近会话）",
+                options=known,
+                index=known.index(current_workspace) if current_workspace in known else 0,
+                key=f"{key_prefix}-workspace-pick-{current_workspace or 'none'}-{len(known)}",
+            )
+            if selected and selected != current_workspace:
+                return SessionAction(kind="select_workspace", workspace_path=str(selected))
+
+        typed = st.text_input(
+            "工作区绝对路径",
+            placeholder="例如 E:/projects/demo",
+            help="目录不存在或不可读时只提示，不会改变当前会话。",
+            key=f"{key_prefix}-workspace-path",
+        )
+        if st.button("切换到此工作区", key=f"{key_prefix}-workspace-apply"):
+            return SessionAction(kind="select_workspace", workspace_path=typed)
+    return None
+
+
 @dataclass(frozen=True)
 class SessionOption:
     """侧栏里的一条会话（展示数据由页面层算好，本模块不做业务判断）。"""
@@ -266,7 +311,7 @@ class SessionOption:
     is_active: bool
 
 
-SessionActionKind = Literal["create", "switch", "rename"]
+SessionActionKind = Literal["create", "switch", "rename", "select_workspace"]
 
 
 @dataclass(frozen=True)
@@ -276,24 +321,41 @@ class SessionAction:
     kind: SessionActionKind
     session_id: str | None = None
     title: str | None = None
+    #: ``select_workspace`` 的目标目录（用户输入的原始文本或列表里选中的路径）。
+    workspace_path: str | None = None
 
 
 def render_session_sidebar(
-    options: Sequence[SessionOption], *, key_prefix: str = "session"
+    options: Sequence[SessionOption],
+    *,
+    key_prefix: str = "session",
+    workspaces: Sequence[str] = (),
+    current_workspace: str | None = None,
 ) -> SessionAction | None:
-    """渲染会话侧栏：新建 / 切换（切换即恢复）/ 重命名（架构 §10.6）。
+    """渲染侧栏：**工作区选择器 + 当前工作区的会话列表**（架构 §1.5、§10.6）。
 
     Args:
-        options: 当前工作区的会话列表（含当前会话）。
+        options: **当前工作区**的会话列表（含当前会话）。
         key_prefix: 控件 key 前缀，避免同一页面内多个控件冲突。
+        workspaces: 已使用过的工作区（去重，最近在前）。
+        current_workspace: 当前会话绑定的工作区（规范化路径）。
 
     Returns:
         用户本次做出的选择；没有操作时返回 ``None``。
+
+    两级展示：工作区决定会话列表的展示范围，所以工作区选择器放在上面，且一旦有选择就立即
+    返回（页面层切换成功后会重跑脚本，再渲染新工作区的会话列表）。
 
     控件 key 里带上当前会话与选项数量：新建或切换后 key 变化，单选控件会按新的
     当前会话重新初始化，不会残留失效的旧值。
     """
     with st.sidebar:
+        workspace_action = render_workspace_picker(
+            workspaces=workspaces, current_workspace=current_workspace, key_prefix=key_prefix
+        )
+        if workspace_action is not None:
+            return workspace_action
+
         st.subheader("会话")
         if st.button("新建会话", key=f"{key_prefix}-new"):
             return SessionAction(kind="create")

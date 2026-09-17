@@ -278,12 +278,19 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 - 关键接口：memory_refs 按架构 §4.2 覆盖并去重；memory.medium_term.* 按 §8；显式使用 T14A 的 Embedding 适配器。Chroma 的具体构造参数、自定义 Embedding 协议、距离语义和 collection 元数据读写方式在锁定版本后核实，以契约测试固定。
 - 前置：T14A。验收：`python -m pytest tests/test_memory.py tests/test_router.py`；自动测试使用假 Embedding 且不访问网络；相关问题召回，跨项目/过期/低分记忆不召回，关闭时节点透传，Prompt 不超预算；`min_score` 使用“越大越相关”的统一分数；collection 的 provider、模型、维度、归一化或距离度量不匹配时拒绝复用并提示重建；§2 命令通过。手动验收使用本地中文模型时，中文近义内容排在无关内容之前。
 
+### T14C｜网页工作区选择与外部路径策略（L）
+
+- 目标：允许用户在网页选择运行服务的本机目录作为当前工作区，并在不改变记忆、AGENTS 和 RAG 作用域的前提下，通过 `workspace.allow_external_paths` 受控访问工作区外的显式绝对路径（架构 §1.4–§1.5、§6、§10.6）。
+- 涉及文件：src/local_agent/web.py、src/local_agent/ui/renderer.py、src/local_agent/config.py、src/local_agent/scope.py、src/local_agent/persistence/session_store.py、src/local_agent/persistence/migrations.py、src/local_agent/security/path_guard.py、src/local_agent/security/policy.py、src/local_agent/security/shell_guard.py、src/local_agent/security/approval.py、src/local_agent/tools/file_tools.py、src/local_agent/tools/shell_tools.py、src/local_agent/graph/builder.py、src/local_agent/graph/nodes.py、config.yaml.example、tests/test_web.py、tests/test_tools.py、tests/test_security.py、tests/test_graph_resume.py、README.md。
+- 关键接口：只使用既有 `workspace.root`、`workspace.allow_external_paths`、RuntimeContext 的 `workspace_root` / `current_cwd` 与 sessions.workspace_root/status，不增加 AgentState 字段。`workspace.root` 是启动默认值；页面使用“绝对路径输入框 + 已使用工作区列表”，不引入原生目录选择器依赖。规范化后的工作区与会话绑定，`sessions.status=active` 从 T14C 起表示整个聊天库唯一的当前会话；聊天库迁移将历史多 active 归一为 `updated_at` 最新的一条并增加唯一约束。普通提交与 `Command(resume=...)` 都从当前 Session 取得 `workspace_root`，默认 `current_cwd=workspace_root`，不能继续使用缓存 ChatApp 的启动默认值。相对路径始终以当前工作区解析；允许外部路径时，只有原始输入本身是绝对路径才进入外部路径策略。
+- 前置：T14B。验收：`python -m pytest tests/test_web.py tests/test_tools.py tests/test_security.py tests/test_graph_resume.py`；页面可输入并选择已存在且可读的本机目录，也可从去重后的历史工作区列表切换；非法/无权限目录失败且不改变当前会话。等价路径（Windows 大小写与分隔符、尾部分隔符、可解析的符号链接入口）不得生成重复工作区身份；刷新和重启恢复全局唯一的 active 会话及其工作区，旧库存在多 active 时迁移后只保留最新一条。切换工作区会切换或新建会话，不污染原会话的 AGENTS、`project_id`、记忆召回和工具上下文；在工作区 A 挂起相对路径审批、切到 B、再回 A 恢复时，判定、指纹和执行仍以 A 为根目录。`allow_external_paths=false` 时路径穿越、软链接逃逸和绝对外部路径均被拒绝；设为 `true` 时，原始输入为绝对路径的外部目标可 `list_dir` / `read_file`，但 `~`、相对路径逃逸和 Windows 盘符相对路径仍拒绝。外部 `edit_file`、`write_file`、`delete_file` 与工作区外 `run_shell.cwd` 必须在安全判定、动作指纹和执行三处使用同一规范化目标，进入人工审批且不得命中免审白名单；文件系统/驱动器根、用户主目录根、工作区根、Git 元数据和系统关键目录不可通过审批删除。外部路径不自动加载 AGENTS、不改变作用域、不进入 RAG 索引；页面突出展示外部路径及审批原因。关闭短期记忆时只承诺页面生命周期内选择，服务重启回到 `workspace.root`；§2 命令通过。
+
 ### T15｜长期实体事实 CRUD 与冲突（L）
 
 - 目标：实现 entities/facts/task_conclusions 的写入、查询、更新、版本记录、冲突检测、过期处理及人工删除（架构 §10.3）。
 - 涉及文件：src/local_agent/memory/long_term.py、src/local_agent/memory/schemas.py、src/local_agent/memory/recall.py、src/local_agent/persistence/migrations.py、tests/test_memory.py。
 - 关键接口：表和字段名按架构 §10.3，不新增 AgentState 字段。
-- 前置：T13。验收：`python -m pytest tests/test_memory.py`；同键更新保留版本、冲突不静默覆盖、删除后不召回、跨项目隔离、旧库迁移通过；§2 命令通过。
+- 前置：T14C。验收：`python -m pytest tests/test_memory.py`；同键更新保留版本、冲突不静默覆盖、删除后不召回、跨项目隔离、旧库迁移通过；§2 命令通过。
 
 ### T16｜Prompt 窗口与摘要压缩（M）
 
@@ -379,8 +386,8 @@ embedding:
   local_files_only: false
 
 workspace:
-  root: "."
-  allow_external_paths: false
+  root: "."                    # 启动默认工作区；T14C 后可在网页选择并按会话保存
+  allow_external_paths: false   # false=严格工作区；true=允许受控的显式外部绝对路径
   max_file_size_bytes: 2000000
 
 agents:
@@ -517,7 +524,7 @@ embedding:
 
 - v0.1a：以示例 YAML 为起点，memory.medium_term.enabled、memory.long_term.enabled、memory.compression.enabled、embedding.enabled 均设为 false；rag.enabled 维持 false。llm.api_key_env 指向环境变量名，绝不在 YAML 写入值。security.require_approval 的四项始终为 true；v0.1a 对这些动作固定拒绝，v0.1b 才进入审批。任一项改为 false 应在配置校验时失败。
 - v0.1b：启用网页审批和 sessions 索引，保持记忆/压缩/RAG 关闭；逐项验证 shell.whitelist 的平台与参数结构。
-- v0.2：先配置并验证 embedding provider 再打开 medium_term；默认 `onnx_local`，首次运行允许下载模型，严格离线环境先准备缓存并设置 `local_files_only=true`。long_term 和 compression 可分别打开，关闭任一层仍须可运行。prompt_window_messages 限制 Prompt 窗口而非 Checkpoint 消息数。
+- v0.2：先配置并验证 embedding provider 再打开 medium_term；默认 `onnx_local`，首次运行允许下载模型，严格离线环境先准备缓存并设置 `local_files_only=true`。T14C 后 `workspace.root` 只作为启动默认值，网页选择结果在启用短期记忆时按会话保存；关闭短期记忆时只在当前页面生命周期内生效，服务重启回到配置默认值。`allow_external_paths=false` 保持严格边界，改为 `true` 只允许受控的显式外部绝对路径，外部副作用仍强制审批。long_term 和 compression 可分别打开，关闭任一层仍须可运行。prompt_window_messages 限制 Prompt 窗口而非 Checkpoint 消息数。
 - v0.3：rag.enabled 可选打开；若没有语言解析器或索引损坏，必须给出可见错误或降级检索，不得伪称已检索。
 - 配置缺字段、超出工作区路径、缺少环境变量或模型能力不匹配，在启动/提交时给出可理解的错误；不允许用默认值掩盖危险配置。具体配置键以上方 YAML 为准。
 
@@ -588,6 +595,7 @@ v0.2 安装记忆可选组：`uv sync --extra memory`；v0.3 全功能验收：`
 | 只读/编辑/新建/安全 Shell | T05–T07 | tests/test_tools.py、tests/test_security.py | 实际内容/Hash/退出码与页面一致，刷新无重复副作用 |
 | 删除、覆盖、大改、危险 Shell | T07 拒绝；T10 审批 | tests/test_security.py、tests/test_graph_resume.py | 未批准不执行；批准后目标变化重新审批；递归删除二次确认；拒绝不循环 |
 | Checkpoint 与多会话 | T03；T11 | tests/test_graph_resume.py、tests/test_web.py | 重启恢复，跨会话消息/审批/工具状态不串线 |
+| 工作区选择与外部路径 | T14C | tests/test_web.py、tests/test_tools.py、tests/test_security.py、tests/test_graph_resume.py | 全局当前会话与工作区可恢复；严格模式不可越界；允许模式只接受显式绝对外部路径，外部只读受限、外部副作用强制审批，根/系统目录删除硬拒绝，且不改变 AGENTS/记忆/RAG 作用域 |
 | 模型能力与错误输出 | T09 | tests/test_router.py、tests/test_web.py | 不支持 Tool Calling 不能伪装完成；JSON 错误有界重试 |
 | 本地 Embedding 与模型缓存 | T14A；页面 T19 | tests/test_memory.py（假 Embedding）+ 手动真实模型验收 | 自动测试不联网；首次下载只写显式缓存目录；断网可复用；准备状态与失败原因在 T19 页面可见 |
 | 中长期记忆召回和写入 | T14B–T19 | tests/test_memory.py、tests/test_reflection.py | 普通闲聊不写；闲聊中明确“记住”经反思后可写；仅相关且作用域匹配的已验证记忆进入 Prompt，模型/维度/距离契约不匹配时拒绝旧索引，删除后不召回 |
@@ -600,7 +608,7 @@ v0.2 安装记忆可选组：`uv sync --extra memory`；v0.3 全功能验收：`
 
 ## 11. 关键风险与停止条件
 
-1. **安全失败闭合**（架构 §6、§11.1）：路径穿越、软链接逃逸、Windows/POSIX 命令歧义、审批被跳过，任一复现即阻止阶段交付；仅在隔离临时工作区复现破坏性测试。
+1. **安全失败闭合**（架构 §1.5、§6、§11.1）：路径穿越、软链接逃逸、外部路径被误纳入作用域、Windows/POSIX 命令歧义或审批被跳过，任一复现即阻止阶段交付；仅在隔离临时目录复现外部路径与破坏性测试。
 2. **模型与 API 差异**（架构 §11.7）：兼容端点不等于支持 Tool Calling/严格 JSON/Streaming。T09 之前只承诺已验证模型；探测结果需可见，不能自动“假执行”工具。
 3. **恢复与幂等**（架构 §4.2、§5.3）：刷新、重试和人工审批按钮重复提交可能重放写入/删除/Shell。用事件 ID、Checkpoint 和执行前后证据测试；“副作用已发生但 Checkpoint 未提交”的崩溃窗口无法仅凭 State 保证恰好一次，必须暂停自动重放并要求用户核对。未通过不得开放危险操作。
 4. **记忆污染与召回噪声**（架构 §10、§11.3/§11.6）：写入需来源与反思审核；召回需作用域、相似度、时间和重要度过滤。跨用户/项目串线、已删除记忆再召回、混用不兼容 Embedding 向量或把 Chroma distance 反向当成 score，即停止发布。本地模型下载还需记录来源与锁定版本，缓存损坏不得静默换模型。
@@ -611,7 +619,7 @@ v0.2 安装记忆可选组：`uv sync --extra memory`；v0.3 全功能验收：`
 ## 12. 实施顺序与变更控制
 
 - 严格依 T01→T07 形成可运行 Web 基线；T08/T09 可并行，T10 依赖二者，T11/T12 之后进入记忆。
-- T13 后 T14A/T15 可并行，T14B 依赖 T14A；T16 依赖 T14B，T17 依赖 T16，T18 依赖 T14B/T15/T17，T19 做网页与三层记忆集成。T14A、T14B 各对应一个独立 Conventional Commits 提交和独立验收结果。
+- T13 后按 T14A→T14B→T14C→T15→T16 推进；T17 依赖 T16，T18 依赖 T14B/T15/T17，T19 做网页与三层记忆集成。T14A、T14B、T14C 各对应一个独立 Conventional Commits 提交和独立验收结果。T14C 紧接已完成的 T14B，不推迟到 v0.3 或发布阶段。
 - T20/T21 可并行，T22 依赖 T20，T23 汇总，T24 发布回归。并行任务不能同时修改同一 State/Graph 文件而不协调，合并时重跑全量测试。
 - 修改架构 §4 State、§5 边、§6 工具契约或 §10 存储字段，先改架构文档并说明迁移/兼容策略，再改本开发文档任务和测试；不要在实现中悄悄新增字段或配置键。
 - 每阶段退出前确认文档、配置样例、依赖清单和真实运行结果一致；用户未确认的范围扩张（例如多 Agent、外部 Trace 服务）单独立项，不夹带进任务。
@@ -622,7 +630,7 @@ v0.2 安装记忆可选组：`uv sync --extra memory`；v0.3 全功能验收：`
 |---|---|---|
 | v0.1a | StateGraph 路由、Tool Calling、`add_messages`、Checkpointer、文件/Shell 安全、Web rerun 幂等 | 浏览器读改测录屏、Checkpoint 恢复测试、拒删用例 |
 | v0.1b | `interrupt()` / `Command(resume=...)`、三出口 HITL、事件幂等、模型能力协商、跨平台策略 | 审批拒绝不循环、按钮重复不重放、多会话隔离与能力降级测试 |
-| v0.2 | 短/中/长期记忆分层、向量召回、SQLite 实体、摘要压缩、反思、遗忘 | 跨会话召回与删除测试、压缩前后 Prompt/Checkpoint 对照、反思证据链 |
+| v0.2 | 短/中/长期记忆分层、向量召回、工作区与会话作用域、受控外部路径、SQLite 实体、摘要压缩、反思、遗忘 | 跨会话召回与删除测试、双工作区隔离、外部副作用审批、压缩前后 Prompt/Checkpoint 对照、反思证据链 |
 | v0.3 | Plan-and-Execute、动态重规划、可选代码 RAG/AST、轨迹与评测 | 三步任务恢复演示、RAG 开关对照、固定评测集指标和失败分析 |
 
 简历只陈述已完成且有测试/演示证据的能力；不要把架构预留的多模态、插件、知识蒸馏或未实现的多 Agent 写成已交付功能。
