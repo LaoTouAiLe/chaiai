@@ -23,6 +23,16 @@ from local_agent.context import agents_loader, prompt_context
 from local_agent.exceptions import MemoryStoreError
 from local_agent.graph import builder, nodes, routers
 from local_agent.graph.routers import ROUTE_CLASSIFIER_MARKER, RouteDecision
+
+
+def _assert_usage_adds_up(result: dict[str, Any]) -> None:
+    """``prompt_tokens`` 必须等于各分项之和（``token_budget`` 声明的不变量）。"""
+    usage = result["token_usage"]
+    assert (
+        usage.system_prompt_tokens
+        + usage.window_messages_tokens
+        + usage.tool_definition_tokens
+    ) == usage.prompt_tokens
 from local_agent.graph.state import RuntimeContext
 from local_agent.llm.models import (
     TOOL_CALLING_UNAVAILABLE_REPLY,
@@ -33,6 +43,7 @@ from local_agent.llm.protocol import StructuredOutputError, call_structured
 from local_agent.memory import medium_term
 from local_agent.memory.medium_term import MediumTermHit
 from local_agent.memory.schemas import MemoryReference
+from local_agent.reflection import reflector
 
 ModelFactory = Callable[..., object]
 
@@ -375,18 +386,49 @@ def test_tool_call_is_executed_and_verified(
     )
 
     assert result["mode"] == "tool"
-    assert result["loop_count"] == 2
+    # T17：反思判完成后走 finish，最终回答由反射节点那次不绑定工具的合成调用给出，
+    # 不再回到 planner 再取一次决策（因此只有 1 轮工具循环）
+    assert result["loop_count"] == 1
     assert [event.status for event in result["tool_events"]] == ["ok"]
     assert result["tool_results"][0]["status"] == "ok"
     assert "文件内容甲" in result["tool_results"][0]["output_preview"]
     assert result["reflection_result"].result_trust == "verified"
-    assert result["reflection_result"].goal_achieved is False  # T05 不做完成度判断
+    # T17 起完成度由 LLM 反思判定，但以机械证据为准：这里证据是 verified，允许判完成
+    assert result["reflection_result"].goal_achieved is True
     assert [evidence.verified for evidence in result["final_evidence"]] == [True]
     # 工具结果确实回填给了模型
     assert any("文件内容甲" in prompt for prompt in model.seen_prompts)
     assert any(isinstance(message, ToolMessage) for message in result["messages"])
     assert result["final_response"] == "我读到的是：文件内容甲"
     assert result["task_status"] == "completed"
+
+
+def test_unfinished_tool_task_asks_user_with_visible_question(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """工具被拒 + 反思自称完成 → 被机械压制为 ask_user，页面上必须看到追问而不是空回答。
+
+    复审实测：不补可展示回答时，这条路径会得到 ``final_response=None`` + ``failed``。
+    """
+    model = model_factory(
+        decision="tool",
+        reply="不该走到这里",
+        tool_calls=[{"name": "unknown_tool", "args": {}, "id": "call_1"}],
+        reflection={
+            "goal_achieved": True,
+            "next_action": "finish",
+            "ask_user_reason": "请确认要执行哪个操作",
+        },
+    )
+
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "随便做点什么"}, context=_context_with(tmp_path, model, app_config)
+    )
+
+    assert result["reflection_result"].goal_achieved is False
+    assert result["reflection_result"].next_action == "ask_user"
+    assert result["final_response"] and "请确认要执行哪个操作" in result["final_response"]
+    assert result["task_status"] == "running"  # 未完成不冒充 completed
 
 
 def test_denied_tool_is_reported_back_to_model(
@@ -397,6 +439,8 @@ def test_denied_tool_is_reported_back_to_model(
         decision="tool",
         reply="好的，我无法执行该操作",
         tool_calls=[{"name": "unknown_tool", "args": {}, "id": "call_1"}],
+        # 工具被拒 → 证据等级 failed：反思不得声称完成（架构 §5.4），继续想办法
+        reflection={"goal_achieved": False, "next_action": "continue"},
     )
 
     result = builder.build_chat_graph().invoke(
@@ -420,14 +464,16 @@ def _interrupt_payload(result: dict[str, Any]) -> dict[str, Any]:
     return dict(raw[0].value)
 
 
-def test_loop_limit_stops_the_cycle(
+def test_loop_limit_blocks_continue_on_the_last_round(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
+    """达到上限且反思仍想继续 → 停下来并明确说明（架构 §11.5）。"""
     config = _config_with_agent(app_config, max_tool_loops=1)
     model = model_factory(
         decision="tool",
         reply="不该走到这里",
         tool_calls=[{"name": "list_dir", "args": {"path": "."}, "id": "call_1"}],
+        reflection={"goal_achieved": False, "next_action": "continue"},
     )
 
     result = builder.build_chat_graph().invoke(
@@ -437,6 +483,136 @@ def test_loop_limit_stops_the_cycle(
     assert result["loop_count"] == 1
     assert result["task_status"] == "failed"
     assert result["final_response"] == routers.LOOP_LIMIT_REPLY
+
+
+def test_loop_limit_does_not_block_finish_on_the_last_round(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """上限轮已经拿到 verified + finish：正常终止不能被上限改成"失败"。
+
+    复审实证：原先 ``completion_route`` 先判上限，会把 ``verified + finish`` 改成
+    ``loop_limit + failed``，正常结论在边界轮次丢失。
+    """
+    (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
+    config = _config_with_agent(app_config, max_tool_loops=1)
+    model = model_factory(
+        decision="tool",
+        reply="文件内容是甲",
+        tool_calls=[{"name": "read_file", "args": {"path": "note.txt"}, "id": "call_1"}],
+        reflection={"goal_achieved": True, "next_action": "finish"},
+    )
+
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "读取 note.txt"}, context=_context_with(tmp_path, model, app_config=config)
+    )
+
+    assert result["loop_count"] == 1
+    assert result["reflection_result"].result_trust == "verified"
+    assert result["reflection_result"].next_action == "finish"
+    assert result["final_response"] == "文件内容是甲"
+    assert result["task_status"] == "completed"
+    _assert_usage_adds_up(result)  # 正常合成路径
+
+
+def test_loop_limit_does_not_block_ask_user_on_the_last_round(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """上限轮判定需要用户补充：追问优先于"循环上限失败"。"""
+    config = _config_with_agent(app_config, max_tool_loops=1)
+    model = model_factory(
+        decision="tool",
+        reply="不该走到这里",
+        tool_calls=[{"name": "list_dir", "args": {"path": "."}, "id": "call_1"}],
+        reflection={
+            "goal_achieved": False,
+            "next_action": "ask_user",
+            "ask_user_reason": "请确认要对哪个目录操作",
+        },
+    )
+
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "列出目录"}, context=_context_with(tmp_path, model, app_config=config)
+    )
+
+    assert result["loop_count"] == 1
+    assert result["reflection_result"].next_action == "ask_user"
+    assert result["final_response"] and "请确认要对哪个目录操作" in result["final_response"]
+    assert result["task_status"] == "running"
+
+
+def test_final_synthesis_stays_within_budget_with_large_tool_output(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """工具输出很大时，``finish`` 的收尾合成不能把整段窗口直接发出去。
+
+    复审实证：合成调用发生在工具执行之后，却沿用压缩节点在工具执行**之前**算好的预算快照，
+    也没算指令本身；大输出会让收尾请求超上下文，State 自报的预算也与真实出站 Prompt 不一致。
+    """
+    (tmp_path / "big.txt").write_text("甲" * 8000, encoding="utf-8")
+    model = model_factory(
+        decision="tool",
+        reply="大文件读完了",
+        tool_calls=[{"name": "read_file", "args": {"path": "big.txt"}, "id": "call_1"}],
+        reflection={"goal_achieved": True, "next_action": "finish"},
+    )
+    config = app_config.model_copy(
+        update={
+            "llm": app_config.llm.model_copy(
+                update={"context_window_tokens": 2048, "max_tokens": 1024}
+            )
+        }
+    )
+
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "读大文件"}, context=_context_with(tmp_path, model, config)
+    )
+
+    assert result["final_response"] == "大文件读完了"
+    # 收尾调用发的是"有界证据 + 指令"，不是整段工具输出
+    assert reflector.TOOL_DATA_OPEN in model.seen_prompts[-1]
+    assert "甲" * 3000 not in model.seen_prompts[-1]
+    # State 自报的预算与这次调用对得上，且这次调用真的在预算内（固定上限也不一定放得下）
+    budget = result["context_budget"]
+    assert budget.window_messages == 1
+    assert budget.estimated_prompt_tokens == result["token_usage"].prompt_tokens
+    assert budget.estimated_prompt_tokens <= budget.prompt_budget_tokens
+    _assert_usage_adds_up(result)  # 有界证据路径（指令仍算在系统提示分项里）
+
+
+def test_final_synthesis_skips_the_model_when_the_prompt_does_not_fit(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """连"系统提示 + 指令"都放不下时不发请求：改用确定性摘要并记一条降级事件。"""
+    (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
+    model = model_factory(
+        decision="tool",
+        reply="文件内容是甲",
+        tool_calls=[{"name": "read_file", "args": {"path": "note.txt"}, "id": "call_1"}],
+        reflection={"goal_achieved": True, "next_action": "finish"},
+    )
+    # 预算（1024 − 1000 = 24 token）远小于系统提示本身
+    config = app_config.model_copy(
+        update={
+            "llm": app_config.llm.model_copy(
+                update={"context_window_tokens": 1024, "max_tokens": 1000}
+            )
+        }
+    )
+
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "读文件"}, context=_context_with(tmp_path, model, config)
+    )
+
+    assert result["final_response"]
+    assert "PromptBudgetExceeded" in result["final_response"]
+    assert any(
+        event["stage"] == f"{nodes.REFLECTION_NODE}:final_answer"
+        and "PromptBudgetExceeded" in str(event["message"])
+        for event in result.get("error_events", [])
+    )
+    # 只有第一次决策调用（返回工具调用）打过模型：合成没有发出任何请求
+    assert model.decision_calls == 1
+    _assert_usage_adds_up(result)  # 不调用模型路径（窗口分项为 0）
 
 
 def test_answer_without_tool_calls_has_no_evidence(

@@ -1,6 +1,7 @@
-"""T08 验收：机械证据校验、追加字段去重与副作用不重放。
+"""T08/T17 验收：机械证据校验、LLM 反思决策、追加字段去重与副作用不重放。
 
-全部使用构造出来的 State 与临时工作区，不联网、不调用真实模型。
+T08 覆盖机械校验与幂等；T17 覆盖 LLM 完成度判断、机械压制、结构化输出失败兜底、重试上限与
+计划更新。全部使用构造出来的 State 与临时工作区，不联网、不调用真实模型。
 """
 
 from __future__ import annotations
@@ -9,11 +10,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from langchain_core.messages import AIMessage
+
 from local_agent.config import AppConfig
 from local_agent.graph import builder, nodes
 from local_agent.graph.state import (
     DecisionRecord,
     ErrorEvent,
+    PlanStep,
+    ReflectionResult,
     ToolEvent,
     decision_record_key,
     error_event_key,
@@ -400,3 +405,280 @@ def _runtime(context: Any, state: dict[str, Any]) -> Any:
 
     del state
     return _Runtime(context)
+
+
+# --------------------------------------------------------------------------- T17 反思决策
+
+
+def _tool_result(
+    *, status: str = "ok", preview: str = '{"path": "a.py", "content": "x"}'
+) -> dict[str, Any]:
+    return {
+        "tool_call_id": "c1",
+        "tool_name": "read_file",
+        "status": status,
+        "truncated": False,
+        "output_preview": preview,
+        "output_digest": "d",
+        "run_id": RUN_ID,
+    }
+
+
+def _verified_state(**overrides: Any) -> dict[str, Any]:
+    """读文件成功、机械校验为 ``verified`` 的 State。"""
+    state: dict[str, Any] = {
+        "run_id": RUN_ID,
+        "loop_count": 1,
+        "messages": [],
+        "task_goal": "读取配置文件",
+        "tool_events": [
+            ToolEvent(tool_call_id="c1", tool_name="read_file", status="ok", run_id=RUN_ID)
+        ],
+        "tool_results": [_tool_result()],
+    }
+    state.update(overrides)
+    return state
+
+
+def _failed_state(**overrides: Any) -> dict[str, Any]:
+    """工具被拒（机械校验为 ``failed``）的 State。"""
+    state: dict[str, Any] = {
+        "run_id": RUN_ID,
+        "loop_count": 1,
+        "messages": [],
+        "task_goal": "读取工作区外的文件",
+        "tool_events": [
+            ToolEvent(tool_call_id="c1", tool_name="read_file", status="error", run_id=RUN_ID)
+        ],
+        "tool_results": [_tool_result(status="denied", preview="已拒绝执行 read_file")],
+    }
+    state.update(overrides)
+    return state
+
+
+def test_reflection_follows_llm_decision_when_evidence_is_verified(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": True, "next_action": "finish"}
+    )
+    state = _verified_state(
+        plan=[PlanStep(id="s1", description="读取配置文件", status="running")]
+    )
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    result = update["reflection_result"]
+    assert result.result_trust == "verified"
+    assert result.goal_achieved is True
+    assert result.next_action == "finish"
+    assert [step.status for step in update["plan"]] == ["completed"]
+    assert not update.get("error_events")
+
+
+def test_reflection_suppresses_completion_without_verified_evidence(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """架构 §5.4：证据不足时，模型自称"完成"也不能判完成。"""
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": True, "next_action": "finish"}
+    )
+    state = _failed_state()
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    result = update["reflection_result"]
+    assert result.result_trust == "failed"
+    assert result.goal_achieved is False
+    assert result.next_action == "ask_user"
+    assert any("不能判定完成" in record["summary"] for record in update["decision_trace"])
+
+
+def test_reflection_normalizes_finish_when_goal_not_achieved(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """未达成目标时不允许用 ``finish`` 收尾，统一改为向用户说明。"""
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": False, "next_action": "finish"}
+    )
+    state = _verified_state()
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    assert update["reflection_result"].goal_achieved is False
+    assert update["reflection_result"].next_action == "ask_user"
+    assert any("不能用 finish 收尾" in record["summary"] for record in update["decision_trace"])
+
+
+def test_reflection_falls_back_to_mechanical_conclusion_on_parse_failure(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """结构化输出全部失败：``verified`` → finish，否则 ask_user，并且必须记错误事件。"""
+    verified_state = _verified_state()
+    verified_model = model_factory(decision="tool", fail_reflection=True)
+    verified_update = nodes.reflection_node(
+        verified_state, _runtime(_context(tmp_path, app_config, verified_model), verified_state)
+    )
+
+    assert verified_update["reflection_result"].goal_achieved is True
+    assert verified_update["reflection_result"].next_action == "finish"
+    assert any(
+        "结构化输出失败" in event["message"] for event in verified_update["error_events"]
+    )
+
+    failed_state = _failed_state()
+    failed_model = model_factory(decision="tool", fail_reflection=True)
+    failed_update = nodes.reflection_node(
+        failed_state, _runtime(_context(tmp_path, app_config, failed_model), failed_state)
+    )
+
+    assert failed_update["reflection_result"].goal_achieved is False
+    assert failed_update["reflection_result"].next_action == "ask_user"
+
+
+def test_reflection_stops_retrying_after_the_configured_limit(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": False, "next_action": "retry"}
+    )
+    limit = app_config.agent.max_retries_per_step
+    state = _verified_state(retry_count=limit)
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    assert update["reflection_result"].next_action == "ask_user"
+    assert update["retry_count"] == limit  # 不再增加
+    assert any("重试已达上限" in record["summary"] for record in update["decision_trace"])
+
+
+def test_planner_creates_single_step_plan_and_keeps_existing_one(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    context = _context(tmp_path, app_config, model_factory())
+    planned = nodes.planner_node(  # type: ignore[arg-type]
+        {"run_id": RUN_ID, "normalized_request": "读取配置", "task_goal": "读取配置"},
+        _runtime(context, {}),
+    )
+
+    assert len(planned["plan"]) == 1
+    assert planned["plan"][0].description == "读取配置"
+    assert planned["plan"][0].status == "running"
+
+    again = nodes.planner_node(  # type: ignore[arg-type]
+        {"run_id": RUN_ID, "task_goal": "读取配置", "plan": planned["plan"]},
+        _runtime(context, {}),
+    )
+
+    assert again["plan"] == planned["plan"]
+
+
+def test_reflection_keeps_every_error_of_one_round(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """同一轮的机械失败与解析失败必须各留一条事件。
+
+    复审实测：逐次 ``merge_appended`` 覆盖 ``error_events`` 时，"机械失败 + 解析失败"最终得到
+    0 条（两类事件在同 stage 下 ID 相同，后写的把先写的挤掉）。
+    """
+    model = model_factory(decision="tool", fail_reflection=True)
+    state = _failed_state()
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    stages = [event["stage"] for event in update["error_events"]]
+    assert stages == [f"{nodes.REFLECTION_NODE}:mechanical", f"{nodes.REFLECTION_NODE}:llm"]
+
+
+def test_ask_user_branch_produces_a_visible_question(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """``ask_user`` 必须留下可展示的追问，否则 final_response_node 只能给出 None（复审实测）。"""
+    model = model_factory(
+        decision="tool",
+        reflection={
+            "goal_achieved": False,
+            "next_action": "ask_user",
+            "ask_user_reason": "请确认要修改哪个文件",
+        },
+    )
+    state = _verified_state()
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    assert update["reflection_result"].next_action == "ask_user"
+    texts = [message.text for message in update["messages"]]
+    assert any("请确认要修改哪个文件" in text for text in texts)
+
+
+def test_finish_branch_synthesizes_a_final_answer(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """``finish`` 走一次**不绑定工具**的合成调用，并把结果作为可展示回答。"""
+    model = model_factory(
+        decision="tool",
+        reply="依据工具结果：a.py 的内容是 x",
+        reflection={"goal_achieved": True, "next_action": "finish"},
+    )
+    state = _verified_state()
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    assert [message.text for message in update["messages"]] == ["依据工具结果：a.py 的内容是 x"]
+    # 只有合成这一次决策类调用：finish 不会回到 agent_decision_node 再要一轮工具决策
+    assert model.decision_calls == 1
+
+
+def test_plan_and_adjustment_are_injected_into_the_prompt(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """重规划必须真的影响下一轮：计划与反思写入的调整要出现在系统提示里。"""
+    from local_agent.context.prompt_context import build_system_prompt
+
+    context = _context(tmp_path, app_config, model_factory())
+    prompt = build_system_prompt(
+        mode="tool",
+        context=context,
+        task_goal="修复登录失败",
+        plan=[
+            PlanStep(
+                id="s1",
+                description="定位问题",
+                status="running",
+                result_summary="改为先看日志",
+            )
+        ],
+    )
+
+    assert "## 当前计划" in prompt.system_prompt
+    assert "定位问题" in prompt.system_prompt
+    assert "改为先看日志" in prompt.system_prompt
+    assert "修复登录失败" in prompt.system_prompt
+
+
+def test_unfinished_task_does_not_claim_completed() -> None:
+    """未达成目标就结束（例如要用户补充）时不能冒充 completed（架构 §5.4）。"""
+    state: dict[str, Any] = {
+        "messages": [AIMessage(content="请确认目标是不是这个")],
+        "task_status": "running",
+        "reflection_result": ReflectionResult(
+            goal_achieved=False, result_trust="uncertain", next_action="ask_user"
+        ),
+    }
+
+    update = nodes.final_response_node(state)  # type: ignore[arg-type]
+
+    assert update["task_status"] == "running"
+    assert update["final_response"] == "请确认目标是不是这个"
+
+    finished = {
+        **state,
+        "reflection_result": ReflectionResult(
+            goal_achieved=True, result_trust="verified", next_action="finish"
+        ),
+    }
+    assert nodes.final_response_node(finished)["task_status"] == "completed"  # type: ignore[arg-type]
+
+    # 闲聊/模型直接回答（没有反思结论）仍然算完成
+    chat_state: dict[str, Any] = {"messages": [AIMessage(content="你好")], "task_status": "running"}
+    assert nodes.final_response_node(chat_state)["task_status"] == "completed"  # type: ignore[arg-type]

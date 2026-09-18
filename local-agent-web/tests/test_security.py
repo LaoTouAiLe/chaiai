@@ -815,6 +815,8 @@ def test_tool_call_cannot_read_outside_workspace(
         tool_calls=[
             {"name": "read_file", "args": {"path": outside.as_posix()}, "id": "call_1"}
         ],
+        # 越界被拒 → 证据等级 failed：反思不得声称完成（架构 §5.4），继续想办法
+        reflection={"goal_achieved": False, "next_action": "continue"},
     )
     result = builder.build_chat_graph().invoke(
         {"user_input": "读取工作区外的文件"}, context=_context(workspace, model, app_config)

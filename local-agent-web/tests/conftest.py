@@ -20,6 +20,7 @@ from pydantic import Field
 
 from local_agent.config import AppConfig, load_config
 from local_agent.graph.routers import ROUTE_CLASSIFIER_MARKER
+from local_agent.memory.summarizer import SUMMARIZE_INSTRUCTION
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -28,7 +29,7 @@ class RoutingFakeModel(GenericFakeChatModel):
     """按提示区分“路由分类”“工具调用”“文本回答”的假模型。
 
     - 系统提示里含 ``ROUTE_CLASSIFIER_MARKER`` → 返回分类 JSON；
-    - 配置了 ``tool_calls`` 且是第一次非分类调用 → 返回带工具调用的 AI 消息；
+    - 配置了 ``tool_calls`` 且（第一次非分类调用 或 ``repeated_tool_calls``）→ 返回带工具调用的 AI 消息；
     - 其余 → 返回 ``reply`` 文本。
     """
 
@@ -40,6 +41,18 @@ class RoutingFakeModel(GenericFakeChatModel):
     invalid_classification: bool = False
     support_json_schema: bool = True
     fail_bind_tools: bool = False
+    summary: str = "会话摘要（假模型）"
+    fail_summary: bool = False
+    #: T17 反思结论的默认值：`goal_achieved=True` 只能配 `finish`（否则会被机械 guard 归一），
+    #: 因此默认给"已完成、结束"——finish 会触发一次不绑定工具的最终回答合成，模型第二调用
+    #: 返回 `reply`，既有断言（final_response == reply、task_status == completed）继续成立。
+    reflection: dict[str, Any] = Field(
+        default_factory=lambda: {"goal_achieved": True, "next_action": "finish"}
+    )
+    fail_reflection: bool = False
+    #: ``True`` 时**每次**决策调用都返回 ``tool_calls``，用来构造"一个用户请求内的长工具链"
+    #: （默认 ``False``：只有第一次带工具调用，之后返回文本——多数用例依赖这个行为）。
+    repeated_tool_calls: bool = False
     seen_prompts: list[str] = Field(default_factory=list)
     bound_tools: list[str] = Field(default_factory=list)
     decision_calls: int = 0
@@ -55,14 +68,18 @@ class RoutingFakeModel(GenericFakeChatModel):
     def with_structured_output(self, schema, **kwargs: Any):  # type: ignore[no-untyped-def]
         """模拟原生 JSON Schema 能力。
 
-        构造阶段不报错（能力探测按可用记录）；调用阶段按测试开关抛错，
-        用来分别模拟“不支持 JSON Schema”和“分类调用失败”。
+        构造阶段不报错（能力探测按可用记录）；调用阶段按结构名分派：T17 的反思决策用
+        ``reflection`` 字段，其余（路由分类）用 ``classification()``。
         """
         del kwargs
         if not self.support_json_schema:
             raise NotImplementedError("测试假模型不提供原生 JSON Schema 输出")
 
         def _invoke(_input: Any) -> Any:
+            if schema.__name__ == "ReflectionDecision":
+                if self.fail_reflection:
+                    raise RuntimeError("反思调用失败（测试故意触发）")
+                return schema.model_validate(self.reflection)
             if self.fail_classification:
                 raise RuntimeError("分类调用失败（测试故意触发）")
             if self.invalid_classification:
@@ -79,6 +96,13 @@ class RoutingFakeModel(GenericFakeChatModel):
         text = "\n".join(message.text for message in messages)
         self.seen_prompts.append(text)
 
+        if SUMMARIZE_INSTRUCTION in text:  # T16：摘要请求（与路由分类/回答分开）
+            if self.fail_summary:
+                raise RuntimeError("摘要调用失败（测试故意触发）")
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content=self.summary))]
+            )
+
         if ROUTE_CLASSIFIER_MARKER in text:
             if self.fail_classification:
                 raise RuntimeError("分类调用失败（测试故意触发）")
@@ -90,10 +114,23 @@ class RoutingFakeModel(GenericFakeChatModel):
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
         self.decision_calls += 1
-        if self.tool_calls and self.decision_calls == 1:
-            message = AIMessage(content="", tool_calls=self.tool_calls)
+        if self.tool_calls and (self.repeated_tool_calls or self.decision_calls == 1):
+            message = AIMessage(content="", tool_calls=self._materialize_calls())
             return ChatResult(generations=[ChatGeneration(message=message)])
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.reply))])
+
+    def _materialize_calls(self) -> list[dict[str, Any]]:
+        """本轮返回的工具调用。
+
+        重复模式下每次都给**唯一 id**：``tool_execution_node`` 按 ``(run_id, tool_call_id)`` 判重
+        （"上一轮复用同一个调用 ID 不算已执行"），复用模板里的同一个 id 会让第 2 轮起全被当成
+        "已有确认结果"跳过——图级测试就只剩 1 个完整步 + 若干无结果的 AI 调用（复审探针实测）。
+        """
+        calls: list[dict[str, Any]] = [dict(call) for call in self.tool_calls]
+        if self.repeated_tool_calls:
+            for call in calls:
+                call["id"] = f"{call.get('id') or 'call'}-{self.decision_calls}"
+        return calls
 
 
 def make_model(**overrides: Any) -> RoutingFakeModel:

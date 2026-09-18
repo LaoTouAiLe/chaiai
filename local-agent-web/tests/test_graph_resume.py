@@ -1606,3 +1606,293 @@ def test_project_id_prefers_git_root(tmp_path: Path) -> None:
     assert project_id_for(nested) == project_id_for(repository)
     assert project_id_for(outside) != project_id_for(repository)
     assert project_id_for(outside) == project_id_for(outside)  # 稳定：同路径同结果
+
+
+# --------------------------------------------------------------- T16 压缩与 Prompt 窗口
+
+
+def _compression_config(
+    *,
+    enabled: bool = True,
+    trigger_ratio: float = 0.8,
+    prompt_window_messages: int = 100,
+    preserve_recent_turns: int = 1,
+    preserve_recent_tool_steps: int = 3,
+    max_tool_loops: int | None = None,
+    context_window_tokens: int = 4096,
+    max_tokens: int = 1024,
+) -> AppConfig:
+    """在示例配置上打开压缩（只改内存里的配置对象，不写磁盘）。"""
+    base = load_config(PROJECT_ROOT / "config.yaml.example")
+    agent_update = {} if max_tool_loops is None else {"max_tool_loops": max_tool_loops}
+    return base.model_copy(
+        update={
+            "llm": base.llm.model_copy(
+                update={
+                    "context_window_tokens": context_window_tokens,
+                    "max_tokens": max_tokens,
+                }
+            ),
+            "agent": base.agent.model_copy(update=agent_update),
+            "memory": base.memory.model_copy(
+                update={
+                    "short_term": base.memory.short_term.model_copy(
+                        update={"prompt_window_messages": prompt_window_messages}
+                    ),
+                    "compression": base.memory.compression.model_copy(
+                        update={
+                            "enabled": enabled,
+                            "trigger_ratio": trigger_ratio,
+                            "preserve_recent_turns": preserve_recent_turns,
+                            "preserve_recent_tool_steps": preserve_recent_tool_steps,
+                        }
+                    ),
+                }
+            ),
+        }
+    )
+
+
+def _run(graph: builder.ChatGraph, context: RuntimeContext, text: str) -> dict[str, Any]:
+    return graph.invoke(
+        {"user_input": text, "thread_id": THREAD}, config=_config(THREAD), context=context
+    )
+
+
+def test_recent_tool_records_keep_the_latest_results() -> None:
+    """超过上限时保留**最近**的结果：早期失败不能把后面的成功挤出最终回答。
+
+    复审探针：原先"收满 5 条就停"留下 t1…t5，第 6、7 条（后续成功与最终验证）被最终回答忽略。
+    合成证据与确定性摘要共用同一个选择函数，口径一致。
+    """
+    state: Any = {
+        "run_id": "run-1",
+        "tool_results": [
+            {
+                "tool_call_id": f"t{index}",
+                "tool_name": "read_file",
+                "status": "failed" if index == 1 else "success",
+                "truncated": False,
+                "output_preview": f"结果{index}",
+                "output_digest": "digest",
+                "run_id": "run-1",
+            }
+            for index in range(1, 8)
+        ],
+    }
+
+    records = nodes._recent_records(state, limit=5)
+
+    assert [record["tool_call_id"] for record in records] == ["t3", "t4", "t5", "t6", "t7"]
+    assert nodes._evidence_entries(state) == [
+        f"- read_file（{'failed' if index == 1 else 'success'}）：结果{index}"
+        for index in (3, 4, 5, 6, 7)
+    ]
+    text = nodes._deterministic_summary(
+        state,
+        decision=nodes._mechanical_fallback("verified"),
+        trust="verified",
+        anomalies=(),
+    )
+    assert "结果7" in text  # 最新结果必须进最终回答
+    assert "结果1" not in text and "结果2" not in text
+
+
+def test_long_tool_loop_window_omits_older_tool_steps(
+    tmp_path: Path, model_factory: ModelFactory
+) -> None:
+    """一个用户请求内的长工具链也能收缩：窗口只保留最近 K 个完整工具步。
+
+    这条链只有 1 个人类轮次，``preserve_recent_turns`` 取到的起点就是链首，救不了它
+    （复审探针：21 条消息仍发 21 条）；收缩靠"工具步"这一层规则，且不切开
+    ``AIMessage(tool_calls)`` 与它的 ``ToolMessage``。
+    """
+    graph = _graph(_database(tmp_path))
+    model = model_factory(
+        decision="tool",
+        reply="已经列完了",
+        tool_calls=[{"name": "list_dir", "args": {"path": "."}, "id": "call_1"}],
+        reflection={"goal_achieved": False, "next_action": "continue"},
+        repeated_tool_calls=True,  # 每次决策调用都带工具 → 造出多步工具链
+    )
+    context = _context_for(
+        tmp_path,
+        model,
+        _compression_config(preserve_recent_tool_steps=2, max_tool_loops=4),
+    )
+
+    result = _run(graph, context, "列出目录")
+
+    assert result["max_loop_count"] == 4
+    assert result["loop_count"] >= 3
+    # 每个 AI 调用都有匹配的工具结果（假模型每轮给唯一 id，否则第 2 轮起会被判重跳过）
+    messages = list(result["messages"])
+    calls = [
+        str(call["id"])
+        for message in messages
+        if isinstance(message, AIMessage)
+        for call in message.tool_calls
+    ]
+    results = [
+        str(message.tool_call_id) for message in messages if isinstance(message, ToolMessage)
+    ]
+    assert len(calls) >= 3
+    assert sorted(calls) == sorted(results)
+    assert len(result["tool_events"]) == len(calls)
+    assert len(result["tool_results"]) == len(calls)
+    # 循环中途的窗口已经按"工具步"收缩（更早的调用与结果整步省略）
+    assert any("省略了" in prompt for prompt in model.seen_prompts)
+
+
+def test_chat_turn_records_context_budget(tmp_path: Path, model_factory: ModelFactory) -> None:
+    """闲聊分支确实经过 compression_node：预算与用量写入 State，未达阈值时不压缩。"""
+    graph = _graph(_database(tmp_path))
+    context = _context_for(tmp_path, model_factory(), _compression_config())
+
+    result = _run(graph, context, "你好")
+
+    budget = result["context_budget"]
+    assert budget.prompt_budget_tokens == 4096 - 1024
+    assert budget.total_messages == 1
+    assert budget.window_messages == 1
+    assert budget.triggered is False
+    assert result["token_usage"].prompt_tokens > 0
+    assert result.get("conversation_summary") is None
+
+
+def test_tool_loop_also_records_context_budget(
+    tmp_path: Path, model_factory: ModelFactory
+) -> None:
+    """工具分支（planner → compression_node）同样经过压缩节点。"""
+    model = model_factory(
+        decision="tool",
+        tool_calls=[{"name": "list_dir", "args": {"path": "."}, "id": "call-1"}],
+    )
+    graph = _graph(_database(tmp_path))
+    # 窗口给足：工具分支的预算还要算上绑定给模型的工具定义（T17 复审后计入），
+    # 用默认的小窗口会让这里意外触发压缩
+    context = _context_for(
+        tmp_path, model, _compression_config(context_window_tokens=65536)
+    )
+
+    result = _run(graph, context, "看看目录")
+
+    assert result["context_budget"].triggered is False
+    assert result["task_status"] in {"completed", "failed"}
+
+
+def test_compression_writes_summary_without_dropping_messages(
+    tmp_path: Path, model_factory: ModelFactory
+) -> None:
+    """压缩只作用于 Prompt 窗口：Checkpoint 的原始消息一条都不少（架构 §10.1）。"""
+    graph = _graph(_database(tmp_path))
+    context = _context_for(
+        tmp_path,
+        model_factory(decision="chat", summary="用户连聊三句"),
+        _compression_config(trigger_ratio=0.0, preserve_recent_turns=1),
+    )
+
+    results = [_run(graph, context, text) for text in ("第一句", "第二句", "第三句")]
+    result = results[-1]
+
+    assert result["conversation_summary"] == "用户连聊三句"
+    # 第一轮还没有"更早的旧消息"可摘要：静默跳过（不算故障），从第二轮起才真正压缩
+    assert not any(
+        event["stage"] == nodes.COMPRESSION_NODE
+        for event in results[0].get("error_events", [])
+    )
+    assert result["compression_count"] >= 2
+    assert result["context_version"] >= 2
+    assert result["context_budget"].triggered is True
+    assert result["context_budget"].summary_chars == len("用户连聊三句")
+    assert _texts(result["messages"])[:6] == [
+        "第一句",
+        "假回答",
+        "第二句",
+        "假回答",
+        "第三句",
+        "假回答",
+    ]
+
+
+def test_summary_coverage_shrinks_the_next_window(
+    tmp_path: Path, model_factory: ModelFactory
+) -> None:
+    """摘要成功后要记录覆盖边界：已覆盖的旧消息不再进窗口，而且不会重复摘要同一批历史。
+
+    复审实测：原实现每轮都把同一批历史重新摘要、并继续原样发送，压缩可能反而让 Prompt 变长。
+    """
+    graph = _graph(_database(tmp_path))
+    context = _context_for(
+        tmp_path,
+        model_factory(decision="chat", summary="前几轮都在问好"),
+        _compression_config(
+            context_window_tokens=65536, trigger_ratio=0.0, preserve_recent_turns=1
+        ),
+    )
+
+    results = [_run(graph, context, text) for text in ("第一句", "第二句", "第三句")]
+
+    covered = [result["context_budget"].summary_covered_messages for result in results]
+    assert covered[0] == 0  # 第一轮没有更早的消息可摘要
+    assert covered == sorted(covered)  # 覆盖边界只前进，不重复覆盖
+    assert covered[-1] == 4  # 第三轮已覆盖前两轮共 4 条消息
+
+    budget = results[-1]["context_budget"]
+    assert budget.window_messages == budget.total_messages - 4
+    assert results[-1]["context_budget"].summary_chars == len("前几轮都在问好")
+
+
+def test_prompt_window_shrinks_what_the_model_sees(tmp_path: Path) -> None:
+    """窗口裁剪真的作用在送模型的消息上，而不是只记了数字。"""
+    graph = _graph(_database(tmp_path))
+    context = _context_for(
+        tmp_path,
+        _model(),
+        _compression_config(prompt_window_messages=1, trigger_ratio=1.0),
+    )
+
+    for text in ("甲", "乙", "丙"):
+        result = _run(graph, context, text)
+
+    assert result["final_response"] == "human=1"  # 只看到最近一轮的 1 条用户消息
+    budget = result["context_budget"]
+    assert budget.total_messages > budget.window_messages
+
+
+def test_compression_disabled_passes_the_window_through(tmp_path: Path) -> None:
+    """关闭时窗口原样返回全部消息（不做任何裁剪，也不摘要）。"""
+    graph = _graph(_database(tmp_path))
+    context = _context_for(
+        tmp_path, _model(), _compression_config(enabled=False, prompt_window_messages=1)
+    )
+
+    for text in ("甲", "乙"):
+        result = _run(graph, context, text)
+
+    assert result["final_response"] == "human=2"
+    budget = result["context_budget"]
+    assert budget.window_messages == budget.total_messages
+    assert budget.triggered is False
+
+
+def test_summary_failure_degrades_without_touching_state(
+    tmp_path: Path, model_factory: ModelFactory
+) -> None:
+    """摘要失败只记 ErrorEvent：不动 summary / context_version / compression_count。"""
+    graph = _graph(_database(tmp_path))
+    context = _context_for(
+        tmp_path,
+        model_factory(decision="chat", fail_summary=True),
+        _compression_config(trigger_ratio=0.0),
+    )
+
+    _run(graph, context, "第一句")  # 第一轮没有更早的消息：静默跳过，不调用摘要模型
+    result = _run(graph, context, "第二句")  # 第二轮真的去摘要 → 失败 → 降级
+
+    assert result.get("conversation_summary") is None
+    assert result.get("compression_count", 0) == 0
+    assert result.get("context_version", 0) == 0
+    assert result["context_budget"].triggered is True
+    assert any(event["stage"] == nodes.COMPRESSION_NODE for event in result["error_events"])
+    assert result["final_response"]  # 摘要失败不影响本轮回答

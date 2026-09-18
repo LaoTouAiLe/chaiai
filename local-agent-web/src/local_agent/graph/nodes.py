@@ -18,8 +18,9 @@ import hashlib
 import json
 import threading
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from langchain_core.messages import (
@@ -35,7 +36,16 @@ from langgraph.types import interrupt
 
 from local_agent.config import EmbeddingConfig, MediumTermMemoryConfig, resolve_api_key
 from local_agent.context.agents_loader import load_agents
-from local_agent.context.prompt_context import build_system_prompt
+from local_agent.context.prompt_context import PromptContext, build_system_prompt
+from local_agent.context.token_budget import (
+    ContextBudget,
+    TokenUsage,
+    estimate_message_tokens,
+    estimate_messages_tokens,
+    estimate_tools_tokens,
+    prompt_budget_tokens,
+    usage_ratio,
+)
 from local_agent.exceptions import (
     EmbeddingError,
     LocalAgentError,
@@ -48,6 +58,7 @@ from local_agent.graph.state import (
     ErrorEvent,
     EvidenceReference,
     EvidenceType,
+    PlanStep,
     ReflectionResult,
     RuntimeContext,
     TaskStatus,
@@ -64,7 +75,24 @@ from local_agent.graph.state import (
 from local_agent.llm import embedding as embedding_module
 from local_agent.llm.models import TOOL_CALLING_UNAVAILABLE_REPLY, ModelCapabilities
 from local_agent.memory import medium_term, recall
-from local_agent.reflection.validators import ToolEvidence, summarize_trust, validate_tool_event
+from local_agent.memory.short_term import (
+    PromptWindow,
+    recent_turns_start,
+    select_prompt_window,
+)
+from local_agent.memory.summarizer import summarize_conversation
+from local_agent.reflection.reflector import (
+    TOOL_DATA_CLOSE,
+    TOOL_DATA_OPEN,
+    ReflectionDecision,
+    reflect,
+)
+from local_agent.reflection.validators import (
+    EvidenceLevel,
+    ToolEvidence,
+    summarize_trust,
+    validate_tool_event,
+)
 from local_agent.scope import project_id_for
 from local_agent.security.approval import (
     ApprovalChoice,
@@ -97,6 +125,9 @@ REJECTED_REPLY = (
     "该动作已被你拒绝，我不会执行，也不会自动重试。"
     "如果希望换个做法，可以补充说明后让我重新规划。"
 )
+
+#: 反思给出的下一步动作（架构 §4.3 的 ``ReflectionResult.next_action``）。
+ReflectionAction = Literal["continue", "retry", "ask_user", "finish"]
 
 
 # --------------------------------------------------------------------------- 闲聊分支
@@ -270,9 +301,206 @@ def recall_memory_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> A
     return {"memory_refs": references}
 
 
-def compression_node(state: AgentState) -> AgentState:
-    """上下文压缩（v0.1 透传；T16 接入摘要压缩与 Prompt 窗口裁剪）。"""
-    return {}
+def _prompt_window(
+    state: AgentState, context: RuntimeContext, *, covered: int | None = None
+) -> PromptWindow:
+    """本轮送模型的消息窗口（架构 §10.1）。
+
+    ``memory.compression.enabled=false`` 时原样返回全部消息（关闭即不裁剪）。
+    ``covered`` 显式给出时用它作为"已被摘要覆盖"的边界（压缩节点写完摘要要重算窗口）。
+    """
+    config = context.app_config
+    return select_prompt_window(
+        state.get("messages") or [],
+        enabled=config.memory.compression.enabled,
+        max_messages=config.memory.short_term.prompt_window_messages,
+        preserve_recent_turns=config.memory.compression.preserve_recent_turns,
+        preserve_recent_tool_steps=config.memory.compression.preserve_recent_tool_steps,
+        covered_messages=_covered_messages(state) if covered is None else covered,
+    )
+
+
+def _covered_messages(state: AgentState) -> int:
+    """会话摘要已经覆盖到第几条消息（``context_budget.summary_covered_messages``）。"""
+    budget = state.get("context_budget")
+    if isinstance(budget, ContextBudget):
+        return max(0, int(budget.summary_covered_messages))
+    return 0
+
+
+def _tool_definition_tokens(state: AgentState, context: RuntimeContext) -> int:
+    """本轮绑定给模型的工具定义占用的估算 token（仅工具模式；它们也是出站 Prompt 的一部分）。"""
+    if str(state.get("mode", "chat")) != "tool":
+        return 0
+    registry = context.tool_registry
+    if registry is None:
+        return 0
+    return estimate_tools_tokens(registry.tools_for_mode("tool"))
+
+
+def _system_prompt(
+    state: AgentState, context: RuntimeContext, *, summary: str | None = None
+) -> PromptContext:
+    """系统提示；压缩节点的估算与出站节点实际发送必须用**同一个**函数，否则预算口径会脱节。
+
+    ``summary`` 显式给出时用它（压缩节点写完摘要需要按新摘要重算预算），否则取 State 里的值。
+    """
+    return build_system_prompt(
+        mode=state.get("mode", "chat"),
+        context=context,
+        route_reason=str(state.get("route_reason", "")),
+        memory_refs=state.get("memory_refs") or (),
+        conversation_summary=(
+            summary if summary is not None else state.get("conversation_summary")
+        ),
+        task_goal=state.get("task_goal"),
+        plan=state.get("plan") or (),
+    )
+
+
+def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
+    """上下文预算与摘要压缩（架构 §10.1、§10.5）。
+
+    只压缩**送模型的窗口**：Checkpoint 里的 ``messages`` 一条都不删（架构 §10.1）。
+
+    触发口径（T16）：``estimated_prompt_tokens / (context_window_tokens - max_tokens)
+    >= memory.compression.trigger_ratio``；估算量覆盖实际出站的完整 Prompt —— 系统提示
+    （含 AGENTS、会话摘要、召回记忆）、消息窗口，以及工具模式下绑定给模型的**工具定义**。
+
+    "摘要替代旧消息"（架构 §10.5 第 5 条）：摘要成功后把覆盖边界记进
+    ``context_budget.summary_covered_messages``，窗口从该边界之后开始，并按**新窗口与新摘要**
+    重算预算——否则每轮都会重发同一批历史，压缩反而让 Prompt 变长。
+
+    降级口径：
+    - ``compression.enabled=false``：只统计预算，不裁剪窗口、不生成摘要；
+    - 没有"更早的旧消息"可摘要（典型是第一轮）：静默跳过，不记错误事件、不改压缩计数；
+    - 摘要生成失败：**只记 ErrorEvent**，不更新 ``conversation_summary`` / ``context_version``
+      / ``compression_count``，本轮继续用裁剪后的窗口；
+    - 窗口按完整轮次裁剪（见 :mod:`local_agent.memory.short_term`），不切开工具调用对。
+    """
+    context = runtime.context
+    config = context.app_config
+    compression = config.memory.compression
+    messages = list(state.get("messages") or [])
+    covered = _covered_messages(state)
+    window = _prompt_window(state, context, covered=covered)
+    prompt = _system_prompt(state, context)
+    tools_tokens = _tool_definition_tokens(state, context)
+    window_tokens = estimate_messages_tokens(window.messages)
+    estimated = prompt.estimated_tokens + window_tokens + tools_tokens
+    budget_tokens = prompt_budget_tokens(
+        context_window_tokens=config.llm.context_window_tokens,
+        completion_reserve_tokens=config.llm.max_tokens,
+    )
+    ratio = usage_ratio(estimated_prompt_tokens=estimated, prompt_budget_tokens=budget_tokens)
+    triggered = compression.enabled and ratio >= compression.trigger_ratio
+    existing_summary = (state.get("conversation_summary") or "").strip()
+
+    def snapshot(
+        *,
+        triggered_now: bool,
+        summary_chars: int,
+        covered_now: int,
+        window_now: PromptWindow,
+        prompt_now: PromptContext,
+        estimated_now: int,
+        ratio_now: float,
+    ) -> tuple[TokenUsage, ContextBudget]:
+        """按给定的窗口/系统提示生成这一轮的用量与预算记录。"""
+        return (
+            TokenUsage(
+                prompt_tokens=estimated_now,
+                system_prompt_tokens=prompt_now.estimated_tokens,
+                window_messages_tokens=estimate_messages_tokens(window_now.messages),
+                completion_reserve_tokens=config.llm.max_tokens,
+                tool_definition_tokens=tools_tokens,
+            ),
+            ContextBudget(
+                context_window_tokens=config.llm.context_window_tokens,
+                completion_reserve_tokens=config.llm.max_tokens,
+                prompt_budget_tokens=budget_tokens,
+                estimated_prompt_tokens=estimated_now,
+                usage_ratio=round(ratio_now, 6),
+                trigger_ratio=compression.trigger_ratio,
+                triggered=triggered_now,
+                window_messages=len(window_now.messages),
+                total_messages=window_now.total_messages,
+                summary_chars=summary_chars,
+                summary_covered_messages=covered_now,
+            ),
+        )
+
+    usage, current_budget = snapshot(
+        triggered_now=triggered,
+        summary_chars=len(existing_summary),
+        covered_now=covered,
+        window_now=window,
+        prompt_now=prompt,
+        estimated_now=estimated,
+        ratio_now=ratio,
+    )
+    update: AgentState = {"token_usage": usage, "context_budget": current_budget}
+    if not triggered:
+        return update
+
+    # 只摘要"已覆盖边界之后、最近 preserve_recent_turns 轮之前"的旧消息：既不重复摘要同一批
+    # 历史，也不会出现"既没进窗口、也没进摘要"的消息。
+    boundary = recent_turns_start(messages, compression.preserve_recent_turns)
+    older = messages[covered:boundary]
+    if not older:
+        # 还没有"更早的旧消息"可摘要（典型是第一轮）：这不是故障，**静默跳过本轮**——
+        # 不记错误事件，也不动 conversation_summary / context_version / compression_count。
+        return update
+    try:
+        summary = summarize_conversation(
+            context.model_adapter,
+            messages=older,
+            previous_summary=state.get("conversation_summary"),
+            max_chars=compression.summary_max_chars,
+        )
+    except Exception as exc:  # noqa: BLE001 —— 摘要失败不能拖垮本轮，记 ErrorEvent 后继续
+        return {
+            **update,
+            "error_events": merge_appended(
+                state.get("error_events", []),
+                [
+                    _error(
+                        state,
+                        stage=COMPRESSION_NODE,
+                        message=f"会话摘要生成失败，本轮不更新摘要：{exc}",
+                    )
+                ],
+                error_event_key,
+            ),
+        }
+
+    # 摘要成功：被覆盖的旧消息不再进窗口，按新边界与新摘要重算预算
+    new_covered = covered + len(older)
+    new_window = _prompt_window(state, context, covered=new_covered)
+    new_prompt = _system_prompt(state, context, summary=summary)
+    new_estimated = (
+        new_prompt.estimated_tokens + estimate_messages_tokens(new_window.messages) + tools_tokens
+    )
+    new_ratio = usage_ratio(
+        estimated_prompt_tokens=new_estimated, prompt_budget_tokens=budget_tokens
+    )
+    new_usage, new_budget = snapshot(
+        triggered_now=True,
+        summary_chars=len(summary),
+        covered_now=new_covered,
+        window_now=new_window,
+        prompt_now=new_prompt,
+        estimated_now=new_estimated,
+        ratio_now=new_ratio,
+    )
+    return {
+        **update,
+        "token_usage": new_usage,
+        "context_budget": new_budget,
+        "conversation_summary": summary,
+        "context_version": int(state.get("context_version", 0)) + 1,
+        "compression_count": int(state.get("compression_count", 0)) + 1,
+    }
 
 
 def chat_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
@@ -282,15 +510,10 @@ def chat_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState
     ``bind_tools``；模型实例来自 RuntimeContext（架构 §4.1），不在图内持有。
     """
     context = runtime.context
-    prompt = build_system_prompt(
-        mode=state.get("mode", "chat"),
-        context=context,
-        route_reason=str(state.get("route_reason", "")),
-        memory_refs=state.get("memory_refs") or (),
-    )
+    prompt = _system_prompt(state, context)
     messages = [
         SystemMessage(content=prompt.system_prompt),
-        *state.get("messages", []),
+        *_prompt_window(state, context).messages,
     ]
     return {"messages": [context.model_adapter.invoke(messages)]}
 
@@ -301,14 +524,27 @@ def chat_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState
 def planner_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
     """工具分支的规划入口。
 
-    T05 只确定任务目标与循环上限（架构 §11.5），多步计划、依赖与重规划在 T20。
-    ``task_goal`` 已存在时保留，便于重入时不丢目标。
+    T05 只确定任务目标与循环上限（架构 §11.5）；T17 起如果没有计划就生成**单步**计划，让反思
+    节点有可更新的对象（当前步状态、结果摘要、重试次数）。多步计划、依赖与重规划属于 T20。
+    ``task_goal`` 与已有计划都保留，便于重入时不丢目标。
     """
     context = runtime.context
+    goal = state.get("task_goal") or str(state.get("normalized_request", ""))
+    plan = list(state.get("plan") or [])
+    if not plan:
+        plan = [
+            PlanStep(
+                id=f"{state.get('run_id') or 'run'}:step-1",
+                description=goal.strip() or "完成用户请求",
+                status="running",
+                expected_evidence="工具结果与最终回答",
+            )
+        ]
     return {
-        "task_goal": state.get("task_goal") or str(state.get("normalized_request", "")),
+        "task_goal": goal,
         "max_loop_count": context.app_config.agent.max_tool_loops,
         "task_status": "running",
+        "plan": plan,
     }
 
 
@@ -328,16 +564,11 @@ def agent_decision_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
         # 架构 §11.7：不支持 Tool Calling 时不得静默退化成闲聊，要明确告知
         return _tool_calling_unavailable(state, capabilities)
     model = context.model_adapter.bind_tools(tools) if tools else context.model_adapter
-    condition = build_system_prompt(
-        mode=state.get("mode", "tool"),
-        context=context,
-        route_reason=str(state.get("route_reason", "")),
-        memory_refs=state.get("memory_refs") or (),
-    )
+    condition = _system_prompt(state, context)
     response = model.invoke(
         [
             SystemMessage(content=condition.system_prompt),
-            *state.get("messages", []),
+            *_prompt_window(state, context).messages,
         ]
     )
     if not isinstance(response, AIMessage):
@@ -750,15 +981,23 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
 
 
 def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
-    """最小反思：机械校验工具结果并重算证据（架构 §5.4、§11.2）。
+    """反思：机械校验 + LLM 完成度判断（架构 §5.4、§11.2）。
 
-    - ``goal_achieved`` 在本阶段恒为 ``False``：是否真正完成由 T17 的 LLM 反思判断，
-      这里不替模型下结论，也不因为模型自称完成就算完成。
-    - 是否 ``verified`` 只由 :mod:`local_agent.reflection.validators` 的机械校验决定。
-    - ``final_evidence`` 按架构 §4.2 从**当前任务**的工具事件重算后整体覆盖：历史任务的
-      事件与错误不再混进本轮证据（作用域见 :func:`current_task_scope`）。
+    三层职责，顺序不能颠倒：
+
+    1. **机械校验**（:mod:`local_agent.reflection.validators`）：证据是否存在、是否
+       ``verified``、有哪些异常——``result_trust`` 只由它得出；
+    2. **LLM 决策**（:mod:`local_agent.reflection.reflector`）：完成度、异常解释、计划调整与
+       下一步动作；结构化输出失败时按机械结论兜底（``verified`` → ``finish``，否则 ``ask_user``）
+       并记一条 ErrorEvent，让"解析失败"可见（架构 §5.4 要求降级明确）；
+    3. **机械压制**：证据等级不是 ``verified`` 时 ``goal_achieved`` 一律压回 ``False`` 并改用
+       ``ask_user``；``goal_achieved=False`` 时不允许用 ``finish`` 收尾；重试超过
+       ``agent.max_retries_per_step`` 时同样改为 ``ask_user``。规范化说明写进 ``decision_trace``。
+
+    ``final_evidence`` 按架构 §4.2 从**当前任务**的工具事件重算后整体覆盖：历史任务的事件与
+    错误不再混进本轮证据（作用域见 :func:`current_task_scope`）。
     """
-    del runtime  # 机械校验不需要运行上下文
+    context = runtime.context
     scope = current_task_scope(state)
     records = {
         record["tool_call_id"]: record
@@ -769,6 +1008,7 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
     checks: list[ToolEvidence] = []
     anomalies: list[str] = []
     evidences: list[EvidenceReference] = []
+    summaries: list[str] = []
 
     for event in state.get("tool_events", []):
         if not _in_current_task(event.run_id, scope=scope):
@@ -791,6 +1031,7 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
                 created_at=event.finished_at,
             )
         )
+        summaries.append(f"{event.tool_name}({event.status}) → {event.output_preview[:160]}")
 
     trust = summarize_trust(checks)
     for error_record in state.get("error_events", []):
@@ -806,49 +1047,497 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
         )
 
     unique_evidence = _dedupe_evidence(evidences)
-    trace = _decision(
-        state,
-        stage="reflection",
-        summary=f"结果可信度 {trust}；证据 {len(unique_evidence)} 条；异常 {len(anomalies)} 条",
+
+    decision, failure = _reflect_decision(
+        state, context, trust=trust, anomalies=anomalies, summaries=summaries
     )
+    goal_achieved, next_action, notes = _apply_mechanical_guard(trust, decision)
+    next_action, retry_note = _apply_retry_limit(
+        state, next_action, max_retries=context.app_config.agent.max_retries_per_step
+    )
+    if retry_note:
+        notes.append(retry_note)
+    if failure is not None:
+        notes.append(f"反思决策不可用（{failure}），已按机械结论兜底")
+
+    # ask_user / finish 直接进 final_response_node，而 final_response_node 只取已有 AI 文本：
+    # 不在这里补齐可展示的回答，这两个分支会得到 final_response=None + failed（复审实测）。
+    endings, final_answer = _ending(
+        state,
+        context,
+        next_action=next_action,
+        decision=decision,
+        trust=trust,
+        anomalies=anomalies,
+    )
+
+    summary = (
+        f"结果可信度 {trust}；动作 {next_action}；证据 {len(unique_evidence)} 条；"
+        f"异常 {len(anomalies)} 条"
+    )
+    if notes:
+        summary = f"{summary}；{'；'.join(notes)}"
+    trace = _decision(state, stage="reflection", summary=summary)
 
     update: AgentState = {
         "final_evidence": unique_evidence,
         "reflection_result": ReflectionResult(
-            goal_achieved=False,
+            goal_achieved=goal_achieved,
             result_trust=trust,
             anomalies=tuple(anomalies),
-            next_action="continue",
+            plan_adjustment=decision.plan_adjustment.strip() or None,
+            next_action=next_action,
+            evidence=tuple(unique_evidence),
         ),
+        "plan": _updated_plan(
+            state, goal_achieved=goal_achieved, next_action=next_action, decision=decision
+        ),
+        "retry_count": int(state.get("retry_count", 0))
+        + (1 if next_action == "retry" else 0),
         "decision_trace": merge_appended(
             state.get("decision_trace", []), [trace], decision_record_key
         ),
     }
+    if endings:
+        update["messages"] = endings
+    if final_answer is not None:
+        # 收尾合成也是一次出站 Prompt：把它的估算写回，State 自报的预算才与真实请求一致
+        update["token_usage"] = final_answer.usage
+        update["context_budget"] = final_answer.budget
+
+    # 同一轮的机械失败、解析失败与未确认副作用都要各留一条事件：**先收集、最后只 merge 一次**。
+    # 逐次 merge 会互相覆盖——`_error` 的事件 ID 由 stage + loop_count 派生，三类同轮事件在同一个
+    # stage 下 ID 相同，后写的会把先写的挤掉（复审实测：机械失败 + 解析失败最终 0 条）。
+    errors: list[ErrorEvent] = []
     if trust == "failed":
-        update["error_events"] = merge_appended(
-            state.get("error_events", []),
-            [
-                _error(
-                    state,
-                    stage="reflection",
-                    message="机械校验未通过：本轮工具结果不能作为已验证证据",
-                )
-            ],
-            error_event_key,
+        errors.append(
+            _error(
+                state,
+                stage=f"{REFLECTION_NODE}:mechanical",
+                message="机械校验未通过：本轮工具结果不能作为已验证证据",
+            )
+        )
+    if failure is not None:
+        errors.append(
+            _error(
+                state,
+                stage=f"{REFLECTION_NODE}:llm",
+                message=f"反思决策结构化输出失败（{failure}），已按机械结论兜底",
+            )
+        )
+    if final_answer is not None and final_answer.failure is not None:
+        errors.append(
+            _error(
+                state,
+                stage=f"{REFLECTION_NODE}:final_answer",
+                message=(
+                    f"最终回答合成降级（{final_answer.failure}），已改用确定性结果摘要"
+                ),
+            )
         )
     if pending_uncertain:
+        errors.append(
+            _error(
+                state,
+                stage=f"{REFLECTION_NODE}:side_effect",
+                message=f"存在未确认的副作用：{'、'.join(pending_uncertain)}，不自动重放",
+            )
+        )
+    if errors:
         update["error_events"] = merge_appended(
-            update.get("error_events", state.get("error_events", [])),
-            [
-                _error(
-                    state,
-                    stage="reflection",
-                    message=f"存在未确认的副作用：{'、'.join(pending_uncertain)}，不自动重放",
-                )
-            ],
-            error_event_key,
+            state.get("error_events", []), errors, error_event_key
         )
     return update
+
+
+def _reflect_decision(
+    state: AgentState,
+    context: RuntimeContext,
+    *,
+    trust: EvidenceLevel,
+    anomalies: Sequence[str],
+    summaries: Sequence[str],
+) -> tuple[ReflectionDecision, str | None]:
+    """调用 LLM 反思；失败时按机械结论兜底（第二个返回值是失败类型）。"""
+    capabilities = context.model_capabilities
+    try:
+        decision = reflect(
+            context.model_adapter,
+            task_goal=str(state.get("task_goal") or state.get("normalized_request") or ""),
+            plan=state.get("plan") or [],
+            current_step_index=int(state.get("current_step_index", 0)),
+            trust=trust,
+            anomalies=anomalies,
+            tool_summaries=summaries,
+            loop_count=int(state.get("loop_count", 0)),
+            max_loop_count=int(state.get("max_loop_count", 0)),
+            capabilities=capabilities if isinstance(capabilities, ModelCapabilities) else None,
+        )
+    except Exception as exc:  # noqa: BLE001 — 反思不可用时按机械结论兜底，不让本轮失败
+        return _mechanical_fallback(trust), type(exc).__name__
+    return decision, None
+
+
+def _mechanical_fallback(trust: EvidenceLevel) -> ReflectionDecision:
+    """结构化输出失败时的兜底：机械证据充分视为完成，否则交回用户。"""
+    if trust == "verified":
+        return ReflectionDecision(
+            goal_achieved=True,
+            next_action="finish",
+            anomaly_explanation="反思决策不可用，按机械校验结论结束",
+        )
+    return ReflectionDecision(
+        goal_achieved=False,
+        next_action="ask_user",
+        ask_user_reason="反思决策不可用（结构化输出失败），需要你确认当前结果",
+    )
+
+
+def _apply_mechanical_guard(
+    trust: EvidenceLevel, decision: ReflectionDecision
+) -> tuple[bool, ReflectionAction, list[str]]:
+    """机械结论优先，并把自相矛盾的组合归一。
+
+    返回 ``(goal_achieved, next_action, 规范化说明)``。三条归一规则：
+
+    1. 证据等级不是 ``verified`` 却判完成 → ``goal_achieved=False`` + ``ask_user``；
+    2. 未达成目标却用 ``finish`` 收尾 → 改为 ``ask_user``；
+    3. 判定完成却还要 ``continue`` / ``retry`` / ``ask_user`` → 归一为 ``finish``（否则会出现
+       "步骤已完成却继续执行"的矛盾状态）。
+    """
+    notes: list[str] = []
+    if trust != "verified" and decision.goal_achieved:
+        notes.append("证据等级不是 verified，不能判定完成，改为向用户说明")
+        return False, "ask_user", notes
+    if decision.goal_achieved and decision.next_action != "finish":
+        notes.append("已判定完成，动作归一为 finish")
+        return True, "finish", notes
+    if not decision.goal_achieved and decision.next_action == "finish":
+        notes.append("未达成目标不能用 finish 收尾，改为向用户说明")
+        return False, "ask_user", notes
+    return decision.goal_achieved, decision.next_action, notes
+
+
+def _apply_retry_limit(
+    state: AgentState, next_action: ReflectionAction, *, max_retries: int
+) -> tuple[ReflectionAction, str | None]:
+    """重试次数达到 ``agent.max_retries_per_step`` 后不再重试，改为向用户说明。"""
+    if next_action != "retry":
+        return next_action, None
+    used = int(state.get("retry_count", 0))
+    if used >= max_retries:
+        return "ask_user", f"重试已达上限（{max_retries} 次），改为向用户说明"
+    return next_action, None
+
+
+def _updated_plan(
+    state: AgentState,
+    *,
+    goal_achieved: bool,
+    next_action: ReflectionAction,
+    decision: ReflectionDecision,
+) -> list[PlanStep]:
+    """更新当前步骤的状态与结果摘要（多步计划、依赖与重规划属于 T20）。"""
+    plan = list(state.get("plan") or [])
+    index = int(state.get("current_step_index", 0))
+    if not plan or index < 0 or index >= len(plan):
+        return plan
+    step = plan[index]
+    if goal_achieved:
+        status = "completed"
+    elif next_action == "ask_user":
+        status = "blocked"
+    else:
+        status = "running"
+    plan[index] = replace(
+        step,
+        status=status,
+        result_summary=decision.plan_adjustment.strip() or step.result_summary,
+        retry_count=step.retry_count + (1 if next_action == "retry" else 0),
+    )
+    return plan
+
+
+#: ``finish`` 分支的合成指令：要求不绑定工具地给出最终回答（架构 §5.3 的完成出口）。
+FINAL_ANSWER_INSTRUCTION = (
+    "请基于上面的任务、计划与工具结果，直接给出本轮的最终回答。\n"
+    "说明：做了什么、依据是什么（引用具体的工具输出、文件或命令）、是否存在失败、未验证或\n"
+    "需要用户确认的部分。\n"
+    "不要调用任何工具。"
+)
+
+
+#: 超预算时合成输入里的证据条数与单条长度上限（有界，避免把大工具输出整段发给模型）。
+MAX_SYNTHESIS_EVIDENCE_ITEMS = 5
+MAX_SYNTHESIS_EVIDENCE_CHARS = 400
+#: 收敛时单条摘要的长度下限：再小就不再截短，改为减少条数。
+MIN_SYNTHESIS_EVIDENCE_CHARS = 40
+#: 确定性结果摘要里最多列几条工具结果（与合成证据一样只取**最近**的若干条）。
+DETERMINISTIC_SUMMARY_RECORDS = 5
+
+
+@dataclass(frozen=True)
+class _FinalAnswer:
+    """``finish`` 分支的合成结果：回答、这次调用的预算快照，以及降级信息。"""
+
+    message: AIMessage
+    usage: TokenUsage
+    budget: ContextBudget
+    failure: str | None = None
+    bounded: bool = False
+
+
+def _ending(
+    state: AgentState,
+    context: RuntimeContext,
+    *,
+    next_action: ReflectionAction,
+    decision: ReflectionDecision,
+    trust: EvidenceLevel,
+    anomalies: Sequence[str],
+) -> tuple[list[AnyMessage], _FinalAnswer | None]:
+    """为 ``ask_user`` / ``finish`` 分支准备可展示的回答（空列表表示无需补）。
+
+    为什么必需：这两个分支直接进入 :func:`final_response_node`，而它只从消息里取**最后一条
+    AI 文本**——此时最后一条 AI 消息往往还是"提出工具调用"的那条（content 为空），于是
+    ``final_response`` 变成 ``None`` 且任务被标成 ``failed``（复审实测）。
+
+    - ``ask_user``：用 ``ask_user_reason`` 生成**确定性追问**（含证据不足说明），不调用模型；
+    - ``finish``：让模型**不绑定工具**地合成一次最终回答，同时返回这次调用的预算快照，
+      由调用方写回 State（否则 ``context_budget`` 会停留在压缩节点那一轮的旧值）。
+      模型不可用时退化为确定性结果摘要。两条路都会保留 ``anomaly_explanation`` 与机械异常。
+    """
+    if next_action == "ask_user":
+        return [AIMessage(content=_ask_user_text(decision, trust=trust))], None
+    if next_action == "finish":
+        answer = _synthesize_final_answer(
+            state, context, decision=decision, trust=trust, anomalies=anomalies
+        )
+        return [answer.message], answer
+    return [], None
+
+
+def _ask_user_text(decision: ReflectionDecision, *, trust: EvidenceLevel) -> str:
+    """把 ``ask_user_reason`` 变成用户看得懂的追问（确定性文本，不额外调用模型）。"""
+    reason = decision.ask_user_reason.strip() or "需要你补充信息或确认结果后才能继续"
+    parts = [f"我需要你确认一下：{reason}"]
+    explanation = decision.anomaly_explanation.strip()
+    if explanation:
+        parts.append(f"当前情况：{explanation}")
+    if trust != "verified":
+        parts.append("（本轮工具结果没有通过机械校验，所以我不会声称任务已经完成。）")
+    return "\n\n".join(parts)
+
+
+def _synthesize_final_answer(
+    state: AgentState,
+    context: RuntimeContext,
+    *,
+    decision: ReflectionDecision,
+    trust: EvidenceLevel,
+    anomalies: Sequence[str],
+) -> _FinalAnswer:
+    """``finish`` 分支的最终回答：一次**不绑定工具**的模型调用，失败时退化为确定性摘要。
+
+    与普通出站一样**先过预算**：这次调用发生在工具执行**之后**，窗口里带着刚产生的工具结果，
+    而 State 里的 ``context_budget`` 还是工具执行前的旧快照；大输出或多工具调用会让收尾调用
+    超上下文，也会让"State 自报预算"与真实出站 Prompt 对不上（复审实证）。因此：
+
+    1. 按 ``context_window_tokens - max_tokens`` 估算"系统提示 + 窗口 + 指令"（指令也要算）；
+    2. 超预算时退化为**有界的证据摘要**（见 :func:`_bounded_evidence`）：按"预算 − 系统提示
+       − 指令"的剩余额度逐步收敛，包在 ``<<<TOOL_OUTPUT>>>`` 里标注为不可信数据；
+    3. 连"系统提示 + 指令"本身都放不下时不调用模型，直接给确定性摘要——**绝不发出超预算请求**；
+    4. 无论走哪条路，都把这次调用的估算作为预算快照返回，由调用方写回 State。
+    """
+    config = context.app_config
+    prompt = _system_prompt(state, context)
+    window = _prompt_window(state, context)
+    budget_tokens = prompt_budget_tokens(
+        context_window_tokens=config.llm.context_window_tokens,
+        completion_reserve_tokens=config.llm.max_tokens,
+    )
+    # 指令也是以消息形式出站的：用与外层集合完全相同的口径（含消息包装开销），否则评估会稳定
+    # 少算一小截，"这次调用在预算内"就不再可靠。
+    instruction_tokens = estimate_message_tokens(
+        SystemMessage(content=FINAL_ANSWER_INSTRUCTION)
+    )
+    window_tokens = estimate_messages_tokens(window.messages)
+    estimated = prompt.estimated_tokens + window_tokens + instruction_tokens
+    window_count = len(window.messages)
+    bounded = estimated > budget_tokens
+    messages: list[AnyMessage] = []
+    if bounded:
+        allowance = budget_tokens - prompt.estimated_tokens - instruction_tokens
+        evidence = (
+            _bounded_evidence(state, allowance_tokens=allowance) if allowance > 0 else None
+        )
+        if evidence is None:
+            # 固定部分就放不下：连证据都不发，走确定性摘要（空 messages 即"不调用模型"）
+            window_tokens = 0
+            window_count = 0
+            estimated = prompt.estimated_tokens + instruction_tokens
+        else:
+            window_tokens = estimate_messages_tokens([HumanMessage(content=evidence)])
+            window_count = 1
+            estimated = prompt.estimated_tokens + window_tokens + instruction_tokens
+            messages = [
+                SystemMessage(content=prompt.system_prompt),
+                HumanMessage(content=evidence),
+                SystemMessage(content=FINAL_ANSWER_INSTRUCTION),
+            ]
+    else:
+        messages = [
+            SystemMessage(content=prompt.system_prompt),
+            *window.messages,
+            SystemMessage(content=FINAL_ANSWER_INSTRUCTION),
+        ]
+
+    ratio = usage_ratio(estimated_prompt_tokens=estimated, prompt_budget_tokens=budget_tokens)
+    usage = TokenUsage(
+        prompt_tokens=estimated,
+        # 指令本身也是一条 SystemMessage：必须算进系统提示分项，否则分项之和比总量少指令那部分，
+        # 违反 "各分项之和 = prompt_tokens" 的不变量（复审实测少 95 token）。
+        system_prompt_tokens=prompt.estimated_tokens + instruction_tokens,
+        window_messages_tokens=window_tokens,
+        completion_reserve_tokens=config.llm.max_tokens,
+        tool_definition_tokens=0,  # 收尾合成不绑定工具
+    )
+    budget = ContextBudget(
+        context_window_tokens=config.llm.context_window_tokens,
+        completion_reserve_tokens=config.llm.max_tokens,
+        prompt_budget_tokens=budget_tokens,
+        estimated_prompt_tokens=estimated,
+        usage_ratio=round(ratio, 6),
+        trigger_ratio=config.memory.compression.trigger_ratio,
+        # 这是一次收尾调用、不是压缩节点那一轮：triggered 只表示"本轮触发过摘要压缩"
+        triggered=False,
+        window_messages=window_count,
+        total_messages=window.total_messages,
+        summary_chars=len((state.get("conversation_summary") or "").strip()),
+        summary_covered_messages=window.covered_messages,
+    )
+
+    failure: str | None = None
+    if not messages:
+        # 预算连固定部分都放不下：不发请求（真实模型会拒绝），改用确定性摘要并记降级事件
+        failure = "PromptBudgetExceeded"
+        return _FinalAnswer(
+            message=AIMessage(
+                content=_deterministic_summary(
+                    state, decision=decision, trust=trust, anomalies=anomalies, failure=failure
+                )
+            ),
+            usage=usage,
+            budget=budget,
+            failure=failure,
+            bounded=True,
+        )
+    try:
+        response = context.model_adapter.invoke(messages)
+    except Exception as exc:  # noqa: BLE001 —— 合成失败也不能丢掉这一轮的结果
+        failure = type(exc).__name__
+        text = _deterministic_summary(
+            state, decision=decision, trust=trust, anomalies=anomalies, failure=failure
+        )
+    else:
+        answer = response.text.strip() if isinstance(response, AIMessage) else ""
+        if not answer:
+            # 空回答同样是降级：必须让调用方记事件，而不是静默换成摘要
+            failure = "EmptyAnswer"
+        text = answer or _deterministic_summary(
+            state, decision=decision, trust=trust, anomalies=anomalies
+        )
+    return _FinalAnswer(
+        message=AIMessage(content=text),
+        usage=usage,
+        budget=budget,
+        failure=failure,
+        bounded=bounded,
+    )
+
+
+def _bounded_evidence(state: AgentState, *, allowance_tokens: int) -> str | None:
+    """在 ``allowance_tokens`` 内构造证据摘要；连最小摘要都放不下时返回 ``None``。
+
+    "有界"不能只是固定条数 + 固定长度：固定上限仍可能超预算（复审实测 1094 > 1024），真实模型
+    会直接拒绝请求。这里按剩余额度**逐步收敛**——先截短每条，再减少条数，最后放弃；返回 ``None``
+    表示由调用方改用确定性摘要（不再发出超预算请求）。
+    """
+    entries = _evidence_entries(state)
+    limit = MAX_SYNTHESIS_EVIDENCE_CHARS
+    while True:
+        text = _wrap_evidence(entries, limit=limit)
+        if estimate_messages_tokens([HumanMessage(content=text)]) <= allowance_tokens:
+            return text
+        if limit > MIN_SYNTHESIS_EVIDENCE_CHARS:
+            limit //= 2
+            continue
+        if len(entries) > 1:
+            entries = entries[1:]  # 先丢最早的一条
+            limit = MAX_SYNTHESIS_EVIDENCE_CHARS
+            continue
+        return None
+
+
+def _evidence_entries(state: AgentState) -> list[str]:
+    """当前任务**最近** :data:`MAX_SYNTHESIS_EVIDENCE_ITEMS` 条工具结果的摘要行（从旧到新）。"""
+    lines = [
+        f"- {record.get('tool_name')}（{record.get('status')}）："
+        f"{' '.join(str(record.get('output_preview') or '').split())}"
+        for record in _recent_records(state, limit=MAX_SYNTHESIS_EVIDENCE_ITEMS)
+    ]
+    return lines or ["（本轮没有工具结果）"]
+
+
+def _recent_records(state: AgentState, *, limit: int) -> list[ToolResultRecord]:
+    """当前任务里**最近** ``limit`` 条工具结果（超出时丢最早的那些）。
+
+    "收满就停"会留下最早的结果、丢掉最新的成功或最终验证（复审探针：7 条只返回 t1…t5），
+    最终回答于是可能忽略刚做完的事。合成证据与确定性摘要共用本函数，口径一致。
+    """
+    if limit <= 0:
+        return []
+    scope = current_task_scope(state)
+    records = [
+        record
+        for record in state.get("tool_results", [])
+        if _in_current_task(record.get("run_id"), scope=scope)
+    ]
+    return records[-limit:]
+
+
+def _wrap_evidence(entries: Sequence[str], *, limit: int) -> str:
+    """把证据行包成带不可信标记的文本，每行按 ``limit`` 截断。"""
+    body = "\n".join(entry[:limit] for entry in entries)
+    return f"{TOOL_DATA_OPEN}\n{body}\n{TOOL_DATA_CLOSE}"
+
+
+def _deterministic_summary(
+    state: AgentState,
+    *,
+    decision: ReflectionDecision,
+    trust: EvidenceLevel,
+    anomalies: Sequence[str],
+    failure: str | None = None,
+) -> str:
+    """模型不可用时拼出的确定性结果摘要（保证 ``finish`` 始终有可展示的回答）。"""
+    lines = ["本轮没有生成可用的模型回答，下面是确定性的结果摘要："]
+    goal = str(state.get("task_goal") or state.get("normalized_request") or "").strip()
+    if goal:
+        lines.append(f"- 任务：{goal}")
+    lines.append(f"- 机械证据等级：{trust}")
+    for record in _recent_records(state, limit=DETERMINISTIC_SUMMARY_RECORDS):
+        preview = " ".join(str(record.get("output_preview") or "").split())[:200]
+        lines.append(f"- {record.get('tool_name')}（{record.get('status')}）：{preview}")
+    explanation = decision.anomaly_explanation.strip()
+    if explanation:
+        lines.append(f"- 异常解释：{explanation}")
+    if anomalies:
+        lines.append(f"- 机械校验异常：{'；'.join(str(item) for item in list(anomalies)[:3])}")
+    if failure:
+        lines.append(f"- 最终回答合成失败：{failure}")
+    lines.append("- 以上结论未经你确认；如需继续，请补充说明。")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- 输出
@@ -857,14 +1546,25 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
 def final_response_node(state: AgentState) -> AgentState:
     """把最后一条有文本的 AI 消息定为最终回答。
 
-    - 没有可用的 AI 文本时标记为 ``failed``，由页面给出明确提示，而不是编造回答。
-    - 已经被判定为失败（例如超出循环上限）的运行，不在这里被改写成 ``completed``：
-      有回答不等于任务完成。
+    ``task_status`` 的更新规则（架构 §5.4：有回答不等于任务完成）：
+
+    - 没有可用的 AI 文本 → ``failed``，由页面给出明确提示，而不是编造回答；
+    - 已经是 ``failed``（例如超出循环上限）→ 保持 ``failed``，不改写成 ``completed``；
+    - 反思结论存在但 ``goal_achieved=False``（未达成目标就结束，例如需要用户补充）→
+      保持 ``running``，不冒充 ``completed``；
+    - 其余（闲聊、模型直接回答、反思判定完成）→ ``completed``。
     """
     text = last_ai_text(state.get("messages", []))
     if text is None:
         return {"final_response": None, "task_status": "failed"}
-    status: TaskStatus = "failed" if state.get("task_status") == "failed" else "completed"
+    reflection = state.get("reflection_result")
+    unfinished = isinstance(reflection, ReflectionResult) and not reflection.goal_achieved
+    if state.get("task_status") == "failed":
+        status: TaskStatus = "failed"
+    elif unfinished:
+        status = "running"
+    else:
+        status = "completed"
     return {"final_response": text, "task_status": status}
 
 

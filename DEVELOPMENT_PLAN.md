@@ -295,14 +295,14 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 ### T16｜Prompt 窗口与摘要压缩（M）
 
 - 目标：达到 memory.compression.trigger_ratio 时生成 conversation_summary，只压缩模型输入窗口，Checkpoint 原始 messages 保持不变（架构 §10.1、§10.5）。
-- 涉及文件：src/local_agent/context/token_budget.py、src/local_agent/memory/summarizer.py、src/local_agent/memory/short_term.py、src/local_agent/graph/nodes.py、src/local_agent/context/prompt_context.py、tests/test_memory.py、tests/test_graph_resume.py。
+- 涉及文件：src/local_agent/context/token_budget.py、src/local_agent/memory/summarizer.py、src/local_agent/memory/short_term.py、src/local_agent/graph/nodes.py、src/local_agent/context/prompt_context.py、src/local_agent/config.py、src/local_agent/graph/state.py、config.yaml.example、ARCHITECTURE.md（§7.2「会话摘要」段落）、tests/test_memory.py、tests/test_graph_resume.py、tests/test_web.py、README.md。
 - 关键接口：conversation_summary、context_version、compression_count、context_budget 按架构 §4.2；prompt_window_messages、compression.* 按 §8。
 - 前置：T14B。验收：`python -m pytest tests/test_memory.py tests/test_graph_resume.py`；闲聊和工具循环均实际经过 `compression_node`，压缩后原始消息数不减，Prompt 窗口缩小但保留目标/约束，关闭时透传；§2 命令通过。
 
 ### T17｜完整反思与动态重规划（L）
 
 - 目标：在机械证据基础上加入 LLM 完成度判断、异常解释、继续/重试/追问/结束与计划更新；是否 verified 仍由 validators.py 决定（架构 §5.4、§11.2）。
-- 涉及文件：src/local_agent/reflection/reflector.py、src/local_agent/reflection/validators.py、src/local_agent/graph/nodes.py、src/local_agent/graph/edges.py、tests/test_reflection.py、tests/test_router.py。
+- 涉及文件：src/local_agent/reflection/reflector.py、src/local_agent/reflection/validators.py、src/local_agent/graph/nodes.py、src/local_agent/graph/edges.py、src/local_agent/context/prompt_context.py（「当前任务」「当前计划」段落）、tests/conftest.py、tests/test_reflection.py、tests/test_router.py、tests/test_security.py、README.md。
 - 关键接口：reflection_result、plan、current_step_index、final_evidence、loop_count、max_loop_count 按架构 §4.2；结构化输出沿用 T09。
 - 前置：T08、T09、T16。验收：`python -m pytest tests/test_reflection.py tests/test_router.py`；工具失败不得声称完成，可重规划且不超 agent.max_tool_loops，无证据不 verified，解析失败降级明确；§2 命令通过。
 
@@ -373,8 +373,9 @@ llm:
   base_url: "https://api.example.com/v1"
   api_key_env: "OPENAI_API_KEY"
   model: "your-model-name"
+  context_window_tokens: 128000   # 必填：模型上下文窗口（token），按所连模型填写；压缩触发比的分母
   temperature: 0.2
-  max_tokens: 4096
+  max_tokens: 4096                # 输出预留：输入 Prompt 可用预算 = context_window_tokens − max_tokens
   timeout_seconds: 120
   retry_count: 2
 
@@ -524,7 +525,7 @@ embedding:
 
 - v0.1a：以示例 YAML 为起点，memory.medium_term.enabled、memory.long_term.enabled、memory.compression.enabled、embedding.enabled 均设为 false；rag.enabled 维持 false。llm.api_key_env 指向环境变量名，绝不在 YAML 写入值。security.require_approval 的四项始终为 true；v0.1a 对这些动作固定拒绝，v0.1b 才进入审批。任一项改为 false 应在配置校验时失败。
 - v0.1b：启用网页审批和 sessions 索引，保持记忆/压缩/RAG 关闭；逐项验证 shell.whitelist 的平台与参数结构。
-- v0.2：先配置并验证 embedding provider 再打开 medium_term；默认 `onnx_local`，首次运行允许下载模型，严格离线环境先准备缓存并设置 `local_files_only=true`。T14C 后 `workspace.root` 只作为启动默认值，网页选择结果在启用短期记忆时按会话保存；关闭短期记忆时只在当前页面生命周期内生效，服务重启回到配置默认值。`allow_external_paths=false` 保持严格边界，改为 `true` 只允许受控的显式外部绝对路径，外部副作用仍强制审批。long_term 和 compression 可分别打开，关闭任一层仍须可运行。prompt_window_messages 限制 Prompt 窗口而非 Checkpoint 消息数。
+- v0.2：先配置并验证 embedding provider 再打开 medium_term；默认 `onnx_local`，首次运行允许下载模型，严格离线环境先准备缓存并设置 `local_files_only=true`。T14C 后 `workspace.root` 只作为启动默认值，网页选择结果在启用短期记忆时按会话保存；关闭短期记忆时只在当前页面生命周期内生效，服务重启回到配置默认值。`allow_external_paths` 保持严格边界，改为 `true` 只允许受控的显式外部绝对路径，外部副作用仍强制审批。long_term 和 compression 可分别打开，关闭任一层仍须可运行。`context_window_tokens` 必填且必须大于 `max_tokens`：压缩触发比 `trigger_ratio` 以 `context_window_tokens − max_tokens` 为分母，换模型时必须同步修改；prompt_window_messages 限制 Prompt 窗口而非 Checkpoint 消息数，且只在 `compression.enabled=true` 时生效（关闭时窗口原样返回全部消息）。
 - v0.3：rag.enabled 可选打开；若没有语言解析器或索引损坏，必须给出可见错误或降级检索，不得伪称已检索。
 - 配置缺字段、超出工作区路径、缺少环境变量或模型能力不匹配，在启动/提交时给出可理解的错误；不允许用默认值掩盖危险配置。具体配置键以上方 YAML 为准。
 

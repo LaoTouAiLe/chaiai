@@ -255,30 +255,48 @@ def route_after_approval(state: AgentState) -> str:
 # --------------------------------------------------------------------------- 完成判定
 
 
+#: 达到循环上限时仍然"想继续"的动作：只有它们会被上限拦住（架构 §11.5）。
+#: ``finish`` / ``ask_user`` 本轮就能收尾，不受上限影响——拦它们只会把正常结论变成"失败"。
+_LOOPING_ACTIONS: tuple[str, ...] = ("continue", "retry")
+
+
 def completion_router_node(state: AgentState) -> AgentState:
     """架构 §5.3：反思之后唯一决定后续走向。
 
-    本节点的状态改动只有一种情况：达到循环上限时补一句明确说明，
+    本节点的状态改动只有一种情况：**还想继续/重试但已达循环上限**时补一句明确说明，
     让用户知道任务没做完、为什么停下，而不是看到一个半截回答。
+
+    上限**不覆盖**已经确定的 ``finish`` / ``ask_user``：那一轮反思已经给出可收尾的结论
+    （而且是基于机械证据的结论），把它改成"失败"会让正常终止在边界轮次丢失（复审实证：
+    ``verified + finish`` 与 ``ask_user`` 都被改成了 ``loop_limit + failed``）。
     """
-    if loop_limit_reached(state):
+    if _loop_limit_blocks(state):
         return {"messages": [AIMessage(content=LOOP_LIMIT_REPLY)], "task_status": "failed"}
     return {}
 
 
 def completion_route(state: AgentState) -> str:
-    """条件边：把反思结论映射为下一个分支。"""
-    if loop_limit_reached(state):
+    """条件边：把反思结论映射为下一个分支（循环上限只拦 ``continue`` / ``retry``）。"""
+    action = _next_action(state)
+    if action in _LOOPING_ACTIONS and loop_limit_reached(state):
         return ROUTE_LOOP_LIMIT
-
-    result = state.get("reflection_result")
-    action = result.next_action if isinstance(result, ReflectionResult) else "finish"
     return {
         "continue": ROUTE_CONTINUE,
         "retry": ROUTE_RETRY,
         "ask_user": ROUTE_ASK_USER,
         "finish": ROUTE_FINISH,
     }.get(action, ROUTE_FINISH)
+
+
+def _next_action(state: AgentState) -> str:
+    """反思给出的下一步动作；没有反思结论时按 ``finish`` 处理（与条件边一致）。"""
+    result = state.get("reflection_result")
+    return result.next_action if isinstance(result, ReflectionResult) else "finish"
+
+
+def _loop_limit_blocks(state: AgentState) -> bool:
+    """循环上限是否真的拦住了本轮（只在"还想继续/重试"时成立）。"""
+    return _next_action(state) in _LOOPING_ACTIONS and loop_limit_reached(state)
 
 
 def loop_limit_reached(state: AgentState) -> bool:
