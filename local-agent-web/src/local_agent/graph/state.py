@@ -24,6 +24,7 @@ from langchain_core.messages import AnyMessage, ToolCall
 from langgraph.graph.message import add_messages
 
 from local_agent.config import AppConfig
+from local_agent.context.token_budget import ContextBudget, TokenUsage
 from local_agent.llm.models import ModelCapabilities
 from local_agent.memory.schemas import MemoryReference
 from local_agent.security.approval import ApprovalDecision, ApprovalRequest
@@ -36,11 +37,9 @@ TaskStatus = Literal["pending", "running", "waiting_approval", "completed", "fai
 EvidenceType = Literal["file_hash", "diff", "exit_code", "stdout", "test_result"]
 
 # 架构 §4.3 未给出具体字段的结构：仍为字典占位的部分由对应任务替换为具体类型
-# （MemoryReference 在 T14B 定稿，见 memory/schemas.py；TokenUsage/ContextBudget 在 T16，
-# RAGReference 在 T21）。审批请求与决策已由 T10 定义（见 security/approval.py）。
+# （MemoryReference 在 T14B 定稿，见 memory/schemas.py；TokenUsage/ContextBudget 在 T16 定稿，
+# 见 context/token_budget.py；RAGReference 在 T21）。审批请求与决策已由 T10 定义。
 RAGReference = dict[str, Any]
-TokenUsage = dict[str, Any]
-ContextBudget = dict[str, Any]
 
 
 class DecisionRecord(TypedDict):

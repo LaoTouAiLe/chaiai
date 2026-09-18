@@ -27,6 +27,7 @@ llm:
   base_url: "https://api.deepseek.com"
   api_key_env: "DEEPSEEK_API_KEY"
   model: "deepseek-flash"
+  context_window_tokens: 65536
 """
 FAKE_REPLY = "你好，我是测试模型"
 
@@ -129,6 +130,29 @@ def test_missing_required_llm_fields_are_listed(tmp_path: Path) -> None:
     message = str(excinfo.value)
     assert "llm.model" in message
     assert "llm.api_key_env" in message
+
+
+def test_missing_context_window_tokens_is_reported(tmp_path: Path) -> None:
+    """``llm.context_window_tokens`` 是必填键（没有默认值）：缺了必须直接失败。"""
+    body = 'llm:\n  base_url: "https://api.deepseek.com"\n  api_key_env: "K"\n  model: "m"\n'
+    path = _write_config(tmp_path, body)
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path)
+
+    assert "context_window_tokens" in str(excinfo.value)
+
+
+def test_context_window_must_exceed_max_tokens(tmp_path: Path) -> None:
+    """上下文窗口必须大于输出预留，否则输入预算为负、压缩触发比失去意义。"""
+    path = _write_config(tmp_path, MINIMAL_CONFIG + "  max_tokens: 65536\n")
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(path)
+
+    message = str(excinfo.value)
+    assert "context_window_tokens" in message
+    assert "max_tokens" in message
 
 
 def test_unknown_config_key_is_rejected(tmp_path: Path) -> None:

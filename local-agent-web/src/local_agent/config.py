@@ -40,10 +40,25 @@ class LlmConfig(_StrictModel):
     base_url: str = Field(min_length=1)
     api_key_env: str = Field(min_length=1)
     model: str = Field(min_length=1)
+    #: 模型上下文窗口（token）。**必填且没有默认值**：T16 的压缩触发比 ``trigger_ratio``
+    #: 以 ``context_window_tokens - max_tokens`` 为分母，给一个固定缺省值会让"达到多少比例"
+    #: 这句话随模型变化而失真（换模型必须同步改这里，不能靠默认值蒙对）。
+    context_window_tokens: int = Field(gt=0)
     temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    #: 输出预留：回答长度上限。输入 Prompt 的可用预算 = 上下文窗口 − 这里的值。
     max_tokens: int = Field(default=4096, gt=0)
     timeout_seconds: int = Field(default=120, gt=0)
     retry_count: int = Field(default=2, ge=0, le=10)
+
+    @model_validator(mode="after")
+    def _window_must_exceed_output_reserve(self) -> LlmConfig:
+        if self.context_window_tokens <= self.max_tokens:
+            raise ValueError(
+                f"llm.context_window_tokens（{self.context_window_tokens}）必须大于 "
+                f"llm.max_tokens（{self.max_tokens}）：max_tokens 是为回答预留的输出额度，"
+                "输入 Prompt 的可用预算 = 上下文窗口 − 输出预留，必须为正数"
+            )
+        return self
 
 
 #: Embedding provider（架构 §10.2）：本地 ONNX / OpenAI 兼容 API。
@@ -219,6 +234,10 @@ class CompressionConfig(_StrictModel):
     enabled: bool = False
     trigger_ratio: float = Field(default=0.8, gt=0.0, le=1.0)
     preserve_recent_turns: int = Field(default=8, ge=1)
+    #: 窗口里最多保留的**最近完整工具步**数量，更早的整步省略并留一条带摘要的说明占位。
+    #: 轮次保底对"一个用户请求内的长工具循环"无效（只有 1 个人类轮次），靠这条才能收缩单个长任务。
+    #: ``0`` 表示**所有工具步都被省略**（窗口里只剩人类消息与那条说明占位）。
+    preserve_recent_tool_steps: int = Field(default=3, ge=0)
     summary_max_chars: int = Field(default=12_000, gt=0)
 
 

@@ -9,8 +9,11 @@ llm:
   base_url: "https://api.deepseek.com"
   api_key_env: "DEEPSEEK_API_KEY"
   model: "deepseek-flash"          # 该 key 实测可用：deepseek-flash、deepseek-v4-pro
+  # 必填：模型的上下文窗口（token），必须按所连模型的实际窗口填写——压缩触发比
+  # memory.compression.trigger_ratio 以“窗口 − max_tokens”为分母，填错会让压缩过早或过晚触发。
+  context_window_tokens: 65536     # 示例值，按模型文档替换
   temperature: 0.2
-  max_tokens: 4096
+  max_tokens: 4096                 # 输出预留：输入 Prompt 的可用预算 = 上下文窗口 − 这个值
   timeout_seconds: 120
   retry_count: 2
 
@@ -79,6 +82,7 @@ memory:
     enabled: false                 # v0.1a / v0.1b 保持关闭
     trigger_ratio: 0.8
     preserve_recent_turns: 8
+    preserve_recent_tool_steps: 3  # 窗口最多保留的最近完整工具步，更早的整步省略
     summary_max_chars: 12000
 
 security:
