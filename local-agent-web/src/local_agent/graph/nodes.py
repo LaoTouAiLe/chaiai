@@ -92,6 +92,7 @@ from local_agent.memory.short_term import (
     select_prompt_window,
 )
 from local_agent.memory.summarizer import summarize_conversation
+from local_agent.rag.retriever import retrieve_code
 from local_agent.reflection.memory_candidates import (
     RejectedCandidate,
     WriteIntent,
@@ -136,6 +137,7 @@ from local_agent.tools.result_types import ToolResultRecord, ToolResultStatus
 PREPARE_CONTEXT = "prepare_context"
 LOAD_AGENTS = "load_agents"
 RECALL_MEMORY = "recall_memory"
+RETRIEVE_CODE_NODE = "retrieve_code_node"
 COMPRESSION_NODE = "compression_node"
 PLANNER_NODE = "planner_node"
 AGENT_DECISION_NODE = "agent_decision_node"
@@ -410,6 +412,60 @@ def _merge_references(references: Sequence[MemoryReference]) -> list[MemoryRefer
     return ordered[:MAX_MEMORY_REFS]
 
 
+def retrieve_code_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
+    """按需检索当前工作区的代码片段并写入 ``rag_refs``（架构 §4.3、§5.3；开发文档 T21）。
+
+    只在 tool 分支执行、每轮一次；闲聊分支不经过这个节点（架构 §5.2/§5.3）。口径：
+
+    - ``rag.enabled=false`` 时**什么都不做**：不访问文件系统、不探测 ``rg``、不加载任何解析器，
+      也不记错误事件，只写空的 ``rag_refs`` 透传；
+    - 查询素材只取当前轮的 ``normalized_request`` / ``user_input``：这个节点在 ``planner_node``
+      之前，``task_goal`` 此刻还没生成（``prepare_context`` 每轮把它复位为 ``None``），
+      更不能读上一轮遗留的目标；
+    - 检索**失败**与"检索了但没有命中"是两回事：前者记一条可见错误事件，Prompt 里也用不同的
+      占位文字（架构 §11.6：失败要可见，不允许静默回退）；
+    - 降级与截断说明写进决策轨迹，便于审计"这一轮到底搜了多少、为什么结果不完整"。
+    """
+    context = runtime.context
+    config = context.app_config.rag
+    if not config.enabled:
+        return {"rag_refs": []}
+    query = str(state.get("normalized_request") or state.get("user_input") or "").strip()
+    # 工作区边界与敏感文件判定用安全策略；正常构造一定带策略，缺失时按配置现建一个，
+    # 不能因为"没有策略"就跳过边界检查去扫文件。
+    policy = context.security_policy or SecurityPolicy.from_config(
+        context.app_config, workspace_root=context.workspace_root
+    )
+    try:
+        retrieved = retrieve_code(
+            query,
+            config=config,
+            workspace_root=context.workspace_root,
+            policy=policy,
+        )
+    except Exception as exc:  # noqa: BLE001 — 检索是增强能力，任何意外都不该打断整张图
+        return {
+            "rag_refs": [],
+            "error_events": [
+                _error(
+                    state,
+                    stage=RETRIEVE_CODE_NODE,
+                    message=f"代码检索失败，本轮不注入代码片段：{exc}",
+                )
+            ],
+        }
+    update: AgentState = {"rag_refs": list(retrieved.references)}
+    if retrieved.failed:
+        update["error_events"] = [
+            _error(state, stage=RETRIEVE_CODE_NODE, message="代码检索失败，本轮不注入代码片段")
+        ]
+    elif retrieved.notes:
+        update["decision_trace"] = [
+            _decision(state, stage=RETRIEVE_CODE_NODE, summary="；".join(retrieved.notes))
+        ]
+    return update
+
+
 def _prompt_window(
     state: AgentState, context: RuntimeContext, *, covered: int | None = None
 ) -> PromptWindow:
@@ -470,6 +526,21 @@ def _recall_failed(state: AgentState) -> bool:
     )
 
 
+def _rag_search_failed(state: AgentState) -> bool:
+    """本轮代码检索是否**失败过**（区别于"检索了但没有命中"）。
+
+    与 :func:`_recall_failed` 同一套路：只用 ``error_events`` 里本轮 ``run_id`` 的记录推导，
+    不新增 State 字段。两种情况下 ``rag_refs`` 都是空的，混说会让模型把"这次没检索成功"
+    说成"工作区里没有相关代码"。
+    """
+    run_id = _run_id(state)
+    return any(
+        str(event.get("stage") or "") == RETRIEVE_CODE_NODE
+        and str(event.get("run_id") or "") == run_id
+        for event in state.get("error_events", [])
+    )
+
+
 def _system_prompt(
     state: AgentState, context: RuntimeContext, *, summary: str | None = None
 ) -> PromptContext:
@@ -484,6 +555,9 @@ def _system_prompt(
         memory_refs=state.get("memory_refs") or (),
         # 召回失败与"查了没有结果"是两回事：前者不能对用户说"我没有相关记忆"
         memory_recall_failed=_recall_failed(state),
+        rag_refs=state.get("rag_refs") or (),
+        # 同理：检索失败不能对用户说"工作区里没有相关代码"
+        rag_search_failed=_rag_search_failed(state),
         conversation_summary=(
             summary if summary is not None else state.get("conversation_summary")
         ),

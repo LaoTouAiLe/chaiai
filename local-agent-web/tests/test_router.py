@@ -35,7 +35,7 @@ def _assert_usage_adds_up(result: dict[str, Any]) -> None:
         + usage.window_messages_tokens
         + usage.tool_definition_tokens
     ) == usage.prompt_tokens
-from local_agent.graph.state import RuntimeContext, ToolEvent
+from local_agent.graph.state import RAGReference, RuntimeContext, ToolEvent
 from local_agent.llm.models import (
     TOOL_CALLING_UNAVAILABLE_REPLY,
     ModelCapabilities,
@@ -345,6 +345,7 @@ def test_graph_nodes_match_plan() -> None:
         "load_agents",
         "recall_memory",
         "mode_router",
+        "retrieve_code_node",
         "compression_node",
         "planner_node",
         "agent_decision_node",
@@ -2588,3 +2589,160 @@ def test_store_is_created_once_under_concurrency(
 
     assert len(opened) == 1
     assert len({id(item) for item in results}) == 1
+
+
+# --------------------------------------------------------------------------- T21 按需代码检索
+
+
+def _rag_enabled(app_config: AppConfig, **overrides: object) -> AppConfig:
+    data = app_config.model_dump()
+    data["rag"].update({"enabled": True, **overrides})
+    return AppConfig.model_validate(data)
+
+
+def _node_runtime(context: RuntimeContext) -> Any:
+    """构造节点需要的 ``Runtime`` 包装（只暴露 ``context``）。"""
+
+    class _Runtime:
+        def __init__(self, ctx: RuntimeContext) -> None:
+            self.context = ctx
+
+    return _Runtime(context)
+
+
+def test_retrieve_code_node_passes_through_when_disabled(
+    tmp_path: Path, app_config: AppConfig, model_factory: ModelFactory, monkeypatch
+) -> None:
+    """``rag.enabled=false`` 时不访问文件系统、不探测 ``rg``、不记错误事件（架构 §5.3）。"""
+    def boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("关闭时不应调用检索")
+
+    monkeypatch.setattr(nodes, "retrieve_code", boom)
+    context = _context(tmp_path, model_factory, app_config)
+
+    update = nodes.retrieve_code_node(
+        {"run_id": "run-1", "normalized_request": "看看 routers.py"}, _node_runtime(context)
+    )
+
+    assert update == {"rag_refs": []}
+
+
+def test_retrieve_code_node_writes_references(
+    tmp_path: Path, app_config: AppConfig, model_factory: ModelFactory
+) -> None:
+    """工具分支的检索节点把命中写进 ``rag_refs``（含 rank 与行区间）。"""
+    (tmp_path / "mod.py").write_text("decide_mode = 1\n", encoding="utf-8")
+    context = _context(tmp_path, model_factory, _rag_enabled(app_config))
+
+    update = nodes.retrieve_code_node(
+        {"run_id": "run-1", "normalized_request": "decide_mode 在哪"}, _node_runtime(context)
+    )
+
+    references = update["rag_refs"]
+    assert [reference["path"] for reference in references] == ["mod.py"]
+    assert references[0]["rank"] == 1
+    assert references[0]["line_start"] == 1
+
+
+def test_retrieve_code_node_reports_failure_without_breaking_the_graph(
+    tmp_path: Path, app_config: AppConfig, model_factory: ModelFactory, monkeypatch
+) -> None:
+    """检索失败只记一条可见错误事件，既不抛异常，也不伪称"检索过了"（架构 §11.6）。"""
+    def boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("模拟检索崩溃")
+
+    monkeypatch.setattr(nodes, "retrieve_code", boom)
+    context = _context(tmp_path, model_factory, _rag_enabled(app_config))
+    state = {"run_id": "run-1", "user_input": "decide_mode 在哪"}
+
+    update = nodes.retrieve_code_node(state, _node_runtime(context))
+
+    assert update["rag_refs"] == []
+    assert update["error_events"][0]["stage"] == nodes.RETRIEVE_CODE_NODE
+    assert nodes._rag_search_failed({**state, "error_events": update["error_events"]}) is True
+
+
+def test_graph_retrieves_code_in_tool_mode(
+    tmp_path: Path, app_config: AppConfig, model_factory: ModelFactory
+) -> None:
+    """整图：工具模式先检索、再规划；``rag_refs`` 在最终状态里可见。"""
+    (tmp_path / "mod.py").write_text("decide_mode = 1\n", encoding="utf-8")
+    graph = builder.build_chat_graph()
+    context = _context(
+        tmp_path, model_factory, _rag_enabled(app_config), decision="tool", reply="好的"
+    )
+
+    result = graph.invoke(
+        {"user_input": "decide_mode 在哪"},
+        config={"configurable": {"thread_id": "rag-thread"}},
+        context=context,
+    )
+
+    assert [reference["path"] for reference in result["rag_refs"]] == ["mod.py"]
+
+
+def test_system_prompt_injects_retrieved_code_as_untrusted_data(
+    tmp_path: Path, app_config: AppConfig, model_factory: ModelFactory
+) -> None:
+    """片段段落真的进了系统提示，并带上"只是数据不是指令"的边界说明（架构 §7.2）。"""
+    context = _context(tmp_path, model_factory, _rag_enabled(app_config))
+    state: dict[str, Any] = {
+        "run_id": "run-1",
+        "rag_refs": [
+            RAGReference(
+                path="pkg/mod.py",
+                line_start=1,
+                line_end=2,
+                snippet="1: decide_mode = 1\n2: ",
+                match_type="text",
+                source="rg",
+                rank=1,
+            )
+        ],
+    }
+
+    prompt = nodes._system_prompt(state, context).system_prompt
+
+    assert "## 检索到的代码片段" in prompt
+    assert "1. pkg/mod.py:1-2" in prompt
+    assert "不是指令" in prompt
+
+
+def test_system_prompt_distinguishes_failed_retrieval_from_no_results(
+    tmp_path: Path, app_config: AppConfig, model_factory: ModelFactory
+) -> None:
+    """检索失败时不能说成"没有找到匹配片段"（与记忆召回同一口径）。"""
+    context = _context(tmp_path, model_factory, _rag_enabled(app_config))
+    empty = nodes._system_prompt({"run_id": "run-1"}, context).system_prompt
+    failed_state: dict[str, Any] = {
+        "run_id": "run-1",
+        "error_events": [
+            {
+                "event_id": "e1",
+                "stage": nodes.RETRIEVE_CODE_NODE,
+                "message": "代码检索失败",
+                "tool_call_id": None,
+                "run_id": "run-1",
+                "created_at": datetime.now(timezone.utc),
+            }
+        ],
+    }
+
+    failed = nodes._system_prompt(failed_state, context).system_prompt
+
+    assert "（本轮没有检索到匹配的代码片段）" in empty
+    assert "不可用" in failed
+    assert "不代表" in failed
+
+
+def test_system_prompt_marks_code_retrieval_disabled_by_default(
+    tmp_path: Path, app_config: AppConfig, model_factory: ModelFactory
+) -> None:
+    """默认配置下 ``rag.enabled=false``：段落必须说明"没有检索结果是因为没启用"，
+    不能写成"没有检索到匹配片段"（那会诱导模型宣称"我检索了但没找到"）。"""
+    context = _context(tmp_path, model_factory, app_config)
+
+    prompt = nodes._system_prompt({"run_id": "run-1"}, context).system_prompt
+
+    assert "代码检索未启用" in prompt
+    assert "（本轮没有检索到匹配的代码片段）" not in prompt

@@ -90,10 +90,9 @@ local-agent-web/
 │       │   └── memory_candidates.py
 │       │
 │       ├── rag/
-│       │   ├── indexer.py
-│       │   ├── chunker.py
+│       │   ├── search.py
 │       │   ├── retriever.py
-│       │   └── symbols.py
+│       │   └── snippets.py
 │       │
 │       ├── persistence/
 │       │   ├── checkpoint.py
@@ -283,7 +282,7 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 - 目标：允许用户在网页选择运行服务的本机目录作为当前工作区，并在不改变记忆、AGENTS 和 RAG 作用域的前提下，通过 `workspace.allow_external_paths` 受控访问工作区外的显式绝对路径（架构 §1.4–§1.5、§6、§10.6）。
 - 涉及文件：src/local_agent/web.py、src/local_agent/ui/renderer.py、src/local_agent/config.py、src/local_agent/scope.py、src/local_agent/persistence/session_store.py、src/local_agent/persistence/migrations.py、src/local_agent/security/path_guard.py、src/local_agent/security/policy.py、src/local_agent/security/shell_guard.py、src/local_agent/security/approval.py、src/local_agent/tools/file_tools.py、src/local_agent/tools/shell_tools.py、src/local_agent/graph/builder.py、src/local_agent/graph/nodes.py、config.yaml.example、tests/test_web.py、tests/test_tools.py、tests/test_security.py、tests/test_graph_resume.py、README.md。
 - 关键接口：只使用既有 `workspace.root`、`workspace.allow_external_paths`、RuntimeContext 的 `workspace_root` / `current_cwd` 与 sessions.workspace_root/status，不增加 AgentState 字段。`workspace.root` 是启动默认值；页面使用“绝对路径输入框 + 已使用工作区列表”，不引入原生目录选择器依赖。规范化后的工作区与会话绑定，`sessions.status=active` 从 T14C 起表示整个聊天库唯一的当前会话；聊天库迁移将历史多 active 归一为 `updated_at` 最新的一条并增加唯一约束。普通提交与 `Command(resume=...)` 都从当前 Session 取得 `workspace_root`，默认 `current_cwd=workspace_root`，不能继续使用缓存 ChatApp 的启动默认值。相对路径始终以当前工作区解析；允许外部路径时，只有原始输入本身是绝对路径才进入外部路径策略。
-- 前置：T14B。验收：`python -m pytest tests/test_web.py tests/test_tools.py tests/test_security.py tests/test_graph_resume.py`；页面可输入并选择已存在且可读的本机目录，也可从去重后的历史工作区列表切换；非法/无权限目录失败且不改变当前会话。等价路径（Windows 大小写与分隔符、尾部分隔符、可解析的符号链接入口）不得生成重复工作区身份；刷新和重启恢复全局唯一的 active 会话及其工作区，旧库存在多 active 时迁移后只保留最新一条。切换工作区会切换或新建会话，不污染原会话的 AGENTS、`project_id`、记忆召回和工具上下文；在工作区 A 挂起相对路径审批、切到 B、再回 A 恢复时，判定、指纹和执行仍以 A 为根目录。`allow_external_paths=false` 时路径穿越、软链接逃逸和绝对外部路径均被拒绝；设为 `true` 时，原始输入为绝对路径的外部目标可 `list_dir` / `read_file`，但 `~`、相对路径逃逸和 Windows 盘符相对路径仍拒绝。外部 `edit_file`、`write_file`、`delete_file` 与工作区外 `run_shell.cwd` 必须在安全判定、动作指纹和执行三处使用同一规范化目标，进入人工审批且不得命中免审白名单；文件系统/驱动器根、用户主目录根、工作区根、Git 元数据和系统关键目录不可通过审批删除。外部路径不自动加载 AGENTS、不改变作用域、不进入 RAG 索引；页面突出展示外部路径及审批原因。关闭短期记忆时只承诺页面生命周期内选择，服务重启回到 `workspace.root`；§2 命令通过。
+- 前置：T14B。验收：`python -m pytest tests/test_web.py tests/test_tools.py tests/test_security.py tests/test_graph_resume.py`；页面可输入并选择已存在且可读的本机目录，也可从去重后的历史工作区列表切换；非法/无权限目录失败且不改变当前会话。等价路径（Windows 大小写与分隔符、尾部分隔符、可解析的符号链接入口）不得生成重复工作区身份；刷新和重启恢复全局唯一的 active 会话及其工作区，旧库存在多 active 时迁移后只保留最新一条。切换工作区会切换或新建会话，不污染原会话的 AGENTS、`project_id`、记忆召回和工具上下文；在工作区 A 挂起相对路径审批、切到 B、再回 A 恢复时，判定、指纹和执行仍以 A 为根目录。`allow_external_paths=false` 时路径穿越、软链接逃逸和绝对外部路径均被拒绝；设为 `true` 时，原始输入为绝对路径的外部目标可 `list_dir` / `read_file`，但 `~`、相对路径逃逸和 Windows 盘符相对路径仍拒绝。外部 `edit_file`、`write_file`、`delete_file` 与工作区外 `run_shell.cwd` 必须在安全判定、动作指纹和执行三处使用同一规范化目标，进入人工审批且不得命中免审白名单；文件系统/驱动器根、用户主目录根、工作区根、Git 元数据和系统关键目录不可通过审批删除。外部路径不自动加载 AGENTS、不改变作用域、不进入代码 RAG 检索范围；页面突出展示外部路径及审批原因。关闭短期记忆时只承诺页面生命周期内选择，服务重启回到 `workspace.root`；§2 命令通过。
 
 ### T15｜长期实体事实 CRUD 与冲突（L）
 
@@ -328,7 +327,7 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 
 ## 7. v0.3：复杂任务、可选代码 RAG 与评测
 
-前置：v0.2 验收通过；仅 T19 首次在线下载因外部网络阻断时，可按 §6 的收尾记录先开展 T20 等后续开发，但该项仍是待补验，不构成 v0.2 完整验收或发布豁免。RAG 可关闭，关闭后基本工具任务仍能完成。架构 §12 的可选子 Agent 只有在基础任务评测达标并另行批准范围后启动，不阻塞本阶段退出。每项任务都执行 §2 质量命令。
+前置：v0.2 验收通过；仅 T19 首次在线下载因外部网络阻断时，可按 §6 的收尾记录先开展 T20 等后续开发，但该项仍是待补验，不构成 v0.2 完整验收或发布豁免。RAG 可关闭，关闭后基本工具任务仍能完成。架构 §14 的可选子 Agent 只有在基础任务评测达标并另行批准范围后启动，不阻塞本阶段退出。每项任务都执行 §2 质量命令。
 
 ### T20｜多步骤规划与恢复（L）
 
@@ -337,12 +336,13 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 - 关键接口：只用架构 §4.2 已有字段，步骤上限用 agent.max_tool_loops / max_retries_per_step；final_evidence 全量重算。
 - 前置：T19。验收：`python -m pytest tests/test_router.py tests/test_graph_resume.py`；三步任务第二步失败可调整后续计划，重启后不重做已有副作用步骤，超限明确失败；§2 命令通过。
 
-### T21｜AST 索引与可关闭代码 RAG（L）
+### T21｜按需代码检索与可关闭代码 RAG（L）
 
-- 目标：为工作区代码建立增量索引；代码问题按 rag.enabled 检索带文件路径和位置的片段，禁用时不访问索引（架构 §2、§12）。
-- 涉及文件：src/local_agent/rag/indexer.py、src/local_agent/rag/chunker.py、src/local_agent/rag/retriever.py、src/local_agent/rag/symbols.py、src/local_agent/context/prompt_context.py、src/local_agent/graph/nodes.py、tests/test_rag.py。
-- 关键接口：rag_refs 按架构 §4.2 覆盖语义；rag.enabled/backend/index_path/max_results 按 §8；Tree-sitter API 先按已安装版本核实，未知语言以带来源的文本切片降级。
-- 前置：T19。验收：`python -m pytest tests/test_rag.py tests/test_router.py`；新增/修改/删除文件后索引更新，禁用时无索引访问，工作区外文件不进入结果，片段可定位；§2 命令通过。
+- 目标：代码问题按 `rag.enabled` 在当前工作区内执行按需文件/文本搜索，命中后只读取有界片段并返回文件路径与行号；不建立持久 AST/向量索引，不维护增量索引，不把 LSP 接入列为 T21 交付范围（架构 §2、§12）。
+- 涉及文件：src/local_agent/rag/search.py、src/local_agent/rag/retriever.py、src/local_agent/rag/snippets.py、src/local_agent/context/prompt_context.py、src/local_agent/graph/state.py、src/local_agent/graph/nodes.py、src/local_agent/graph/builder.py、src/local_agent/graph/edges.py、src/local_agent/config.py、config.yaml.example、pyproject.toml、uv.lock、tests/test_rag.py、tests/test_router.py。
+- 关键接口：`rag_refs` 按架构 §4.2 覆盖语义，`RAGReference` 严格按 §4.3；`retrieve_code_node` 按 §5.1/§5.3 只在 tool 分支首次进入时运行。配置收敛为 `rag.enabled` / `max_results` 及经实测确认的搜索限额。优先使用 `rg` 做候选发现，但 `rg` 只是可选加速器，不是运行硬依赖；找不到时退化为同样有界的 Python 文件扫描。两者都不得拼接 Shell 字符串，搜索参数、超时、扫描文件数、单文件大小、结果数、单片段字符数与总 Prompt 预算均须有界。仅在候选文件已命中且解析器可用时允许做局部 AST 边界提取，失败退回带来源的行级片段；不扫描全库建立符号数据库。
+- 配置迁移：`RagConfig` 已收窄为 `enabled` / `max_results` 与搜索限额（`timeout_seconds` / `max_files` / `max_file_bytes` / `max_terms` / `max_matches_per_term` / `context_lines` / `snippet_chars` / `section_chars`）；`config.yaml.example` 同步更新，`pyproject.toml` 的 `rag = ["tree-sitter", ...]` 可选组已移除并重跑 `uv lock`（锁文件里不再有 tree-sitter / langchain-text-splitters）。旧的 `backend` / `index_path` 键已删除：配置里仍写它们会在启动校验时直接失败，不会静默忽略。局部 AST 若在实测后启用，再单独开一个可选组。
+- 前置：T19。验收：`python -m pytest tests/test_rag.py tests/test_router.py`；按路径/文件名/文本可找到候选，结果片段严格符合 §4.3 并带可核对的相对路径和行号；新增、修改、删除文件后的下一次查询直接反映磁盘现状（不缓存目录列表，不返回已删除、已改名或旧内容的路径）；关闭时不搜索、不探测 `rg`、不加载解析器，工作区外文件、敏感文件、二进制文件不进入结果；`rg` 缺失时有界 Python 扫描仍可返回结果，搜索超时、两条路径都失败或局部 AST 失败时可见降级且不得伪称已检索；Prompt 中片段按 §7.2 作为不可信数据注入；§2 命令通过。
 
 ### T22｜编辑预览与 Patch 冲突（L）
 
@@ -363,7 +363,7 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 - 目标：按 §10 验收矩阵完成安装、文档、测试和真实模型演示；关闭高级功能后不破坏 v0.1a 使用。
 - 涉及文件：README.md、CONTRIBUTING.md、LICENSE、config.yaml.example、requirements.txt、pyproject.toml、tests/test_web.py、tests/test_security.py、tests/test_graph_resume.py、tests/test_memory.py、tests/test_rag.py、tests/test_agent_eval.py。
 - 关键接口：不新增业务接口，只核对架构 §4–§10 契约、配置与启动命令。
-- 前置：T23。验收：在新环境执行 `uv lock --check`、`uv sync --extra memory --extra rag`，激活该环境后运行 `python -m pytest`、`python -m ruff check .`、`python -m mypy src`；再用仅基础依赖的环境确认关闭高级功能时 Web/工具仍可用。按 README 从空配置到本机网页演示，分别记录 Windows/POSIX 的实际测试覆盖范围与至少两种兼容端点的结果和限制，§10 矩阵逐项通过。
+- 前置：T23。验收：在新环境执行 `uv lock --check`、`uv sync --extra memory`，激活该环境后运行 `python -m pytest`、`python -m ruff check .`、`python -m mypy src`；若 T21 实测后增加了局部 AST 可选组，再把该组加入安装与验收命令。另用仅基础依赖的环境确认关闭高级功能时 Web/工具仍可用。按 README 从空配置到本机网页演示，分别记录 Windows/POSIX 的实际测试覆盖范围与至少两种兼容端点的结果和限制，§10 矩阵逐项通过。
 
 阶段演示：三步任务跨重启继续、没有重复编辑；打开 RAG 定位代码片段，关闭后基本任务照常；导出无密钥的轨迹与评测结果。
 
@@ -498,9 +498,15 @@ security:
 
 rag:
   enabled: false
-  backend: tree_sitter
-  index_path: "data/code_index"
   max_results: 8
+  timeout_seconds: 10
+  max_files: 200
+  max_file_bytes: 262144
+  max_terms: 4
+  max_matches_per_term: 20
+  context_lines: 20
+  snippet_chars: 1200
+  section_chars: 4000
 
 agent:
   max_tool_loops: 20
@@ -530,7 +536,7 @@ embedding:
 - v0.1a：以示例 YAML 为起点，memory.medium_term.enabled、memory.long_term.enabled、memory.compression.enabled、embedding.enabled 均设为 false；rag.enabled 维持 false。llm.api_key_env 指向环境变量名，绝不在 YAML 写入值。security.require_approval 的四项始终为 true；v0.1a 对这些动作固定拒绝，v0.1b 才进入审批。任一项改为 false 应在配置校验时失败。
 - v0.1b：启用网页审批和 sessions 索引，保持记忆/压缩/RAG 关闭；逐项验证 shell.whitelist 的平台与参数结构。
 - v0.2：先配置并验证 embedding provider 再打开 medium_term；默认 `onnx_local`，首次运行允许下载模型，严格离线环境先准备缓存并设置 `local_files_only=true`。T14C 后 `workspace.root` 只作为启动默认值，网页选择结果在启用短期记忆时按会话保存；关闭短期记忆时只在当前页面生命周期内生效，服务重启回到配置默认值。`allow_external_paths` 保持严格边界，改为 `true` 只允许受控的显式外部绝对路径，外部副作用仍强制审批。long_term 和 compression 可分别打开，关闭任一层仍须可运行。`context_window_tokens` 必填且必须大于 `max_tokens`：压缩触发比 `trigger_ratio` 以 `context_window_tokens − max_tokens` 为分母，换模型时必须同步修改；prompt_window_messages 限制 Prompt 窗口而非 Checkpoint 消息数，且只在 `compression.enabled=true` 时生效（关闭时窗口原样返回全部消息）。
-- v0.3：rag.enabled 可选打开；若没有语言解析器或索引损坏，必须给出可见错误或降级检索，不得伪称已检索。
+- v0.3：`rag.enabled` 可选打开；基础能力是工作区内按需搜索与有界片段读取，不依赖持久索引。`rg` 是外部可执行的可选加速器，不由 `uv sync` 安装；不可用时退化为有界 Python 扫描。搜索超时、两条路径都失败或文件读取失败时必须给出可见错误，不得伪称已检索；可选局部 AST 解析失败时退回带路径和行号的文本片段。
 - 配置缺字段、超出工作区路径、缺少环境变量或模型能力不匹配，在启动/提交时给出可理解的错误；不允许用默认值掩盖危险配置。具体配置键以上方 YAML 为准。
 
 
@@ -566,7 +572,8 @@ dependencies = [
 
 [project.optional-dependencies]
 memory = ["chromadb>=1.5,<1.6", "tiktoken", "fastembed>=0.8,<0.9"]
-rag = ["tree-sitter", "tree-sitter-language-pack", "langchain-text-splitters"]
+# T21 的按需文本搜索基础路径不新增 Python 运行依赖；若实测后启用局部 AST，
+# 再把解析器放进独立可选组并同步 uv.lock。
 
 [dependency-groups]
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
@@ -581,14 +588,14 @@ where = ["src"]
 -e .
 ```
 
-v0.2 安装记忆可选组：`uv sync --extra memory`；v0.3 全功能验收：`uv sync --extra memory --extra rag`。可选依赖安装失败不应影响未开启这些功能的基础网页/工具模式。`unidiff` 不在默认依赖内，T22 采用自定义 Patch 应用器；若改变选择，先取得批准并更新此节。
+v0.2 安装记忆可选组：`uv sync --extra memory`；T21 的按需文本搜索基础路径不要求 `rag` Python 可选组，`rg` 只作为系统中可发现的外部加速器，缺失时使用有界 Python 扫描。若实测后加入局部 AST 解析器，再恢复独立可选组并更新安装命令与锁文件。可选依赖安装失败不应影响未开启这些功能的基础网页/工具模式。`unidiff` 不在默认依赖内，T22 采用自定义 Patch 应用器；若改变选择，先取得批准并更新此节。
 
 ---
 
 ### 9.1 依赖分层与锁定
 
 - v0.1a 基础组包含上方 `[project].dependencies`；`filelock` 仅在需要进程间文件协调时调用，不得替代 SQLite 事务或安全审批。每新增运行依赖同步 `pyproject.toml`、`uv.lock` 和安装说明；`requirements.txt` 保持 `-e .` 入口，无需复制依赖名单。
-- v0.2 安装 `memory` 可选组，其中 FastEmbed 只服务于 `onnx_local`；版本范围已在 T14A / T14B 用目标 Python 版本实际安装、核实 API 后锁定为 `chromadb>=1.5,<1.6` 与 `fastembed>=0.8,<0.9`（实现依赖这两版实测到的具体行为：`hnsw:space` 距离度量键、自定义 Embedding 函数的 `name()` 与 `__call__(self, input)` 协议、`cache_dir` / `local_files_only` 构造参数），不直接依赖其传递依赖。v0.3 根据 `rag.enabled` 安装 `rag` 组；关掉 RAG 时不应强制安装 Tree-sitter。运行全量测试必须同步两个可选组。
+- v0.2 安装 `memory` 可选组，其中 FastEmbed 只服务于 `onnx_local`；版本范围已在 T14A / T14B 用目标 Python 版本实际安装、核实 API 后锁定为 `chromadb>=1.5,<1.6` 与 `fastembed>=0.8,<0.9`（实现依赖这两版实测到的具体行为：`hnsw:space` 距离度量键、自定义 Embedding 函数的 `name()` 与 `__call__(self, input)` 协议、`cache_dir` / `local_files_only` 构造参数），不直接依赖其传递依赖。v0.3 的按需代码检索基础路径不强制安装 Tree-sitter；只有局部 AST 增强经真实 API 核实后才增加独立可选依赖。运行全量测试时只安装实际启用的可选组。
 - 开发工具 pytest、pytest-asyncio、ruff、mypy 归 `[dependency-groups].dev`，随 `uv sync` 安装；T01 和 T24 都必须检查 `uv lock --check`。用新虚拟环境实际安装，并记录 Python 版本、`uv` 版本和依赖冲突；本文版本范围是方案约束，安装后的实际 API 仍需以该版本核实。
 - 待批准：unidiff。默认 T22 采用自定义 Patch 应用器，不偷偷引入 unidiff；若选择它，先批准并补版本、测试与许可检查。
 
@@ -606,7 +613,7 @@ v0.2 安装记忆可选组：`uv sync --extra memory`；v0.3 全功能验收：`
 | 中长期记忆召回和写入 | T14B–T19 | tests/test_memory.py、tests/test_reflection.py | 普通闲聊不写；闲聊中明确“记住”经反思后可写；仅相关且作用域匹配的已验证记忆进入 Prompt，模型/维度/距离契约不匹配时拒绝旧索引，删除后不召回 |
 | 摘要压缩 | T16 | tests/test_memory.py、tests/test_graph_resume.py | Prompt 窗口变短，Checkpoint 原消息不减 |
 | 反思、重规划和循环上限 | T17；T20 | tests/test_reflection.py、tests/test_router.py | 错误工具不能 verified；失败可调整计划；循环有明确终点 |
-| 可选 RAG 与 AST | T21 | tests/test_rag.py | 开启可定位来源，关闭时无索引依赖/访问 |
+| 按需代码 RAG（局部 AST 可选） | T21 | tests/test_rag.py | 开启后返回带路径/行号的有界片段，文件变化即时可见；关闭时无搜索或解析器访问，越界/敏感/二进制文件不进入结果 |
 | 轨迹与评测 | T23–T24 | tests/test_agent_eval.py | 固定任务集产出可读指标、失败原因，无密钥和隐藏思维链 |
 
 每阶段留存：测试命令/通过结果、一次真实模型演示记录、已知限制、回归列表。真实 API 不通过时先区分“模型能力不足”“配置错误”“Graph/工具缺陷”，不能只给笼统失败截图。
@@ -636,6 +643,6 @@ v0.2 安装记忆可选组：`uv sync --extra memory`；v0.3 全功能验收：`
 | v0.1a | StateGraph 路由、Tool Calling、`add_messages`、Checkpointer、文件/Shell 安全、Web rerun 幂等 | 浏览器读改测录屏、Checkpoint 恢复测试、拒删用例 |
 | v0.1b | `interrupt()` / `Command(resume=...)`、三出口 HITL、事件幂等、模型能力协商、跨平台策略 | 审批拒绝不循环、按钮重复不重放、多会话隔离与能力降级测试 |
 | v0.2 | 短/中/长期记忆分层、向量召回、工作区与会话作用域、受控外部路径、SQLite 实体、摘要压缩、反思、遗忘 | 跨会话召回与删除测试、双工作区隔离、外部副作用审批、压缩前后 Prompt/Checkpoint 对照、反思证据链 |
-| v0.3 | Plan-and-Execute、动态重规划、可选代码 RAG/AST、轨迹与评测 | 三步任务恢复演示、RAG 开关对照、固定评测集指标和失败分析 |
+| v0.3 | Plan-and-Execute、动态重规划、可选按需代码 RAG（局部 AST 可选）、轨迹与评测 | 三步任务恢复演示、RAG 开关与文件即时更新对照、固定评测集指标和失败分析 |
 
 简历只陈述已完成且有测试/演示证据的能力；不要把架构预留的多模态、插件、知识蒸馏或未实现的多 Agent 写成已交付功能。

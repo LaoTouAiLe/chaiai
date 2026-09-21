@@ -30,6 +30,7 @@ from local_agent.graph.nodes import (
     PREPARE_CONTEXT,
     RECALL_MEMORY,
     REFLECTION_NODE,
+    RETRIEVE_CODE_NODE,
     SAFETY_GATE_NODE,
     TOOL_EXECUTION_NODE,
     agent_decision_node,
@@ -43,6 +44,7 @@ from local_agent.graph.nodes import (
     prepare_context_node,
     recall_memory_node,
     reflection_node,
+    retrieve_code_node,
     safety_gate_node,
     tool_execution_node,
 )
@@ -76,6 +78,7 @@ def build_chat_graph(checkpointer: BaseCheckpointSaver | None = None) -> ChatGra
     graph.add_node(LOAD_AGENTS, load_agents_node)
     graph.add_node(RECALL_MEMORY, recall_memory_node)
     graph.add_node(MODE_ROUTER, mode_router_node)
+    graph.add_node(RETRIEVE_CODE_NODE, retrieve_code_node)
     graph.add_node(COMPRESSION_NODE, compression_node)
     graph.add_node(PLANNER_NODE, planner_node)
     graph.add_node(AGENT_DECISION_NODE, agent_decision_node)

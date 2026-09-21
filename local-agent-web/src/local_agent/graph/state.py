@@ -38,8 +38,30 @@ EvidenceType = Literal["file_hash", "diff", "exit_code", "stdout", "test_result"
 
 # 架构 §4.3 未给出具体字段的结构：仍为字典占位的部分由对应任务替换为具体类型
 # （MemoryReference 在 T14B 定稿，见 memory/schemas.py；TokenUsage/ContextBudget 在 T16 定稿，
-# 见 context/token_budget.py；RAGReference 在 T21）。审批请求与决策已由 T10 定义。
-RAGReference = dict[str, Any]
+# 见 context/token_budget.py；RAGReference 在 T21 定稿）。审批请求与决策已由 T10 定义。
+
+#: 检索命中的类型（架构 §4.3）。``ast`` 是局部 AST 解析预留的取值，T21 的基础路径不产生它。
+RAGMatchType = Literal["path", "filename", "text", "ast"]
+#: 命中的来源路径：外部 ``rg``、有界 Python 扫描，或（预留）局部 AST。
+RAGSource = Literal["rg", "python_scan", "ast"]
+
+
+class RAGReference(TypedDict):
+    """一条代码检索结果（架构 §4.3，T21 定稿）。
+
+    - ``path`` 是**相对当前工作区**的规范化路径；``line_start`` / ``line_end`` 是 1 基闭区间，
+      且必须与实际返回的片段一致（截断后也要如实收窄）；
+    - ``rank`` 只是本轮结果的顺序（从 1 开始），**不是相似度或置信度**——这里没有向量；
+    - 相同 ``path + line_start + line_end`` 的结果在写入 ``rag_refs`` 前必须去重。
+    """
+
+    path: str
+    line_start: int
+    line_end: int
+    snippet: str
+    match_type: RAGMatchType
+    source: RAGSource
+    rank: int
 
 
 class DecisionRecord(TypedDict):

@@ -7,7 +7,7 @@ START → prepare_context → load_agents → recall_memory → mode_router
 mode_router --chat--> compression_node → chat_node → reflection_node → completion_router
 completion_router --有记忆候选--> memory_write_node → final_response_node → END
 completion_router --其余--> final_response_node → END
-mode_router --tool--> planner_node → compression_node → agent_decision_node
+mode_router --tool--> retrieve_code_node → planner_node → compression_node → agent_decision_node
 agent_decision_node --有工具调用--> safety_gate_node
 safety_gate_node --有放行调用--> tool_execution_node → reflection_node → completion_router
 safety_gate_node --全部被拒-->   reflection_node → completion_router
@@ -35,6 +35,7 @@ from local_agent.graph.nodes import (
     PREPARE_CONTEXT,
     RECALL_MEMORY,
     REFLECTION_NODE,
+    RETRIEVE_CODE_NODE,
     SAFETY_GATE_NODE,
     TOOL_EXECUTION_NODE,
 )
@@ -80,8 +81,10 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
     graph.add_conditional_edges(
         MODE_ROUTER,
         route_by_mode,
-        {ROUTE_CHAT: COMPRESSION_NODE, ROUTE_TOOL: PLANNER_NODE},
+        {ROUTE_CHAT: COMPRESSION_NODE, ROUTE_TOOL: RETRIEVE_CODE_NODE},
     )
+    # 工具分支先按需检索（T21），再进入规划；闲聊分支不经过检索节点（架构 §5.2、§5.3）。
+    graph.add_edge(RETRIEVE_CODE_NODE, PLANNER_NODE)
     graph.add_edge(PLANNER_NODE, COMPRESSION_NODE)
     graph.add_conditional_edges(
         COMPRESSION_NODE,

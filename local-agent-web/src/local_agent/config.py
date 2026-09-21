@@ -331,12 +331,32 @@ class SecurityConfig(_StrictModel):
 
 
 class RagConfig(_StrictModel):
-    """可选代码检索（T21 启用）。"""
+    """可选按需代码检索（架构 §4.3、§5.3；T21 启用）。
+
+    **没有持久索引**：每次查询直接读当前工作区的磁盘现状，所以不存在"陈旧索引"，
+    也没有 `backend` / `index_path` 这类预留键（T21 已把旧的 tree_sitter 预留收窄掉）。
+
+    所有限额都必须有界：一个常见查询词就能命中整棵树，没有上限会同时吃掉内存与 Prompt。
+    """
 
     enabled: bool = False
-    backend: Literal["tree_sitter"] = "tree_sitter"
-    index_path: str = "data/code_index"
     max_results: int = Field(default=8, gt=0)
+    #: 单次检索的超时秒数；`rg` 与 Python 扫描共用同一上限。
+    timeout_seconds: int = Field(default=10, gt=0)
+    #: 候选发现最多检查的文件数；达到上限即停止并在结果说明里标注"已截断"。
+    max_files: int = Field(default=200, gt=0)
+    #: 单个文件最多读取的字节数；超过即跳过，并在结果说明里如实标注。
+    max_file_bytes: int = Field(default=262_144, gt=0)
+    #: 从用户请求里最多提取多少个查询词项。
+    max_terms: int = Field(default=4, gt=0)
+    #: 单个词项最多接受多少条命中（常见词命中太多时按文件顺序截断）。
+    max_matches_per_term: int = Field(default=20, gt=0)
+    #: 片段上下文行数：命中行前后各取多少行。
+    context_lines: int = Field(default=20, ge=0)
+    #: 单个片段的字符上限。
+    snippet_chars: int = Field(default=1200, gt=0)
+    #: 「检索到的代码片段」段落的总字符上限。
+    section_chars: int = Field(default=4000, gt=0)
 
 
 class AgentConfig(_StrictModel):

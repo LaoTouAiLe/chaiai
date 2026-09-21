@@ -148,11 +148,19 @@ security:
     redact_environment_values: true
     block_known_secret_files: true
 
+# 可选按需代码检索（T21）：不建持久索引，每次查询直接读当前工作区。
+# rag.enabled=false 时不访问文件系统、不探测 rg、不加载解析器。
 rag:
   enabled: false
-  backend: "tree_sitter"
-  index_path: "data/code_index"
   max_results: 8
+  timeout_seconds: 10
+  max_files: 200
+  max_file_bytes: 262144
+  max_terms: 4
+  max_matches_per_term: 20
+  context_lines: 20
+  snippet_chars: 1200
+  section_chars: 4000
 
 agent:
   max_tool_loops: 20

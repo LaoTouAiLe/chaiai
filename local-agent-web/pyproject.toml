@@ -29,7 +29,8 @@ dependencies = [
 # metadata、维度校验时机），换小版本必须重新核实。
 # fastembed 同理：它还是 0.x，构造参数（cache_dir / local_files_only / 模型元数据）在 0.8 上核实。
 memory = ["chromadb>=1.5,<1.6", "tiktoken", "fastembed>=0.8,<0.9"]
-rag = ["tree-sitter", "tree-sitter-language-pack", "langchain-text-splitters"]
+# 按需代码检索（T21）不新增 Python 运行依赖：优先调用外部 `rg`（可选加速器，不由 uv 安装），
+# 缺失时退化为有界 Python 扫描。局部 AST 若经实测加入，再单独开一个可选组。
 
 [dependency-groups]
 dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
