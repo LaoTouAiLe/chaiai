@@ -15,6 +15,9 @@ dist/
 config.yaml
 data/
 
+# T23 评测的生成报表（本地可比对的产物，不进版本库）
+eval/
+
 # 编辑器
 .idea/
 .vscode/
