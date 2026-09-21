@@ -1156,6 +1156,13 @@ ToolEvidence
 
 应在 `llm/factory.py` 中建立适配层，并在启动时执行能力探测，结果写入日志和 `RuntimeContext`：
 
+供应商扩展字段属于同一层适配：部分端点（如 DeepSeek 的思考模式）会在响应里带非标准字段
+（`reasoning_content`），并**要求它在下一轮请求中原样回传**——官方 `ChatOpenAI` 明确不提取、
+不保留这类字段，直接用会让带 `tool_calls` 的工具循环在第二次请求被 400 拒绝。适配层必须用最小的
+provider 子类把该字段在"响应 → 消息 → 下一轮请求"三段之间保住，并且**只对带 `tool_calls` 的
+assistant 消息**回传；没有该字段的模型行为不变。该字段只留在消息元数据（随 Checkpoint 保存，
+恢复后仍拼得回原请求），不进决策轨迹、工具事件、错误事件与最终证据，也不在页面渲染。
+
 ```text
 ModelCapabilities
 ├── tool_calling: bool

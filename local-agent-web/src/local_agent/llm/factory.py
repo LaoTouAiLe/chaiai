@@ -3,6 +3,11 @@
 字段名以已安装的 ``langchain-openai`` 为准：``model``、``base_url``、``api_key``、
 ``timeout``、``max_completion_tokens`` 是该类字段的初始化别名。T09 会在这里补能力
 探测与结构化输出降级链。
+
+返回的是 :class:`ChatOpenAIWithReasoning`（``ChatOpenAI`` 的子类）：它只多一件事——把
+供应商扩展字段 ``reasoning_content`` 留住并在带 ``tool_calls`` 的消息上回传，否则 DeepSeek
+思考模式的工具循环第二次请求就会 400（详见 :mod:`local_agent.llm.compat`）。对没有该字段的
+模型等价于原类。
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from local_agent.config import LlmConfig
+from local_agent.llm.compat import ChatOpenAIWithReasoning
 
 
 def build_chat_model(config: LlmConfig, api_key: str) -> ChatOpenAI:
@@ -23,7 +29,7 @@ def build_chat_model(config: LlmConfig, api_key: str) -> ChatOpenAI:
     Returns:
         可用于 ``invoke`` 的聊天模型实例（本阶段不启用流式输出）。
     """
-    return ChatOpenAI(
+    return ChatOpenAIWithReasoning(
         model=config.model,
         base_url=config.base_url,
         api_key=SecretStr(api_key),
