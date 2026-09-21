@@ -42,6 +42,7 @@ from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatResult
 from langchain_openai import ChatOpenAI
+from pydantic import PrivateAttr
 
 #: 供应商扩展字段名（DeepSeek 思考模式）。
 REASONING_CONTENT_KEY = "reasoning_content"
@@ -53,6 +54,10 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
     只影响 OpenAI 兼容端点的供应商扩展字段；官方 OpenAI 模型上等价于原类。
     """
 
+    #: 这个供应商**确实会用**该字段（见过一次非流式响应带它）。流式路径要用它决定
+    #: "要不要补一个空值占位"——`stream_placeholder_fields` 只用它，不猜供应商名字。
+    _uses_reasoning_content: bool = PrivateAttr(default=False)
+
     def _create_chat_result(
         self, response: Any, generation_info: dict[str, Any] | None = None
     ) -> ChatResult:
@@ -61,6 +66,7 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
             # ``None`` = 响应里没有这个字段（非思考模型）；空串是 DeepSeek 的真实返回值，
             # 必须原样留住——服务端要的是"字段存在并传回"，不是"内容非空"。
             if reasoning is not None:
+                self._uses_reasoning_content = True
                 generation.message.additional_kwargs[REASONING_CONTENT_KEY] = reasoning
         return result
 
@@ -87,6 +93,22 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
             if isinstance(reasoning, str):
                 target[REASONING_CONTENT_KEY] = reasoning
         return payload
+
+
+def stream_placeholder_fields(model: Any) -> dict[str, str]:
+    """流式回答需要补齐的供应商字段占位（不需要时返回空字典）。
+
+    为什么需要：**真增量流式时框架不会把 ``reasoning_content`` 装进块里**（它只在非流式的响应
+    解析路径上被本模块提取），于是流式回答落库后会缺这个字段，下一轮请求被服务端 400 拒绝
+    （T23 真实模型冒烟实测：`The reasoning_content in the thinking mode must be passed back`）。
+
+    规则：只有"这个供应商确实用过该字段"（见过一次非流式响应带它）才补一个**空值**占位——
+    服务端判定的是"字段是否存在"，空串是它自己也发过的值。没见过就不动，避免给官方 OpenAI
+    这类不认识该字段的端点发非标准参数。
+    """
+    if bool(getattr(model, "_uses_reasoning_content", False)):
+        return {REASONING_CONTENT_KEY: ""}
+    return {}
 
 
 def _response_reasoning(response: Any) -> list[str | None]:

@@ -16,6 +16,10 @@ llm:
   max_tokens: 4096                 # 输出预留：输入 Prompt 的可用预算 = 上下文窗口 − 这个值
   timeout_seconds: 120
   retry_count: 2
+  # 网页是否按增量流式展示**最终回答**（T23）。默认关闭：流式只是展示层优化——只影响
+  # "最终回答"那两个调用点的显示，planner/反思/工具调用/工具结果/隐藏推理都不流式；
+  # 流式过程不逐块写 Checkpoint，模型不支持或中途失败都会退化为一次普通完整调用。
+  streaming: false
 
 embedding:
   # 示例保持关闭：加载示例配置不会导入 fastembed、不访问网络、不下载模型。

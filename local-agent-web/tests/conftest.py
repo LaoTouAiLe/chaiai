@@ -13,8 +13,8 @@ from typing import Any
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import RunnableLambda
 from pydantic import Field
 
@@ -63,6 +63,10 @@ class RoutingFakeModel(GenericFakeChatModel):
     #: 审核结论里的 ``user_requested``（"用户本轮是否要求记住"）；默认 ``False``。它与候选列表
     #: 相互独立：用户要求记住但没能提炼出候选时，脚本可以只把这一项设为 ``True``。
     memory_requested: bool = False
+    #: 流式测试用：把回答切成几块（确定性均分；``<=1`` 表示整段一块）。
+    stream_chunks: int = 3
+    #: 流式测试用：产出第 N 块之后就抛错（模拟"中途失败"）；``None`` 表示不失败。
+    fail_stream_after_chunks: int | None = None
     seen_prompts: list[str] = Field(default_factory=list)
     #: 结构化输出调用（反思、分类、记忆意图审核）收到的提示文本。
     structured_prompts: list[str] = Field(default_factory=list)
@@ -184,6 +188,32 @@ class RoutingFakeModel(GenericFakeChatModel):
             return ChatResult(generations=[ChatGeneration(message=message)])
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.reply))])
 
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[no-untyped-def]
+        """按 ``_generate`` 的同一套脚本产出**增量块**（真实模型是 token 级，这里按块）。
+
+        有了它，``llm.streaming=true`` 的路径在测试里也是确定性的：块的内容拼起来必须等于
+        ``_generate`` 的整段回答（流式与不流式的最终消息因此完全一致）。
+        """
+        # 只为取脚本内容：提示只记一份、调用计数记 **1**（真正的"这次请求"是 stream 那一次）
+        calls, prompts = self.decision_calls, len(self.seen_prompts)
+        try:
+            result = self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+        finally:
+            self.decision_calls = calls + 1
+            del self.seen_prompts[prompts:]
+        message = result.generations[0].message
+        for index, piece in enumerate(_split_chunks(str(message.content), self.stream_chunks)):
+            if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
+                raise RuntimeError("流式中途失败（测试故意触发）")
+            # `_stream` 的契约是产出 `ChatGenerationChunk`（langchain-core 会解包 .message）
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content=piece,
+                    additional_kwargs=dict(message.additional_kwargs),
+                    id=message.id,
+                )
+            )
+
     def _materialize_calls(self) -> list[dict[str, Any]]:
         """本轮返回的工具调用。
 
@@ -196,6 +226,16 @@ class RoutingFakeModel(GenericFakeChatModel):
             for call in calls:
                 call["id"] = f"{call.get('id') or 'call'}-{self.decision_calls}"
         return calls
+
+
+def _split_chunks(text: str, count: int) -> list[str]:
+    """把文本切成若干块（确定性：按长度均分，保持顺序，拼起来等于原文）。"""
+    if not text:
+        return []
+    if count <= 1:
+        return [text]
+    size = max(len(text) // count, 1)
+    return [text[index : index + size] for index in range(0, len(text), size)]
 
 
 def make_model(**overrides: Any) -> RoutingFakeModel:

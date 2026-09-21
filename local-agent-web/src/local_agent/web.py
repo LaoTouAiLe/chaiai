@@ -15,9 +15,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import sqlite3
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -57,6 +58,7 @@ from local_agent.ui.renderer import (
     render_session_sidebar,
     render_workspace_picker,
 )
+from local_agent.ui.streaming import use_sink
 
 DEFAULT_CONFIG_PATH = config_module.DEFAULT_CONFIG_PATH
 DEFAULT_ENV_PATH = config_module.DEFAULT_ENV_PATH
@@ -127,6 +129,43 @@ def load_chat_app(
         capabilities=probe_capabilities(model, provider_name=app_config.llm.model),
         sessions=sessions,
     )
+
+
+class _PageSink:
+    """把增量回答写进页面的临时占位符（T23）。
+
+    只负责**显示**：最终回答仍由节点在结束时作为**一条** AI 消息写进 State（不逐块写 Checkpoint）。
+    占位符只在本轮调用期间存在，函数退出即清空——之后由 ``render_history`` 按 State 渲染那条回答，
+    因此不会重复显示；页面重绘/刷新也不会再调用模型（模型调用只发生在用户提交或审批恢复那一次）。
+    """
+
+    def __init__(self, placeholder: Any) -> None:
+        self._placeholder = placeholder
+        self._text = ""
+
+    def push(self, text: str) -> None:
+        self._text += text
+        self._placeholder.markdown(self._text)
+
+    def discard(self) -> None:
+        """丢弃不完整投影：清空占位符，改由退化的普通调用结果统一展示。"""
+        self._text = ""
+        self._placeholder.empty()
+
+
+@contextlib.contextmanager
+def answer_sink(app: ChatApp) -> Iterator[None]:
+    """本轮是否给"最终回答"装增量接收方（``llm.streaming`` 且模型支持时才装）。"""
+    if not (app.app_config.llm.streaming and app.capabilities.streaming):
+        yield
+        return
+    placeholder = st.empty()
+    try:
+        with use_sink(_PageSink(placeholder)):
+            yield
+    finally:
+        # 占位符只做"直播"：结束后统一由历史渲染展示 State 里那条回答（避免重复显示）
+        placeholder.empty()
 
 
 def run_chat_turn(
@@ -701,12 +740,13 @@ def main() -> None:
             decision = approval_ui.render_approval(pending_approval)
             if decision is not None:
                 try:
-                    result = resume_turn(
-                        app,
-                        thread_id=thread_id,
-                        resume_value=decision.as_payload(),
-                        session_id=session.session_id if session is not None else None,
-                    )
+                    with answer_sink(app):
+                        result = resume_turn(
+                            app,
+                            thread_id=thread_id,
+                            resume_value=decision.as_payload(),
+                            session_id=session.session_id if session is not None else None,
+                        )
                 except Exception as exc:  # noqa: BLE001 — 页面边界：恢复失败也要给提示
                     detail = config_module.redact_secrets(str(exc), app.secret_values)
                     st.error(f"恢复审批失败：{detail}")
@@ -744,13 +784,14 @@ def main() -> None:
 
     previous_count = len(history)
     try:
-        result = run_chat_turn(
-            app,
-            thread_id=thread_id,
-            session_id=session.session_id if session is not None else None,
-            user_text=user_text,
-            prior_messages=history,
-        )
+        with answer_sink(app):
+            result = run_chat_turn(
+                app,
+                thread_id=thread_id,
+                session_id=session.session_id if session is not None else None,
+                user_text=user_text,
+                prior_messages=history,
+            )
     except Exception as exc:  # noqa: BLE001 — 页面边界要把任何调用失败变成提示，而不是 500
         render_message(ChatMessage(role="user", content=user_text))
         detail = config_module.redact_secrets(str(exc), app.secret_values)

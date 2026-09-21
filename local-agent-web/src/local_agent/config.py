@@ -49,6 +49,10 @@ class LlmConfig(_StrictModel):
     max_tokens: int = Field(default=4096, gt=0)
     timeout_seconds: int = Field(default=120, gt=0)
     retry_count: int = Field(default=2, ge=0, le=10)
+    #: 网页是否按增量流式展示**最终回答**（T23）。默认关闭：流式只是展示层优化，关闭时行为与
+    #: 之前完全一致；打开后它同时作用于模型构造（``streaming``）与页面 sink——只在"最终回答"
+    #: 那两个调用点流式（见 ``local_agent.ui.streaming``），其它调用一律照常一次性拿全。
+    streaming: bool = False
 
     @model_validator(mode="after")
     def _window_must_exceed_output_reserve(self) -> LlmConfig:

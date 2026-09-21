@@ -37,5 +37,12 @@ def build_chat_model(config: LlmConfig, api_key: str) -> ChatOpenAI:
         max_completion_tokens=config.max_tokens,
         timeout=config.timeout_seconds,
         max_retries=config.retry_count,
-        streaming=False,
+        # **刻意不传 `streaming`**（T23 实测踩过两次坑，改动前先读这段）：
+        # - 传 `streaming=False`：langchain-core 的 `_streaming_disabled()` 会因"实例上显式设了
+        #   streaming=False"而永久判定为不可流式，`.stream()` 退化成一次 `invoke`（永远只有一个块）；
+        # - 传 `streaming=True`：它会进 `_default_params`，于是**所有** `invoke()` 请求都带
+        #   `stream=true`，非流式解析路径拿不到供应商字段——思考模式的 `reasoning_content` 会消失，
+        #   下一轮请求直接被 400 拒绝（真是用真实模型冒烟抓到的）。
+        # 不传时：`invoke()` 照常带 `stream=false`（字段完整），`.stream()` 走真正的增量路径；
+        # "要不要把增量展示给用户"由 `llm.streaming` + `ui.streaming` 那一层决定。
     )

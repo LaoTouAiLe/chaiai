@@ -37,6 +37,7 @@ from local_agent.graph import builder
 from local_agent.llm import factory
 from local_agent.persistence import checkpoint
 from local_agent.security.policy import SHELL_TOOLS, WRITE_TOOLS
+from local_agent.ui.streaming import use_sink
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = PROJECT_ROOT / "eval"
@@ -57,6 +58,20 @@ _TRACE_FIELDS: tuple[str, ...] = (
     "rag_refs",
     "plan",
 )
+
+
+@dataclass
+class _RecordingSink:
+    """记录"最终回答"的增量块（等价于页面上的占位符）；``llm.streaming`` 打开时才用得上。"""
+
+    pushed: list[str] = field(default_factory=list)
+    discards: int = 0
+
+    def push(self, text: str) -> None:
+        self.pushed.append(text)
+
+    def discard(self) -> None:
+        self.discards += 1
 
 
 @dataclass(frozen=True, eq=False)
@@ -244,26 +259,28 @@ def _run_scenario(
     approvals: list[str] = []
     failure: str | None = None
     sink: list[str] = []
+    streamed = _RecordingSink()
     original_generate = _with_prompt_capture(model, sink)
     started = time.monotonic()
     try:
-        result = graph.invoke(
-            {"user_input": scenario.user_input, "thread_id": thread_id},
-            config=thread,
-            context=context,
-        )
-        for _ in range(6):
-            pending = result.get("pending_approval")
-            if not pending:
-                break
-            name = str(pending["tool_name"])
-            approved = name in scenario.approve
-            approvals.append(f"{name}:{'approve' if approved else 'reject'}")
+        with use_sink(streamed):
             result = graph.invoke(
-                Command(resume={"decision": "approve" if approved else "reject"}),
+                {"user_input": scenario.user_input, "thread_id": thread_id},
                 config=thread,
                 context=context,
             )
+            for _ in range(6):
+                pending = result.get("pending_approval")
+                if not pending:
+                    break
+                name = str(pending["tool_name"])
+                approved = name in scenario.approve
+                approvals.append(f"{name}:{'approve' if approved else 'reject'}")
+                result = graph.invoke(
+                    Command(resume={"decision": "approve" if approved else "reject"}),
+                    config=thread,
+                    context=context,
+                )
     except Exception as exc:  # noqa: BLE001 —— 冒烟要把失败原样记下来
         failure = f"{type(exc).__name__}: {exc}"
         result = dict(graph.get_state(thread).values or {})
@@ -342,6 +359,9 @@ def _run_scenario(
     outcome.quality_flags = {
         # 诊断用：真实模型没有 seen_prompts，采集到的提示长度必须 > 0（否则注入类检查无意义）
         "prompts_chars": len(prompts),
+        # 流式（T23）：打开 llm.streaming 时"最终回答"应能看到多个增量块；中途失败会 discard
+        "stream_chunks": len(streamed.pushed),
+        "stream_discards": streamed.discards,
         "rag_refs": len(refs),
         "rag_path_ok": _path_ok(refs, scenario.rag_path),
         "rag_line_ok": _line_ok(refs, scenario.rag_path, scenario.rag_line),
@@ -479,13 +499,13 @@ def _write_report(results: Sequence[SmokeResult], *, model_name: str) -> None:
         "",
         "## 质量维度（记录，不阻塞 T23）",
         "",
-        "| 场景 | 检索命中 | 行号正确 | 片段注入 | 片段被用上 | 有回答 | 完整回答 | 多余工具 | 不必要追问 | 轮数 |",
-        "|---|---|---|---|---|---|---|---|---|---|",
+        "| 场景 | 检索命中 | 行号正确 | 片段注入 | 片段被用上 | 有回答 | 完整回答 | 多余工具 | 不必要追问 | 轮数 | 增量块 |",
+        "|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     for item in results:
         quality = item.quality_flags
         lines.append(
-            "| {id} | {refs} | {line} | {injected} | {used} | {answered} | {complete} | {extra} | {asked} | {loops} |".format(
+            "| {id} | {refs} | {line} | {injected} | {used} | {answered} | {complete} | {extra} | {asked} | {loops} | {chunks} |".format(
                 id=item.scenario.scenario_id,
                 refs=quality.get("rag_refs"),
                 line=quality.get("rag_line_ok"),
@@ -496,6 +516,7 @@ def _write_report(results: Sequence[SmokeResult], *, model_name: str) -> None:
                 extra=quality.get("unnecessary_tool_calls"),
                 asked=quality.get("unnecessary_ask_user"),
                 loops=quality.get("loop_count"),
+                chunks=quality.get("stream_chunks"),
             )
         )
     lines += [

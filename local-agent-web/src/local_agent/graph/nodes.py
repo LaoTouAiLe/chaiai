@@ -136,6 +136,7 @@ from local_agent.security.policy import (
 )
 from local_agent.tools.file_tools import OUTPUT_PREVIEW_CHARS
 from local_agent.tools.result_types import ToolResultRecord, ToolResultStatus
+from local_agent.ui.streaming import stream_answer
 
 PREPARE_CONTEXT = "prepare_context"
 LOAD_AGENTS = "load_agents"
@@ -729,7 +730,30 @@ def chat_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState
         SystemMessage(content=prompt.system_prompt),
         *_prompt_window(state, context).messages,
     ]
-    return {"messages": [context.model_adapter.invoke(messages)]}
+    # 闲聊回答就是"最终回答"之一：开了流式就增量展示（不逐块写 Checkpoint，见 ui.streaming）
+    answer = stream_answer(
+        context.model_adapter,
+        messages,
+        capabilities=_model_capabilities(context),
+        enabled=bool(context.app_config.llm.streaming),
+    )
+    update: AgentState = {"messages": [answer.message]}
+    if answer.failure is not None:
+        update["error_events"] = merge_appended(
+            state.get("error_events", []),
+            [
+                _error(
+                    state,
+                    stage=f"{CHAT_NODE}:stream",
+                    message=(
+                        f"流式回答降级（{answer.failure}）：已丢弃页面上的不完整投影，"
+                        "改用一次普通完整调用"
+                    ),
+                )
+            ],
+            error_event_key,
+        )
+    return update
 
 
 # --------------------------------------------------------------------------- 工具分支
@@ -1506,6 +1530,19 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
                 ),
             )
         )
+    if final_answer is not None and final_answer.stream_failure is not None:
+        # 流式中途失败是**可见**降级：页面上的不完整投影已丢弃、普通调用重试过一次，
+        # 用户需要知道"这次是退化成一次性返回的"（T23 验收：中途失败有错误事件）
+        errors.append(
+            _error(
+                state,
+                stage=f"{REFLECTION_NODE}:stream",
+                message=(
+                    f"流式回答降级（{final_answer.stream_failure}）：已丢弃页面上的不完整投影，"
+                    "改用一次普通完整调用"
+                ),
+            )
+        )
     if pending_uncertain:
         errors.append(
             _error(
@@ -1519,6 +1556,12 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
             state.get("error_events", []), errors, error_event_key
         )
     return update
+
+
+def _model_capabilities(context: RuntimeContext) -> ModelCapabilities | None:
+    """``RuntimeContext.model_capabilities`` 归一：只认本类型（单测可能塞别的对象）。"""
+    capabilities = context.model_capabilities
+    return capabilities if isinstance(capabilities, ModelCapabilities) else None
 
 
 def _last_answer_text(state: AgentState) -> str:
@@ -1937,6 +1980,8 @@ class _FinalAnswer:
     usage: TokenUsage
     budget: ContextBudget
     failure: str | None = None
+    #: 流式中途失败的异常类型（"已丢弃不完整投影 + 普通调用重试一次"）；调用方要记可见事件
+    stream_failure: str | None = None
     bounded: bool = False
 
 
@@ -2085,8 +2130,18 @@ def _synthesize_final_answer(
             failure=failure,
             bounded=True,
         )
+    stream_failure: str | None = None
     try:
-        response = context.model_adapter.invoke(messages)
+        # 收尾合成是"最终回答"的另一个调用点：开了流式就增量展示（不逐块写 Checkpoint）；
+        # 不支持 / 首块前失败自动退化，中途失败会丢弃不完整投影并普通重试一次（ui.streaming）。
+        streamed = stream_answer(
+            context.model_adapter,
+            messages,
+            capabilities=_model_capabilities(context),
+            enabled=bool(config.llm.streaming),
+        )
+        response = streamed.message
+        stream_failure = streamed.failure
     except Exception as exc:  # noqa: BLE001 —— 合成失败也不能丢掉这一轮的结果
         failure = type(exc).__name__
         text = _deterministic_summary(
@@ -2105,6 +2160,7 @@ def _synthesize_final_answer(
         usage=usage,
         budget=budget,
         failure=failure,
+        stream_failure=stream_failure,
         bounded=bounded,
     )
 

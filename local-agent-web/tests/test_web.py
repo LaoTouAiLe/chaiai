@@ -1203,3 +1203,58 @@ def test_page_names_session_from_first_message(
     assert active is not None
     assert active.title == "帮我看看项目结构"
     assert active.last_checkpoint_id is not None  # 会话索引记录了本轮 Checkpoint
+
+
+# --------------------------------------------------------------------------- T23 流式展示
+
+STREAMING_CONFIG = MINIMAL_CONFIG + "  streaming: true\n"
+
+
+def test_page_streams_the_final_answer_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
+) -> None:
+    """T23：流式的增量只进临时占位符，最终回答在页面上**只出现一次**；重绘不再调用模型。
+
+    "不重复显示"是这套实现的直接结果：占位符在本轮调用结束时清空，随后由 ``render_history``
+    按 State 里的那一条回答渲染；因此"增量块"既不会留在页面上，也不会进 Checkpoint。
+    """
+    _write_config(tmp_path, STREAMING_CONFIG)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
+    model = model_factory(decision="chat", reply="流式回答内容在这里")
+    monkeypatch.setattr(factory, "build_chat_model", lambda _config, _api_key: model)
+
+    page = _run_page(tmp_path, monkeypatch)
+    page.chat_input[0].set_value("你好").run()
+
+    assert not page.exception
+    assert _rendered_text(page).count("流式回答内容在这里") == 1
+    calls = model.decision_calls
+    assert calls == 1
+
+    # 普通重绘只读状态：不重新调用模型（架构 §1.4）
+    page.run()
+    assert model.decision_calls == calls
+    assert _rendered_text(page).count("流式回答内容在这里") == 1
+
+
+def test_page_shows_stream_degradation_but_keeps_the_full_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
+) -> None:
+    """T23：流式中途失败 → 不完整投影被丢弃、回答仍是完整的，并留下可见降级事件。"""
+    _write_config(tmp_path, STREAMING_CONFIG)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
+    monkeypatch.setattr(
+        factory,
+        "build_chat_model",
+        lambda _config, _api_key: model_factory(
+            decision="chat", reply="完整回答内容在这里", fail_stream_after_chunks=1
+        ),
+    )
+
+    page = _run_page(tmp_path, monkeypatch)
+    page.chat_input[0].set_value("你好").run()
+
+    assert not page.exception
+    assert "完整回答内容在这里" in _rendered_text(page)
+    notices = [element.value for element in page.warning]
+    assert any("流式回答降级" in text for text in notices)
