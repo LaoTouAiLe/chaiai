@@ -104,10 +104,19 @@ class EvalCase:
     expect_absent_file: str | None = None
     expect_approvals: tuple[str, ...] = ()
     expect_rag_refs: bool = False
+    #: 检索类用例的机械契约：片段必须命中这个路径、窗口必须覆盖这个 1 基行号，
+    #: 并且这段标志串必须真的出现在**出站提示**里（"检索到了"不等于"注入了"）
+    rag_path: str | None = None
+    rag_line: int | None = None
+    snippet_marker: str | None = None
+    #: 关闭检索时提示里必须出现的「未启用」占位文字（防止"没检索却说检索过"）
+    expect_rag_placeholder: str | None = None
     max_loop_count: int | None = None
     secrets: tuple[str, ...] = ()
     expect_answer_contains: str | None = None
     expect_memory_values: tuple[str, ...] = ()
+    #: 已知质量缺口的说明（记录用；质量问题按用户裁定**不阻塞 T23**）
+    quality_note: str = ""
 
 
 @dataclass
@@ -127,6 +136,13 @@ class EvalOutcome:
     answer_text: str
     state: dict[str, Any]
     side_effects: dict[str, int]
+    #: 本轮所有出站提示（含结构化输出调用）：用于"片段是否真的注入""是否虚假声称检索过"的判定
+    prompts: str = ""
+    #: 空转保护是否在本轮触发（T23 用它检查"误伤率"）
+    stall_guard_fired: bool = False
+    #: 逐例质量维度（检索命中 / 片段注入 / 是否给出完整回答 / 多余工具调用 / 不必要追问 /
+    #: 循环次数 / 虚假完成 / 重复副作用）——用户裁定：记录，不当硬失败
+    quality: dict[str, Any] = field(default_factory=dict)
     failures: list[str] = field(default_factory=list)
 
     @property
@@ -135,6 +151,49 @@ class EvalOutcome:
 
 
 _DEFAULT_REFLECTION: Mapping[str, Any] = {"goal_achieved": True, "next_action": "finish"}
+
+#: 「检索到的代码片段」段落标题：注入检查用它（没有检索却声称检索过是硬问题）。
+RAG_SECTION_HEADING = "检索到的代码片段"
+#: 关闭检索时的占位文字：提示里必须出现它，才说明"确实没检索"，而不是假装检索过。
+RAG_DISABLED_PLACEHOLDER = "（本轮没有代码检索结果：代码检索未启用）"
+
+#: 质量维度里哪些是**硬问题**（用户裁定：出现即中断 T23 回头修）。
+_HARD_FAILURE_KEYS: tuple[str, ...] = (
+    "rag_path_ok",  # 来源定位/错误路径
+    "rag_line_ok",  # 错误行号
+    "snippet_injected",  # 检索到却没注入（等于"声称检索过"）
+    "false_completion",  # 虚假完成
+    "duplicate_side_effects",  # 重复副作用
+)
+#: 其余只记录、不阻塞 T23：回答不完整后诚实追问属于这一类（等评测集跑完再按数据决定）。
+_QUALITY_ONLY_KEYS: tuple[str, ...] = (
+    "rag_refs",
+    "answered",
+    "answered_completely",
+    "unnecessary_tool_calls",
+    "unnecessary_ask_user",
+    "loop_count",
+    "stall_guard_fired",
+    "quality_note",
+)
+
+#: T21 那条自然问法用的示例文件：片段窗口必须覆盖 ``def decide_mode`` 那一行。
+_NATURAL_QUESTION_FILE = (
+    "import re\n"
+    "\n"
+    "TOOL_INTENT_KEYWORDS = ('读取', '删除')\n"
+    "\n"
+    "\n"
+    "def decide_mode(text):\n"
+    '    """先判空输入，其余交给分类器，失败再走关键词兜底。"""\n'
+    "    if not text.strip():\n"
+    '        return "chat"\n'
+    "    return classify(text)\n"
+)
+#: 期望被片段窗口覆盖的行（1 基：``def decide_mode``）。
+_NATURAL_QUESTION_LINE = 6
+#: 片段标志串：必须出现在出站提示里，才算"片段真的注入了"（文件里的独有内容）。
+_NATURAL_QUESTION_MARKER = "TOOL_INTENT_KEYWORDS = ('读取', '删除')"
 
 CASES: tuple[EvalCase, ...] = (
     EvalCase(
@@ -298,6 +357,7 @@ CASES: tuple[EvalCase, ...] = (
         expect_rag_refs=False,
         expect_tools=("read_file",),
         expect_answer_contains="已完成",
+        expect_rag_placeholder=RAG_DISABLED_PLACEHOLDER,
     ),
     EvalCase(
         case_id="false-completion-blocked",
@@ -334,6 +394,55 @@ CASES: tuple[EvalCase, ...] = (
         user_input="读取 note.txt 并告诉我第一行",
         files=(("note.txt", "内容甲\n"),),
         tool_calls=({"name": "read_file", "args": {"path": "note.txt"}, "id": "think-1"},),
+        expect_tools=("read_file",),
+    ),
+    EvalCase(
+        case_id="rag-natural-question",
+        title="检索自然问法：直接用片段回答（T21 第 3 项的理想路径）",
+        covers="RAG 自然问法",
+        user_input="routers.py 里的 decide_mode 怎么判断模式？",
+        files=(("routers.py", _NATURAL_QUESTION_FILE),),
+        rag=True,
+        reply="decide_mode 先判空输入 → chat；其余交给分类器，失败时按关键词兜底。",
+        # 片段已经在系统提示里：这条问句不需要再调工具（多调的算"不必要的工具调用"）
+        expect_tools=(),
+        expect_rag_refs=True,
+        max_loop_count=1,
+        rag_path="routers.py",
+        rag_line=_NATURAL_QUESTION_LINE,
+        snippet_marker=_NATURAL_QUESTION_MARKER,
+    ),
+    EvalCase(
+        case_id="rag-natural-question-asks",
+        title="检索自然问法：回答不完整后诚实追问（T21 第 3 项记录的真实形态）",
+        covers="RAG 自然问法 / 质量基线",
+        user_input="routers.py 里的 decide_mode 怎么判断模式？",
+        files=(("routers.py", _NATURAL_QUESTION_FILE),),
+        rag=True,
+        tool_calls=({"name": "read_file", "args": {"path": "routers.py"}, "id": "natural-1"},),
+        reflection={
+            "goal_achieved": False,
+            "next_action": "ask_user",
+            "ask_user_reason": "我没拿到 decide_mode 的完整分支，需要你确认下一步怎么读。",
+        },
+        expect_endpoint="ask_user",
+        expect_status="running",
+        expect_tools=("read_file",),
+        expect_rag_refs=True,
+        max_loop_count=2,
+        rag_path="routers.py",
+        rag_line=_NATURAL_QUESTION_LINE,
+        snippet_marker=_NATURAL_QUESTION_MARKER,
+        quality_note="已知质量缺口：检索、注入、来源定位都对，但回答不完整 → 诚实追问（无虚假完成）",
+    ),
+    EvalCase(
+        case_id="plan-multi-step-completes",
+        title="多步计划正常走完（空转保护不得误伤）",
+        covers="计划 / 空转误伤检查",
+        user_input="读取 note.txt 并总结成一句",
+        files=(("note.txt", "内容甲\n"),),
+        tool_calls=({"name": "read_file", "args": {"path": "note.txt"}, "id": "multi-1"},),
+        plan_steps=("读取 note.txt", "总结成一句"),
         expect_tools=("read_file",),
     ),
 )
@@ -486,11 +595,79 @@ def _run_case(case: EvalCase, *, tmp_path: Path, app_config: AppConfig, model_fa
         answer_text="\n".join(answers),
         state=state,
         side_effects=_side_effect_counts(results),
+        prompts="\n".join(
+            [
+                *getattr(model, "seen_prompts", []),
+                *getattr(model, "structured_prompts", []),
+            ]
+        ),
+        stall_guard_fired=_stall_guard_fired(state),
     )
+    outcome.quality = _quality_flags(outcome)
     outcome.failures = _case_failures(outcome, workspace, tmp_path) + _invariant_failures(
         outcome, model
     )
     return outcome
+
+
+def _stall_guard_fired(state: Mapping[str, Any]) -> bool:
+    """本轮反思是否触发了空转保护（用户裁定：由 T23 检查它的误伤率）。"""
+    return any(
+        "空转保护" in str(record.get("summary") or "")
+        for record in state.get("decision_trace") or []
+    )
+
+
+def _quality_flags(outcome: EvalOutcome) -> dict[str, Any]:
+    """逐例质量维度（用户裁定要记录的 8 项）。
+
+    这些**不是**硬失败：检索契约、安全与"恰好执行一次"由硬断言守住，回答质量只记录；
+    哪里是硬、哪里是质量，见 :data:`_HARD_FAILURE_KEYS` 与 :data:`_QUALITY_ONLY_KEYS`。
+    """
+    case = outcome.case
+    prompts = outcome.prompts
+    refs = list(outcome.state.get("rag_refs") or [])
+    path_ok = (
+        None
+        if case.rag_path is None
+        else any(str(reference.get("path")) == case.rag_path for reference in refs)
+    )
+    line_ok = (
+        None
+        if case.rag_line is None
+        else any(
+            str(reference.get("path")) == case.rag_path
+            and int(reference.get("line_start", 0))
+            <= case.rag_line
+            <= int(reference.get("line_end", 0))
+            for reference in refs
+        )
+    )
+    injected = (
+        None
+        if case.snippet_marker is None
+        else case.snippet_marker in prompts and RAG_SECTION_HEADING in prompts
+    )
+    asked = outcome.endpoint == "ask_user"
+    answered = bool((outcome.final_response or "").strip())
+    return {
+        "rag_refs": len(refs),
+        "rag_path_ok": path_ok,
+        "rag_line_ok": line_ok,
+        "snippet_injected": injected,
+        "answered": answered,
+        # "完整回答"在机械层只能这样近似：有回答、且没有转成追问
+        "answered_completely": answered and not asked,
+        "unnecessary_tool_calls": max(len(outcome.tools) - len(case.expect_tools), 0),
+        # "不必要地追问"：已经有可用的检索片段（答案本可从片段里得到）却仍然转成追问。
+        # 这是用户裁定要记录的质量缺口；安全类追问（越界、密钥文件）没有片段，不算在内。
+        "unnecessary_ask_user": asked and bool(refs),
+        "loop_count": outcome.loop_count,
+        "false_completion": _is_false_completion(outcome),
+        "duplicate_side_effects": _has_duplicate_side_effects(outcome),
+        "stall_guard_fired": outcome.stall_guard_fired,
+        "quality_note": case.quality_note,
+    }
 
 
 # --------------------------------------------------------------------------- 判定
@@ -534,6 +711,28 @@ def _case_failures(outcome: EvalOutcome, workspace: Path, tmp_path: Path) -> lis
         expect(outcome.rag_refs > 0, "开启检索时 rag_refs 不应为空")
     else:
         expect(outcome.rag_refs == 0, f"未开启检索时 rag_refs 应为空，实际 {outcome.rag_refs}")
+    # 检索类用例的**硬契约**：来源定位正确、片段真的注入（"检索到"不等于"注入了"）
+    if case.rag_path is not None:
+        expect(outcome.quality["rag_path_ok"], f"片段应命中 {case.rag_path}")
+        expect(
+            outcome.quality["rag_line_ok"],
+            f"片段窗口应覆盖第 {case.rag_line} 行（来源定位/行号必须正确）",
+        )
+        expect(
+            outcome.quality["snippet_injected"],
+            "片段（含段落标题与文件内容标志串）必须出现在出站提示里",
+        )
+    if case.expect_rag_placeholder is not None:
+        # 关闭检索时必须用「未启用」占位文字，且提示里不能出现任何片段块：
+        # "没检索却说检索过"是硬问题（架构 §7.2 的三种占位文字口径）
+        expect(
+            case.expect_rag_placeholder in outcome.prompts,
+            "关闭检索时提示里必须写明「未启用」占位文字",
+        )
+        expect(
+            RAG_SECTION_HEADING + "\n\n1. " not in outcome.prompts,
+            "关闭检索时提示里不应出现任何代码片段块",
+        )
     if case.max_loop_count is not None:
         expect(
             outcome.loop_count <= case.max_loop_count,
@@ -643,6 +842,15 @@ def _metrics(outcomes: Sequence[EvalOutcome]) -> dict[str, Any]:
         ),
         "loop_count_mean": round(sum(loops) / total, 2),
         "loop_count_max": max(loops),
+        # 空转保护：触发了哪些用例、其中有多少是"本该正常收尾"的（误伤率必须为 0）
+        "stall_guard_fired_cases": [
+            item.case.case_id for item in outcomes if item.stall_guard_fired
+        ],
+        "stall_guard_false_positives": [
+            item.case.case_id
+            for item in outcomes
+            if item.stall_guard_fired and item.case.expect_endpoint == "completed"
+        ],
         "failed_cases": failed,
     }
 
@@ -663,6 +871,8 @@ def _write_report(outcomes: Sequence[EvalOutcome]) -> dict[str, Any]:
                 "tools": item.tools,
                 "approvals": item.approvals,
                 "rag_refs": item.rag_refs,
+                # 逐例质量维度（记录，不阻塞）：硬问题见 _HARD_FAILURE_KEYS
+                "quality": item.quality,
                 "failures": item.failures,
             }
             for item in outcomes
@@ -711,9 +921,40 @@ def _markdown(outcomes: Sequence[EvalOutcome], metrics: Mapping[str, Any]) -> st
         f"- 错误宣称：{metrics['false_completion']}（必须为 0）",
         f"- 重复副作用：{metrics['duplicate_side_effects']}（必须为 0）",
         f"- 平均循环次数：{metrics['loop_count_mean']}（最大 {metrics['loop_count_max']}）",
+        (
+            f"- 空转保护触发：{'、'.join(metrics['stall_guard_fired_cases']) or '无'}"
+            f"（误伤：{'、'.join(metrics['stall_guard_false_positives']) or '无'}）"
+        ),
         f"- 失败用例：{'、'.join(metrics['failed_cases']) or '无'}",
         "",
+        "## 检索类用例的质量维度（记录，不阻塞）",
+        "",
+        "| 用例 | rag_refs | 路径正确 | 行号正确 | 片段已注入 | 有回答 | 完整回答 | 多余工具 | 不必要追问 | 空转保护 |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
+    for item in outcomes:
+        quality = item.quality
+        if item.case.rag_path is None and not item.case.quality_note:
+            continue
+        lines.append(
+            "| {id} | {refs} | {path} | {line} | {injected} | {answered} | {complete} | {extra} | {asked} | {stall} |".format(
+                id=item.case.case_id,
+                refs=quality.get("rag_refs"),
+                path=quality.get("rag_path_ok"),
+                line=quality.get("rag_line_ok"),
+                injected=quality.get("snippet_injected"),
+                answered=quality.get("answered"),
+                complete=quality.get("answered_completely"),
+                extra=quality.get("unnecessary_tool_calls"),
+                asked=quality.get("unnecessary_ask_user"),
+                stall=quality.get("stall_guard_fired"),
+            )
+        )
+    notes = [item for item in outcomes if item.case.quality_note]
+    if notes:
+        lines += ["", "质量缺口说明："]
+        lines += [f"- `{item.case.case_id}`：{item.case.quality_note}" for item in notes]
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -749,3 +990,18 @@ def test_eval_metrics_and_report(
     assert metrics["failed_cases"] == []
     # 固定集里大多数用例是"正常能收尾"的：完成率过低说明图或工具链回归了
     assert metrics["completion_rate"] >= 0.5
+    # 空转保护不得误伤"本该正常收尾"的用例（用户裁定：阈值 2 先保留，由这里盯误伤率）
+    assert metrics["stall_guard_false_positives"] == []
+
+    # T21 那条自然问法必须留在固定集里，且质量维度要记录下来（用户裁定）
+    by_id = {item["case_id"]: item for item in payload["cases"]}
+    natural = by_id["rag-natural-question"]
+    assert natural["quality"]["rag_path_ok"] is True
+    assert natural["quality"]["rag_line_ok"] is True
+    assert natural["quality"]["snippet_injected"] is True
+    assert natural["quality"]["answered_completely"] is True  # 理想路径：直接用片段回答
+    assert natural["quality"]["unnecessary_tool_calls"] == 0
+    asking = by_id["rag-natural-question-asks"]
+    assert asking["failures"] == []  # 诚实追问是**质量**记录，不是硬失败
+    assert asking["quality"]["unnecessary_ask_user"] is True
+    assert asking["quality"]["false_completion"] is False
