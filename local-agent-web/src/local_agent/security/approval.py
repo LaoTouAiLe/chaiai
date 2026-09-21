@@ -115,12 +115,15 @@ def action_fingerprint(
     if tool_name in {"edit_file", "write_file"}:
         path = _normalized_path(policy, str(args.get("path") or ""))
         # 影响执行语义的参数一个都不能漏：`replace_all` 决定改动一处还是全部，
-        # `overwrite` 决定覆盖还是新建；漏掉它们会让不同的动作共用同一个指纹。
-        # 布尔量统一按 True/False 归一：调用方省略与显式传默认值必须得到同一个指纹。
+        # `overwrite` 决定覆盖还是新建，`patch`（T22 的第二输入模式）决定到底改成什么
+        # ——漏掉任何一个都会让不同的动作共用同一个指纹（架构 §5.3）。
+        # 布尔量统一按 True/False 归一、文本统一按空串归一：调用方省略与显式传默认值
+        # 必须得到同一个指纹，否则批准会因为"少写一个默认值"莫名失效。
         change = json.dumps(
             {
-                "old_text": args.get("old_text"),
-                "new_text": args.get("new_text"),
+                "old_text": _text(args.get("old_text")),
+                "new_text": _text(args.get("new_text")),
+                "patch": _text(args.get("patch")),
                 "replace_all": bool(args.get("replace_all")),
                 "content": args.get("content"),
                 "overwrite": bool(args.get("overwrite")),
@@ -324,3 +327,12 @@ def _delete_target_summary(path_text: str) -> str:
 
 def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _text(value: Any) -> str:
+    """把参与指纹的文本参数归一成字符串：省略 / ``None`` 与显式空串必须等价。
+
+    不归一的话，"省略 old_text" 与 "显式传 ``old_text=""``" 会算出两个指纹，
+    同一个动作的批准会莫名其妙失效（架构 §5.3）。
+    """
+    return value if isinstance(value, str) else ""

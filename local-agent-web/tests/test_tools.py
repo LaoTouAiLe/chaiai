@@ -16,6 +16,7 @@ from local_agent.config import DEFAULT_SHELL_TIMEOUT_SECONDS, AppConfig
 from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
 from local_agent.security import shell_guard
 from local_agent.security.approval import action_fingerprint
+from local_agent.security.diff_guard import parse_patch
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools import file_tools
 from local_agent.tools.file_tools import (
@@ -418,6 +419,7 @@ def test_built_tools_match_architecture_signatures(policy: SecurityPolicy) -> No
         "path",
         "old_text",
         "new_text",
+        "patch",
         "replace_all",
         "expected_sha256",
         "reason",
@@ -628,6 +630,347 @@ def test_edit_file_preserves_crlf_line_endings(tmp_path: Path, policy: SecurityP
     )
 
     assert target.read_bytes() == b"a = 9\r\nb = 2\r\n"
+
+
+# --------------------------------------------------------------------------- T22 patch 模式
+
+
+def _patch_text(*lines: str) -> str:
+    """把若干行拼成 patch 文本：保留每行原文（只有一个空格的上下文空行也保持原样）。"""
+    return "".join(f"{line}\n" for line in lines)
+
+
+def test_parse_patch_rejects_a_blank_patch() -> None:
+    """空 Patch 在解析层直接拒绝（工具层的互斥判定会先给出更通用的缺参提示）。"""
+    with pytest.raises(SecurityError) as excinfo:
+        parse_patch("   \n")
+
+    assert "patch 为空" in str(excinfo.value)
+
+
+def test_edit_patch_applies_hunks_and_reports_preview(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """合法 patch：改动落盘，返回 diff 预览、hunk 数与新旧 Hash（架构 §6.3）。"""
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\ny = 2\nz = 3\n", encoding="utf-8", newline="")
+    sha = _sha256(target)
+
+    result = edit_file_content(
+        "a.py",
+        policy=policy,
+        patch=_patch_text(
+            "--- a/a.py",
+            "+++ b/a.py",
+            "@@ -1,3 +1,4 @@",
+            " x = 1",
+            "-y = 2",
+            "+y = 22",
+            "+w = 4",
+            " z = 3",
+        ),
+        expected_sha256=sha,
+        reason="补丁替换",
+    )
+
+    assert target.read_text(encoding="utf-8") == "x = 1\ny = 22\nw = 4\nz = 3\n"
+    # patch 模式下 replaced_count 是 hunk 数（不是替换处数），语义写在 note 里
+    assert result.replaced_count == 1
+    assert result.note is not None and "hunk" in result.note
+    assert result.changed_lines == 3  # 删 1 行 + 增 2 行
+    assert result.old_sha256 == sha
+    assert result.new_sha256 == _sha256(target)
+    assert result.new_sha256 != result.old_sha256
+    assert "-y = 2" in result.diff and "+y = 22" in result.diff
+    assert result.reason == "补丁替换"
+
+
+def test_edit_patch_applies_multiple_hunks_for_a_subdirectory_file(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """多个 hunk 各自定位；文件头只写文件名（本项目 diff 预览的形态）也必须被接受。"""
+    (tmp_path / "sub").mkdir()
+    target = tmp_path / "sub" / "a.py"
+    target.write_text("one\ntwo\nthree\nfour\nfive\n", encoding="utf-8", newline="")
+
+    result = edit_file_content(
+        "sub/a.py",
+        policy=policy,
+        patch=_patch_text(
+            "--- a/a.py",
+            "+++ b/a.py",
+            "@@ -1,2 +1,2 @@",
+            "-one",
+            "+ONE",
+            " two",
+            "@@ -4,2 +4,2 @@",
+            " four",
+            "-five",
+            "+FIVE",
+        ),
+        expected_sha256=_sha256(target),
+    )
+
+    assert target.read_text(encoding="utf-8") == "ONE\ntwo\nthree\nfour\nFIVE\n"
+    assert result.replaced_count == 2
+
+
+def test_edit_patch_inserts_at_the_beginning_of_an_empty_file(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """计数为 0 的纯插入 hunk 按 GNU 约定定位；空文件插入后以换行结束。"""
+    target = tmp_path / "empty.py"
+    target.write_bytes(b"")
+
+    edit_file_content(
+        "empty.py",
+        policy=policy,
+        patch=_patch_text("@@ -0,0 +1,2 @@", "+a = 1", "+b = 2"),
+        expected_sha256=_sha256(target),
+    )
+
+    assert target.read_bytes() == b"a = 1\nb = 2\n"
+
+
+def test_edit_patch_keeps_crlf_and_a_file_without_a_final_newline(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """匹配忽略 CRLF 的 ``\\r``，写回保留每一行原有的结束符（架构 §6.3）。"""
+    crlf = tmp_path / "crlf.py"
+    crlf.write_bytes(b"a = 1\r\nb = 2\r\n")
+
+    edit_file_content(
+        "crlf.py",
+        policy=policy,
+        patch=_patch_text("@@ -1,2 +1,2 @@", "-a = 1", "+a = 9", " b = 2"),
+        expected_sha256=_sha256(crlf),
+    )
+
+    assert crlf.read_bytes() == b"a = 9\r\nb = 2\r\n"
+
+    # 末尾没有换行的文件：patch 没碰末行时原样保留，新增行仍然带换行
+    tail = tmp_path / "tail.py"
+    tail.write_bytes(b"a\nb")
+
+    edit_file_content(
+        "tail.py",
+        policy=policy,
+        patch=_patch_text("@@ -1,2 +1,3 @@", "-a", "+A", " b", "+c"),
+        expected_sha256=_sha256(tail),
+    )
+
+    assert tail.read_bytes() == b"A\nb\nc\n"
+
+
+def test_edit_patch_tolerates_trailing_blank_lines(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """patch 末尾的排版空行不算内容；但 hunk 体内的无前缀空行仍然拒绝。"""
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\n", encoding="utf-8", newline="")
+
+    edit_file_content(
+        "a.py",
+        policy=policy,
+        patch="@@ -1 +1 @@\n-x = 1\n+x = 2\n\n",
+        expected_sha256=_sha256(target),
+    )
+
+    assert target.read_text(encoding="utf-8") == "x = 2\n"
+
+
+def test_edit_patch_rejects_conflict_and_keeps_the_file(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """上下文不匹配即冲突：拒绝且原文件一字不动（架构 §6.3）。"""
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\ny = 2\n", encoding="utf-8", newline="")
+    before = _sha256(target)
+
+    with pytest.raises(SecurityError) as excinfo:
+        edit_file_content(
+            "a.py",
+            policy=policy,
+            patch=_patch_text("@@ -1,2 +1,2 @@", "-x = 1", "+x = 9", " zzz"),
+            expected_sha256=before,
+        )
+
+    assert "上下文不匹配" in str(excinfo.value)
+    assert _sha256(target) == before
+
+
+def test_edit_patch_rejects_out_of_range_hunk(tmp_path: Path, policy: SecurityPolicy) -> None:
+    """hunk 声明的行号超出文件长度：按冲突拒绝，不猜位置。"""
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\n", encoding="utf-8", newline="")
+    before = _sha256(target)
+
+    with pytest.raises(SecurityError) as excinfo:
+        edit_file_content(
+            "a.py",
+            policy=policy,
+            patch=_patch_text("@@ -9,1 +9,1 @@", "-nope", "+nope2"),
+            expected_sha256=before,
+        )
+
+    assert "定位越界" in str(excinfo.value)
+    assert _sha256(target) == before
+
+
+def test_edit_patch_rejects_overlapping_hunks(tmp_path: Path, policy: SecurityPolicy) -> None:
+    """hunk 乱序或重叠一律拒绝（架构 §6.3）。"""
+    target = tmp_path / "a.py"
+    target.write_text("a\nb\nc\n", encoding="utf-8", newline="")
+    before = _sha256(target)
+
+    with pytest.raises(SecurityError) as excinfo:
+        edit_file_content(
+            "a.py",
+            policy=policy,
+            patch=_patch_text(
+                "@@ -1,3 +1,3 @@", " a", " b", " c", "@@ -2,2 +4,0 @@", "-b", "-c"
+            ),
+            expected_sha256=before,
+        )
+
+    assert "顺序或位置非法" in str(excinfo.value)
+    assert _sha256(target) == before
+
+
+def test_edit_patch_rejects_bad_structure_and_unsupported_forms(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """空 hunk、计数不符、无前缀行、Git 扩展头与 No-newline 标记都拒绝且不写盘。"""
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\ny = 2\n", encoding="utf-8", newline="")
+    before = _sha256(target)
+    cases = {
+        "只有文件头": (_patch_text("--- a/a.py", "+++ b/a.py"), "没有任何 hunk"),
+        "计数不符": (_patch_text("@@ -1,5 +1,5 @@", "-x = 1", "+x = 9"), "计数与内容不符"),
+        "空行缺空格": (_patch_text("@@ -1,2 +1,2 @@", "-x = 1", "", "+x = 9"), "无前缀行"),
+        "hunk 头非法": (_patch_text("@@ 1 5 @@", "-x = 1", "+x = 9"), "hunk 头格式非法"),
+        "Git 扩展头": (
+            _patch_text("diff --git a/a.py b/a.py", "@@ -1 +1 @@", "-x = 1", "+x = 9"),
+            "不支持的 diff 头",
+        ),
+        "No newline 标记": (
+            _patch_text("@@ -1 +1 @@", "-x = 1", "\\ No newline at end of file", "+x = 9"),
+            "No newline",
+        ),
+    }
+
+    for name, (patch, expected) in cases.items():
+        with pytest.raises(SecurityError) as excinfo:
+            edit_file_content("a.py", policy=policy, patch=patch, expected_sha256=before)
+        assert expected in str(excinfo.value), name
+        assert _sha256(target) == before, name
+
+
+def test_edit_patch_rejects_a_file_header_for_another_file(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """文件头指向别的文件（basename 不同）时拒绝，避免把补丁落到错的文件上。"""
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\n", encoding="utf-8", newline="")
+    before = _sha256(target)
+
+    with pytest.raises(SecurityError) as excinfo:
+        edit_file_content(
+            "a.py",
+            policy=policy,
+            patch=_patch_text("--- a/b.py", "+++ b/b.py", "@@ -1 +1 @@", "-x = 1", "+x = 9"),
+            expected_sha256=before,
+        )
+
+    assert "文件头指向 b.py" in str(excinfo.value)
+    assert _sha256(target) == before
+
+
+def test_edit_patch_rejects_an_unchanged_result(tmp_path: Path, policy: SecurityPolicy) -> None:
+    """应用后内容没变（等价于空 diff）也拒绝，不产生一次没有意义的写入。"""
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\n", encoding="utf-8", newline="")
+    before = _sha256(target)
+
+    with pytest.raises(SecurityError) as excinfo:
+        edit_file_content(
+            "a.py",
+            policy=policy,
+            patch=_patch_text("@@ -1 +1 @@", "-x = 1", "+x = 1"),
+            expected_sha256=before,
+        )
+
+    assert "没有变化" in str(excinfo.value)
+    assert _sha256(target) == before
+
+
+def test_edit_patch_requires_expected_sha256_and_rejects_stale_hash(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """patch 模式与精确替换一样必须带正确的旧 Hash（架构 §6.3）。"""
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\n", encoding="utf-8", newline="")
+    before = _sha256(target)
+    patch = _patch_text("@@ -1 +1 @@", "-x = 1", "+x = 9")
+
+    with pytest.raises(SecurityError) as missing:
+        edit_file_content("a.py", policy=policy, patch=patch)
+    assert "expected_sha256" in str(missing.value)
+
+    with pytest.raises(SecurityError) as stale:
+        edit_file_content("a.py", policy=policy, patch=patch, expected_sha256="0" * 64)
+    assert "不一致" in str(stale.value)
+
+    assert _sha256(target) == before
+
+
+def test_edit_rejects_mixed_or_missing_input_modes(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """patch 与 old_text/new_text 互斥；两种都给或都没给都拒绝（架构 §6.3）。"""
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\n", encoding="utf-8", newline="")
+    before = _sha256(target)
+
+    with pytest.raises(SecurityError) as mixed:
+        edit_file_content(
+            "a.py",
+            policy=policy,
+            old_text="x = 1",
+            new_text="x = 9",
+            patch=_patch_text("@@ -1 +1 @@", "-x = 1", "+x = 9"),
+            expected_sha256=before,
+        )
+    assert "不能同时使用" in str(mixed.value)
+
+    with pytest.raises(SecurityError) as neither:
+        edit_file_content("a.py", policy=policy, expected_sha256=before)
+    assert "old_text 与 new_text" in str(neither.value)
+
+    # 只有空白的 patch 视为"没有给 patch"，落到同一个缺参提示（不会当成空 Patch 执行）
+    with pytest.raises(SecurityError) as blank:
+        edit_file_content("a.py", policy=policy, patch="   \n", expected_sha256=before)
+    assert "old_text 与 new_text" in str(blank.value)
+
+    assert _sha256(target) == before
+
+
+def test_edit_patch_over_limit_requires_approval(tmp_path: Path, app_config: AppConfig) -> None:
+    """patch 模式的改动行数同样走大范围修改审批（架构 §6.3）。"""
+    policy = SecurityPolicy.from_config(
+        _config_with_large_edit(app_config, max_changed_lines=2),
+        workspace_root=tmp_path,
+        environ={},
+    )
+    target = tmp_path / "a.py"
+    target.write_text("line\n", encoding="utf-8", newline="")
+    patch = _patch_text("@@ -1 +1,9 @@", "-line", *[f"+l{index}" for index in range(9)])
+
+    with pytest.raises(SecurityError) as excinfo:
+        edit_file_content("a.py", policy=policy, patch=patch, expected_sha256=_sha256(target))
+
+    assert "大范围修改" in str(excinfo.value)
+    assert target.read_text(encoding="utf-8") == "line\n"
 
 
 # --------------------------------------------------------------------------- write_file

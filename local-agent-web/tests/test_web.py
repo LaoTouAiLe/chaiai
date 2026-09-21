@@ -753,6 +753,46 @@ def test_page_shows_edit_diff(
     assert target.read_text(encoding="utf-8") == "value = 2\n"
 
 
+def test_page_shows_patch_edit_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
+) -> None:
+    """patch 输入模式：预览照常展示，并标出应用的 hunk 数（架构 §6.3、T22）。"""
+    _write_config(tmp_path, MINIMAL_CONFIG)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
+    target = tmp_path / "note.py"
+    target.write_text("value = 1\nother = 0\n", encoding="utf-8", newline="")
+    sha = hashlib.sha256(target.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        factory,
+        "build_chat_model",
+        lambda _config, _api_key: model_factory(
+            decision="tool",
+            reply="改好了",
+            tool_calls=[
+                {
+                    "name": "edit_file",
+                    "args": {
+                        "path": "note.py",
+                        "patch": "@@ -1,2 +1,2 @@\n-value = 1\n+value = 2\n other = 0\n",
+                        "expected_sha256": sha,
+                    },
+                    "id": "call-1",
+                }
+            ],
+        ),
+    )
+
+    page = _run_page(tmp_path, monkeypatch)
+    page.chat_input[0].set_value("把 value 改成 2").run()
+
+    assert not page.exception
+    rendered = _rendered_text(page)
+    assert "+value = 2" in rendered
+    captions = "\n".join(element.value for element in page.caption)
+    assert "hunk" in captions  # patch 模式的 replaced_count 语义在页面上可见
+    assert target.read_text(encoding="utf-8") == "value = 2\nother = 0\n"
+
+
 def test_page_warns_about_unconfirmed_side_effects(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
 ) -> None:

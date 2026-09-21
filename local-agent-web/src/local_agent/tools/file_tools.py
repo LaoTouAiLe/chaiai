@@ -20,7 +20,13 @@ from langchain_core.tools import BaseTool, tool
 
 from local_agent.exceptions import SecurityError
 from local_agent.security.approval import action_fingerprint
-from local_agent.security.diff_guard import build_unified_diff, count_changed_lines
+from local_agent.security.diff_guard import (
+    apply_patch,
+    build_unified_diff,
+    count_changed_lines,
+    edit_input_mode,
+    parse_patch,
+)
 from local_agent.security.path_guard import assert_not_protected_target, is_within
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.result_types import (
@@ -214,33 +220,43 @@ def edit_file_content(
     path: str,
     *,
     policy: SecurityPolicy,
-    old_text: str,
-    new_text: str,
+    old_text: str = "",
+    new_text: str = "",
+    patch: str = "",
     replace_all: bool = False,
     expected_sha256: str | None = None,
     reason: str = "",
 ) -> EditFileResult:
-    """用精确串替换修改工作区内已有文件（架构 §6.3）。
+    """修改工作区内已有文件：精确串替换（默认）或 unified diff（架构 §6.3）。
+
+    两种输入模式**互斥**（由 :func:`diff_guard.edit_input_mode` 统一判定，安全判定与执行
+    共用同一规则）：
+
+    - ``old_text`` + ``new_text`` 非空、``patch`` 为空 → 精确串替换；
+    - ``patch`` 非空、``old_text`` / ``new_text`` 都为空 → unified diff。
 
     安全约束（全部在代码层强制）：
 
-    - 必须提供与当前文件一致的 ``expected_sha256``，否则拒绝并提示重新读取；
-    - ``old_text`` 必须精确匹配且默认只允许一处，多处匹配必须显式 ``replace_all``；
-    - 不接受用整份文件内容做替换；
+    - 两种模式都**必须**提供与当前文件一致的 ``expected_sha256``，否则拒绝并提示重新读取；
+    - 精确串替换：``old_text`` 必须精确匹配且默认只允许一处，多处匹配必须显式 ``replace_all``；
+      不接受用整份文件内容做替换；
+    - ``patch`` 模式：先解析（空 Patch、格式、计数、顺序、重叠），再按 `@@` 旧行号逐字校验
+      上下文；任一不过即拒绝，**原文件一字不动**（架构 §6.3）；
     - 改动行数超过 ``security.large_edit.max_changed_lines_without_approval`` 时按大范围修改拒绝；
     - 先写同目录临时文件再原子替换，写入后重新计算 Hash。
 
     Args:
         path: 工作区内的目标文件。
         policy: 安全策略。
-        old_text: 要被替换的原文片段。
-        new_text: 替换后的文本。
-        replace_all: 是否替换全部匹配。
+        old_text: 要被替换的原文片段（精确替换模式）。
+        new_text: 替换后的文本（精确替换模式）。
+        patch: unified diff 文本（patch 模式，与 old_text/new_text 互斥）。
+        replace_all: 是否替换全部匹配（仅精确替换模式）。
         expected_sha256: 调用方读到的文件 Hash。
         reason: 修改原因，写入审计结果。
 
     Returns:
-        修改结果与 unified diff。
+        修改结果与 unified diff；patch 模式下 ``replaced_count`` 是应用的 hunk 数。
 
     Raises:
         SecurityError: 任何安全校验不通过。
@@ -249,6 +265,7 @@ def edit_file_content(
         "path": path,
         "old_text": old_text,
         "new_text": new_text,
+        "patch": patch,
         "replace_all": replace_all,
     }
     # 先解析目标：越界（WorkspaceBoundaryError）、敏感文件与受保护目标（SecurityError）
@@ -260,6 +277,9 @@ def edit_file_content(
         action_fingerprint("edit_file", arguments, policy=policy)
     ):
         raise SecurityError(decision.reason)
+    # 输入模式由安全判定与工具执行共用同一个函数（架构 §6.3），避免两处各写一套互斥规则。
+    mode = edit_input_mode(old_text, new_text, patch)
+
     data = resolved.read_bytes()
     original = _decode_text(data)
     current_sha256 = hashlib.sha256(data).hexdigest()
@@ -275,32 +295,42 @@ def edit_file_content(
             f"expected_sha256 与当前文件不一致（当前为 {current_sha256[:12]}…）："
             "文件已被改动，请重新读取后再修改"
         )
-    if not old_text:
-        raise SecurityError("old_text 不能为空")
-    if old_text == new_text:
-        raise SecurityError("old_text 与 new_text 相同，没有需要修改的内容")
-    # 架构 §6.3：不接受用整份文件内容做替换。单行文件例外——那一行本身就是最小的唯一锚点，
-    # 否则会出现"文件只有一行就没法改"的怪现象。
-    if len(original.splitlines()) > 1 and old_text.rstrip("\n") == original.rstrip("\n"):
-        raise SecurityError(
-            "不接受用整份文件内容做替换：请给出更小的唯一片段（架构 §6.3）"
-        )
+    note: str | None = None
+    if mode == "patch":
+        # patch 模式：先解析结构，再对着真实内容按旧行号严格定位应用；任一不过都不写盘。
+        plan = parse_patch(patch)
+        updated = apply_patch(original, plan, file_name=resolved.name)
+        replaced_count = len(plan.hunks)
+        # replaced_count 在 patch 模式下表示**应用的 hunk 数**（不是替换处数）。字段语义写进
+        # note：页面与审计据此区分两种模式，模型也能看到这次改了几个 hunk（架构 §6.3）。
+        note = f"补丁模式：已应用 {replaced_count} 个 hunk（replaced_count 为 hunk 数）"
+    else:
+        if old_text == new_text:
+            raise SecurityError("old_text 与 new_text 相同，没有需要修改的内容")
+        # 架构 §6.3：不接受用整份文件内容做替换。单行文件例外——那一行本身就是最小的唯一锚点，
+        # 否则会出现"文件只有一行就没法改"的怪现象。
+        if len(original.splitlines()) > 1 and old_text.rstrip("\n") == original.rstrip("\n"):
+            raise SecurityError(
+                "不接受用整份文件内容做替换：请给出更小的唯一片段（架构 §6.3）"
+            )
 
-    occurrences = original.count(old_text)
-    if occurrences == 0:
-        raise SecurityError(
-            "old_text 在文件中没有精确匹配：请核对空格、缩进与换行（Windows 文件可能是 CRLF）"
-        )
-    if occurrences > 1 and not replace_all:
-        raise SecurityError(
-            f"old_text 匹配到 {occurrences} 处：请提供更长的唯一片段，或显式设置 replace_all=true"
-        )
+        occurrences = original.count(old_text)
+        if occurrences == 0:
+            raise SecurityError(
+                "old_text 在文件中没有精确匹配：请核对空格、缩进与换行（Windows 文件可能是 CRLF）"
+            )
+        if occurrences > 1 and not replace_all:
+            raise SecurityError(
+                f"old_text 匹配到 {occurrences} 处：请提供更长的唯一片段，或显式设置 replace_all=true"
+            )
 
-    updated = (
-        original.replace(old_text, new_text)
-        if replace_all
-        else original.replace(old_text, new_text, 1)
-    )
+        updated = (
+            original.replace(old_text, new_text)
+            if replace_all
+            else original.replace(old_text, new_text, 1)
+        )
+        replaced_count = occurrences if replace_all else 1
+
     diff = build_unified_diff(original, updated, path=resolved.name)
     if not diff.strip():
         raise SecurityError("计算出的 diff 为空，没有可写入的改动")
@@ -311,12 +341,13 @@ def edit_file_content(
     return EditFileResult(
         path=_display_path(resolved, policy.workspace_root),
         reason=reason,
-        replaced_count=occurrences if replace_all else 1,
+        replaced_count=replaced_count,
         changed_lines=count_changed_lines(original, updated),
         old_sha256=current_sha256,
         new_sha256=hashlib.sha256(new_data).hexdigest(),
         diff=diff,
         line_count=len(updated.splitlines()),
+        note=note,
     )
 
 
@@ -527,19 +558,26 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
     @tool
     def edit_file(
         path: str,
-        old_text: str,
-        new_text: str,
+        old_text: str = "",
+        new_text: str = "",
+        patch: str = "",
         replace_all: bool = False,
         expected_sha256: str | None = None,
         reason: str = "",
     ) -> str:
-        """用精确字符串替换修改已有文件，返回变更行数与 unified diff。
+        """修改已有文件，返回变更行数与 unified diff。
+
+        两种输入模式**互斥**，请只用其中一种：
+
+        1. 精确字符串替换（默认）：给出 old_text 与 new_text；
+        2. unified diff（patch）：只给出 patch，old_text/new_text 留空。
 
         Args:
             path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，工作区外修改需要人工审批，且不能是密钥文件。
-            old_text: 要被替换的原文片段，必须与文件内容精确一致（含缩进与换行）。
-            new_text: 替换后的文本。
-            replace_all: 是否替换全部匹配；默认要求 old_text 在文件中唯一。
+            old_text: 要被替换的原文片段，必须与文件内容精确一致（含缩进与换行）；与 patch 互斥。
+            new_text: 替换后的文本；与 patch 互斥。
+            patch: unified diff 文本（`@@ -旧[,行数] +新[,行数] @@` 与 ` `/`-`/`+` 开头的行）。要求：hunk 按旧行号升序、上下文与删除行必须与当前文件逐字一致、文件头只能写文件名，不支持 Git 扩展头与 "\\ No newline at end of file"。
+            replace_all: 是否替换全部匹配（仅精确替换模式）；默认要求 old_text 在文件中唯一。
             expected_sha256: 先用 read_file 读取该文件得到的 sha256，必填。
             reason: 修改原因。
         """
@@ -548,6 +586,7 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
             policy=policy,
             old_text=old_text,
             new_text=new_text,
+            patch=patch,
             replace_all=replace_all,
             expected_sha256=expected_sha256,
             reason=reason,

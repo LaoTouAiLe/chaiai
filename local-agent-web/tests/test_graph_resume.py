@@ -629,6 +629,57 @@ def test_large_edit_rejection_keeps_file(
     assert all(record["status"] != "ok" for record in result.get("tool_results") or [])
 
 
+def _large_patch_flow(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> tuple[Path, builder.ChatGraph, RuntimeContext]:
+    """准备一个“等待审批的大范围补丁”：改动 251 行，远超免审上限（200）。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = workspace / "big.txt"
+    target.write_text(_numbered_lines("line", 300) + "\n", encoding="utf-8", newline="")
+    sha = hashlib.sha256(target.read_bytes()).hexdigest()
+    patch = "@@ -1 +1,250 @@\n-line 0\n" + "".join(
+        f"+new {index}\n" for index in range(250)
+    )
+    graph = builder.build_chat_graph(checkpoint.open_checkpointer(_database(tmp_path)))
+    model = model_factory(
+        decision="tool",
+        reply="好的",
+        tool_calls=[
+            {
+                "name": "edit_file",
+                "args": {"path": "big.txt", "patch": patch, "expected_sha256": sha},
+                "id": "call-patch",
+            }
+        ],
+    )
+    context = _context_for(workspace, model, app_config)
+    first = graph.invoke(
+        {"user_input": "用补丁改 big.txt 的开头", "thread_id": THREAD},
+        config=_config(THREAD),
+        context=context,
+    )
+    assert first["pending_approval"]["tool_name"] == "edit_file"  # 确认它确实需要审批
+    return target, graph, context
+
+
+def test_large_patch_executes_after_approval(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """补丁经人工批准后按 patch 落地：patch 进了动作指纹，批准才落到同一个动作上（T22）。"""
+    target, graph, context = _large_patch_flow(tmp_path, model_factory, app_config)
+
+    result = graph.invoke(
+        Command(resume={"decision": "approve"}), config=_config(THREAD), context=context
+    )
+
+    assert result["tool_results"][-1]["status"] == "ok"
+    lines = target.read_text(encoding="utf-8").splitlines()
+    assert lines[:2] == ["new 0", "new 1"]
+    assert lines[250] == "line 1"
+    assert lines[-1] == "line 299"
+
+
 def _overwrite_write_flow(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> tuple[Path, builder.ChatGraph, RuntimeContext]:

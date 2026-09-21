@@ -175,13 +175,18 @@ def _shell_summary(payload: Mapping[str, Any] | None) -> str:
 
 
 def _edit_summary(payload: Mapping[str, Any] | None) -> str:
-    """编辑类结果的摘要：改动行数与前后 Hash（便于肉眼确认修改真的落盘）。"""
+    """编辑类结果的摘要：改动行数、模式说明（patch 模式）与前后 Hash（便于肉眼确认修改真的落盘）。"""
     if not payload:
         return ""
     parts: list[str] = []
     changed = payload.get("changed_lines")
     if isinstance(changed, int):
         parts.append(f"改动 {changed} 行")
+    note = payload.get("note")
+    if isinstance(note, str) and note.strip():
+        # patch 模式把"应用了几个 hunk（replaced_count 的含义）"写进 note，页面上要能看到，
+        # 否则用户只看到"改动 N 行"分不清是精确替换还是补丁（架构 §6.3）。
+        parts.append(note.strip())
     old_hash = str(payload.get("old_sha256") or "")
     new_hash = str(payload.get("new_sha256") or "")
     if old_hash and new_hash:

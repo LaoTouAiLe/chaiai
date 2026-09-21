@@ -654,6 +654,84 @@ def test_fingerprint_separates_replace_all(
     assert once == action_fingerprint("edit_file", base, policy=policy)
 
 
+def test_classify_edit_patch_mode_needs_no_approval_when_small(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    """patch 模式共用同一套免审上限：小补丁直接放行，理由写明是哪种输入模式（架构 §6.3）。"""
+    policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+
+    decision = policy.classify_tool(
+        "edit_file", {"path": "a.py", "patch": "@@ -1 +1 @@\n-a\n+b\n"}
+    )
+
+    assert decision.allowed
+    assert not decision.requires_approval
+    assert "unified diff" in decision.reason
+
+
+def test_classify_edit_patch_over_limit_requires_approval(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    """补丁的改动行数（删除 + 新增）超过免审上限时进入审批。"""
+    policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+    limit = app_config.security.large_edit.max_changed_lines_without_approval
+    patch = f"@@ -1 +1,{limit + 1} @@\n-a\n" + "".join(
+        f"+l{index}\n" for index in range(limit + 1)
+    )
+
+    decision = policy.classify_tool("edit_file", {"path": "a.py", "patch": patch})
+
+    assert not decision.allowed
+    assert decision.requires_approval
+    assert "大范围修改" in decision.reason
+
+
+def test_classify_edit_patch_structure_failure_is_a_hard_reject(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    """结构非法的 patch 永远不可能执行：硬拒绝，不推进审批（架构 §6.3）。"""
+    policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+
+    decision = policy.classify_tool(
+        "edit_file", {"path": "a.py", "patch": "@@ -1,5 +1,5 @@\n-a\n+b\n"}
+    )
+
+    assert not decision.allowed
+    assert not decision.requires_approval
+    assert "计数与内容不符" in decision.reason
+
+
+def test_classify_edit_rejects_mixed_input_modes(app_config: AppConfig, tmp_path: Path) -> None:
+    """patch 与 old_text/new_text 同时给出：硬拒绝（安全判定与工具执行同一套规则）。"""
+    policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+
+    decision = policy.classify_tool(
+        "edit_file",
+        {"path": "a.py", "old_text": "a", "new_text": "b", "patch": "@@ -1 +1 @@\n-a\n+b\n"},
+    )
+
+    assert not decision.allowed
+    assert not decision.requires_approval
+    assert "不能同时使用" in decision.reason
+
+
+def test_fingerprint_separates_patch_mode(app_config: AppConfig, tmp_path: Path) -> None:
+    """patch 是第二输入模式：不同补丁必须算出不同指纹，省略 patch 与空串等价（架构 §5.3）。"""
+    policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+    first = {"path": "a.py", "patch": "@@ -1 +1 @@\n-a\n+b\n"}
+    second = {"path": "a.py", "patch": "@@ -1 +1 @@\n-a\n+c\n"}
+    replace = {"path": "a.py", "old_text": "a", "new_text": "b"}
+
+    fp_first = action_fingerprint("edit_file", first, policy=policy)
+    assert fp_first != action_fingerprint("edit_file", second, policy=policy)
+    # 精确替换与补丁模式不能撞指纹：否则批准一个补丁会放行另一次完全不同的修改
+    assert fp_first != action_fingerprint("edit_file", replace, policy=policy)
+    # 省略 patch 与显式空串必须等价，否则同一个动作的批准会莫名失效
+    assert action_fingerprint("edit_file", replace, policy=policy) == action_fingerprint(
+        "edit_file", {**replace, "patch": ""}, policy=policy
+    )
+
+
 def test_fingerprint_includes_timeout(app_config: AppConfig, tmp_path: Path) -> None:
     """超时是执行计划的一部分：不同超时的指纹必须不同，省略值与**配置默认值**必须相同。"""
     policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})

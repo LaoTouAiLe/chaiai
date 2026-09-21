@@ -6,8 +6,9 @@
 放行清单：
 
 - ``list_dir`` / ``read_file``：只读，直接放行；
-- ``edit_file``：精确串替换，改动行数在 ``security.large_edit`` 免审范围内时放行，
-  超过上限视为大范围修改 → 需要审批（T10 之前拒绝）；
+- ``edit_file``：精确串替换或 unified diff（`patch`，架构 §6.3），改动行数在
+  ``security.large_edit`` 免审范围内时放行，超过上限视为大范围修改 → 需要审批
+  （T10 之前拒绝）；结构非法的 patch 直接硬拒绝，不进审批；
 - ``write_file``：只允许创建新文件；覆盖已有文件需要审批（T10 之前拒绝）；
 - ``run_shell``：只有命中 ``security.shell.whitelist`` 的命令免审批，其余需要审批；
 - ``delete_file``：始终需要审批（T10 之前拒绝）。
@@ -28,7 +29,7 @@ from local_agent.config import (
     redact_secrets,
 )
 from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
-from local_agent.security.diff_guard import count_changed_lines
+from local_agent.security.diff_guard import count_changed_lines, edit_input_mode, parse_patch
 from local_agent.security.path_guard import (
     assert_not_protected_target,
     is_sensitive_path,
@@ -261,30 +262,43 @@ class SecurityPolicy:
         return None
 
     def _classify_edit(self, args: Mapping[str, Any]) -> SafetyDecision:
-        old_text = args.get("old_text")
-        new_text = args.get("new_text")
-        if not isinstance(old_text, str) or not isinstance(new_text, str):
-            return SafetyDecision(
-                allowed=False, requires_approval=False, reason="edit_file 缺少 old_text 或 new_text"
-            )
+        # 输入模式：精确串替换（默认）或 unified diff（T22）。安全判定与工具执行**共用**
+        # diff_guard.edit_input_mode，不能两处各写一套互斥规则（架构 §6.3）。
+        try:
+            mode = edit_input_mode(args.get("old_text"), args.get("new_text"), args.get("patch"))
+        except SecurityError as exc:
+            return SafetyDecision(allowed=False, requires_approval=False, reason=str(exc))
         concern = self._external_side_effect_decision(str(args.get("path", "")), verb="修改")
         if concern is not None:
             return concern
-        changed_lines = count_changed_lines(old_text, new_text)
+        if mode == "patch":
+            try:
+                plan = parse_patch(str(args.get("patch") or ""))
+            except SecurityError as exc:
+                # 结构非法的 patch 永远不可能被执行：硬拒绝，不推进审批——不能让用户为一个
+                # 必然失败的补丁点"批准"（架构 §6.3：空 Patch/错 hunk 直接拒绝）。
+                return SafetyDecision(allowed=False, requires_approval=False, reason=str(exc))
+            changed_lines = plan.changed_lines
+            what = f"unified diff（{len(plan.hunks)} 个 hunk）"
+        else:
+            changed_lines = count_changed_lines(
+                str(args.get("old_text") or ""), str(args.get("new_text") or "")
+            )
+            what = "精确串替换"
         limit = self.security.large_edit.max_changed_lines_without_approval
         if changed_lines > limit:
             return SafetyDecision(
                 allowed=False,
                 requires_approval=True,
                 reason=(
-                    f"改动约 {changed_lines} 行，超过免审上限 {limit} 行，属于大范围修改，"
+                    f"{what}，改动约 {changed_lines} 行，超过免审上限 {limit} 行，属于大范围修改，"
                     "需要人工审批（T10）"
                 ),
             )
         return SafetyDecision(
             allowed=True,
             requires_approval=False,
-            reason=f"精确串替换，改动 {changed_lines} 行，在免审范围内",
+            reason=f"{what}，改动 {changed_lines} 行，在免审范围内",
         )
 
     def _classify_write(self, args: Mapping[str, Any]) -> SafetyDecision:
