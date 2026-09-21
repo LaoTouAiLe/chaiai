@@ -2,7 +2,7 @@
 
 **不建持久索引**：每次调用直接读当前工作区的磁盘现状，因此不存在"陈旧索引"，也没有
 增量维护任务。检索是**字面匹配**，词项由 :func:`extract_terms` 从用户请求里提取（路径、
-文件名、标识符；纯中文片段也可以作为字面词项），不对整句话做模糊匹配。
+文件名、标识符；只有纯中文请求才退回中文片段做字面词项），不对整句话做模糊匹配。
 
 候选来源有两条，职责划分如下：
 
@@ -172,8 +172,14 @@ def extract_terms(query: str, *, limit: int) -> list[str]:
     """把用户请求转成候选检索词项（字面匹配用）。
 
     切分规则：按非标识符字符切分，保留长度 ``2..MAX_TERM_CHARS`` 的片段，丢掉常见英文虚词，
-    去重保序，最后截到 ``limit`` 个。**ASCII 词项优先**：中文问句里混着的 ``routers.py``
-    ``decide_mode`` 这类词项比"里的""怎么判断"更有检索价值，先占名额。
+    去重保序，最后截到 ``limit`` 个。
+
+    **有 ASCII 词项时只用 ASCII 词项**（文件名、路径、标识符），中文片段一律不再加入：
+    中文问句里混着的 ``routers.py``、``decide_mode`` 才是能定位到代码的东西，而"里的""怎么判断"
+    这类片段按字面匹配只会命中中文散文。实测：一句「routers.py 里的 decide_mode 怎么判断模式？」
+    里的"里的"在 README 里出现 7 次，把 8 个结果位吃掉 7 个，真正要找的函数被挤出结果——
+    检索等于白做。**纯中文请求**（没有任何 ASCII 词项）仍然用中文片段做字面词项：那是这种请求
+    唯一可用的信号，宁可召回弱，也不要什么都不搜。
 
     Args:
         query: 用户请求原文（通常是 ``normalized_request``）。
@@ -183,7 +189,7 @@ def extract_terms(query: str, *, limit: int) -> list[str]:
         去重保序的词项列表；没有任何可用词项时返回空列表。
     """
     ascii_terms: list[str] = []
-    other_terms: list[str] = []
+    chinese_terms: list[str] = []
     seen: set[str] = set()
     for raw in _TOKEN_SPLIT.split(query or ""):
         term = raw.strip("./\\-_")
@@ -193,8 +199,10 @@ def extract_terms(query: str, *, limit: int) -> list[str]:
         if key in _STOPWORDS or key in seen:
             continue
         seen.add(key)
-        (ascii_terms if term.isascii() else other_terms).append(term)
-    return (ascii_terms + other_terms)[: max(limit, 0)]
+        (ascii_terms if term.isascii() else chinese_terms).append(term)
+    if ascii_terms:
+        return ascii_terms[: max(limit, 0)]
+    return chinese_terms[: max(limit, 0)]
 
 
 def discover_matches(

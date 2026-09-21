@@ -65,11 +65,17 @@ def _find(
 
 
 def test_extract_terms_prefers_identifiers_over_chinese_filler() -> None:
-    """中文问句里混着的标识符/文件名要先占词项名额（否则 4 个名额全被虚词吃掉）。"""
+    """有文件名/标识符时**只用**它们：中文虚词当词项会按字面命中中文散文，把结果位吃光。"""
     terms = search.extract_terms("routers.py 里的 decide_mode 是怎么判断模式的？", limit=4)
 
-    assert terms[:2] == ["routers.py", "decide_mode"]
-    assert all(term not in {"里的", "是怎么判断模式的"} for term in terms[:2])
+    assert terms == ["routers.py", "decide_mode"]
+
+
+def test_extract_terms_keeps_chinese_terms_for_pure_chinese_queries() -> None:
+    """纯中文请求没有任何 ASCII 词项，这时才退回中文片段——否则等于什么都没搜。"""
+    terms = search.extract_terms("检索怎么做的？索引又在哪里？", limit=4)
+
+    assert terms == ["检索怎么做的", "索引又在哪里"]
 
 
 def test_extract_terms_drops_stopwords_short_tokens_and_duplicates() -> None:
@@ -127,6 +133,35 @@ def test_path_match_finds_candidates_by_directory_name(
 
     assert [reference["match_type"] for reference in result.references] == ["path"]
     assert result.references[0]["path"] == "pkg/mod.py"
+
+
+def test_identifiers_are_not_crowded_out_by_chinese_prose(
+    workspace: Path, app_config: AppConfig
+) -> None:
+    """实测回归（真实模型手测发现）：句中的"里的"曾命中 README 散文，把真命中挤出结果位。
+
+    修法是"有 ASCII 词项时不再加入 CJK 片段"，所以这条用例固定住：中文散文不得进入结果，
+    而 ``decide_mode`` 的正文命中必须在结果里。
+    """
+    (workspace / "README.md").write_text(
+        "\n".join(f"第 {index} 行里的说明文字" for index in range(1, 40)) + "\n",
+        encoding="utf-8",
+    )
+    # 函数放在文件中部（第 60 行）：文件名命中的是文件开头窗口，正文命中的是函数附近窗口，
+    # 两者不会被"路径 + 行区间"去重掉——这才看得出正文命中是否真的进了结果。
+    (workspace / "routers.py").write_text(
+        "\n".join(["a = 1"] * 59 + ["def decide_mode():", "    return 'tool'"] + ["b = 2"] * 20),
+        encoding="utf-8",
+    )
+
+    result = _find(
+        "routers.py 里的 decide_mode 怎么判断模式？", workspace=workspace, app_config=app_config
+    )
+
+    assert {reference["path"] for reference in result.references} == {"routers.py"}
+    text_refs = [ref for ref in result.references if ref["match_type"] == "text"]
+    assert text_refs, "decide_mode 的正文命中必须出现在结果里"
+    assert text_refs[0]["line_start"] <= 60 <= text_refs[0]["line_end"]
 
 
 def test_results_reflect_the_disk_immediately(workspace: Path, app_config: AppConfig) -> None:
