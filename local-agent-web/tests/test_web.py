@@ -8,14 +8,22 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 
 from local_agent import web
-from local_agent.config import ConfigError, load_config, redact_secrets, resolve_api_key
+from local_agent.config import (
+    AppConfig,
+    ConfigError,
+    load_config,
+    redact_secrets,
+    resolve_api_key,
+)
 from local_agent.graph import builder, nodes
 from local_agent.graph.state import make_decision_record
+from local_agent.llm import embedding as embedding_module
 from local_agent.llm import factory
 from local_agent.persistence import checkpoint
 from local_agent.persistence.session_store import SessionStore
@@ -64,6 +72,150 @@ def _run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> object:
 
 
 # --------------------------------------------------------------------------- 配置层
+
+
+def test_memory_status_lines_describe_each_layer(tmp_path: Path) -> None:
+    """侧栏状态块：三层各一行；关闭的层写明"已关闭"，配置问题必须报出来（架构 §1.4）。"""
+    base = load_config(PROJECT_ROOT / "config.yaml.example")
+
+    disabled_lines, disabled_warn = web.memory_status_lines(
+        SimpleNamespace(app_config=base)  # type: ignore[arg-type]
+    )
+    disabled_text = "\n".join(disabled_lines)
+    assert "短期" in disabled_text
+    assert "中期：已关闭" in disabled_text
+    assert "长期：已关闭" in disabled_text
+    assert disabled_warn is False
+
+    data = base.model_dump()
+    data["memory"]["medium_term"].update(
+        {"enabled": True, "path": str(tmp_path / "data" / "chroma")}
+    )
+    data["memory"]["long_term"].update(
+        {"enabled": True, "path": str(tmp_path / "data" / "memories.sqlite")}
+    )
+    data["embedding"].update(
+        {
+            "enabled": True,
+            "provider": "onnx_local",
+            "model": "BAAI/bge-small-zh-v1.5",
+            "cache_dir": str(tmp_path / "models"),
+        }
+    )
+    config = AppConfig.model_validate(data)
+    lines, warn = web.memory_status_lines(
+        SimpleNamespace(app_config=config)  # type: ignore[arg-type]
+    )
+
+    text = "\n".join(lines)
+    assert "中期：已启用" in text
+    assert "长期：已启用" in text
+    assert "缓存目录" in text
+    assert f"状态：{embedding_module.readiness(config.embedding).detail}" in text
+    assert warn is False  # 合法配置：依赖已装、缓存目录是绝对路径
+
+    # "中期已启用但 embedding 关闭"会被配置校验拦住；页面仍要能报出来（防御分支）
+    broken = config.model_copy(
+        update={"embedding": config.embedding.model_copy(update={"enabled": False})}
+    )
+    _, warn_broken = web.memory_status_lines(
+        SimpleNamespace(app_config=broken)  # type: ignore[arg-type]
+    )
+    assert warn_broken is True
+
+
+def test_memory_status_lines_report_missing_api_key_instead_of_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """远端 embedding 缺 Key：状态页展示可处理的警告，而不是整块抛 ``ConfigError``。
+
+    复审实证：状态块原来先调用会抛异常的 ``resolve_api_key()``，于是 ``readiness(..., api_key=None)``
+    的 ``not_ready`` 分支根本走不到，用户看到的是页面报错而不是"请补 Key"。
+    """
+    base = load_config(PROJECT_ROOT / "config.yaml.example")
+    data = base.model_dump()
+    data["memory"]["medium_term"].update(
+        {"enabled": True, "path": str(tmp_path / "data" / "chroma")}
+    )
+    data["embedding"] = {
+        "enabled": True,
+        "provider": "openai_compatible",
+        "base_url": "https://example.invalid/v1",
+        "model": "text-embedding-3-small",
+        "api_key_env": "CHAT_EMBEDDING_KEY",
+    }
+    config = AppConfig.model_validate(data)
+    monkeypatch.delenv("CHAT_EMBEDDING_KEY", raising=False)
+
+    lines, warn = web.memory_status_lines(
+        SimpleNamespace(app_config=config)  # type: ignore[arg-type]
+    )
+
+    assert warn is True
+    assert any("API Key" in line for line in lines)
+
+
+def test_pending_error_lines_are_deduped_and_redacted() -> None:
+    """页面要显示本轮的降级/错误事件：按 ``event_id`` 去重，并且先脱敏。
+
+    复审实证：图产生了可读的 ``recall_memory`` 错误事件（Embedding 首次加载失败），页面却只渲染
+    消息与工具结果 —— 用户只看到一条正常的聊天回复，看不到失败原因，与侧栏"失败原因会出现在对话里"
+    的说法不符。
+    """
+    state = {
+        "error_events": [
+            {
+                "event_id": "e1",
+                "stage": "recall_memory",
+                "message": "Embedding 首次加载失败：连接超时（key=sk-secret）",
+            },
+            {"event_id": "e2", "stage": "memory_write_node", "message": "长期库打不开"},
+        ]
+    }
+
+    lines, fresh = web.pending_error_lines(state, shown={"e1"}, secrets=["sk-secret"])
+
+    assert lines == ["[memory_write_node] 长期库打不开"]  # 已展示过的不重复渲染
+    assert fresh == ["e2"]
+
+    lines, fresh = web.pending_error_lines(state, shown=set(), secrets=["sk-secret"])
+
+    assert len(lines) == 2 and len(fresh) == 2
+    assert "sk-secret" not in " ".join(lines)  # 先脱敏再上页面
+    assert lines[0].startswith("[recall_memory] Embedding 首次加载失败")
+
+
+def test_projected_history_applies_reply_corrections() -> None:
+    """页面展示走投影：修正过的回答替换掉原文，条数与顺序不变。
+
+    页面上不能出现"我记住了"与"没有保存成功"并排两条（复审实证）；也不能为好看去改 Checkpoint
+    里的原文（架构 §10.1）。
+    """
+    messages = [
+        HumanMessage(content="请记住", id="h1"),
+        AIMessage(content="好的，我记住了", id="a1"),
+    ]
+
+    projected = web.projected_history(
+        {"messages": messages, "reply_overrides": {"a1": "（这条记忆没有保存成功。）"}}
+    )
+
+    assert [item.content for item in projected] == ["请记住", "（这条记忆没有保存成功。）"]
+    assert [item.id for item in projected] == ["h1", "a1"]  # 没有新增或删除消息
+    assert messages[1].content == "好的，我记住了"  # 原对象未被修改
+    assert web.projected_history({"messages": messages}) == messages  # 没有投影时原样返回
+
+    # 本轮回答为空时：渲染本来会跳过这条空消息，投影后用户才看得到说明（复审实证）
+    empty_reply = [HumanMessage(content="请记住", id="h3"), AIMessage(content="", id="a3")]
+    assert [item.content for item in to_chat_messages(empty_reply)] == ["请记住"]
+    assert [
+        item.content
+        for item in to_chat_messages(
+            web.projected_history(
+                {"messages": empty_reply, "reply_overrides": {"a3": "（没有保存成功。）"}}
+            )
+        )
+    ] == ["请记住", "（没有保存成功。）"]
 
 
 def test_config_example_is_valid() -> None:
@@ -133,14 +285,19 @@ def test_missing_required_llm_fields_are_listed(tmp_path: Path) -> None:
 
 
 def test_missing_context_window_tokens_is_reported(tmp_path: Path) -> None:
-    """``llm.context_window_tokens`` 是必填键（没有默认值）：缺了必须直接失败。"""
+    """``llm.context_window_tokens`` 是必填键（没有默认值）：缺了必须直接失败，并说清怎么补。"""
     body = 'llm:\n  base_url: "https://api.deepseek.com"\n  api_key_env: "K"\n  model: "m"\n'
     path = _write_config(tmp_path, body)
 
     with pytest.raises(ConfigError) as excinfo:
         load_config(path)
 
-    assert "context_window_tokens" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "context_window_tokens" in message
+    # 新增必填键会让既有的 config.yaml 直接失效（升级后典型故障）：提示必须可操作，
+    # 不能只回一句 "Field required"。
+    assert "缺少必填键" in message
+    assert "config.yaml.example" in message
 
 
 def test_context_window_must_exceed_max_tokens(tmp_path: Path) -> None:
@@ -260,7 +417,9 @@ def test_chat_graph_answers_without_tools(tmp_path: Path, model_factory, app_con
     assert not result.get("tool_events")
     assert not result.get("tool_results")
     assert not result.get("pending_tool_calls")
-    assert result.get("reflection_result") is None
+    # 闲聊也过 reflection_node（架构 §5.2），但没有任务证据、也不产生记忆候选
+    assert not result["reflection_result"].memory_candidates
+    assert result["reflection_result"].result_trust == "uncertain"
 
 
 def test_chat_graph_keeps_history_across_turns(tmp_path: Path, model_factory, app_config) -> None:

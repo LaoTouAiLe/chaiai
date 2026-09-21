@@ -92,6 +92,17 @@ _CONCLUSION_COLUMN_NAMES: tuple[str, ...] = (
     "updated_at",
 )
 
+#: ``facts.status`` 的合法取值；读库时校验，未知状态明确失败（不静默当成 ``active``）。
+_FACT_STATUSES: frozenset[str] = frozenset(
+    {
+        FACT_STATUS_ACTIVE,
+        FACT_STATUS_SUPERSEDED,
+        FACT_STATUS_CONFLICTED,
+        FACT_STATUS_EXPIRED,
+        FACT_STATUS_DELETED,
+    }
+)
+
 
 def _select_list(names: Sequence[str], *, alias: str | None = None) -> str:
     """列清单（统一加引号，``key`` / ``status`` 这类名字不用特殊处理）。"""
@@ -502,6 +513,57 @@ class LongTermStore:
             self._set_status(overdue, FACT_STATUS_EXPIRED, stamp)
         return len(overdue)
 
+    def expire_aged(
+        self,
+        *,
+        forget_after_days: int,
+        aging_enabled: bool = True,
+        now: datetime | None = None,
+    ) -> int:
+        """把超过 ``forget_after_days`` 的 ``active`` 事实落库改为 ``expired``，返回条数。
+
+        与 :meth:`expire_overdue` 的分工是**显式有效期优先**：带 ``expires_at`` 的行交给
+        :meth:`expire_overdue`，这里只处理**没有有效期**、纯靠年龄淘汰的行，两条规则不会互相
+        覆盖。年龄基准是 ``last_accessed_at or updated_at or created_at``，与
+        :func:`local_agent.memory.forgetting.fact_age_days` 同一口径（改一处要同步另一处）。
+
+        ``aging_enabled=false`` 时什么都不做——它只关闭自动老化，不关闭显式过期；
+        ``task_conclusions`` 不参与老化（该表没有状态字段）。
+        """
+        if not aging_enabled or forget_after_days <= 0:
+            return 0
+        moment = _moment(now)
+        stamp = _timestamp(moment)
+        with self._transaction():
+            rows = self.connection.execute(
+                f'SELECT {_FACT_COLUMNS} FROM facts'
+                ' WHERE "status" = ? AND "expires_at" IS NULL',
+                (FACT_STATUS_ACTIVE,),
+            ).fetchall()
+            aged = [
+                record
+                for record in (_fact_from_row(row) for row in rows)
+                if _age_days(record, moment) >= forget_after_days
+            ]
+            self._set_status(aged, FACT_STATUS_EXPIRED, stamp)
+        return len(aged)
+
+    def list_active_facts(self, *, limit: int | None = None) -> list[FactRecord]:
+        """列出**整库**的 ``active`` 事实（不做作用域与时间过滤）。
+
+        给"整库维护与预演"用：``expire_overdue()`` / ``expire_aged()`` 都是整库操作，预演必须与
+        执行同范围，否则会出现"预览 0 条、实际过期 1 条"的错觉（复审实证）。时间判定不在存储层做，
+        由调用方用 :func:`~local_agent.memory.forgetting.is_expired` / ``is_aged_out`` 判定。
+        """
+        with self._connection_lock:
+            rows = self.connection.execute(
+                f"SELECT {_FACT_COLUMNS} FROM facts"
+                f' WHERE "status" = ? ORDER BY {_NEWEST_FIRST}',
+                (FACT_STATUS_ACTIVE,),
+            ).fetchall()
+        records = [_fact_from_row(row) for row in rows]
+        return records[:limit] if limit is not None and limit >= 0 else records
+
     def active_facts_with_entities(
         self, scope_keys: Sequence[tuple[MemoryScope, str]], *, now: datetime | None = None
     ) -> list[tuple[EntityRecord, FactRecord]]:
@@ -545,9 +607,37 @@ class LongTermStore:
         now: datetime | None = None,
     ) -> TaskConclusionRecord:
         """写入一条任务结论（``task_conclusions`` 没有版本与状态字段，写入即长期有效）。"""
+        record, _ = self.upsert_task_conclusion(
+            conclusion_id=_new_id("conclusion"),
+            task_title=task_title,
+            conclusion=conclusion,
+            project_scope=project_scope,
+            confidence=confidence,
+            evidence=evidence,
+            now=now,
+        )
+        return record
+
+    def upsert_task_conclusion(
+        self,
+        *,
+        conclusion_id: str,
+        task_title: str,
+        conclusion: str,
+        project_scope: str,
+        confidence: float,
+        evidence: Any = None,
+        now: datetime | None = None,
+    ) -> tuple[TaskConclusionRecord, bool]:
+        """按**调用方给出的稳定 id** 幂等写入任务结论，返回 ``(记录, 是否插入了新行)``。
+
+        为什么需要它：任务结论表没有版本与状态字段，写入即新增一行。数据库写入成功、但 Checkpoint
+        提交前发生重放时会重复插入（复审探针：连续写同一来源得到 2 条结论）；写入方按"项目 + 来源
+        事件"算出稳定 id 后，重放等价于一次幂等重试，而不是多出一条记忆。
+        """
         moment = _timestamp(_moment(now))
         record = TaskConclusionRecord(
-            id=_new_id("conclusion"),
+            id=_require_text(conclusion_id, "conclusion_id"),
             task_title=_require_text(task_title, "task_title"),
             conclusion=_require_text(conclusion, "conclusion"),
             evidence_json=_normalize_json(evidence, "evidence"),
@@ -557,8 +647,8 @@ class LongTermStore:
             updated_at=moment,
         )
         with self._transaction():
-            self.connection.execute(
-                f"INSERT INTO task_conclusions ({_CONCLUSION_COLUMNS})"
+            cursor = self.connection.execute(
+                f"INSERT OR IGNORE INTO task_conclusions ({_CONCLUSION_COLUMNS})"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
@@ -571,7 +661,15 @@ class LongTermStore:
                     record.updated_at,
                 ),
             )
-        return record
+            if not cursor.rowcount:
+                row = self.connection.execute(
+                    f'SELECT {_CONCLUSION_COLUMNS} FROM task_conclusions WHERE "id" = ?',
+                    (record.id,),
+                ).fetchone()
+                if row is None:  # pragma: no cover —— INSERT OR IGNORE 之外的失败
+                    raise MemoryStoreError(f"任务结论写入未生效：{record.id}")
+                return _conclusion_from_row(row), False
+        return record, True
 
     def list_task_conclusions(
         self, *, project_scope: str, limit: int | None = None
@@ -845,6 +943,19 @@ def _optional_text(value: str | None) -> str | None:
     return text or None
 
 
+def _age_days(record: FactRecord, moment: datetime) -> float:
+    """事实的年龄（天），基准是 ``last_accessed_at or updated_at or created_at``。
+
+    与 :func:`local_agent.memory.forgetting.fact_age_days` 同一口径（那个是给调用方的公开版本，
+    这里避免两个模块互相导入）；改一处要同步另一处。读不出时间时返回 ``0``——不因为读不出年龄
+    就淘汰记忆（与召回层"宁可少召回"的方向相反，这里宁可不遗忘）。
+    """
+    parsed = _parse_time(record.last_accessed_at or record.updated_at or record.created_at)
+    if parsed is None:
+        return 0.0
+    return max(0.0, (moment - parsed).total_seconds() / 86_400.0)
+
+
 def _optional_expires_at(value: str | None) -> str | None:
     """可选有效期：必须是可解析的 ISO-8601，否则**写入时直接拒绝**。
 
@@ -939,43 +1050,69 @@ def _json_equal(left: Any, right: Any) -> bool:
 
 
 def _entity_from_row(row: Sequence[Any]) -> EntityRecord:
-    return EntityRecord(
-        id=str(row[0]),
-        entity_type=str(row[1]),
-        name=str(row[2]),
-        # 作用域是隔离边界：库里读到非法值时不猜（不当作 global），明确失败
-        scope=_require_scope(str(row[3])),
-        scope_key=str(row[4]),
-        created_at=str(row[5]),
-        updated_at=str(row[6]),
-    )
+    try:
+        return EntityRecord(
+            id=str(row[0]),
+            entity_type=str(row[1]),
+            name=str(row[2]),
+            # 作用域是隔离边界：库里读到非法值时不猜（不当作 global），明确失败
+            scope=_require_scope(str(row[3])),
+            scope_key=str(row[4]),
+            created_at=str(row[5]),
+            updated_at=str(row[6]),
+        )
+    except (IndexError, TypeError, ValueError) as exc:
+        raise MemoryStoreError(f"entities 表存在无法解码的行：{exc}") from exc
 
 
 def _fact_from_row(row: Sequence[Any]) -> FactRecord:
-    return FactRecord(
-        id=str(row[0]),
-        entity_id=str(row[1]),
-        key=str(row[2]),
-        value_json=str(row[3]),
-        confidence=float(row[4]),
-        importance=float(row[5]),
-        source=str(row[6]),
-        created_at=str(row[7]),
-        updated_at=str(row[8]),
-        last_accessed_at=str(row[9]) if row[9] is not None else None,
-        expires_at=str(row[10]) if row[10] is not None else None,
-        status=str(row[11]),
-    )
+    """**解码失败必须转成领域异常**：合法 SQLite 文件里的脏值（例如 ``confidence`` 存了文本）
+    会让 ``float(...)`` 抛 ``ValueError``；调用方只隔离 ``MemoryStoreError`` / ``sqlite3`` /
+    ``OSError``，一条脏行就能拖垮整轮对话（复审实证）。
+
+    分数列复用 :func:`_require_score`（非数字、``NaN``、``Infinity``、负数或 >1 都会被拒绝），
+    ``status`` 也必须是已知取值——否则会算出一个无穷大的排序分，却不触发单层降级。
+    """
+    try:
+        return FactRecord(
+            id=str(row[0]),
+            entity_id=str(row[1]),
+            key=str(row[2]),
+            value_json=str(row[3]),
+            confidence=_require_score(float(row[4]), "confidence"),
+            importance=_require_score(float(row[5]), "importance"),
+            source=str(row[6]),
+            created_at=str(row[7]),
+            updated_at=str(row[8]),
+            last_accessed_at=str(row[9]) if row[9] is not None else None,
+            expires_at=str(row[10]) if row[10] is not None else None,
+            status=_require_fact_status(str(row[11])),
+        )
+    except MemoryStoreError:
+        raise
+    except (IndexError, TypeError, ValueError) as exc:
+        raise MemoryStoreError(f"facts 表存在无法解码的行：{exc}") from exc
+
+
+def _require_fact_status(status: str) -> str:
+    """校验长期事实的 ``status`` 取值（库里读到未知状态时明确失败，不静默当成 active）。"""
+    if status in _FACT_STATUSES:
+        return status
+    allowed = "、".join(sorted(_FACT_STATUSES))
+    raise MemoryStoreError(f"facts 行存在未知状态：{status!r}（只能是 {allowed}）")
 
 
 def _conclusion_from_row(row: Sequence[Any]) -> TaskConclusionRecord:
-    return TaskConclusionRecord(
-        id=str(row[0]),
-        task_title=str(row[1]),
-        conclusion=str(row[2]),
-        evidence_json=str(row[3]),
-        project_scope=str(row[4]),
-        confidence=float(row[5]),
-        created_at=str(row[6]),
-        updated_at=str(row[7]),
-    )
+    try:
+        return TaskConclusionRecord(
+            id=str(row[0]),
+            task_title=str(row[1]),
+            conclusion=str(row[2]),
+            evidence_json=str(row[3]),
+            project_scope=str(row[4]),
+            confidence=float(row[5]),
+            created_at=str(row[6]),
+            updated_at=str(row[7]),
+        )
+    except (IndexError, TypeError, ValueError) as exc:
+        raise MemoryStoreError(f"task_conclusions 表存在无法解码的行：{exc}") from exc

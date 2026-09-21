@@ -31,6 +31,7 @@ from __future__ import annotations
 import importlib.util
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -175,16 +176,85 @@ class MediumTermStore:
             raise MemoryStoreError(self._failure_text("查询", exc)) from exc
         return _hits_from_result(result)
 
+    def list_records(
+        self, *, scope_keys: Sequence[tuple[MemoryScope, str]], limit: int = 20
+    ) -> list[MediumTermHit]:
+        """按**作用域**列出记忆，供人工查看与删除（不做相似度计算）。
+
+        为什么需要它：:meth:`query` 必须给定查询向量，人工排查"库里到底有什么"时无从下手；
+        :meth:`expired_ids` 又只给 id。但列出必须与召回同口径——过滤比 :meth:`query` 少一项，人工
+        列表就会把别的项目、已过期的记录列出来（复审实证：当前工作区列出了其它项目的记录）。因此
+        作用域条件复用 ``_scope_where``（含 ``status=active``），过期项在取回后排除；因为过滤发生在
+        取回之后，这里按 ``limit`` 的若干倍多取一些再截断。
+
+        ``distance`` 在列出场景没有意义（不是检索），统一置 ``1.0``。
+        """
+        if limit <= 0 or not scope_keys:
+            return []
+        try:
+            result = self.collection.get(
+                limit=max(1, limit) * _LIST_OVERFETCH,
+                where=_scope_where(scope_keys),
+                include=["metadatas", "documents"],
+            )
+        except Exception as exc:  # 统一包装成带重建提示的可读错误
+            raise MemoryStoreError(self._failure_text("列出", exc)) from exc
+        moment = datetime.now(timezone.utc)
+        visible = [hit for hit in _hits_from_get(result) if not _hit_expired(hit, moment)]
+        return visible[:limit]
+
+    def find_record(self, memory_id: str) -> MediumTermHit | None:
+        """按 id 取一条记忆（人工删除前的**作用域校验**用），没有则 ``None``。
+
+        只看 id，不做作用域与状态过滤：调用方需要先拿到记录的作用域，才能判断"该不该允许删除"。
+        """
+        try:
+            result = self.collection.get(ids=[memory_id], include=["metadatas", "documents"])
+        except Exception as exc:  # 统一包装成带重建提示的可读错误
+            raise MemoryStoreError(self._failure_text("查询", exc)) from exc
+        hits = _hits_from_get(result)
+        return hits[0] if hits else None
+
     def delete(self, memory_ids: Sequence[str]) -> int:
-        """按 id 删除记忆（遗忘的判定在 T18，这里只提供原语）。"""
-        items = list(memory_ids)
+        """按 id 删除记忆，返回**实际删除**的条数（不存在的 id 不计入）。
+
+        原先直接返回请求条数，于是删除一个不存在的 id 也会被报成"删除成功"（复审实证：实际删除
+        0 条、返回 1 条）。人工入口要给出可信结果，所以先核实存在性再删。
+        """
+        items = list(dict.fromkeys(str(item) for item in memory_ids))
         if not items:
             return 0
         try:
-            self.collection.delete(ids=items)
+            existing = [
+                str(item) for item in (self.collection.get(ids=items, include=[])["ids"] or [])
+            ]
+            if not existing:
+                return 0
+            self.collection.delete(ids=existing)
         except Exception as exc:  # 统一包装成带重建提示的可读错误
             raise MemoryStoreError(self._failure_text("删除", exc)) from exc
-        return len(items)
+        return len(existing)
+
+    def expired_ids(self, *, now: datetime | None = None) -> list[str]:
+        """已过期的记忆 id（``expires_at`` 有值且不晚于 ``now``），供显式遗忘任务删除。
+
+        读不出有效期（非法值）的**不在这里删**：中期库没有版本历史、删除不可逆，宁可留到人工
+        处理，也不因为一次解析失败悄悄删掉记忆。判定口径与召回层一致（``expires_at <= now``）。
+        """
+        moment = now or datetime.now(timezone.utc)
+        try:
+            result = self.collection.get(include=["metadatas"])
+        except Exception as exc:  # 统一包装成带重建提示的可读错误
+            raise MemoryStoreError(self._failure_text("查询过期记忆", exc)) from exc
+        ids = [str(item) for item in (result.get("ids") or [])]
+        metadatas = result.get("metadatas") or []
+        expired: list[str] = []
+        for index, memory_id in enumerate(ids):
+            metadata = dict(metadatas[index]) if index < len(metadatas) else {}
+            expiry = _parse_moment(metadata.get("expires_at"))
+            if expiry is not None and expiry <= moment:
+                expired.append(memory_id)
+        return expired
 
     def _embeddings_for(self, records: Sequence[MediumTermRecord]) -> list[list[float]]:
         """向量一律由**当前 store 的适配器**计算。
@@ -396,6 +466,17 @@ def _reject_foreign_vectors(
             )
 
 
+def _parse_moment(value: Any) -> datetime | None:
+    """解析 ISO-8601 时间字符串；解析不了返回 ``None``（与 forgetting 的口径一致）。"""
+    if not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
 def _hits_from_result(result: Any) -> list[MediumTermHit]:
     """把 Chroma 的查询结果解析成命中列表（空结果安全返回空列表）。"""
     ids = (result.get("ids") or [[]])[0] or []
@@ -412,6 +493,39 @@ def _hits_from_result(result: Any) -> list[MediumTermHit]:
                 content=str(documents[index]) if index < len(documents) else "",
                 metadata=dict(metadatas[index]) if index < len(metadatas) else {},
                 distance=float(distances[index]) if index < len(distances) else 1.0,
+            )
+        )
+    return hits
+
+
+#: 人工列出时按 ``limit`` 多取几倍：过期过滤发生在取回之后，不多取会被提前截断。
+_LIST_OVERFETCH = 4
+
+
+def _hit_expired(hit: MediumTermHit, now: datetime) -> bool:
+    """中期记忆是否已过期（与召回层 ``_is_expired`` 同一口径：读不出来按已过期处理）。"""
+    expires_at = hit.metadata.get("expires_at")
+    if not expires_at:
+        return False
+    moment = _parse_moment(expires_at)
+    return True if moment is None else moment <= now
+
+
+def _hits_from_get(result: Any) -> list[MediumTermHit]:
+    """把 Chroma ``get`` 的结果解析成命中列表（形状与查询结果不同：字段是**扁平**列表）。"""
+    ids = list(result.get("ids") or [])
+    documents = list(result.get("documents") or [])
+    metadatas = list(result.get("metadatas") or [])
+    hits: list[MediumTermHit] = []
+    for index, memory_id in enumerate(ids):
+        document = documents[index] if index < len(documents) else None
+        metadata = metadatas[index] if index < len(metadatas) else None
+        hits.append(
+            MediumTermHit(
+                memory_id=str(memory_id),
+                content=str(document) if document is not None else "",
+                metadata=dict(metadata) if metadata else {},
+                distance=1.0,  # 列出不是检索：距离没有意义
             )
         )
     return hits

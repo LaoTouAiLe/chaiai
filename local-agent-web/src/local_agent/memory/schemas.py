@@ -29,7 +29,7 @@ T13 未定的语义（现已定稿）：
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from local_agent.scope import MemoryScope
 
@@ -64,8 +64,15 @@ class MemoryReference(TypedDict):
     """一条召回结果（架构 §4.2 的 ``memory_refs`` 元素；字段由 T14B 定义，架构 §4.3 未固定）。
 
     只放"当前轮 Prompt 与页面需要"的最小集合：``content`` 是原文，
-    ``similarity`` 是"越大越相关"的语义相似度，``score`` 是叠加作用域/重要度/时间/置信度
+    ``similarity`` 是"越大越相关"的排序依据，``score`` 是叠加作用域/重要度/时间/置信度
     系数后的排序分数（同样越大越相关）。两者都只在当前轮有效，不写回记忆库。
+
+    ``kind`` 标出来源——T19 起中期与长期召回**都进这一个列表**：
+
+    - ``medium_term``：中期向量记忆，``similarity`` 是**真实余弦相似度**；
+    - ``long_term_fact`` / ``task_conclusion``：长期结构化记忆。长期库没有向量，``similarity``
+      位置放它的综合分（``confidence × importance``；任务结论即 ``confidence``），**只作为排序
+      与展示依据，不要当成语义相似度解释**。
     """
 
     memory_id: str
@@ -79,6 +86,8 @@ class MemoryReference(TypedDict):
     created_at: str
     source_thread_id: str | None
     expires_at: str | None
+    #: 记忆来源；缺省按中期向量记忆处理（兼容 T14B 产出的结果）。
+    kind: NotRequired[Literal["medium_term", "long_term_fact", "task_conclusion"]]
 
 
 class LongTermReference(TypedDict):

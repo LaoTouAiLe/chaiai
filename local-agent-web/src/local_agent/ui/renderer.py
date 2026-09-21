@@ -255,6 +255,34 @@ def render_model_status(*, configured: bool, text: str) -> None:
 # --------------------------------------------------------------------------- 会话侧栏
 
 
+def render_error_events(*, lines: Sequence[str], title: str = "本轮有降级/错误事件") -> None:
+    """在对话里展示本轮的错误与降级事件（调用方保证文本已脱敏）。
+
+    架构 §1.4 要求"失败可见"：图会把"长期库打不开""Embedding 首次加载失败""会话摘要生成失败"
+    这类降级写进 ``error_events``；页面原先只渲染消息与工具结果，用户看到的是一条**一切正常**的
+    回复，而侧栏却写着"下载或加载失败的原因会出现在对话里"（复审实证）。
+    """
+    if not lines:
+        return
+    text = "\n".join(f"- {line}" for line in lines)
+    st.warning(f"{title}（共 {len(lines)} 条，细节已脱敏）：\n{text}")
+
+
+def render_memory_status(*, lines: Sequence[str], warn: bool = False) -> None:
+    """在侧栏展示记忆与 Embedding 的准备状态（架构 §1.4）。
+
+    每行一个主题（短期 / 中期 / 长期 / 压缩）；需要用户处理时用 warning 样式，避免出现
+    "看起来一切正常、实际某层是关的或被降级"的误读。
+    """
+    if not lines:
+        return
+    text = "\n".join(f"- {line}" for line in lines)
+    if warn:
+        st.warning(text)
+    else:
+        st.info(text)
+
+
 def render_workspace_picker(
     *,
     workspaces: Sequence[str],

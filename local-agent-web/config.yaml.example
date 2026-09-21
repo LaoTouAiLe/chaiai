@@ -77,6 +77,10 @@ memory:
     importance_threshold: 0.5
     aging_enabled: true
     forget_after_days: 180
+    # 是否允许把事实写进**用户级**（跨项目可见）作用域。默认 false：entity_fact 一律落项目级。
+    # 判定"这是个人偏好而不是项目事实"依赖模型输出的 entity_type，而作用域是跨项目隔离边界，
+    # 一次误分类就会让项目事实被别的项目召回——所以跨项目共享必须显式打开。
+    allow_user_scope: false
 
   compression:
     enabled: false                 # v0.1a / v0.1b 保持关闭

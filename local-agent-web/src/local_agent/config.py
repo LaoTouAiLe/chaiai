@@ -226,6 +226,13 @@ class LongTermMemoryConfig(_StrictModel):
     importance_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     aging_enabled: bool = True
     forget_after_days: int = Field(default=180, gt=0)
+    #: 是否允许把事实写进**用户级**（``user``）作用域——即"跨项目可见"。
+    #:
+    #: 默认 ``false``：``entity_fact`` 一律落项目级。原因：判定"这是个人偏好而不是项目事实"依赖
+    #: 模型输出的 ``entity_type``，而作用域是跨项目隔离边界——模型一次误分类就会让项目事实被别的
+    #: 项目召回。跨项目共享属于显式授权，需要在这里打开（打开后 ``entity_type="user"`` 才落
+    #: 用户级，其余仍落项目级）。
+    allow_user_scope: bool = False
 
 
 class CompressionConfig(_StrictModel):
@@ -441,6 +448,20 @@ def resolve_api_key(
     return value
 
 
+def optional_api_key(
+    config: LlmConfig | EmbeddingConfig, environ: Mapping[str, str] | None = None
+) -> str | None:
+    """非抛出式取 Key：缺失或为空时返回 ``None``。
+
+    给**状态展示**这类只读场景用：那里要的是"能不能用、缺什么"的说明，而不是一个异常——直接调用
+    :func:`resolve_api_key` 会让状态页整块抛错，连"请补 Key"的提示都显示不出来（复审实证：
+    ``readiness(..., api_key=None)`` 的 ``not_ready`` 分支根本走不到）。
+    """
+    env = os.environ if environ is None else environ
+    value = env.get(config.api_key_env, "").strip()
+    return value or None
+
+
 def redact_secrets(text: str, secrets: Mapping[str, str] | Sequence[str]) -> str:
     """把文本中的密钥值替换成 ``***``，用于任何可能回显给用户的错误消息。
 
@@ -459,8 +480,24 @@ def redact_secrets(text: str, secrets: Mapping[str, str] | Sequence[str]) -> str
 
 
 def _format_validation_error(display_path: str, exc: ValidationError) -> str:
+    """把校验错误转成可读消息：逐条列出现位置，缺必填键时再补一句可操作指引。
+
+    为什么单独处理"缺键"：本项目会随任务新增**必填**配置键（例如 T16 的
+    ``llm.context_window_tokens``），而 ``config.yaml`` 被 .gitignore 排除、不会自动更新——
+    旧配置会在升级后直接失效。只回一句 "Field required" 用户不知道该补什么、补到哪，
+    所以这里明确指向示例文件。
+    """
     details: list[str] = []
+    missing: list[str] = []
     for error in exc.errors():
         location = ".".join(str(part) for part in error["loc"])
         details.append(f"{location}: {error['msg']}")
-    return f"{display_path} 配置校验失败：" + "；".join(details)
+        if error["type"] == "missing":
+            missing.append(location)
+    message = f"{display_path} 配置校验失败：" + "；".join(details)
+    if missing:
+        message += (
+            f"。缺少必填键：{'、'.join(missing)}——对照项目里的 {DEFAULT_CONFIG_PATH.name}.example "
+            "补齐这几项后重启（示例文件里每个键都有注释）"
+        )
+    return message

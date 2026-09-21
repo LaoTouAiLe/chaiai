@@ -21,6 +21,7 @@ from pydantic import Field
 from local_agent.config import AppConfig, load_config
 from local_agent.graph.routers import ROUTE_CLASSIFIER_MARKER
 from local_agent.memory.summarizer import SUMMARIZE_INSTRUCTION
+from local_agent.reflection.reflector import MEMORY_INTENT_MARKER
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -53,6 +54,12 @@ class RoutingFakeModel(GenericFakeChatModel):
     #: ``True`` 时**每次**决策调用都返回 ``tool_calls``，用来构造"一个用户请求内的长工具链"
     #: （默认 ``False``：只有第一次带工具调用，之后返回文本——多数用例依赖这个行为）。
     repeated_tool_calls: bool = False
+    #: 闲聊分支"记忆意图审核"给出的候选（默认空 = 普通闲聊，不写任何记忆）。
+    memory_intent: list[dict[str, Any]] = Field(default_factory=list)
+    fail_memory_intent: bool = False
+    #: 审核结论里的 ``user_requested``（"用户本轮是否要求记住"）；默认 ``False``。它与候选列表
+    #: 相互独立：用户要求记住但没能提炼出候选时，脚本可以只把这一项设为 ``True``。
+    memory_requested: bool = False
     seen_prompts: list[str] = Field(default_factory=list)
     bound_tools: list[str] = Field(default_factory=list)
     decision_calls: int = 0
@@ -80,6 +87,15 @@ class RoutingFakeModel(GenericFakeChatModel):
                 if self.fail_reflection:
                     raise RuntimeError("反思调用失败（测试故意触发）")
                 return schema.model_validate(self.reflection)
+            if schema.__name__ == "MemoryIntentDecision":
+                if self.fail_memory_intent:
+                    raise RuntimeError("记忆意图审核失败（测试故意触发）")
+                return schema.model_validate(
+                    {
+                        "user_requested": self.memory_requested,
+                        "memory_candidates": self.memory_intent,
+                    }
+                )
             if self.fail_classification:
                 raise RuntimeError("分类调用失败（测试故意触发）")
             if self.invalid_classification:
@@ -112,6 +128,25 @@ class RoutingFakeModel(GenericFakeChatModel):
                 else json.dumps(self.classification(), ensure_ascii=False)
             )
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
+
+        if MEMORY_INTENT_MARKER in text:  # T18：闲聊分支的记忆意图审核
+            if self.fail_memory_intent:
+                raise RuntimeError("记忆意图审核失败（测试故意触发）")
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(
+                            content=json.dumps(
+                                {
+                                    "user_requested": self.memory_requested,
+                                    "memory_candidates": self.memory_intent,
+                                },
+                                ensure_ascii=False,
+                            )
+                        )
+                    )
+                ]
+            )
 
         self.decision_calls += 1
         if self.tool_calls and (self.repeated_tool_calls or self.decision_calls == 1):

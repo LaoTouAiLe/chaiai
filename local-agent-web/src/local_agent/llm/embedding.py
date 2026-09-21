@@ -45,6 +45,7 @@ legacy 并告警。实测这条路是**半截协议**——补上 ``is_legacy()`
 
 from __future__ import annotations
 
+import importlib.util
 import math
 import os
 import re
@@ -53,7 +54,7 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from langchain_openai import OpenAIEmbeddings
 from pydantic import SecretStr
@@ -542,6 +543,166 @@ def build_embedding_function(
             f"用 resolve_api_key 从环境变量 {config.api_key_env} 读取"
         )
     return OpenAiCompatibleEmbedding(config, api_key=api_key)
+
+
+@dataclass(frozen=True, kw_only=True)
+class EmbeddingReadiness:
+    """Embedding 的**准备状态**（架构 §1.4、§10.2；T19 的页面展示用）。
+
+    只做"静态可判定"的判断：**不加载模型、不联网、不建缓存目录**，因此页面可以随时调用。
+
+    ``state`` 取值：
+
+    - ``disabled``：``embedding.enabled=false``；
+    - ``unavailable``：缺可选依赖（``fastembed``）；
+    - ``not_ready``：配置不完整（缺 ``cache_dir`` / 不是绝对路径 / 目录不可写 / 远端缺端点或 Key）
+      ——**预先发现**，不用等第一次召回失败；
+    - ``ready``：具备启用条件（``onnx_local`` 首次真正使用时才加载模型，可能耗时）。
+    """
+
+    state: Literal["disabled", "unavailable", "not_ready", "ready"]
+    provider: str
+    model: str
+    cache_dir: str | None
+    #: 面向用户的说明；失败时必须说清原因与下一步（架构 §11.6：不允许静默回退）。
+    detail: str
+
+
+def readiness(config: EmbeddingConfig, *, api_key: str | None = None) -> EmbeddingReadiness:
+    """判断 embedding 是否具备启用条件；**不加载模型、不写磁盘**。
+
+    Args:
+        config: ``embedding`` 配置节。
+        api_key: API provider 的 Key（``onnx_local`` 用不到）。
+
+    Returns:
+        :class:`EmbeddingReadiness`；页面据此展示模型名、目标缓存目录与当前状态。
+    """
+    provider = str(config.provider)
+    model = str(config.model)
+    cache_dir = (config.cache_dir or "").strip() or None
+    if not config.enabled:
+        return EmbeddingReadiness(
+            state="disabled",
+            provider=provider,
+            model=model,
+            cache_dir=cache_dir,
+            detail="embedding.enabled=false：不使用 embedding，也不加载本地模型",
+        )
+    if provider == "openai_compatible":
+        if not str(config.base_url or "").strip() or not (api_key or "").strip():
+            return EmbeddingReadiness(
+                state="not_ready",
+                provider=provider,
+                model=model,
+                cache_dir=None,
+                detail=(
+                    "远端 embedding 需要 base_url 与 API Key"
+                    f"（环境变量 {config.api_key_env}）；补全后重试"
+                ),
+            )
+        return EmbeddingReadiness(
+            state="ready",
+            provider=provider,
+            model=model,
+            cache_dir=None,
+            detail="使用远端 embedding 接口，无需本地模型",
+        )
+    if importlib.util.find_spec("fastembed") is None:
+        return EmbeddingReadiness(
+            state="unavailable",
+            provider=provider,
+            model=model,
+            cache_dir=cache_dir,
+            detail=f"{FASTEMBED_INSTALL_HINT}（当前 provider={provider} 需要本地模型）",
+        )
+    if cache_dir is None:
+        return EmbeddingReadiness(
+            state="not_ready",
+            provider=provider,
+            model=model,
+            cache_dir=None,
+            detail="embedding.cache_dir 未配置：本地模型必须指定一个本机可写的绝对路径",
+        )
+    path = Path(cache_dir)
+    if not path.is_absolute():
+        return EmbeddingReadiness(
+            state="not_ready",
+            provider=provider,
+            model=model,
+            cache_dir=cache_dir,
+            detail=f"embedding.cache_dir 必须是绝对路径（当前是 {cache_dir}）",
+        )
+    parent = _writable_parent(path, provider=provider, model=model)
+    if isinstance(parent, EmbeddingReadiness):
+        return parent
+    if config.local_files_only:
+        return EmbeddingReadiness(
+            state="ready",
+            provider=provider,
+            model=model,
+            cache_dir=cache_dir,
+            detail=(
+                "离线模式（local_files_only=true）：只验证了配置与 "
+                f"{parent.as_posix()} 可写，**模型缓存尚未验证**——首次加载若缺权重会失败，"
+                "那时会以错误事件出现在对话里"
+            ),
+        )
+    return EmbeddingReadiness(
+        state="ready",
+        provider=provider,
+        model=model,
+        cache_dir=cache_dir,
+        detail=(
+            f"首次使用时加载本地模型「{model}」，权重与 HuggingFace 附属缓存都落在 "
+            f"{path.as_posix()}（首次可能需要联网下载，之后可离线使用）"
+        ),
+    )
+
+
+def _writable_parent(
+    path: Path, *, provider: str, model: str
+) -> Path | EmbeddingReadiness:
+    """校验缓存目录（或其最近的存在父目录）可写。
+
+    只检查"已存在的路径是否可写"是不够的：路径存在但不是目录、或者上级目录不可写时，页面会显示
+    ``ready``，直到首次加载才发现既建不了目录也下不了模型（复审实证）。返回可写的**目录**；
+    不可用时返回一条 ``not_ready`` 的 :class:`EmbeddingReadiness`。
+    """
+    if path.exists():
+        if not path.is_dir():
+            return _not_ready(path, provider=provider, model=model,
+                              detail=f"缓存路径存在但不是目录：{path.as_posix()}；请删掉它或换一个目录")
+        if not os.access(path, os.W_OK):
+            return _not_ready(path, provider=provider, model=model,
+                              detail=f"缓存目录不可写：{path.as_posix()}；请改权限或换一个本机可写目录")
+        return path
+    parent = next((item for item in path.parents if item.exists()), None)
+    if parent is None or not parent.is_dir():
+        return _not_ready(path, provider=provider, model=model,
+                          detail=f"缓存目录的上级路径不存在：{path.as_posix()}；请先创建它")
+    if not os.access(parent, os.W_OK):
+        return _not_ready(
+            path,
+            provider=provider,
+            model=model,
+            detail=(
+                f"缓存目录尚未创建，而它的上级目录不可写：{parent.as_posix()}；"
+                "请改权限或换一个本机可写目录"
+            ),
+        )
+    return parent
+
+
+def _not_ready(path: Path, *, provider: str, model: str, detail: str) -> EmbeddingReadiness:
+    """一条 ``not_ready`` 结果（provider/model 照常回填，页面才能显示是哪套配置的问题）。"""
+    return EmbeddingReadiness(
+        state="not_ready",
+        provider=provider,
+        model=model,
+        cache_dir=str(path),
+        detail=detail,
+    )
 
 
 def _import_fastembed() -> Any:

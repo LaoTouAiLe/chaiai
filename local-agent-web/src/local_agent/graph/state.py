@@ -13,7 +13,7 @@ Reducer 约定（架构 §4.2）：
 from __future__ import annotations
 
 import operator
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -71,6 +71,17 @@ class ErrorEvent(TypedDict):
 
 
 T = TypeVar("T")
+
+
+def merge_mapping(existing: Mapping[str, str] | None, incoming: Mapping[str, str] | None) -> dict[str, str]:
+    """字典合并 reducer（``reply_overrides`` 跨轮累积，后写覆盖同键）。
+
+    与 :func:`merge_appended` 的区别：这里要的是**覆盖语义**（同一条消息被再次修正时以最新为准），
+    而不是"只追加没出现过的"。
+    """
+    merged: dict[str, str] = dict(existing or {})
+    merged.update(incoming or {})
+    return merged
 
 
 def merge_appended(existing: Sequence[T], incoming: Sequence[T], key: Callable[[T], str]) -> list[T]:
@@ -141,11 +152,17 @@ def make_decision_record(
     summary: str,
     loop_count: int = 0,
     tool_call_id: str | None = None,
+    salt: str | None = None,
 ) -> DecisionRecord:
-    """构造一条决策轨迹记录（只放简短摘要，不放模型的隐藏思维链）。"""
-    salt = f"{loop_count}:{tool_call_id or ''}"
+    """构造一条决策轨迹记录（只放简短摘要，不放模型的隐藏思维链）。
+
+    ``salt`` 用于区分**同一节点、同一轮次内的多条记录**（例如一批记忆候选各自的结果）。
+    不传时 ID 与旧格式完全一致；传了则追加在尾部——否则同 stage + 同轮次 + 同
+    ``tool_call_id`` 的记录会得到同一个 ID，``merge_appended`` 只保留第一条、其余静默消失。
+    """
+    scope = _record_scope(loop_count=loop_count, tool_call_id=tool_call_id, salt=salt)
     return DecisionRecord(
-        record_id=f"{run_id}:decision:{stage}:{salt}",
+        record_id=f"{run_id}:decision:{stage}:{scope}",
         stage=stage,
         summary=summary,
         tool_call_id=tool_call_id,
@@ -160,17 +177,24 @@ def make_error_event(
     message: str,
     loop_count: int = 0,
     tool_call_id: str | None = None,
+    salt: str | None = None,
 ) -> ErrorEvent:
-    """构造一条错误事件。"""
-    salt = f"{loop_count}:{tool_call_id or ''}"
+    """构造一条错误事件（``salt`` 的用途与 :func:`make_decision_record` 相同）。"""
+    scope = _record_scope(loop_count=loop_count, tool_call_id=tool_call_id, salt=salt)
     return ErrorEvent(
-        event_id=f"{run_id}:error:{stage}:{salt}",
+        event_id=f"{run_id}:error:{stage}:{scope}",
         stage=stage,
         message=message,
         tool_call_id=tool_call_id,
         run_id=run_id,
         created_at=datetime.now(timezone.utc),
     )
+
+
+def _record_scope(*, loop_count: int, tool_call_id: str | None, salt: str | None) -> str:
+    """事件 ID 的作用域部分：``轮次:调用ID``，可选再追加 ``salt``。"""
+    scope = f"{loop_count}:{tool_call_id or ''}"
+    return f"{scope}:{salt}" if salt else scope
 
 
 @dataclass(frozen=True)
@@ -217,7 +241,11 @@ class EvidenceReference:
 
 @dataclass(frozen=True)
 class MemoryCandidate:
-    """架构 §4.3 的记忆候选；作用域由 memory_write_node 依据 RuntimeContext 推导。"""
+    """架构 §4.3 的记忆候选；作用域由 memory_write_node 依据 RuntimeContext 推导。
+
+    **字段集合与架构 §4.3 逐字一致**（架构 §10.4 明确"``MemoryCandidate`` 不新增作用域字段"）：
+    作用域不是候选的属性，而是写入时按"已验证意图 + 候选类型 + 当前用户/项目"推导的结果。
+    """
 
     memory_type: Literal["conversation_summary", "task_fragment", "entity_fact"]
     content: str
@@ -299,6 +327,14 @@ class AgentState(TypedDict, total=False):
     # 输出
     final_response: str | None
     final_evidence: list[EvidenceReference]
+    #: 按**消息 id** 修正的回答投影：``{消息 id: 修正后的文本}``（见
+    #: :mod:`local_agent.graph.projection`）。
+    #:
+    #: 为什么需要它：``messages`` 必须保留模型原文（架构 §10.1：审计与恢复用的原始记录），
+    #: 但**用户看到的内容**与**下一轮送模型的窗口**要用修正后的文本——否则记忆保存失败时页面仍
+    #: 显示"我记住了"，下一轮模型也照着假承诺继续对话（复审实证）。这是"原文留存、投影可选"
+    #: 的桥：映射跨轮累积，按消息 id 定位，不会覆盖历史原文。
+    reply_overrides: Annotated[dict[str, str], merge_mapping]
 
 
 @dataclass

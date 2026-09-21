@@ -25,6 +25,7 @@ from local_agent.graph.nodes import (
     COMPRESSION_NODE,
     FINAL_RESPONSE_NODE,
     LOAD_AGENTS,
+    MEMORY_WRITE_NODE,
     PLANNER_NODE,
     PREPARE_CONTEXT,
     RECALL_MEMORY,
@@ -37,6 +38,7 @@ from local_agent.graph.nodes import (
     compression_node,
     final_response_node,
     load_agents_node,
+    memory_write_node,
     planner_node,
     prepare_context_node,
     recall_memory_node,
@@ -82,6 +84,7 @@ def build_chat_graph(checkpointer: BaseCheckpointSaver | None = None) -> ChatGra
     graph.add_node(TOOL_EXECUTION_NODE, tool_execution_node)
     graph.add_node(REFLECTION_NODE, reflection_node)
     graph.add_node(COMPLETION_ROUTER, completion_router_node)
+    graph.add_node(MEMORY_WRITE_NODE, memory_write_node)
     graph.add_node(CHAT_NODE, chat_node)
     graph.add_node(FINAL_RESPONSE_NODE, final_response_node)
     add_minimal_chat_edges(graph)

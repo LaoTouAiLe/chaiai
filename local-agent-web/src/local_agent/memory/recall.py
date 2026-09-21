@@ -30,6 +30,11 @@
 按**有效重要度 1.0** 处理（分数就等于 ``confidence``）。
 ``memory.long_term`` 的 ``confidence_threshold`` / ``importance_threshold`` **只做召回过滤**，
 不影响写入，也不参与冲突裁决。
+
+**自动老化在召回时实时生效**（T18 裁定）：``aging_enabled=true`` 时，超过 ``forget_after_days``
+的事实当场排除，其余事实用线性衰减后的**有效重要度**做阈值判定、返回字段与排序分数。只在
+``run_forgetting`` 里老化是不够的——维护任务跑之前，超期事实仍会以满分被召回（复审实证：
+20 天旧事实、``forget_after_days=10`` 仍返回 ``importance=1.0``、``score=1.0``）。
 """
 
 from __future__ import annotations
@@ -40,6 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from local_agent.config import LongTermMemoryConfig, MediumTermMemoryConfig
+from local_agent.memory.forgetting import effective_importance, is_recallable_fact
 from local_agent.memory.long_term import LongTermStore
 from local_agent.memory.medium_term import MediumTermHit, MediumTermStore
 from local_agent.memory.schemas import (
@@ -52,12 +58,10 @@ from local_agent.memory.schemas import (
 from local_agent.scope import (
     SCOPE_GLOBAL,
     SCOPE_PROJECT,
-    SCOPE_USER,
-    SCOPE_WORKSPACE,
     SCOPES,
     MemoryScope,
     project_id_for,
-    scope_key_for,
+    visible_scope_keys,
 )
 
 #: 精确过滤之后作用域必然匹配，系数恒为 1.0（保留项，见模块 docstring）。
@@ -80,18 +84,6 @@ DEFAULT_TOP_K = 8
 
 #: ``task_conclusions`` 没有 ``importance`` 列，召回时统一按有效重要度 1.0 处理。
 CONCLUSION_IMPORTANCE = 1.0
-
-
-def visible_scope_keys(
-    *, user_id: str | None, project_id: str, workspace_root: Path
-) -> list[tuple[MemoryScope, str]]:
-    """本次运行可见的作用域组合（架构 §10.2 的四种作用域）。"""
-    return [
-        (SCOPE_GLOBAL, scope_key_for(SCOPE_GLOBAL)),
-        (SCOPE_USER, scope_key_for(SCOPE_USER, user_id=user_id)),
-        (SCOPE_PROJECT, scope_key_for(SCOPE_PROJECT, project_id=project_id)),
-        (SCOPE_WORKSPACE, scope_key_for(SCOPE_WORKSPACE, workspace_root=workspace_root)),
-    ]
 
 
 def recall_memory(
@@ -230,10 +222,11 @@ def recall_long_term(
     )
     references: list[LongTermReference] = []
     for entity, fact in store.active_facts_with_entities(scope_keys, now=moment):
-        if _long_term_usable(fact.confidence, fact.importance, config) and not _is_expired(
-            fact.expires_at, moment
-        ):
-            references.append(_fact_reference(entity, fact))
+        if not is_recallable_fact(fact, config=config, now=moment):
+            continue
+        importance = effective_importance(fact, config=config, now=moment)
+        if _long_term_usable(fact.confidence, importance, config):
+            references.append(_fact_reference(entity, fact, importance=importance))
     for conclusion in store.list_task_conclusions(project_scope=project_scope):
         if conclusion.confidence >= config.confidence_threshold:
             references.append(_conclusion_reference(conclusion, project_scope))
@@ -250,20 +243,26 @@ def _long_term_usable(
     )
 
 
-def _fact_reference(entity: EntityRecord, fact: FactRecord) -> LongTermReference:
-    """事实 → 引用：内容带上实体名与键，否则只看值判断不出说的是什么。"""
+def _fact_reference(
+    entity: EntityRecord, fact: FactRecord, *, importance: float
+) -> LongTermReference:
+    """事实 → 引用：内容带上实体名与键，否则只看值判断不出说的是什么。
+
+    ``importance`` 是**有效重要度**（老化后），不是库里的原值：阈值、返回字段与排序分数都用它，
+    否则超期事实会以满分被召回。
+    """
     return LongTermReference(
         memory_id=fact.id,
         kind="fact",
         content=f"{entity.name} 的 {fact.key}：{_value_text(fact.value_json)}",
         scope=entity.scope,
         scope_key=entity.scope_key,
-        importance=fact.importance,
+        importance=importance,
         confidence=fact.confidence,
         created_at=fact.created_at,
         updated_at=fact.updated_at,
         expires_at=fact.expires_at,
-        score=round(fact.confidence * fact.importance, 6),
+        score=round(fact.confidence * importance, 6),
     )
 
 
@@ -283,6 +282,28 @@ def _conclusion_reference(
         updated_at=conclusion.updated_at,
         expires_at=None,
         score=round(conclusion.confidence * CONCLUSION_IMPORTANCE, 6),
+    )
+
+
+def as_memory_reference(reference: LongTermReference) -> MemoryReference:
+    """把长期召回结果映射成统一的 :class:`MemoryReference`（T19 的三层合并口径）。
+
+    长期库没有向量，``similarity`` 位置放它的综合分（``confidence × importance``，任务结论即
+    ``confidence``）——只用于排序与展示，**不是语义相似度**（见 ``schemas.MemoryReference``）。
+    """
+    return MemoryReference(
+        memory_id=reference["memory_id"],
+        content=reference["content"],
+        scope=reference["scope"],
+        scope_key=reference["scope_key"],
+        similarity=reference["score"],
+        score=reference["score"],
+        importance=reference["importance"],
+        confidence=reference["confidence"],
+        created_at=reference["created_at"],
+        source_thread_id=None,
+        expires_at=reference["expires_at"],
+        kind="long_term_fact" if reference["kind"] == "fact" else "task_conclusion",
     )
 
 

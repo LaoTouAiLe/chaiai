@@ -22,7 +22,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.types import Command
 
 from local_agent.config import AppConfig, load_config
-from local_agent.exceptions import SessionStoreError
+from local_agent.exceptions import MemoryStoreError, SessionStoreError
 from local_agent.graph import builder, nodes
 from local_agent.graph.state import (
     ErrorEvent,
@@ -30,6 +30,7 @@ from local_agent.graph.state import (
     RuntimeContext,
     ToolEvent,
 )
+from local_agent.memory.summarizer import SUMMARIZE_INSTRUCTION
 from local_agent.persistence import checkpoint, migrations
 from local_agent.persistence.session_store import (
     ADOPTED_TITLE,
@@ -801,6 +802,160 @@ def test_mixed_tool_calls_keep_free_pass_calls_after_approval(
 # --------------------------------------------------------------------------- 本轮与历史的作用域
 
 
+def _long_term_only_config(memory_path: Path) -> AppConfig:
+    """只启用长期记忆的配置副本（路径指向临时目录），用于闲聊记忆路径的跨轮用例。"""
+    base = load_config(PROJECT_ROOT / "config.yaml.example")
+    return base.model_copy(
+        update={
+            "memory": base.memory.model_copy(
+                update={
+                    "long_term": base.memory.long_term.model_copy(
+                        update={"enabled": True, "path": str(memory_path)}
+                    )
+                }
+            )
+        }
+    )
+
+
+def test_empty_reply_on_a_later_turn_keeps_earlier_history(
+    tmp_path: Path, model_factory: ModelFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """本轮回复为空时，不能把**上一轮**的回答当成要清理的目标（复审探针：误发 RemoveMessage）。
+
+    闲聊记忆失败路径只改展示文本（``final_response``），历史里的原文必须原地不动。
+    """
+    graph = _graph(_database(tmp_path))
+    config = _long_term_only_config(tmp_path / "data" / "memories.sqlite")
+
+    def _boom(context: RuntimeContext) -> None:
+        del context
+        raise MemoryStoreError("长期库打不开（测试故意触发）")
+
+    monkeypatch.setattr(nodes, "long_term_store", _boom)
+
+    _run(graph, _context_for(tmp_path, model_factory(decision="chat", reply="第一轮的回答"), config), "第一轮随便聊聊")
+    second = model_factory(
+        decision="chat",
+        reply="",  # 本轮回复为空：旧实现会把上一轮回答当成清理目标
+        memory_requested=True,
+        memory_intent=[
+            {
+                "memory_type": "entity_fact",
+                "content": '{"entity_type": "project", "key": "k", "value": 1}',
+                "subject": "chaiai",
+                "confidence": 0.9,
+            }
+        ],
+    )
+
+    result = _run(graph, _context_for(tmp_path, second, config), "请记住这个")
+
+    texts = [item.content for item in result["messages"] if isinstance(item, AIMessage)]
+    assert "第一轮的回答" in texts  # 上一轮历史没有被误删
+    assert "保存成功" in str(result["final_response"])  # 展示文本给出确定性结果
+
+
+def test_next_turn_prompt_uses_the_corrected_reply(
+    tmp_path: Path, model_factory: ModelFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """下一轮送模型的窗口用**修正后**的回答：模型看到的与用户看到的一致（复审实证）。
+
+    ``messages`` 里保留的仍是原始"我记住了"——但它是审计记录，不参与 Prompt 构造。
+    """
+    graph = _graph(_database(tmp_path))
+    config = _long_term_only_config(tmp_path / "data" / "memories.sqlite")
+
+    def _boom(context: RuntimeContext) -> None:
+        del context
+        raise MemoryStoreError("长期库打不开（测试故意触发）")
+
+    monkeypatch.setattr(nodes, "long_term_store", _boom)
+    first = model_factory(
+        decision="chat",
+        reply="好的，我记住了",
+        memory_requested=True,
+        memory_intent=[
+            {
+                "memory_type": "entity_fact",
+                "content": '{"entity_type": "project", "key": "k", "value": 1}',
+                "subject": "chaiai",
+                "confidence": 0.9,
+            }
+        ],
+    )
+    result = _run(graph, _context_for(tmp_path, first, config), "请记住这个")
+    assert "保存成功" in str(result["final_response"])
+
+    second = model_factory(decision="chat", reply="好的")
+    _run(graph, _context_for(tmp_path, second, config), "我们继续")
+
+    assert any("保存成功" in prompt for prompt in second.seen_prompts)  # 修正文本进了窗口
+    assert not any("好的，我记住了" in prompt for prompt in second.seen_prompts)
+
+
+def test_compression_summarises_the_corrected_reply(
+    tmp_path: Path, model_factory: ModelFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """摘要输入也用**投影**：被纠正的"我记住了"不能经会话摘要回流到后续轮次。
+
+    ``conversation_summary`` 会进入之后每一轮的 Prompt，所以它是投影最容易被漏掉的一条路径。
+    同时确认 Checkpoint 里的原文没被改动（审计与恢复）。
+    """
+    graph = _graph(_database(tmp_path))
+    base = _compression_config(
+        trigger_ratio=0.5,
+        preserve_recent_turns=1,
+        context_window_tokens=1200,
+        max_tokens=200,
+    )
+    config = base.model_copy(
+        update={
+            "memory": base.memory.model_copy(
+                update={
+                    "long_term": base.memory.long_term.model_copy(
+                        update={
+                            "enabled": True,
+                            "path": str(tmp_path / "data" / "memories.sqlite"),
+                        }
+                    )
+                }
+            )
+        }
+    )
+
+    def _boom(context: RuntimeContext) -> None:
+        del context
+        raise MemoryStoreError("长期库打不开（测试故意触发）")
+
+    monkeypatch.setattr(nodes, "long_term_store", _boom)
+    first = model_factory(
+        decision="chat",
+        reply="好的，我记住了",
+        memory_requested=True,
+        memory_intent=[
+            {
+                "memory_type": "entity_fact",
+                "content": '{"entity_type": "project", "key": "k", "value": 1}',
+                "subject": "chaiai",
+                "confidence": 0.9,
+            }
+        ],
+    )
+    _run(graph, _context_for(tmp_path, first, config), "请记住这个")
+
+    second = model_factory(decision="chat", reply="好的")
+    result = _run(graph, _context_for(tmp_path, second, config), "我们继续")
+
+    summaries = [prompt for prompt in second.seen_prompts if SUMMARIZE_INSTRUCTION in prompt]
+    assert summaries, "第二轮应当触发会话摘要（否则用例没覆盖到目标路径）"
+    assert all("保存成功" in prompt for prompt in summaries)  # 摘要输入是修正后的文本
+    assert not any("我记住了" in prompt for prompt in summaries)  # 原文不会回流
+    # 摘要确实写进了 State，且 Checkpoint 里的原文一条不动
+    assert result["conversation_summary"]
+    assert "好的，我记住了" in _texts(list(result["messages"]))
+
+
 def test_new_request_resets_turn_scoped_state(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
@@ -854,7 +1009,9 @@ def test_new_request_resets_turn_scoped_state(
     assert result["task_goal"] is None
     assert result["pending_tool_calls"] == []
     assert result["pending_approval"] is None
-    assert result["reflection_result"] is None
+    # 上一轮的反思结论被本轮覆盖：本轮是闲聊，结论里没有候选、也不是 continue
+    assert result["reflection_result"].next_action == "finish"
+    assert not result["reflection_result"].memory_candidates
 
 
 def test_new_request_does_not_reach_previous_loop_limit(

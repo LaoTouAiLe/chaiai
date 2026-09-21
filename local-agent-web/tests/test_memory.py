@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import math
 import os
 import sqlite3
@@ -26,7 +27,7 @@ import sys
 import threading
 from collections.abc import Iterator, Sequence
 from dataclasses import fields
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar
@@ -42,6 +43,7 @@ from local_agent.config import (
     EmbeddingConfig,
     LongTermMemoryConfig,
     MediumTermMemoryConfig,
+    load_config,
     resolve_api_key,
 )
 from local_agent.context import token_budget
@@ -58,10 +60,21 @@ from local_agent.exceptions import (
     MemoryStoreError,
     MemoryUnavailableError,
 )
+from local_agent.graph.state import MemoryCandidate
 from local_agent.llm import embedding as embedding_module
-from local_agent.memory import long_term, medium_term, recall, schemas, short_term, summarizer
+from local_agent.memory import (
+    forgetting,
+    long_term,
+    medium_term,
+    recall,
+    schemas,
+    short_term,
+    summarizer,
+    writer,
+)
 from local_agent.persistence import checkpoint, migrations
 from local_agent.persistence.session_store import SessionStore
+from local_agent.reflection.memory_candidates import RejectedCandidate, plan_writes
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -1681,7 +1694,8 @@ def test_recall_long_term_filters_by_scope_and_thresholds(
         store, entity_a, key="theme", value="dark", confidence=0.9, importance=0.2, now=NOW
     )
 
-    references = _recall_long_term(store, tmp_path, project_id=project_a)
+    # 固定 now=NOW：本用例验证的是作用域与阈值，不是老化（老化有独立用例）
+    references = _recall_long_term(store, tmp_path, project_id=project_a, now=NOW)
 
     assert [item["memory_id"] for item in references] == [visible.record.id]
     assert references[0]["kind"] == "fact"
@@ -1707,11 +1721,12 @@ def test_recall_long_term_sorts_by_score_and_respects_top_k(
     high = _write_fact(store, entity, key="b", value=2, confidence=0.9, importance=0.9, now=NOW)
     mid = _write_fact(store, entity, key="c", value=3, confidence=0.8, importance=0.8, now=NOW)
 
-    references = _recall_long_term(store, tmp_path, project_id=project_id, top_k=2)
+    # 固定 now=NOW：分数断言是 confidence × importance，老化折减会改变期望值
+    references = _recall_long_term(store, tmp_path, project_id=project_id, top_k=2, now=NOW)
 
     assert [item["memory_id"] for item in references] == [high.record.id, mid.record.id]
     assert references[0]["score"] == pytest.approx(0.81)
-    assert _recall_long_term(store, tmp_path, project_id=project_id, top_k=0) == []
+    assert _recall_long_term(store, tmp_path, project_id=project_id, top_k=0, now=NOW) == []
 
 
 def test_task_conclusions_are_recalled_by_project_scope(
@@ -1755,6 +1770,80 @@ def test_task_conclusions_are_recalled_by_project_scope(
     columns = _columns(store.connection, "task_conclusions")
     assert "status" not in columns
     assert "importance" not in columns
+
+
+def test_long_term_recall_applies_aging_in_real_time(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """召回时就地老化：超期事实不再出现，其余用**衰减后**的有效重要度做阈值与分数。
+
+    复审实证：老化原来只在 ``run_forgetting`` 里生效，维护任务跑之前，20 天旧事实
+    （``forget_after_days=10``）仍以 ``importance=1.0``、``score=1.0`` 被召回。
+    """
+    project_id = scope.project_id_for(tmp_path)
+    entity = _project_entity(store, project_id)
+    config = _long_term_config(aging_enabled=True, forget_after_days=10)
+    aged = _write_fact(
+        store, entity, key="old", value="很旧", importance=1.0, now=LATER - timedelta(days=20)
+    )
+    fresh = _write_fact(
+        store, entity, key="new", value="较新", importance=1.0, now=LATER - timedelta(days=4)
+    )
+    # 原值 0.8 ≥ 阈值 0.5，但 4 天后的有效重要度只有 0.48 < 0.5：阈值必须用有效值
+    borderline = _write_fact(
+        store, entity, key="mid", value="中间", importance=0.8, now=LATER - timedelta(days=4)
+    )
+
+    references = _recall_long_term(store, tmp_path, project_id=project_id, config=config)
+
+    assert [item["memory_id"] for item in references] == [fresh.record.id]
+    assert references[0]["importance"] == pytest.approx(0.6)  # 1.0 × (1 - 4/10)
+    assert references[0]["score"] == pytest.approx(0.9 * 0.6)
+    # 老化只影响读取：库里的原始重要度一个字没动
+    original = {item.id: item.importance for item in store.list_facts(entity_id=entity.id)}
+    assert original[fresh.record.id] == pytest.approx(1.0)
+    assert original[aged.record.id] == pytest.approx(1.0)
+
+    # aging_enabled=false 只关自动老化：三条都回到召回结果里（显式有效期不受影响）
+    no_aging = _recall_long_term(
+        store,
+        tmp_path,
+        project_id=project_id,
+        config=_long_term_config(aging_enabled=False, forget_after_days=10),
+    )
+    assert {item["memory_id"] for item in no_aging} == {
+        aged.record.id,
+        fresh.record.id,
+        borderline.record.id,
+    }
+
+
+def test_dirty_row_decoding_is_wrapped_as_store_error(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """合法 SQLite 文件里的脏值必须转成领域异常：否则一条坏行会拖垮整轮对话。
+
+    召回层只隔离 ``MemoryStoreError`` / ``sqlite3.Error`` / ``OSError``，``float("坏值")`` 抛的
+    ``ValueError`` 会直接逃出去（复审实证）。
+    """
+    project_id = scope.project_id_for(tmp_path)
+    entity = _project_entity(store, project_id)
+    _write_fact(store, entity, key="language", value="中文", now=NOW)
+    store.record_task_conclusion(
+        task_title="接通长期记忆",
+        conclusion="结论",
+        project_scope=project_id,
+        confidence=0.9,
+        now=NOW,
+    )
+    store.connection.execute('UPDATE facts SET "confidence" = ?', ("不是数字",))
+    store.connection.execute('UPDATE task_conclusions SET "confidence" = ?', ("坏",))
+    store.connection.commit()
+
+    with pytest.raises(MemoryStoreError):
+        store.active_facts_with_entities([(scope.SCOPE_PROJECT, project_id)], now=NOW)
+    with pytest.raises(MemoryStoreError):
+        store.list_task_conclusions(project_scope=project_id)
 
 
 def test_upsert_fact_rejects_invalid_input(
@@ -2135,6 +2224,86 @@ def test_recall_accepts_naive_now(store: long_term.LongTermStore, tmp_path: Path
     )
 
     assert [item["memory_id"] for item in references] == [fact.record.id]
+
+
+def test_embedding_readiness_is_static_and_actionable(tmp_path: Path) -> None:
+    """Embedding 准备状态：只做静态判断（不加载模型），每种状态都给可照做的说明。"""
+    disabled = embedding_module.readiness(EmbeddingConfig(enabled=False))
+    assert disabled.state == "disabled"
+
+    # "缺 cache_dir / 相对路径"这两种配置会被 EmbeddingConfig 的校验器先拦住；readiness 仍保留
+    # 防御分支（页面可能拿到 model_copy 旁路出来的配置），因此这里用 model_copy 构造。
+    valid = EmbeddingConfig(
+        enabled=True, provider="onnx_local", model="m", cache_dir=str(tmp_path)
+    )
+    for broken in ({"cache_dir": ""}, {"cache_dir": "models"}):
+        state = embedding_module.readiness(valid.model_copy(update=broken))
+        assert state.state == "not_ready"
+        assert "cache_dir" in state.detail or "绝对路径" in state.detail
+
+    ready = embedding_module.readiness(
+        EmbeddingConfig(enabled=True, provider="onnx_local", model="m", cache_dir=str(tmp_path))
+    )
+    assert ready.state == "ready"
+    assert ready.cache_dir == str(tmp_path)
+    assert tmp_path.as_posix() in ready.detail  # 页面要能直接告诉用户权重落在哪
+
+
+def test_embedding_readiness_for_api_provider_needs_credentials() -> None:
+    """远端 provider 缺 Key 时**预先**报 not_ready，而不是等第一次召回失败。"""
+    config = EmbeddingConfig(
+        enabled=True,
+        provider="openai_compatible",
+        base_url="https://example.invalid/v1",
+        model="m",
+        api_key_env="A",
+    )
+
+    missing = embedding_module.readiness(config, api_key=None)
+    assert missing.state == "not_ready"
+    assert "API Key" in missing.detail
+
+    ready = embedding_module.readiness(config, api_key="sk-test")
+    assert ready.state == "ready"
+    assert ready.cache_dir is None
+
+
+def test_embedding_readiness_checks_the_directory_it_will_use(tmp_path: Path) -> None:
+    """静态检查要覆盖"存在但不是目录""上级是文件"与离线模式文案。
+
+    原来只检查"已存在路径是否可写"，页面会显示 ``ready``，直到首次加载才发现既建不了目录、
+    也下不了模型（复审实证）。
+    """
+    as_file = tmp_path / "models"
+    as_file.write_text("这是文件，不是目录", encoding="utf-8")
+
+    not_a_dir = embedding_module.readiness(
+        EmbeddingConfig(enabled=True, provider="onnx_local", model="m", cache_dir=str(as_file))
+    )
+    assert not_a_dir.state == "not_ready"
+    assert "不是目录" in not_a_dir.detail
+
+    blocked_parent = embedding_module.readiness(
+        EmbeddingConfig(
+            enabled=True,
+            provider="onnx_local",
+            model="m",
+            cache_dir=(as_file / "nested").as_posix(),
+        )
+    )
+    assert blocked_parent.state == "not_ready"
+
+    offline = embedding_module.readiness(
+        EmbeddingConfig(
+            enabled=True,
+            provider="onnx_local",
+            model="m",
+            cache_dir=(tmp_path / "new-models").as_posix(),
+            local_files_only=True,
+        )
+    )
+    assert offline.state == "ready"
+    assert "尚未验证" in offline.detail  # 离线模式只验证配置，不假装验证过缓存
 
 
 # --------------------------------------------------------------- T16 预算、窗口与摘要
@@ -2689,6 +2858,540 @@ def test_conversation_summary_rejects_empty_input_or_output() -> None:
             previous_summary=None,
             max_chars=100,
         )
+
+
+# --------------------------------------------------------------- T18 记忆写入与遗忘
+
+
+def _candidate(
+    *,
+    memory_type: str = "conversation_summary",
+    content: str = "用户偏好中文回答",
+    subject: str = "",
+    importance: float = 0.6,
+    confidence: float = 0.8,
+    sources: tuple[str, ...] = ("evt-1",),
+) -> MemoryCandidate:
+    """构造一条候选（字段集合与架构 §4.3 逐字一致，不含作用域字段）。"""
+    return MemoryCandidate(
+        memory_type=memory_type,  # type: ignore[arg-type]
+        content=content,
+        subject=subject,
+        importance=importance,
+        confidence=confidence,
+        source_event_ids=sources,
+    )
+
+
+def _entity_fact_content(
+    key: str = "language", value: Any = "中文", *, entity_type: str = "project"
+) -> str:
+    return json.dumps(
+        {"entity_type": entity_type, "key": key, "value": value}, ensure_ascii=False
+    )
+
+
+class _FakeMediumStore:
+    """只实现 writer / forgetting 用到的方法（真实 Chroma 行为由 T14B 的用例覆盖）。"""
+
+    def __init__(self) -> None:
+        self.records: list[schemas.MediumTermRecord] = []
+        self.deleted: list[str] = []
+        self.expired: list[str] = []
+
+    def upsert(self, records: Sequence[schemas.MediumTermRecord]) -> int:
+        self.records.extend(records)
+        return len(records)
+
+    def expired_ids(self, *, now: datetime | None = None) -> list[str]:
+        return list(self.expired)
+
+    def delete(self, memory_ids: Sequence[str]) -> int:
+        items = list(memory_ids)
+        self.deleted.extend(items)
+        return len(items)
+
+
+def _config_with_long_term(**overrides: Any) -> AppConfig:
+    """在示例配置上改长期记忆设置（只改内存里的对象，不写磁盘）。"""
+    base = load_config(PROJECT_ROOT / "config.yaml.example")
+    return base.model_copy(
+        update={
+            "memory": base.memory.model_copy(
+                update={"long_term": base.memory.long_term.model_copy(update=overrides)}
+            )
+        }
+    )
+
+
+def test_candidate_plan_maps_types_to_targets(tmp_path: Path) -> None:
+    """三类候选的落库契约（T18 定稿）不能悄悄变。"""
+    summary = plan_writes(_candidate(), workspace_root=tmp_path)
+    fragment = plan_writes(_candidate(memory_type="task_fragment"), workspace_root=tmp_path)
+    verified = plan_writes(
+        _candidate(memory_type="task_fragment"), workspace_root=tmp_path, task_verified=True
+    )
+    fact = plan_writes(
+        _candidate(memory_type="entity_fact", subject="chaiai", content=_entity_fact_content()),
+        workspace_root=tmp_path,
+    )
+
+    assert [item.target for item in summary] == ["medium_term"]
+    assert [item.target for item in fragment] == ["medium_term"]
+    assert [item.target for item in verified] == ["medium_term", "long_term_conclusion"]
+    assert [item.target for item in fact] == ["long_term_fact"]
+    assert fact[0].payload is not None
+    assert (fact[0].payload.entity_type, fact[0].payload.key, fact[0].payload.value) == (
+        "project",
+        "language",
+        "中文",
+    )
+    # 自动写入只允许 project / user；单机环境下项目作用域优先
+    for intent in (*summary, *verified, *fact):
+        assert intent.scope == scope.SCOPE_PROJECT
+        assert intent.scope_key == scope.project_id_for(tmp_path)
+
+
+def test_candidate_plan_rejects_invalid_input(tmp_path: Path) -> None:
+    """校验拒绝：内容空、无来源、数值越界、NaN、非规范 JSON、缺键、缺 subject。"""
+    invalid = [
+        _candidate(content="   "),
+        _candidate(sources=()),
+        _candidate(confidence=1.5),
+        _candidate(importance=float("nan")),
+        _candidate(memory_type="entity_fact", subject="chaiai", content="不是 JSON"),
+        _candidate(
+            memory_type="entity_fact", subject="chaiai", content='{"entity_type": "project"}'
+        ),
+        # 注意：缺 subject **不再**算非法输入——按 entity_type 推导（见下一用例）
+    ]
+
+    for candidate in invalid:
+        planned = plan_writes(candidate, workspace_root=tmp_path)
+        assert isinstance(planned, RejectedCandidate)
+        assert planned.reason
+
+
+def test_candidate_plan_derives_missing_subject(tmp_path: Path) -> None:
+    """缺 ``subject`` 时按 ``entity_type`` 推导实体名，只有推不出来才拒绝。
+
+    真实模型实证：用户说"请记住：我个人习惯用 pytest"，模型给出了正确的
+    ``entity_type`` / ``key`` / ``value`` 却没给 ``subject``，整条候选被拒绝——用户会觉得
+    "明明说了记住却没记住"。而 ``user`` / ``project`` 的实体名在本机是确定的，代码可以直接推导。
+    """
+    project_fact = plan_writes(
+        _candidate(memory_type="entity_fact", subject="", content=_entity_fact_content()),
+        workspace_root=tmp_path,
+    )
+    user_fact = plan_writes(
+        _candidate(
+            memory_type="entity_fact",
+            subject="",
+            content='{"entity_type": "user", "key": "test_runner", "value": "pytest"}',
+        ),
+        workspace_root=tmp_path,
+    )
+    unknown = plan_writes(
+        _candidate(
+            memory_type="entity_fact",
+            subject="",
+            content='{"entity_type": "concept", "key": "k", "value": 1}',
+        ),
+        workspace_root=tmp_path,
+    )
+    explicit = plan_writes(
+        _candidate(memory_type="entity_fact", subject="chaiai", content=_entity_fact_content()),
+        workspace_root=tmp_path,
+    )
+
+    assert not isinstance(project_fact, RejectedCandidate)
+    assert project_fact[0].candidate.subject == tmp_path.name  # 工作区目录名
+    assert project_fact[0].note is not None and "系统推导" in project_fact[0].note
+    assert not isinstance(user_fact, RejectedCandidate)
+    assert user_fact[0].candidate.subject == "local"  # 逻辑用户
+    assert isinstance(unknown, RejectedCandidate)  # 推不出来才拒绝
+    assert "subject" in unknown.reason
+    assert not isinstance(explicit, RejectedCandidate)
+    assert explicit[0].candidate.subject == "chaiai"  # 模型给的名字优先
+    assert explicit[0].note is None
+
+
+def test_writer_reports_derived_subject(store: long_term.LongTermStore, tmp_path: Path) -> None:
+    """推导出来的实体名要出现在写入说明里：审计能看出这是代码补的，而不是模型给的。"""
+    planned = plan_writes(
+        _candidate(memory_type="entity_fact", subject="", content=_entity_fact_content()),
+        workspace_root=tmp_path,
+    )
+
+    outcomes = writer.write_intents(planned, long_store=store)
+
+    assert outcomes[0].written is True
+    assert "系统推导" in (outcomes[0].reason or "")
+
+
+def test_candidate_plan_allows_low_scores(tmp_path: Path) -> None:
+    """写入门槛**不设下限**：低分候选照样写入，由召回阈值过滤（延续 T15 口径）。"""
+    planned = plan_writes(_candidate(confidence=0.0, importance=0.0), workspace_root=tmp_path)
+
+    assert not isinstance(planned, RejectedCandidate)
+    assert planned[0].target == "medium_term"
+
+
+def test_writer_writes_entity_fact_into_long_term(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """entity_fact 落成长期事实：实体按 subject 复用身份，值走 T15 的 upsert。"""
+    planned = plan_writes(
+        _candidate(memory_type="entity_fact", subject="chaiai", content=_entity_fact_content()),
+        workspace_root=tmp_path,
+    )
+
+    outcomes = writer.write_intents(planned, long_store=store)
+
+    assert [item.written for item in outcomes] == [True]
+    entity = store.find_entity(
+        entity_type="project",
+        name="chaiai",
+        scope=scope.SCOPE_PROJECT,
+        project_id=scope.project_id_for(tmp_path),
+    )
+    assert entity is not None
+    assert [item.value_json for item in store.list_facts(entity_id=entity.id)] == ['"中文"']
+
+
+def test_writer_skips_duplicate_source_events(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """同一条候选不重复写：判重键是"候选身份 + 来源事件"。"""
+    planned = plan_writes(
+        _candidate(memory_type="task_fragment", content="接通长期记忆", subject="T15"),
+        workspace_root=tmp_path,
+        task_verified=True,
+    )
+
+    fake = _FakeMediumStore()
+    first = writer.write_intents(
+        planned, long_store=store, medium_store=fake  # type: ignore[arg-type]
+    )
+    second = writer.write_intents(
+        planned,
+        long_store=store,
+        medium_store=fake,  # type: ignore[arg-type]
+        seen_keys=(writer.candidate_write_key(planned[0].candidate),),
+    )
+
+    assert [item.written for item in first] == [True, True]
+    assert [item.written for item in second] == [False, False]
+    assert [item.kind for item in second] == ["duplicate", "duplicate"]
+    assert all(item.satisfied for item in second)  # 幂等跳过不算失败
+    assert len(store.list_task_conclusions(project_scope=scope.project_id_for(tmp_path))) == 1
+
+
+def test_writer_uses_stable_medium_id(tmp_path: Path) -> None:
+    """中期记录用稳定 id：重复写入是同 id 覆盖，不会留下两条几乎相同的记忆。"""
+    fake = _FakeMediumStore()
+    planned = plan_writes(_candidate(), workspace_root=tmp_path)
+
+    writer.write_intents(planned, medium_store=fake)  # type: ignore[arg-type]
+    writer.write_intents(planned, medium_store=fake)  # type: ignore[arg-type]
+
+    assert len(fake.records) == 2
+    assert fake.records[0].id == fake.records[1].id == writer.medium_memory_id(planned[0])
+    assert fake.records[0].scope == scope.SCOPE_PROJECT
+    assert fake.records[0].source_event_id == "evt-1"
+
+
+def test_writer_skips_disabled_layers(tmp_path: Path) -> None:
+    """任一层未启用时跳过并说明原因，不抛异常（架构 §10 允许单层关闭）。"""
+    planned = plan_writes(_candidate(), workspace_root=tmp_path)
+
+    outcomes = writer.write_intents(planned)
+
+    assert outcomes[0].written is False
+    assert "未启用" in (outcomes[0].reason or "")
+
+
+def test_writer_records_conflict_without_overwriting(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """长期事实与现有值冲突时保留当前值，但**仍算写入成功**（新行记 ``conflicted``）。"""
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+    current = _write_fact(store, entity, key="language", value="中文", confidence=0.9, now=NOW)
+
+    planned = plan_writes(
+        _candidate(
+            memory_type="entity_fact",
+            subject="chaiai",
+            content=_entity_fact_content(value="English"),
+            confidence=0.5,
+        ),
+        workspace_root=tmp_path,
+    )
+    outcomes = writer.write_intents(planned, long_store=store)
+
+    assert outcomes[0].written is True
+    assert "冲突" in (outcomes[0].reason or "")
+    assert [item.value_json for item in store.list_facts(entity_id=entity.id)] == ['"中文"']
+    assert _status(store, current.record.id) == schemas.FACT_STATUS_ACTIVE
+
+
+def test_task_conclusion_write_is_idempotent_by_stable_id(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """同一来源重复写结论：稳定 id + ``INSERT OR IGNORE`` → 库里只有一条。
+
+    复审实证：任务结论表没有版本字段，数据库写成功、Checkpoint 提交前重放会重复插入
+    （连续写同一来源得到 2 条结论）。
+    """
+    planned = plan_writes(
+        _candidate(memory_type="task_fragment", content="接通长期记忆", subject="T15"),
+        workspace_root=tmp_path,
+        task_verified=True,
+    )
+    conclusion = [item for item in planned if item.target == "long_term_conclusion"]
+
+    first = writer.write_intents(conclusion, long_store=store)
+    second = writer.write_intents(conclusion, long_store=store)
+
+    assert first[0].written is True and first[0].satisfied
+    assert second[0].written is False
+    assert second[0].kind == "duplicate"
+    assert second[0].satisfied is True  # 幂等跳过不算失败
+    assert second[0].memory_id == first[0].memory_id
+    assert len(store.list_task_conclusions(project_scope=scope.project_id_for(tmp_path))) == 1
+
+
+def test_disabled_target_counts_as_satisfied(tmp_path: Path) -> None:
+    """目标层未启用 ≠ 失败：算"已满足"，候选才能登记完成、不会无限重试。"""
+    planned = plan_writes(_candidate(), workspace_root=tmp_path)
+
+    outcomes = writer.write_intents(planned)
+
+    assert outcomes[0].written is False
+    assert outcomes[0].kind == "disabled"
+    assert outcomes[0].satisfied is True
+    assert "未启用" in (outcomes[0].reason or "")
+
+
+def test_write_failure_is_marked_unsatisfied(tmp_path: Path) -> None:
+    """写入真实失败（异常）→ ``satisfied=False``：调用方据此记错误事件、不登记完成。"""
+
+    class _BrokenMediumStore:
+        def upsert(self, records: Sequence[Any]) -> int:
+            del records
+            raise MemoryStoreError("中期库写入失败（测试故意触发）")
+
+    planned = plan_writes(_candidate(), workspace_root=tmp_path)
+
+    outcomes = writer.write_intents(planned, medium_store=_BrokenMediumStore())  # type: ignore[arg-type]
+
+    assert outcomes[0].written is False
+    assert outcomes[0].kind == "failed"
+    assert outcomes[0].satisfied is False
+
+
+def test_duplicate_key_does_not_block_other_candidates(tmp_path: Path) -> None:
+    """判重键含**候选身份**：同一来源事件下的其它候选不会被误伤。
+
+    复审实证：只看来源事件时，候选 A 成功登记后，重试候选 B 会因为"来源已写过"直接变成
+    ``duplicate``，永远补不上。
+    """
+    first = plan_writes(_candidate(content="候选 A"), workspace_root=tmp_path)
+    second = plan_writes(_candidate(content="候选 B"), workspace_root=tmp_path)
+    fake = _FakeMediumStore()
+
+    writer.write_intents(first, medium_store=fake)  # type: ignore[arg-type]
+    outcomes = writer.write_intents(
+        second,
+        medium_store=fake,  # type: ignore[arg-type]
+        seen_keys=(writer.candidate_write_key(first[0].candidate),),
+    )
+
+    assert outcomes[0].written is True  # B 与 A 共享来源事件，但仍然被写入
+    assert len(fake.records) == 2
+
+
+def test_task_conclusions_with_same_content_but_different_titles_coexist(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """同内容、不同任务标题是**两条合法结论**，不能因为稳定 id 相同被丢掉。
+
+    复审探针：T18/已完成 与 T19/已完成 曾算出同一个 id，第二条被 ``INSERT OR IGNORE`` 丢弃。
+    """
+    project_scope = scope.project_id_for(tmp_path)
+    for title in ("T18", "T19"):
+        planned = plan_writes(
+            _candidate(memory_type="task_fragment", content="已完成", subject=title),
+            workspace_root=tmp_path,
+            task_verified=True,
+        )
+        conclusion = [item for item in planned if item.target == "long_term_conclusion"]
+        assert writer.write_intents(conclusion, long_store=store)[0].written is True
+
+    stored = store.list_task_conclusions(project_scope=project_scope)
+    assert sorted(item.task_title for item in stored) == ["T18", "T19"]
+
+
+def test_out_of_range_or_unknown_column_values_are_rejected(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """越界分数、``NaN`` / ``Infinity`` 与未知 ``status`` 都要在解码时拒绝。
+
+    只包装数字格式是不够的：它们能被 ``float()`` 接受，却会算出无穷大的排序分而不触发降级。
+    """
+    project_id = scope.project_id_for(tmp_path)
+    entity = _project_entity(store, project_id)
+    _write_fact(store, entity, key="language", value="中文", now=NOW)
+
+    for value in ("NaN", "Infinity", "2.0", "-1"):
+        store.connection.execute('UPDATE facts SET "confidence" = ?', (value,))
+        store.connection.commit()
+        with pytest.raises(MemoryStoreError):
+            store.active_facts_with_entities([(scope.SCOPE_PROJECT, project_id)], now=NOW)
+
+    # 未知 status 过不了各读路径的 SQL 过滤（读都读不到），因此直接验证解码函数
+    with pytest.raises(MemoryStoreError):
+        long_term._fact_from_row(
+            ("id", "e", "k", "v", 0.9, 0.9, "s", "c", "u", None, None, "unknown")
+        )
+
+
+def test_candidate_scope_needs_entity_type_and_authorisation(tmp_path: Path) -> None:
+    """用户级（跨项目可见）作用域需要 ``entity_type="user"`` **且**部署方显式授权。
+
+    ``entity_type`` 是模型生成的 JSON 值，不足以决定跨项目隔离边界（复审探针：项目事实带上它就
+    被映射成用户级）；默认保守落项目级，打开 ``allow_user_scope`` 才写用户级。
+    """
+    personal = _candidate(
+        memory_type="entity_fact",
+        subject="我",
+        content=_entity_fact_content(key="test_runner", value="pytest", entity_type="user"),
+    )
+
+    default = plan_writes(personal, workspace_root=tmp_path)
+    allowed = plan_writes(personal, workspace_root=tmp_path, user_scope_allowed=True)
+    project = plan_writes(_candidate(memory_type="task_fragment"), workspace_root=tmp_path)
+
+    assert not isinstance(default, RejectedCandidate)
+    assert default[0].scope == scope.SCOPE_PROJECT  # 没有授权：项目事实不会跨项目泄漏
+    assert allowed[0].scope == scope.SCOPE_USER
+    assert allowed[0].scope_key == scope.LOCAL_USER_ID
+    assert project[0].scope == scope.SCOPE_PROJECT  # 其它候选类型永远项目级
+
+
+def test_medium_id_includes_subject(tmp_path: Path) -> None:
+    """中期稳定 id 必须含 ``subject``：同来源、同内容、不同标题是**两条**记录。
+
+    复审实证：漏掉 subject 时它们算出同一个 id，Chroma 的 ``upsert`` 互相覆盖——两条候选都报告
+    写入成功，中期库里却只剩一条。
+    """
+    first = plan_writes(
+        _candidate(memory_type="task_fragment", content="已完成", subject="T18"),
+        workspace_root=tmp_path,
+    )
+    second = plan_writes(
+        _candidate(memory_type="task_fragment", content="已完成", subject="T19"),
+        workspace_root=tmp_path,
+    )
+    fake = _FakeMediumStore()
+
+    outcomes = writer.write_intents(
+        [*first, *second], medium_store=fake  # type: ignore[arg-type]
+    )
+
+    assert [item.written for item in outcomes] == [True, True]
+    assert len(fake.records) == 2
+    assert fake.records[0].id != fake.records[1].id
+
+
+def test_effective_importance_decays_linearly(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """长期有效重要度**线性**衰减，且不改库里的原值（T18 口径：不反复落库衰减值）。"""
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+    fact = _write_fact(store, entity, key="language", value="中文", importance=0.8, now=NOW)
+    config = LongTermMemoryConfig(enabled=True, forget_after_days=100, aging_enabled=True)
+
+    half = forgetting.effective_importance(
+        fact.record, config=config, now=NOW + timedelta(days=50)
+    )
+
+    assert half == pytest.approx(0.4)
+    assert (
+        forgetting.is_aged_out(fact.record, config=config, now=NOW + timedelta(days=99))
+        is False
+    )
+    assert (
+        forgetting.is_aged_out(fact.record, config=config, now=NOW + timedelta(days=100))
+        is True
+    )
+    # 库里仍是原始重要度：老化只在读取时实时折算
+    stored = store.get_fact(fact.record.id)
+    assert stored is not None and stored.importance == 0.8
+
+
+def test_aging_disabled_still_honours_explicit_expiry(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """``aging_enabled=false`` 只关自动老化；显式 ``expires_at`` 照常过期。"""
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+    plain = _write_fact(store, entity, key="language", value="中文", importance=0.8, now=NOW)
+    expiring = _write_fact(
+        store, entity, key="tone", value="正式", expires_at=LATER.isoformat(), now=NOW
+    )
+    config = LongTermMemoryConfig(enabled=True, forget_after_days=1, aging_enabled=False)
+
+    assert forgetting.is_aged_out(plain.record, config=config, now=MUCH_LATER) is False
+    assert (
+        forgetting.effective_importance(plain.record, config=config, now=MUCH_LATER) == 0.8
+    )
+
+    report = forgetting.run_forgetting(
+        config=_config_with_long_term(forget_after_days=1, aging_enabled=False),
+        long_store=store,
+        now=MUCH_LATER,
+    )
+
+    assert report.expired_facts == 1  # 显式有效期归 expire_overdue
+    assert report.aged_facts == 0
+    assert _status(store, expiring.record.id) == schemas.FACT_STATUS_EXPIRED
+    assert _status(store, plain.record.id) == schemas.FACT_STATUS_ACTIVE
+
+
+def test_forgetting_task_expires_overdue_and_aged(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """显式遗忘任务：带有效期的归 ``expire_overdue``，纯年龄的归 ``expire_aged``。"""
+    entity = _project_entity(store, scope.project_id_for(tmp_path))
+    expiring = _write_fact(
+        store, entity, key="a", value=1, expires_at=LATER.isoformat(), now=NOW
+    )
+    aging = _write_fact(store, entity, key="b", value=2, now=NOW)
+
+    report = forgetting.run_forgetting(
+        config=_config_with_long_term(forget_after_days=2),  # 事实年龄 4 天 → 已老化
+        long_store=store,
+        now=MUCH_LATER,
+    )
+
+    assert report.expired_facts == 1
+    assert report.aged_facts == 1
+    assert report.total == 2
+    assert _status(store, expiring.record.id) == schemas.FACT_STATUS_EXPIRED
+    assert _status(store, aging.record.id) == schemas.FACT_STATUS_EXPIRED
+
+
+def test_forgetting_task_purges_expired_medium_memory() -> None:
+    """中期过期记忆由遗忘任务删除（删除不可逆，只删解析得出的过期项）。"""
+    fake = _FakeMediumStore()
+    fake.expired = ["mt-dead"]
+
+    report = forgetting.run_forgetting(
+        config=_config_with_long_term(), medium_store=fake  # type: ignore[arg-type]
+    )
+
+    assert report.deleted_medium == 1
+    assert fake.deleted == ["mt-dead"]
 
 
 # --------------------------------------------------------------- 初始化脚本

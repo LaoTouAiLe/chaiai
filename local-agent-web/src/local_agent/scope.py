@@ -83,6 +83,22 @@ def logical_user_id(user_id: str | None) -> str:
     return user_id.strip() if user_id and user_id.strip() else LOCAL_USER_ID
 
 
+def visible_scope_keys(
+    *, user_id: str | None, project_id: str, workspace_root: Path
+) -> list[tuple[MemoryScope, str]]:
+    """本次运行可见的作用域组合（架构 §10.2 的四种作用域）。
+
+    这是**唯一真源**：召回层（§10.1 的窗口注入）、命令行与页面都用它。任何一处自己拼一套就会出现
+    "模型召回得到、人工看不到"或反之——漏掉 ``workspace`` 就会漏掉工作区级记忆（复审实证）。
+    """
+    return [
+        (SCOPE_GLOBAL, scope_key_for(SCOPE_GLOBAL)),
+        (SCOPE_USER, scope_key_for(SCOPE_USER, user_id=user_id)),
+        (SCOPE_PROJECT, scope_key_for(SCOPE_PROJECT, project_id=project_id)),
+        (SCOPE_WORKSPACE, scope_key_for(SCOPE_WORKSPACE, workspace_root=workspace_root)),
+    ]
+
+
 def scope_key_for(
     scope: MemoryScope | str,
     *,

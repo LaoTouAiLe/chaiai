@@ -4,7 +4,9 @@
 
 ```text
 START → prepare_context → load_agents → recall_memory → mode_router
-mode_router --chat--> compression_node → chat_node → final_response_node → END
+mode_router --chat--> compression_node → chat_node → reflection_node → completion_router
+completion_router --有记忆候选--> memory_write_node → final_response_node → END
+completion_router --其余--> final_response_node → END
 mode_router --tool--> planner_node → compression_node → agent_decision_node
 agent_decision_node --有工具调用--> safety_gate_node
 safety_gate_node --有放行调用--> tool_execution_node → reflection_node → completion_router
@@ -13,6 +15,7 @@ agent_decision_node --无工具调用--> final_response_node
 completion_router --continue--> planner_node（§5.3 要求继续时重新规划）
 completion_router --retry-->    compression_node
 completion_router --ask_user/finish/loop_limit--> final_response_node
+completion_router --有记忆候选的 finish--> memory_write_node → final_response_node
 ```
 """
 
@@ -27,6 +30,7 @@ from local_agent.graph.nodes import (
     COMPRESSION_NODE,
     FINAL_RESPONSE_NODE,
     LOAD_AGENTS,
+    MEMORY_WRITE_NODE,
     PLANNER_NODE,
     PREPARE_CONTEXT,
     RECALL_MEMORY,
@@ -45,6 +49,7 @@ from local_agent.graph.routers import (
     ROUTE_EXECUTE,
     ROUTE_FINISH,
     ROUTE_LOOP_LIMIT,
+    ROUTE_MEMORY_WRITE,
     ROUTE_REFLECT,
     ROUTE_REJECT,
     ROUTE_RETRY,
@@ -118,8 +123,13 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
             ROUTE_ASK_USER: FINAL_RESPONSE_NODE,
             ROUTE_FINISH: FINAL_RESPONSE_NODE,
             ROUTE_LOOP_LIMIT: FINAL_RESPONSE_NODE,
+            ROUTE_MEMORY_WRITE: MEMORY_WRITE_NODE,
         },
     )
+    graph.add_edge(MEMORY_WRITE_NODE, FINAL_RESPONSE_NODE)
 
-    graph.add_edge(CHAT_NODE, FINAL_RESPONSE_NODE)
+    # 闲聊也要过一次反思校验：按架构 §5.2，识别到用户要求记住时 chat_node 只产生
+    # memory_write_intent，**转入现有 reflection_node 校验**，再由 completion_router 决定是否
+    # 走 memory_write_node。普通闲聊在反思里得到空候选 → 直接进 final_response_node。
+    graph.add_edge(CHAT_NODE, REFLECTION_NODE)
     graph.add_edge(FINAL_RESPONSE_NODE, END)

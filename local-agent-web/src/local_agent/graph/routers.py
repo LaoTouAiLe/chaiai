@@ -50,6 +50,7 @@ ROUTE_RETRY = "retry"
 ROUTE_ASK_USER = "ask_user"
 ROUTE_FINISH = "finish"
 ROUTE_LOOP_LIMIT = "loop_limit"
+ROUTE_MEMORY_WRITE = "memory_write"
 
 #: 分类提示的固定标记；提示与测试都用它识别“这是一次分类调用”。
 ROUTE_CLASSIFIER_MARKER = "意图分类器"
@@ -196,6 +197,12 @@ def build_classifier_prompt(context: RuntimeContext) -> str:
         "判定规则：\n"
         '- 需要读取、列出、搜索、修改、创建、删除本机文件，或需要执行命令、运行测试时，mode 取 "tool"。\n'
         '- 普通问答、闲聊、解释概念、只给代码片段而不落地到文件时，mode 取 "chat"。\n'
+        '- 询问"我之前说过的偏好/设定""我习惯用什么""我们上次的结论是什么"，以及**已经记住的项目'
+        '事实或约定**（例如"我们这个项目默认用什么跑自动化测试"）这类**回忆型问题**，mode 取 "chat"：'
+        '答案来自系统提示里已召回的记忆，不需要读写文件或执行命令；'
+        '只有当用户明确要求检查当前文件或运行命令时才取 "tool"。\n'
+        '- 判断标准是"完成这个请求**是否必须**访问本机文件或执行命令"；请求里只是**提到**文件名、'
+        '工具名或"测试""配置"这类词，并不等于需要访问，不要据此取 "tool"。\n'
         '- 不确定时取 "chat"。\n'
         "\n"
         f"工作区根目录：{context.workspace_root.as_posix()}\n"
@@ -276,16 +283,29 @@ def completion_router_node(state: AgentState) -> AgentState:
 
 
 def completion_route(state: AgentState) -> str:
-    """条件边：把反思结论映射为下一个分支（循环上限只拦 ``continue`` / ``retry``）。"""
+    """条件边：把反思结论映射为下一个分支（循环上限只拦 ``continue`` / ``retry``）。
+
+    ``finish`` 且反思给出了记忆候选时，先走 ``memory_write_node``（架构 §5.3）。写入链路要求
+    候选经过反思验证，所以这是**唯一**的写入出口——其余分支都不直接写库。
+    """
     action = _next_action(state)
     if action in _LOOPING_ACTIONS and loop_limit_reached(state):
         return ROUTE_LOOP_LIMIT
-    return {
+    route = {
         "continue": ROUTE_CONTINUE,
         "retry": ROUTE_RETRY,
         "ask_user": ROUTE_ASK_USER,
         "finish": ROUTE_FINISH,
     }.get(action, ROUTE_FINISH)
+    if route == ROUTE_FINISH and _has_memory_candidates(state):
+        return ROUTE_MEMORY_WRITE
+    return route
+
+
+def _has_memory_candidates(state: AgentState) -> bool:
+    """反思结果里是否有记忆候选（决定本轮是否经过 ``memory_write_node``）。"""
+    result = state.get("reflection_result")
+    return bool(result.memory_candidates) if isinstance(result, ReflectionResult) else False
 
 
 def _next_action(state: AgentState) -> str:

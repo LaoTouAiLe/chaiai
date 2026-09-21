@@ -16,9 +16,10 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+import sqlite3
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -30,20 +31,27 @@ from langgraph.types import Command
 
 from local_agent import config as config_module
 from local_agent.config import AppConfig, ConfigError
-from local_agent.exceptions import SessionStoreError
+from local_agent.exceptions import MemoryStoreError, SessionStoreError
 from local_agent.graph import builder, nodes
+from local_agent.graph.projection import project_messages
 from local_agent.graph.state import AgentState
+from local_agent.llm import embedding as embedding_module
 from local_agent.llm import factory
 from local_agent.llm.models import ModelCapabilities, probe_capabilities
+from local_agent.memory import long_term, medium_term
+from local_agent.memory.forgetting import is_recallable_fact
 from local_agent.persistence import checkpoint as checkpoint_module
 from local_agent.persistence.session_store import Session, SessionStore
+from local_agent.scope import project_id_for, visible_scope_keys
 from local_agent.ui import approval_ui
 from local_agent.ui.renderer import (
     ChatMessage,
     SessionAction,
     SessionOption,
     config_error_text,
+    render_error_events,
     render_history,
+    render_memory_status,
     render_message,
     render_model_status,
     render_session_sidebar,
@@ -176,6 +184,107 @@ def thread_state(app: ChatApp, thread_id: str) -> dict[str, Any]:
     if app.checkpointer_enabled:
         return builder.read_thread_state(app.graph, thread_id)
     return {"messages": _session_history(), "tool_results": []}
+
+
+def projected_history(state: Mapping[str, Any]) -> list[AnyMessage]:
+    """页面展示用的会话消息：对回答应用**按轮次投影**（:mod:`local_agent.graph.projection`）。
+
+    为什么不能只改 ``final_response``：那只覆盖"最后一条回答"，历史里上一条仍是原始措辞；也不能
+    为了好看去改 Checkpoint 里的 ``messages``（架构 §10.1：原始记录用于审计与恢复）。所以展示走投影：
+    原文留存、读时替换，页面不会再同时看到"我记住了"和"没有保存成功"两条互相矛盾的回答。
+    """
+    return project_messages(
+        list(state.get("messages") or []), state.get("reply_overrides") or {}
+    )
+
+
+def memory_management_lines(app: ChatApp) -> tuple[list[str], bool]:
+    """侧栏"记忆管理"区块：（展示行, 是否有需要处理的问题）。
+
+    只读且**只打开长期库**（SQLite，微秒级）：中期库要加载 embedding 模型，在页面上做这件事会让
+    每次交互都变慢，因此中期内容统一走命令行查看。人工删除与遗忘任务也在命令行，页面只负责"看得见"
+    （复审要求的最小入口：库 API 之上有 CLI + 页面展示，不额外造第二套写路径）。
+    """
+    memory = app.app_config.memory
+    if not memory.long_term.enabled:
+        return (["长期：已关闭（没有可管理的长期记忆）"], False)
+    path = Path(memory.long_term.path)
+    try:
+        store = long_term.open_store(path)
+    except (MemoryStoreError, sqlite3.Error, OSError) as exc:
+        return ([f"长期库打不开：{type(exc).__name__}: {exc}"], True)
+    try:
+        workspace = Path(app.workspace_root)
+        project = project_id_for(workspace)
+        moment = datetime.now(timezone.utc)
+        facts = [
+            (entity, fact)
+            for entity, fact in store.active_facts_with_entities(
+                visible_scope_keys(
+                    user_id=None, project_id=project, workspace_root=workspace
+                ),
+                now=moment,
+            )
+            # 与召回同一口径的可见性过滤：过期与超龄的事实不该算进"可管理的条数"（复审实证）
+            if is_recallable_fact(fact, config=memory.long_term, now=moment)
+        ]
+        conclusions = (
+            store.list_task_conclusions(project_scope=project) if project else []
+        )
+    except (MemoryStoreError, sqlite3.Error, OSError) as exc:
+        return ([f"长期库读取失败：{type(exc).__name__}: {exc}"], True)
+    finally:
+        store.close()
+    lines = [
+        f"长期：事实 {len(facts)} 条、任务结论 {len(conclusions)} 条（本项目 / 本用户 / 全局）"
+    ]
+    if memory.medium_term.enabled:
+        lines.append("中期：内容与条数请用命令行查看（页面不加载 embedding 模型）")
+    lines.append(
+        "人工操作：python -m local_agent.cli memory list ｜ delete <id> --yes ｜ forget"
+    )
+    return (lines, False)
+
+
+def pending_error_lines(
+    state: Mapping[str, Any], *, shown: Collection[str], secrets: Sequence[str] = ()
+) -> tuple[list[str], list[str]]:
+    """本轮**尚未展示过**的错误/降级事件：（展示行, 事件 id）。
+
+    ``error_events`` 跨轮累积在 State 里，所以按 ``event_id`` 去重（调用方把已展示的 id 记在页面
+    会话里）；文本一律先脱敏，避免把 Key 之类的片段渲染到页面上。
+    """
+    lines: list[str] = []
+    fresh: list[str] = []
+    for event in state.get("error_events") or []:
+        event_id = str(event.get("event_id") or "")
+        if not event_id or event_id in shown:
+            continue
+        stage = str(event.get("stage") or "?")
+        message = config_module.redact_secrets(str(event.get("message") or ""), secrets)
+        lines.append(f"[{stage}] {message}")
+        fresh.append(event_id)
+    return lines, fresh
+
+
+#: 页面会话里"已经显示过"的错误事件 id：不按 id 去重的话，每次重绘都会重复渲染，让用户以为又出错了。
+#: 页面重启后历史事件会再显示一次——它们已脱敏、内容也只是降级说明，这个代价可以接受。
+_SHOWN_ERROR_IDS_KEY = "shown_error_event_ids"
+
+
+def _shown_error_ids() -> set[str]:
+    return st.session_state.setdefault(_SHOWN_ERROR_IDS_KEY, set())
+
+
+def render_pending_errors(app: ChatApp, state: Mapping[str, Any]) -> None:
+    """显示本轮新增的错误/降级事件（脱敏 + 按 id 去重），并记住已显示过的。"""
+    lines, fresh = pending_error_lines(
+        state, shown=_shown_error_ids(), secrets=app.secret_values
+    )
+    if not lines:
+        return
+    render_error_events(lines=lines)
+    _shown_error_ids().update(fresh)
 
 
 def thread_interrupt(app: ChatApp, thread_id: str) -> dict[str, Any] | None:
@@ -412,6 +521,51 @@ def record_session_activity(
     )
 
 
+def memory_status_lines(app: ChatApp) -> tuple[list[str], bool]:
+    """侧栏要展示的记忆状态：（状态行, 是否有需要用户处理的问题）。
+
+    三层各自成行：短期（Checkpoint）、中期（Chroma + embedding）、长期（SQLite）。
+    Embedding **只做静态探测**（不加载模型、不联网），所以这一块不会让页面卡住；真正的
+    下载/加载失败会以错误事件出现在对话里（架构 §1.4 要求准备状态可见、§11.6 要求失败可见）。
+    """
+    memory = app.app_config.memory
+    lines = [
+        "短期：" + ("Checkpoint 已启用" if memory.short_term.enabled else "已关闭（重启即清空）")
+    ]
+    warn = False
+    if not memory.medium_term.enabled:
+        lines.append("中期：已关闭（不访问向量库、不加载模型）")
+    else:
+        embedding_config = app.app_config.embedding
+        # 只有远端 provider 才读 Key：本地模型不需要，读它反而会因为"Key 为空"报错
+        # （与 nodes.medium_term_store 的口径一致）。
+        #
+        # 这里**必须用非抛出式读取**：`resolve_api_key()` 缺 Key 时抛 `ConfigError`，会让整个侧栏
+        # 直接报错，而不是展示一条可处理的警告（复审实证：readiness 的 not_ready 分支根本走不到）。
+        api_key = (
+            config_module.optional_api_key(embedding_config)
+            if embedding_config.provider == "openai_compatible"
+            else None
+        )
+        state = embedding_module.readiness(embedding_config, api_key=api_key)
+        lines.append(f"中期：已启用（Embedding {state.provider}/{state.model}）")
+        lines.append(f"缓存目录：{state.cache_dir or '（远端接口，无本地缓存）'}")
+        lines.append(f"状态：{state.detail}")
+        # 中期记忆已启用时，"embedding 被关掉"本身就是配置问题（没有向量就召回不了），
+        # 因此 disabled 也计入警告。
+        if state.state in {"disabled", "unavailable", "not_ready"}:
+            warn = True
+        if not medium_term.chromadb_available():
+            lines.append("chromadb 未安装：执行 `uv sync --extra memory` 后再启用中期记忆")
+            warn = True
+    lines.append(
+        "长期："
+        + (f"已启用（{memory.long_term.path}）" if memory.long_term.enabled else "已关闭")
+    )
+    lines.append("压缩：" + ("已启用" if memory.compression.enabled else "已关闭"))
+    return lines, warn
+
+
 def _display_time(iso_text: str) -> str:
     """把库里的 UTC ISO 时间转成本机时区的短格式；解析失败时原样返回。"""
     try:
@@ -478,6 +632,13 @@ def main() -> None:
 
     # 侧栏：启用短期记忆时是"工作区选择器 + 当前工作区的会话列表"；关闭短期记忆时也必须能选
     # 工作区，只是选择只在本页面生命周期内有效（架构 §10.6）。
+    if app is not None:
+        with st.sidebar:
+            status_lines, status_warn = memory_status_lines(app)
+            render_memory_status(lines=status_lines, warn=status_warn)
+            # 记忆管理：只读展示 + 指到命令行（删除等写操作不在页面上做，避免误点）
+            manage_lines, manage_warn = memory_management_lines(app)
+            render_memory_status(lines=manage_lines, warn=manage_warn)
     session = current_session(app)
     store = app.sessions if app is not None else None
     if store is not None and session is not None:
@@ -517,7 +678,7 @@ def main() -> None:
         if app is not None
         else {"messages": _session_history()}
     )
-    history: list[AnyMessage] = list(state.get("messages") or [])
+    history: list[AnyMessage] = projected_history(state)
     render_history(history, tool_results=tool_results_of(state))
 
     unconfirmed = (
@@ -550,12 +711,12 @@ def main() -> None:
                     detail = config_module.redact_secrets(str(exc), app.secret_values)
                     st.error(f"恢复审批失败：{detail}")
                     return
-                messages = list(result.get("messages") or [])
                 render_history(
-                    messages,
+                    projected_history(result),
                     start_index=len(history),
                     tool_results=tool_results_of(result),
                 )
+                render_pending_errors(app, result)
                 if session is not None:
                     record_session_activity(app, session)
                 if result.get("final_response") is None and not result.get("__interrupt__"):
@@ -599,8 +760,10 @@ def main() -> None:
         )
         return
 
-    messages = list(result.get("messages") or [])
+    messages = projected_history(result)
     if not app.checkpointer_enabled:
+        # 关闭短期记忆时页面自己存历史：存**投影后**的文本，刷新后仍与用户当时看到的一致
+        # （State 不跨轮，投影表不会留下来）。
         _session_history()[:] = messages
     if session is not None:
         # 更新最后活动时间与 Checkpoint 指针；会话还是默认名时用首条消息命名
@@ -609,6 +772,8 @@ def main() -> None:
     render_history(
         messages, start_index=previous_count, tool_results=tool_results_of(result)
     )
+    # 本轮的降级/错误（库打不开、Embedding 加载失败、摘要失败…）必须让用户看见
+    render_pending_errors(app, result)
 
     if result.get("__interrupt__"):
         # 本轮停在人工审批：审批卡片渲染在页面顶部，这里必须重跑脚本才会出现
