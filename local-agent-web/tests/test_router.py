@@ -544,6 +544,38 @@ def test_loop_limit_does_not_block_ask_user_on_the_last_round(
     assert result["task_status"] == "running"
 
 
+def test_stall_guard_stops_the_loop_when_the_model_has_nothing_to_do(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """空转保护（实测）：计划还有步骤、模型连续只回"任务已完成" → 循环必须在两三轮内停下。
+
+    修复前：反思判不出完成（只看到工具输出的元数据头部）→ 一直 continue，模型每轮都回
+    "任务已完成 / 无新指令"，直到 ``max_tool_loops``（示例配置 12）被烧完才停下；用户最终看到的
+    是一句自相矛盾的追问，而不是早已得出的结论。
+    """
+    (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
+    model = model_factory(
+        decision="tool",
+        reply="已完成，任务结束",
+        tool_calls=[{"name": "read_file", "args": {"path": "note.txt"}, "id": "call_1"}],
+        plan_steps=["读取 note.txt", "总结内容"],
+        reflection={"goal_achieved": False, "next_action": "continue"},
+    )
+
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "读取 note.txt 并总结"},
+        context=_context_with(tmp_path, model, app_config),
+    )
+
+    assert result["max_loop_count"] > 3  # 默认上限足够大，说明是保护生效而不是被上限拦下
+    assert result["loop_count"] <= 3  # 不空转：读完文件后最多再两轮就收口
+    assert result["reflection_result"].next_action == "ask_user"
+    assert result["task_status"] != "completed"  # 计划没走完不冒充完成
+    assert result["final_response"] and "连续 2 轮没有产生可执行的动作" in result["final_response"]
+    # 当前步骤标为 blocked（交给用户），后面没轮到的步骤仍是 pending
+    assert [step.status for step in result["plan"]] == ["blocked", "pending"]
+
+
 def test_final_synthesis_stays_within_budget_with_large_tool_output(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
@@ -2287,6 +2319,33 @@ def test_replanning_inserts_an_adjustment_step() -> None:
     assert progress.next_action == "continue"
     assert progress.completed_steps == ()  # 失败的步骤不算完成
     assert progress.plan[0] == state["plan"][0]  # 已完成步骤原样保留
+
+
+def test_replanning_at_the_step_cap_rewrites_in_place() -> None:
+    """计划已达拆步上限时不再插入新步骤：改为原地重做并计一次重试（否则任务永远收不了尾）。
+
+    实测：真实模型把一句问句拆成 4 步后又连续插入 5 个调整步骤，计划一路涨到 9 步，怎么"继续"
+    都走不完。
+    """
+    cap = reflector.MAX_PLAN_STEPS
+    state = _plan_state(steps=cap, index=cap - 1, completed=tuple(f"run-1:step-{i}" for i in range(1, cap)))
+    decision = ReflectionDecision(
+        goal_achieved=False,
+        next_action="continue",
+        plan_adjustment="改用按行号区间读取，别整文件读",
+    )
+
+    progress = nodes._advance_plan(
+        state, goal_achieved=False, next_action="continue", decision=decision
+    )
+
+    assert len(progress.plan) == cap  # 不再增长
+    assert progress.plan[cap - 1].description == "改用按行号区间读取，别整文件读"  # 计划真的变了
+    assert progress.plan[cap - 1].status == "running"
+    assert progress.plan[cap - 1].retry_count == 1  # 计一次重试，交给重试上限兜底
+    assert progress.current_step_index == cap - 1
+    assert progress.next_action == "retry"
+    assert "上限" in (progress.note or "")
 
 
 def test_retry_budget_is_per_step() -> None:

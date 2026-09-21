@@ -55,11 +55,13 @@ from local_agent.exceptions import (
     MemoryStoreError,
     SecurityError,
 )
+from local_agent.graph.evidence import TOOL_EVIDENCE_CHARS, tool_evidence_text
 from local_agent.graph.projection import (
     current_turn_ai_message,
     message_id,
     project_messages,
 )
+from local_agent.graph.routers import LOOPING_ACTIONS
 from local_agent.graph.state import (
     AgentState,
     DecisionRecord,
@@ -99,6 +101,7 @@ from local_agent.reflection.memory_candidates import (
     plan_writes,
 )
 from local_agent.reflection.reflector import (
+    MAX_PLAN_STEPS,
     TOOL_DATA_CLOSE,
     TOOL_DATA_OPEN,
     ReflectionDecision,
@@ -1350,7 +1353,17 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
                 created_at=event.finished_at,
             )
         )
-        summaries.append(f"{event.tool_name}({event.status}) → {event.output_preview[:160]}")
+        # 证据必须**可判读**：工具输出是 JSON（元数据在前、正文在后），只取前 N 个字符会让模型
+        # 看到 path/line_count 就以为"正文被截断、任务没完成"（实测因此连续空转并反过来问用户）。
+        # 这里按可判读摘要渲染，截断时带明确标注（架构 §5.4、:mod:`local_agent.graph.evidence`）。
+        summaries.append(
+            tool_evidence_text(
+                event.tool_name,
+                str(event.status),
+                payloads.get(event.tool_call_id) or event.output_preview,
+                limit=TOOL_EVIDENCE_CHARS,
+            )
+        )
 
     # ``tool_events`` 覆盖整个任务，所以直接汇总全量会让**第二步的失败永久留在集合里**：
     # 即使重试或换了做法已经成功，"第二步失败、调整后成功"也一辈子判不成完成（复审实证）。
@@ -1405,6 +1418,13 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
     goal_achieved = progress.goal_achieved
     if progress.note:
         notes.append(progress.note)
+    # 空转保护（架构 §5.3）：连续多轮没有任何可执行动作时，再调一次模型不会有新信息。
+    # 必须放在 `_advance_plan` 之后——它自己也会把 finish 归一成 continue（计划还有步骤）。
+    next_action, decision, plan, stall_note = _apply_stall_guard(state, progress, decision)
+    if stall_note:
+        notes.append(stall_note)
+        # 空转保护问的是"下一步做什么"：这一步没有做完，任务状态不能显示完成
+        goal_achieved = False
 
     # ask_user / finish 直接进 final_response_node，而 final_response_node 只取已有 AI 文本：
     # 不在这里补齐可展示的回答，这两个分支会得到 final_response=None + failed（复审实测）。
@@ -1438,7 +1458,7 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
             ),
             evidence=tuple(unique_evidence),
         ),
-        "plan": progress.plan,
+        "plan": plan,
         "current_step_index": progress.current_step_index,
         "retry_count": int(state.get("retry_count", 0))
         + (1 if next_action == "retry" else 0),
@@ -1501,6 +1521,21 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
     return update
 
 
+def _last_answer_text(state: AgentState) -> str:
+    """本轮最后一段**有内容**的 AI 回答文本（供反思判断"模型已经答过什么"）。
+
+    带 ``tool_calls`` 的 AI 消息 content 往往是空的，跳过它们才能拿到真正的回答；同一个请求内
+    可能有多轮工具调用，所以从尾部往前找第一条非空 AI 文本。截断与标注由
+    :func:`local_agent.reflection.reflector._render_answer` 负责。
+    """
+    for message in reversed(list(state.get("messages") or [])):
+        if isinstance(message, AIMessage):
+            text = str(message.text).strip()
+            if text:
+                return text
+    return ""
+
+
 def _reflect_decision(
     state: AgentState,
     context: RuntimeContext,
@@ -1520,6 +1555,9 @@ def _reflect_decision(
             trust=trust,
             anomalies=anomalies,
             tool_summaries=summaries,
+            # 让反思看到"模型本轮已经答过什么"：否则它会一边要求继续、一边忽略已经得出的答案
+            # （实测：模型已按工具结果答完并给出结论，反思仍连续要求继续，最后变成向用户追问）。
+            last_answer=_last_answer_text(state),
             loop_count=int(state.get("loop_count", 0)),
             max_loop_count=int(state.get("max_loop_count", 0)),
             capabilities=capabilities if isinstance(capabilities, ModelCapabilities) else None,
@@ -1703,7 +1741,9 @@ def _advance_plan(
     2. **重规划必须真的改计划**：``plan_adjustment`` 非空且当前步失败时，把该步标为 ``failed``，
        并**在它之后插入一步**（描述即调整内容），``current_step_index`` 指向新步。只把调整写进
        ``result_summary`` 不算重规划——那样模型以为改了、执行仍按老计划走。T20 只实现这一种调整
-       方式：够用、可验证，也不会误伤已完成步骤。
+       方式：够用、可验证，也不会误伤已完成步骤。计划已达 :data:`MAX_PLAN_STEPS`（与拆步上限同一个
+       常量）时**不再插入**：改为原地按调整重做当前步骤并计一次重试，用既有重试上限兜底——
+       否则计划会无限增长，任务永远收不了尾（实测）。
     3. **已完成步骤不可重写、不可重跑**：只更新当前步及其之后；``completed_steps`` 只追加、不清空。
     """
     plan = list(
@@ -1744,19 +1784,37 @@ def _advance_plan(
             next_index = index
     elif _should_replan(step, next_action=next_action, decision=decision):
         adjustment = decision.plan_adjustment.strip()
-        plan[index] = replace(step, status="failed")
-        plan.insert(
-            index + 1,
-            PlanStep(
-                id=f"{_step_scope(step.id)}:step-{len(plan) + 1}",
+        if len(plan) >= MAX_PLAN_STEPS:
+            # 计划已达拆步上限：再插入新步骤会让任务永远收不了尾（实测真实模型把一句问句拆成 4 步后
+            # 又连续插入 5 个调整步骤，一直"继续"到循环上限也走不完）。改为**原地按调整重做当前步骤**
+            # 并计一次重试——计划真的变了、不越上限，且沿用既有的重试上限兜底。
+            plan[index] = replace(
+                step,
                 description=adjustment,
                 status="running",
-                expected_evidence="按调整做法之后的工具结果",
-            ),
-        )
-        next_index = index + 1
-        action = "continue"
-        note = f"步骤 {index + 1} 失败，按反思的调整插入新步骤「{adjustment}」"
+                result_summary=f"按调整重做：{step.description}",
+                retry_count=step.retry_count + 1,
+            )
+            next_index = index
+            action = "retry"
+            note = (
+                f"计划已达 {MAX_PLAN_STEPS} 步上限，不再插入新步骤，"
+                f"改为按调整重做当前步骤「{adjustment}」"
+            )
+        else:
+            plan[index] = replace(step, status="failed")
+            plan.insert(
+                index + 1,
+                PlanStep(
+                    id=f"{_step_scope(step.id)}:step-{len(plan) + 1}",
+                    description=adjustment,
+                    status="running",
+                    expected_evidence="按调整做法之后的工具结果",
+                ),
+            )
+            next_index = index + 1
+            action = "continue"
+            note = f"步骤 {index + 1} 失败，按反思的调整插入新步骤「{adjustment}」"
     else:
         next_index = index
     return _PlanProgress(
@@ -1786,6 +1844,71 @@ def _step_scope(step_id: str) -> str:
     return head if sep else step_id
 
 
+#: 空转保护：连续多少轮"模型只给文字、没有产生任何工具调用"就判定为原地打转（架构 §5.3）。
+STALLED_ROUNDS_WITHOUT_ACTION = 2
+
+
+def _apply_stall_guard(
+    state: AgentState,
+    progress: _PlanProgress,
+    decision: ReflectionDecision,
+) -> tuple[ReflectionAction, ReflectionDecision, list[PlanStep], str | None]:
+    """空转保护：连续多轮没有任何可执行动作时，不再把预算烧在重复调用上（架构 §5.3）。
+
+    为什么必须是机械规则：反思说"继续"，但模型连续若干轮既没调用工具、也没产生新证据，而每一轮的
+    输入（目标、计划、证据）几乎完全相同——再调一次不会有新信息。实测真实模型读完文件后连续 10 轮
+    输出"任务已完成 / 无新指令"，把 ``agent.max_tool_loops`` 烧完才被上限拦下，用户看到的是最后
+    一句自相矛盾的追问而不是早已得出的结论。
+
+    归一为 ``ask_user`` 而不是 ``finish``：计划里还有没走完的步骤，"计划没完成不许收尾"是 §5.3/T20
+    的硬语义，这里问的是"下一步做什么"。当前步骤同时标为 ``blocked``，与 :func:`_updated_plan`
+    对 ``ask_user`` 的口径保持一致。
+    """
+    if progress.next_action not in LOOPING_ACTIONS:
+        return progress.next_action, decision, progress.plan, None
+    stalled = _stalled_rounds(state)
+    if stalled < STALLED_ROUNDS_WITHOUT_ACTION:
+        return progress.next_action, decision, progress.plan, None
+    unfinished = sum(1 for step in progress.plan if step.status != "completed")
+    reason = (
+        f"我已经连续 {stalled} 轮没有产生可执行的动作（既没有调用工具，也没有新的证据），"
+        f"而计划里还有 {unfinished} 步没有完成；继续重复同样的调用不会有新结果，所以我先停下来。"
+        "请确认下一步要做什么，或把需求拆得更具体、把计划改小一些。"
+    )
+    plan = _block_current_step(progress.plan, progress.current_step_index)
+    return (
+        "ask_user",
+        decision.model_copy(update={"ask_user_reason": reason}),
+        plan,
+        f"连续 {stalled} 轮没有可执行动作，改为向用户说明（空转保护）",
+    )
+
+
+def _stalled_rounds(state: AgentState) -> int:
+    """从消息尾部数：连续多少轮模型只给文字、没有产生工具调用。
+
+    不需要新增 State 字段：有工具调用的一轮一定留下带 ``tool_calls`` 的 AI 消息，从尾部往前数
+    纯文本 AI 消息就是"没有可执行动作"的轮数（架构 §5.3）。
+    """
+    count = 0
+    for message in reversed(list(state.get("messages") or [])):
+        if isinstance(message, AIMessage):
+            if message.tool_calls:
+                break
+            count += 1
+            continue
+        if isinstance(message, ToolMessage):
+            break
+    return count
+
+
+def _block_current_step(plan: Sequence[PlanStep], index: int) -> list[PlanStep]:
+    """把当前步骤标为 ``blocked``（交给用户后这一步不再算"正在执行"）。"""
+    if 0 <= index < len(plan) and plan[index].status == "running":
+        return [*plan[:index], replace(plan[index], status="blocked"), *plan[index + 1 :]]
+    return list(plan)
+
+
 #: ``finish`` 分支的合成指令：要求不绑定工具地给出最终回答（架构 §5.3 的完成出口）。
 FINAL_ANSWER_INSTRUCTION = (
     "请基于上面的任务、计划与工具结果，直接给出本轮的最终回答。\n"
@@ -1802,6 +1925,8 @@ MAX_SYNTHESIS_EVIDENCE_CHARS = 400
 MIN_SYNTHESIS_EVIDENCE_CHARS = 40
 #: 确定性结果摘要里最多列几条工具结果（与合成证据一样只取**最近**的若干条）。
 DETERMINISTIC_SUMMARY_RECORDS = 5
+#: 确定性结果摘要里每条工具证据的字符上限（含工具名前缀）。
+DETERMINISTIC_SUMMARY_CHARS = 200
 
 
 @dataclass(frozen=True)
@@ -1990,31 +2115,52 @@ def _bounded_evidence(state: AgentState, *, allowance_tokens: int) -> str | None
     "有界"不能只是固定条数 + 固定长度：固定上限仍可能超预算（复审实测 1094 > 1024），真实模型
     会直接拒绝请求。这里按剩余额度**逐步收敛**——先截短每条，再减少条数，最后放弃；返回 ``None``
     表示由调用方改用确定性摘要（不再发出超预算请求）。
+
+    每收敛一档都**重新渲染**证据行（而不是把长行截短）：截断标注必须留在行内，否则模型会把
+    "摘要被截断"当成"工具没返回内容"（架构 §5.4）。
     """
-    entries = _evidence_entries(state)
     limit = MAX_SYNTHESIS_EVIDENCE_CHARS
+    records = _recent_records(state, limit=MAX_SYNTHESIS_EVIDENCE_ITEMS)
     while True:
-        text = _wrap_evidence(entries, limit=limit)
+        text = _wrap_evidence(state, records, limit=limit)
         if estimate_messages_tokens([HumanMessage(content=text)]) <= allowance_tokens:
             return text
         if limit > MIN_SYNTHESIS_EVIDENCE_CHARS:
             limit //= 2
             continue
-        if len(entries) > 1:
-            entries = entries[1:]  # 先丢最早的一条
+        if len(records) > 1:
+            records = records[1:]  # 先丢最早的一条
             limit = MAX_SYNTHESIS_EVIDENCE_CHARS
             continue
         return None
 
 
-def _evidence_entries(state: AgentState) -> list[str]:
-    """当前任务**最近** :data:`MAX_SYNTHESIS_EVIDENCE_ITEMS` 条工具结果的摘要行（从旧到新）。"""
-    lines = [
-        f"- {record.get('tool_name')}（{record.get('status')}）："
-        f"{' '.join(str(record.get('output_preview') or '').split())}"
-        for record in _recent_records(state, limit=MAX_SYNTHESIS_EVIDENCE_ITEMS)
-    ]
-    return lines or ["（本轮没有工具结果）"]
+def _wrap_evidence(
+    state: AgentState, records: Sequence[ToolResultRecord], *, limit: int
+) -> str:
+    """把证据行包成带不可信标记的文本；每行按 ``limit`` **重新渲染**。
+
+    渲染而不是"先拼好再截短"：截断标注必须留在行内，否则模型会把"摘要被截断"读成
+    "工具没有返回内容"（架构 §5.4）。证据优先用 ``messages`` 里的**完整**工具输出渲染
+    （``tool_results`` 里的 ``output_preview`` 只是前 2000 字符的头部），读不到时才退回 preview。
+    """
+    if not records:
+        body = "（本轮没有工具结果）"
+    else:
+        payloads = _tool_payloads(state.get("messages", []))
+        body = "\n".join(
+            "- "
+            + tool_evidence_text(
+                str(record.get("tool_name")),
+                str(record.get("status")),
+                payloads.get(str(record.get("tool_call_id")))
+                or str(record.get("output_preview") or ""),
+                # 减去 "- " 前缀，整行不超过 limit
+                limit=max(limit - 2, 0),
+            )
+            for record in records
+        )
+    return f"{TOOL_DATA_OPEN}\n{body}\n{TOOL_DATA_CLOSE}"
 
 
 def _recent_records(state: AgentState, *, limit: int) -> list[ToolResultRecord]:
@@ -2034,12 +2180,6 @@ def _recent_records(state: AgentState, *, limit: int) -> list[ToolResultRecord]:
     return records[-limit:]
 
 
-def _wrap_evidence(entries: Sequence[str], *, limit: int) -> str:
-    """把证据行包成带不可信标记的文本，每行按 ``limit`` 截断。"""
-    body = "\n".join(entry[:limit] for entry in entries)
-    return f"{TOOL_DATA_OPEN}\n{body}\n{TOOL_DATA_CLOSE}"
-
-
 def _deterministic_summary(
     state: AgentState,
     *,
@@ -2054,9 +2194,20 @@ def _deterministic_summary(
     if goal:
         lines.append(f"- 任务：{goal}")
     lines.append(f"- 机械证据等级：{trust}")
+    # 确定性摘要也是给人看的结果：同样用具名+截断标注的证据渲染，避免"只看到元数据"的错觉
+    # （与反思、收尾合成共用同一层，见 :mod:`local_agent.graph.evidence`）。
+    payloads = _tool_payloads(state.get("messages", []))
     for record in _recent_records(state, limit=DETERMINISTIC_SUMMARY_RECORDS):
-        preview = " ".join(str(record.get("output_preview") or "").split())[:200]
-        lines.append(f"- {record.get('tool_name')}（{record.get('status')}）：{preview}")
+        lines.append(
+            "- "
+            + tool_evidence_text(
+                str(record.get("tool_name")),
+                str(record.get("status")),
+                payloads.get(str(record.get("tool_call_id")))
+                or str(record.get("output_preview") or ""),
+                limit=DETERMINISTIC_SUMMARY_CHARS,
+            )
+        )
     explanation = decision.anomaly_explanation.strip()
     if explanation:
         lines.append(f"- 异常解释：{explanation}")

@@ -6,11 +6,12 @@ T08 覆盖机械校验与幂等；T17 覆盖 LLM 完成度判断、机械压制�
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from local_agent.config import AppConfig
 from local_agent.graph import builder, nodes
@@ -855,3 +856,203 @@ def test_unfinished_task_does_not_claim_completed() -> None:
     # 闲聊/模型直接回答（没有反思结论）仍然算完成
     chat_state: dict[str, Any] = {"messages": [AIMessage(content="你好")], "task_status": "running"}
     assert nodes.final_response_node(chat_state)["task_status"] == "completed"  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- 证据渲染（§5.4）
+
+
+def test_reflection_prompt_includes_the_models_last_answer(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """反思提示必须带上"模型本轮答过什么"。
+
+    实测缺陷的另一半：模型已经按工具结果答完并给出结论，反思却看不到这段回答，于是继续要求
+    执行、最后变成向用户追问——用户看到一句与前面结论矛盾的追问。
+    """
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": True, "next_action": "finish"}
+    )
+    state = _verified_state(
+        plan=[PlanStep(id="s1", description="读取配置文件", status="running")],
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "read_file",
+                        "args": {"path": "a.py"},
+                        "id": "c1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(content='{"path": "a.py", "content": "x = 1"}', tool_call_id="c1", name="read_file"),
+            AIMessage(content="结论：a.py 里 x = 1。"),
+        ],
+    )
+
+    nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    prompt = next(text for text in model.structured_prompts if "任务反思" in text)
+    assert "【本轮模型回答】结论：a.py 里 x = 1。" in prompt
+    # 指令里必须写明它不能单独作为完成依据（否则反思会变成"模型说完成就完成"）
+    assert "不能单独作为完成依据" in prompt
+
+
+def test_reflection_facts_mark_a_missing_answer_and_cap_a_long_one() -> None:
+    """没有回答时说明清楚；回答过长时有界并标注（不把长回答整段发出去）。"""
+    from local_agent.reflection import reflector
+
+    facts = reflector.build_reflection_facts(task_goal="目标", trust="verified")
+    assert "【本轮模型回答】（本轮模型还没有给出回答）" in facts
+
+    long_answer = "很长的回答" * 400
+    capped = reflector.build_reflection_facts(
+        task_goal="目标", trust="verified", last_answer=long_answer
+    )
+    assert "回答过长，此处只展示前" in capped
+    assert len(capped) < len(long_answer)
+
+
+def test_reflection_prompt_shows_content_not_only_metadata(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """实测回归：反思提示里的工具证据必须能看到正文片段，并明确标注"这只是摘要"。
+
+    修复前只截前 160 个字符，而读文件结果是 JSON（元数据在前、正文在后），模型看到的恰好只有
+    ``path`` / ``encoding`` / ``sha256`` / ``line_count``——于是判断"正文被截断、任务没完成"，
+    连续多轮空转，最后反过来向用户索取**已经读到**的内容。
+    """
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": True, "next_action": "finish"}
+    )
+    payload = json.dumps(
+        {
+            "path": "a.py",
+            "encoding": "utf-8",
+            "sha256": "z" * 64,
+            "line_count": 79,
+            "truncated": False,
+            "is_binary": False,
+            "content": "\n".join(f"第 {index} 行" for index in range(1, 80)),
+        },
+        ensure_ascii=False,
+    )
+    state = _verified_state(
+        plan=[PlanStep(id="s1", description="读取配置文件", status="running")],
+        messages=[
+            HumanMessage(content="读 a.py"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "read_file",
+                        "args": {"path": "a.py"},
+                        "id": "c1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(content=payload, tool_call_id="c1", name="read_file"),
+        ],
+    )
+
+    nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    prompt = next(text for text in model.structured_prompts if "任务反思" in text)
+    assert "path=a.py" in prompt  # 标识字段仍完整
+    assert "content=第 1 行" in prompt  # 正文片段进了提示
+    assert "原文片段" in prompt  # 片段截断了就说清楚，别让模型以为工具没返回内容
+
+
+# --------------------------------------------------------------------------- 空转保护（§5.3）
+
+
+def _two_step_state(**overrides: Any) -> dict[str, Any]:
+    """一个还有一步没做完的任务：第一步已完成、第二步正在执行。"""
+    state = _verified_state(
+        plan=[
+            PlanStep(id="s1", description="读取配置文件", status="completed"),
+            PlanStep(id="s2", description="总结内容", status="running"),
+        ],
+        current_step_index=1,
+        **overrides,
+    )
+    return state
+
+
+def test_stall_guard_stops_rounds_without_any_action(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """空转保护：反思想继续，但模型连续两轮只给文字、没有任何可执行动作 → 停下来交给用户。
+
+    实测：真实模型读完文件后连续 10 轮输出"任务已完成 / 无新指令"，把 ``max_tool_loops`` 烧完
+    才被上限拦下，用户最终看到的是一句自相矛盾的追问。
+    """
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": False, "next_action": "continue"}
+    )
+    state = _two_step_state(
+        messages=[AIMessage(content="已完成"), AIMessage(content="无新指令，任务已完成")]
+    )
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    result = update["reflection_result"]
+    assert result.next_action == "ask_user"  # 不是 finish：计划还有步骤没走完
+    assert result.goal_achieved is False
+    assert [step.status for step in update["plan"]] == ["completed", "blocked"]
+    question = update["messages"][0].text
+    assert "连续 2 轮没有产生可执行的动作" in question
+    assert "请确认下一步要做什么" in question
+    assert any("空转保护" in record["summary"] for record in update["decision_trace"])
+
+
+def test_one_text_round_is_not_treated_as_stalling(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """只给一轮文字不算空转：模型先说一句、下一轮再动手是正常流程。"""
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": False, "next_action": "continue"}
+    )
+    state = _two_step_state(messages=[AIMessage(content="我先说明一下思路")])
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    assert update["reflection_result"].next_action == "continue"
+    assert [step.status for step in update["plan"]] == ["completed", "running"]
+
+
+def test_a_tool_round_resets_the_stall_counter(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """刚执行过工具的那一轮不算空转——计数只看尾部没有动作的连续轮次。"""
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": False, "next_action": "continue"}
+    )
+    state = _two_step_state(
+        messages=[
+            AIMessage(content="已完成"),
+            AIMessage(content="再确认一次"),
+            ToolMessage(content='{"path": "a.py", "content": "x"}', tool_call_id="c1", name="read_file"),
+        ]
+    )
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    assert update["reflection_result"].next_action == "continue"
+
+
+def test_stall_guard_ignores_finish_and_ask_user(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """空转保护只拦"还想继续"：正常收尾与正常追问不受影响。"""
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": True, "next_action": "finish"}
+    )
+    state = _two_step_state(messages=[AIMessage(content="已完成"), AIMessage(content="完成了")])
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    assert update["reflection_result"].next_action == "finish"
+    assert update["reflection_result"].goal_achieved is True

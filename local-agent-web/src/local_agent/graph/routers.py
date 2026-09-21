@@ -286,7 +286,8 @@ def route_after_approval(state: AgentState) -> str:
 
 #: 达到循环上限时仍然"想继续"的动作：只有它们会被上限拦住（架构 §11.5）。
 #: ``finish`` / ``ask_user`` 本轮就能收尾，不受上限影响——拦它们只会把正常结论变成"失败"。
-_LOOPING_ACTIONS: tuple[str, ...] = ("continue", "retry")
+#: 反思节点也用这个集合判"空转保护"（§5.3），所以是公开常量，避免两处各写一份。
+LOOPING_ACTIONS: tuple[str, ...] = ("continue", "retry")
 
 
 def completion_router_node(state: AgentState) -> AgentState:
@@ -311,7 +312,7 @@ def completion_route(state: AgentState) -> str:
     候选经过反思验证，所以这是**唯一**的写入出口——其余分支都不直接写库。
     """
     action = _next_action(state)
-    if action in _LOOPING_ACTIONS and loop_limit_reached(state):
+    if action in LOOPING_ACTIONS and loop_limit_reached(state):
         return ROUTE_LOOP_LIMIT
     route = {
         "continue": ROUTE_CONTINUE,
@@ -338,7 +339,7 @@ def _next_action(state: AgentState) -> str:
 
 def _loop_limit_blocks(state: AgentState) -> bool:
     """循环上限是否真的拦住了本轮（只在"还想继续/重试"时成立）。"""
-    return _next_action(state) in _LOOPING_ACTIONS and loop_limit_reached(state)
+    return _next_action(state) in LOOPING_ACTIONS and loop_limit_reached(state)
 
 
 def loop_limit_reached(state: AgentState) -> bool:

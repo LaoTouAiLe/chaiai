@@ -64,6 +64,8 @@ class RoutingFakeModel(GenericFakeChatModel):
     #: 相互独立：用户要求记住但没能提炼出候选时，脚本可以只把这一项设为 ``True``。
     memory_requested: bool = False
     seen_prompts: list[str] = Field(default_factory=list)
+    #: 结构化输出调用（反思、分类、记忆意图审核）收到的提示文本。
+    structured_prompts: list[str] = Field(default_factory=list)
     bound_tools: list[str] = Field(default_factory=list)
     decision_calls: int = 0
 
@@ -86,6 +88,10 @@ class RoutingFakeModel(GenericFakeChatModel):
             raise NotImplementedError("测试假模型不提供原生 JSON Schema 输出")
 
         def _invoke(_input: Any) -> Any:
+            # 结构化输出调用的提示单独记一份（反思、分类、记忆意图审核都走这条路）。
+            # 不能混进 seen_prompts：那里的约定是"主流程每次生成的提示"，既有用例用 seen_prompts[-1]
+            # 断言"最后一次出站提示"（例如召回记忆/AGENTS 规则有没有进提示），混进来会把结论带偏。
+            self._record_structured_prompt(_input)
             if schema.__name__ == "ReflectionDecision":
                 if self.fail_reflection:
                     raise RuntimeError("反思调用失败（测试故意触发）")
@@ -112,6 +118,14 @@ class RoutingFakeModel(GenericFakeChatModel):
     def classification(self) -> dict[str, Any]:
         """分类结果的结构化形式。"""
         return {"mode": self.decision, "reason": self.decision_reason}
+
+    def _record_structured_prompt(self, payload: Any) -> None:
+        """记录一次结构化输出调用的输入文本（供"提示里到底有没有某段内容"的断言）。"""
+        if isinstance(payload, list):
+            text = "\n".join(getattr(item, "text", str(item)) for item in payload)
+        else:
+            text = str(getattr(payload, "text", payload))
+        self.structured_prompts.append(text)
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[no-untyped-def]
         text = "\n".join(message.text for message in messages)

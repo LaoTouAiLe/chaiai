@@ -1926,7 +1926,10 @@ def test_recent_tool_records_keep_the_latest_results() -> None:
     records = nodes._recent_records(state, limit=5)
 
     assert [record["tool_call_id"] for record in records] == ["t3", "t4", "t5", "t6", "t7"]
-    assert nodes._evidence_entries(state) == [
+    # 证据行按"最近若干条"渲染，且包在不可信数据标记里（渲染层见 local_agent.graph.evidence）
+    body = nodes._wrap_evidence(state, records, limit=400)
+    assert body.startswith(nodes.TOOL_DATA_OPEN) and body.endswith(nodes.TOOL_DATA_CLOSE)
+    assert [line for line in body.splitlines() if line.startswith("- ")] == [
         f"- read_file（{'failed' if index == 1 else 'success'}）：结果{index}"
         for index in (3, 4, 5, 6, 7)
     ]
