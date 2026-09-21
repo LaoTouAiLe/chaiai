@@ -92,7 +92,12 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
     graph.add_conditional_edges(
         AGENT_DECISION_NODE,
         route_after_decision,
-        {ROUTE_WITH_TOOLS: SAFETY_GATE_NODE, ROUTE_WITHOUT_TOOLS: FINAL_RESPONSE_NODE},
+        {
+            ROUTE_WITH_TOOLS: SAFETY_GATE_NODE,
+            ROUTE_WITHOUT_TOOLS: FINAL_RESPONSE_NODE,
+            # 计划还没走完时先去反思（多步任务的第二步不能直接收尾）
+            ROUTE_REFLECT: REFLECTION_NODE,
+        },
     )
     graph.add_conditional_edges(
         SAFETY_GATE_NODE,

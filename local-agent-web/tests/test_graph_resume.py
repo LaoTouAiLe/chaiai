@@ -956,6 +956,40 @@ def test_compression_summarises_the_corrected_reply(
     assert "好的，我记住了" in _texts(list(result["messages"]))
 
 
+def test_plan_progress_survives_restart(
+    tmp_path: Path, model_factory: ModelFactory
+) -> None:
+    """T20：重启恢复后**计划与完成记录都还在**，不重新拆步、也不重做已完成步骤。
+
+    架构 §4.2 的两条边界一起生效：已确认成功的同一 ``run_id + tool_call_id`` 不得再次执行；
+    ``plan`` / ``current_step_index`` / ``completed_steps`` 随 Checkpoint 保留，所以恢复后不会
+    把"第二步"当成"第一步"重跑，也不会用新草稿覆盖已有计划。
+    """
+    graph = _graph(_database(tmp_path))
+    (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
+    config = load_config(PROJECT_ROOT / "config.yaml.example")
+    model = model_factory(
+        decision="tool",
+        reply="读完了",
+        tool_calls=[{"name": "read_file", "args": {"path": "note.txt"}, "id": "call_1"}],
+        plan_steps=["读取 note.txt", "总结内容"],
+        reflection={"goal_achieved": True, "next_action": "finish"},
+    )
+
+    result = _run(graph, _context_for(tmp_path, model, config), "读取 note.txt")
+
+    step_id = result["plan"][0].id
+    assert result["current_step_index"] == 1
+    assert step_id in result["completed_steps"]
+
+    # 换一条连接读回（等价于重启后恢复）：进度不能丢
+    reloaded = builder.read_thread_state(graph, THREAD)
+
+    assert [step.description for step in reloaded["plan"]] == ["读取 note.txt", "总结内容"]
+    assert reloaded["current_step_index"] == 1
+    assert step_id in reloaded["completed_steps"]
+
+
 def test_new_request_resets_turn_scoped_state(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:

@@ -237,8 +237,30 @@ def route_after_compression(state: AgentState) -> str:
 
 
 def route_after_decision(state: AgentState) -> str:
-    """决策节点之后：有工具调用就过安全门，否则直接产出回答。"""
-    return ROUTE_WITH_TOOLS if state.get("pending_tool_calls") else ROUTE_WITHOUT_TOOLS
+    """决策节点之后：有工具调用就过安全门；计划还没走完先反思；其余直接产出回答。
+
+    计划里还有未完成步骤时**不能直接收尾**：模型偶尔会在第二步就给出"任务完成了"的回答，
+    直接进 ``final_response_node`` 会让整张图在第二步结束、第三步永远不执行——而且
+    ``task_status`` 还显示 ``running``，用户看到一个半截任务（复审实证）。
+    先走反思，由 ``_advance_plan`` 的机械规则决定继续还是收尾（完成一步不等于完成整个任务）。
+    """
+    if state.get("pending_tool_calls"):
+        return ROUTE_WITH_TOOLS
+    if _plan_has_unfinished_steps(state):
+        return ROUTE_REFLECT
+    return ROUTE_WITHOUT_TOOLS
+
+
+def _plan_has_unfinished_steps(state: AgentState) -> bool:
+    """多步计划里是否还有 ``pending`` / ``running`` 的步骤。
+
+    **单步计划不走这条路**：单步任务的正常收尾就是"模型直接给回答"，把它也拉去反思会改变既有
+    行为（验收基线：单步任务不回归）。多步计划里最后一步直接回答时多绕一次反思，结论不变。
+    """
+    plan = list(state.get("plan") or [])
+    if len(plan) <= 1:
+        return False
+    return any(step.status in {"pending", "running"} for step in plan)
 
 
 def route_after_safety(state: AgentState) -> str:

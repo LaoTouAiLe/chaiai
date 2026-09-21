@@ -101,6 +101,63 @@ class ReflectionDecision(BaseModel):
     )
 
 
+#: 计划草拟的固定标记；提示与测试都用它识别"这是一次计划草拟调用"。
+PLAN_DRAFT_MARKER = "任务计划草拟"
+
+#: 多步计划的最大步数：步骤太多会挤占工具循环预算（``agent.max_tool_loops`` 仍是总兜底）。
+MAX_PLAN_STEPS = 5
+
+#: 计划草拟指令（架构 §5.3 的多步计划）。
+PLAN_DRAFT_INSTRUCTION = (
+    f"你在为本机 Agent 做一次{PLAN_DRAFT_MARKER}：把用户请求拆成**按顺序执行**的最少步骤。"
+    "只输出结构化结果，不要输出任何其他文字。\n"
+    "\n"
+    "要求：\n"
+    f"1. 1~{MAX_PLAN_STEPS} 步；能一步做完就给一步，不要为了凑数拆细。\n"
+    "2. 每步写成可执行、可验证的动作（例如「读取 X 并确认 Y」）；不要写「分析一下」这类无法验证的话。\n"
+    "3. 步骤按依赖顺序排列，后面的步骤可以使用前面的结果。\n"
+    "4. 不要在这里决定用哪个工具，也不要编造任何结果。\n"
+)
+
+
+class PlanDraft(BaseModel):
+    """模型给出的计划草稿（只有步骤描述，不含工具与结果）。"""
+
+    steps: list[str] = Field(default_factory=list, description="按顺序执行的最少步骤描述")
+
+
+def draft_plan(
+    model: BaseChatModel,
+    *,
+    request: str,
+    capabilities: ModelCapabilities | None = None,
+) -> tuple[str, ...]:
+    """把用户请求拆成有序步骤；拆不出来时返回空元组（调用方退化为单步）。
+
+    Args:
+        model: 聊天模型（来自 RuntimeContext 的适配器）。
+        request: 用户请求（归一化后的文本）。
+        capabilities: 模型能力；支持原生 JSON Schema 时优先使用。
+
+    Returns:
+        步骤描述（已去空、截断到 :data:`MAX_PLAN_STEPS`）；空元组表示"无法拆步"。
+
+    Raises:
+        StructuredOutputError: 结构化输出降级链全部失败（调用方按单步退化）。
+    """
+    draft = call_structured(
+        model,
+        [
+            SystemMessage(content=PLAN_DRAFT_INSTRUCTION),
+            HumanMessage(content=f"【用户请求】{request.strip() or '（空）'}"),
+        ],
+        PlanDraft,
+        capabilities=capabilities,
+    )
+    steps = [str(item).strip() for item in draft.steps]
+    return tuple(item for item in steps if item)[:MAX_PLAN_STEPS]
+
+
 #: 记忆意图审核的固定标记；提示与测试都用它识别"这是一次记忆意图审核调用"。
 MEMORY_INTENT_MARKER = "记忆意图审核"
 

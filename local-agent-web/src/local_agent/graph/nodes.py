@@ -101,6 +101,7 @@ from local_agent.reflection.reflector import (
     TOOL_DATA_CLOSE,
     TOOL_DATA_OPEN,
     ReflectionDecision,
+    draft_plan,
     memory_intent_text,
     reflect,
     reflect_memory_intent,
@@ -121,7 +122,14 @@ from local_agent.security.approval import (
     find_approval,
     find_rejection,
 )
-from local_agent.security.policy import SafetyDecision, SecurityPolicy
+from local_agent.security.policy import (
+    ALWAYS_APPROVAL_TOOLS,
+    KNOWN_TOOLS,
+    SHELL_TOOLS,
+    WRITE_TOOLS,
+    SafetyDecision,
+    SecurityPolicy,
+)
 from local_agent.tools.file_tools import OUTPUT_PREVIEW_CHARS
 from local_agent.tools.result_types import ToolResultRecord, ToolResultStatus
 
@@ -147,6 +155,14 @@ REJECTED_REPLY = (
 
 #: 反思给出的下一步动作（架构 §4.3 的 ``ReflectionResult.next_action``）。
 ReflectionAction = Literal["continue", "retry", "ask_user", "finish"]
+
+#: 上次运行的副作用没有确认结果时给模型的回填内容（架构 §4.2）。
+#: 写清"为什么没执行"与"怎么继续"，否则模型只会把失败原样转述给用户。
+_STALE_SIDE_EFFECT_NOTE = (
+    "{tool} 没有执行：上一次运行放行了同一类动作，但结果没有写进 Checkpoint，"
+    "副作用可能已经发生。为避免重复执行，本次不自动重放。"
+    "请先核对文件内容或命令影响；确认后再让我执行一次。"
+)
 
 
 # --------------------------------------------------------------------------- 闲聊分支
@@ -643,30 +659,60 @@ def chat_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState
 
 
 def planner_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
-    """工具分支的规划入口。
+    """工具分支的规划入口（T05 / T17 / T20）。
 
-    T05 只确定任务目标与循环上限（架构 §11.5）；T17 起如果没有计划就生成**单步**计划，让反思
-    节点有可更新的对象（当前步状态、结果摘要、重试次数）。多步计划、依赖与重规划属于 T20。
-    ``task_goal`` 与已有计划都保留，便于重入时不丢目标。
+    T05 确定任务目标与循环上限（架构 §11.5）；T17 让反思节点有可更新的对象；**T20 起生成多步计划**：
+    先请模型把请求拆成 1~``MAX_PLAN_STEPS`` 步，拆不出来就退化为单步——退化保证"模型不会拆步"时
+    行为与 T19 一致，不回归。
+
+    计划只在**没有计划**时生成：同一任务内的后续轮次沿用已有计划，重启恢复（重入）也不会重新拆步，
+    所以已完成步骤不会被新计划覆盖。步骤 id 形如 ``<run_id>:step-N``，``completed_steps`` 里留下的
+    历史任务步骤因此不会让新任务误判"这一步已完成"。
     """
     context = runtime.context
     goal = state.get("task_goal") or str(state.get("normalized_request", ""))
     plan = list(state.get("plan") or [])
+    trace: list[DecisionRecord] = []
     if not plan:
+        run_id = str(state.get("run_id") or "run")
         plan = [
             PlanStep(
-                id=f"{state.get('run_id') or 'run'}:step-1",
-                description=goal.strip() or "完成用户请求",
-                status="running",
+                id=f"{run_id}:step-{index + 1}",
+                description=description,
+                # 第一步立刻 running、其余 pending："哪一步在做"与"哪些还没轮到"在 State 里可见
+                status="running" if index == 0 else "pending",
                 expected_evidence="工具结果与最终回答",
             )
+            for index, description in enumerate(_draft_steps(context, goal))
         ]
-    return {
+        trace.append(
+            _decision(state, stage=PLANNER_NODE, summary=f"已建立 {len(plan)} 步计划")
+        )
+    update: AgentState = {
         "task_goal": goal,
         "max_loop_count": context.app_config.agent.max_tool_loops,
         "task_status": "running",
         "plan": plan,
     }
+    if not state.get("plan"):
+        update["current_step_index"] = 0  # 新计划从头开始；重入时保留已有进度
+    if trace:
+        update["decision_trace"] = merge_appended(
+            state.get("decision_trace", []), trace, decision_record_key
+        )
+    return update
+
+
+def _draft_steps(context: RuntimeContext, goal: str) -> tuple[str, ...]:
+    """请模型把请求拆成步骤；拆步失败**合法退化**为单步（只进决策轨迹，不记错误事件）。"""
+    single = (goal.strip() or "完成用户请求",)
+    try:
+        steps = draft_plan(
+            context.model_adapter, request=goal, capabilities=context.model_capabilities
+        )
+    except Exception:  # noqa: BLE001 —— 拆步是增强而非必需，任何失败都按单步继续
+        return single
+    return steps or single
 
 
 def agent_decision_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
@@ -778,6 +824,9 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
                             stage="tool_start",
                             summary=f"沿用已批准的动作 {name}",
                             tool_call_id=call_id,
+                            # 放行标记必须带上工具名：更早运行遗留的标记要靠它判断
+                            # "遗留的是不是副作用动作"，否则跨运行只能按 id 猜（架构 §4.2）
+                            salt=name,
                         )
                     )
                 elif approval is None:
@@ -850,6 +899,8 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
                     stage="tool_start",
                     summary=f"放行 {name}",
                     tool_call_id=call_id,
+                    # 同"沿用已批准"分支：工具名进 salt，供跨运行识别遗留的副作用动作
+                    salt=name,
                 )
             )
             continue
@@ -948,6 +999,12 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
     records: list[DecisionRecord] = []
     errors: list[ErrorEvent] = []
 
+    # 更早运行留下的"已放行但没有确认结果"的副作用动作：**执行前**就要拦住（架构 §4.2）。
+    # 检查放在这里而不是反思里：反思发生时副作用已经又跑过一次了（复审实证）。按**工具名**
+    # 匹配而不是动作指纹——副作用可能已经改过目标文件，指纹必然已经变了，只有工具名还稳定。
+    stale = stale_side_effects(state)
+    stale_names = {item.tool_name for item in stale}
+
     for call in state.get("pending_tool_calls", []):
         call_id = _call_id(call)
         name = call["name"]
@@ -959,6 +1016,54 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
                     state,
                     stage="tool_execution",
                     summary=f"{name} 已有确认结果，跳过重复执行",
+                    tool_call_id=call_id,
+                )
+            )
+            continue
+
+        if name in stale_names:
+            # 上次运行放行了同一类动作却没有留下结果 → 副作用可能已经发生。架构 §4.2：
+            # 一律视为不确定、不得自动重放，先让人核对文件或命令影响。
+            note = _STALE_SIDE_EFFECT_NOTE.format(tool=name)
+            messages.append(ToolMessage(content=note, tool_call_id=call_id, name=name))
+            events.append(
+                ToolEvent(
+                    tool_call_id=call_id,
+                    tool_name=name,
+                    redacted_arguments=_redacted_arguments(call, policy),
+                    status="denied",
+                    output_preview=note,
+                    output_digest=_digest(note),
+                    run_id=_run_id(state),
+                )
+            )
+            results.append(
+                ToolResultRecord(
+                    tool_call_id=call_id,
+                    tool_name=name,
+                    status="denied",
+                    truncated=False,
+                    output_preview=note,
+                    output_digest=_digest(note),
+                    run_id=_run_id(state),
+                )
+            )
+            records.append(
+                _decision(
+                    state,
+                    stage="tool_execution",
+                    summary=f"{name} 因上次运行未确认的副作用被跳过",
+                    tool_call_id=call_id,
+                )
+            )
+            errors.append(
+                _error(
+                    state,
+                    stage="tool_execution",
+                    message=(
+                        f"上次运行放行了 {name} 但没有确认结果，副作用可能已发生，"
+                        "已跳过自动重放并要求人工核对"
+                    ),
                     tool_call_id=call_id,
                 )
             )
@@ -1081,6 +1186,19 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
                 )
             )
 
+    # 遗留放行已经提示过人工核对 → 记下来，之后不再拦截。没有这一步，一次异常结束会让
+    # 之后每一次运行都拒绝执行副作用（永久阻断，用户没有任何解除手段）。
+    for item in stale:
+        records.append(
+            _decision(
+                state,
+                stage=SIDE_EFFECT_RECHECK_STAGE,
+                summary=f"已就 {item.tool_name} 的未确认放行提示人工核对",
+                tool_call_id=item.tool_call_id,
+                salt=item.run_id,
+            )
+        )
+
     update: AgentState = {
         "decision_trace": merge_appended(
             state.get("decision_trace", []), records, decision_record_key
@@ -1131,7 +1249,8 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
         if _in_current_task(record.get("run_id"), scope=scope)
     }
     payloads = _tool_payloads(state.get("messages", []))
-    checks: list[ToolEvidence] = []
+    # 每个工具只保留**最后一次**的校验结果（见下面 trust 的说明）；证据列表仍全量重算。
+    latest_by_tool: dict[str, ToolEvidence] = {}
     anomalies: list[str] = []
     evidences: list[EvidenceReference] = []
     summaries: list[str] = []
@@ -1145,7 +1264,7 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
         check = validate_tool_event(
             event, record, payload=payloads.get(event.tool_call_id)
         )
-        checks.append(check)
+        latest_by_tool[event.tool_name] = check
         if check.evidence_level != "verified":
             anomalies.extend(f"{event.tool_name}: {reason}" for reason in check.reasons)
         evidences.append(
@@ -1159,7 +1278,11 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
         )
         summaries.append(f"{event.tool_name}({event.status}) → {event.output_preview[:160]}")
 
-    trust = summarize_trust(checks)
+    # ``tool_events`` 覆盖整个任务，所以直接汇总全量会让**第二步的失败永久留在集合里**：
+    # 即使重试或换了做法已经成功，"第二步失败、调整后成功"也一辈子判不成完成（复审实证）。
+    # 因此按**工具名**取最后一次结果——它表达的正是"后续尝试有没有修复这个工具的失败"。
+    # 注意只影响整体可信度：``final_evidence`` 仍按 §4.2 全量重算，异常清单也照旧全量记录。
+    trust = summarize_trust(list(latest_by_tool.values()))
     for error_record in state.get("error_events", []):
         if not _in_current_task(error_record.get("run_id"), scope=scope):
             continue
@@ -1185,6 +1308,29 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
         notes.append(retry_note)
     if failure is not None:
         notes.append(f"反思决策不可用（{failure}），已按机械结论兜底")
+    # T20：未确认的副作用一律不得自动重放（架构 §4.2/§251）——改成请用户核对文件或命令影响。
+    if pending_uncertain:
+        goal_achieved = False
+        next_action = "ask_user"
+        decision = decision.model_copy(
+            update={
+                "ask_user_reason": (
+                    f"上一次运行里有 {len(pending_uncertain)} 个调用已放行但没有确认结果"
+                    f"（{'、'.join(pending_uncertain)}），可能有未确认的副作用。"
+                    "请先核对文件或命令的实际影响，再决定是否继续。"
+                )
+            }
+        )
+        notes.append("存在未确认的副作用：不自动重放，改为请用户核对")
+    # T20：推进计划（完成一步不等于完成整个任务；重规划必须真的改计划）
+    progress = _advance_plan(
+        state, goal_achieved=goal_achieved, next_action=next_action, decision=decision
+    )
+    next_action = progress.next_action
+    # 计划没走完时 `goal_achieved` 被压回 False：任务状态不能因为"第一步做完"就显示完成
+    goal_achieved = progress.goal_achieved
+    if progress.note:
+        notes.append(progress.note)
 
     # ask_user / finish 直接进 final_response_node，而 final_response_node 只取已有 AI 文本：
     # 不在这里补齐可展示的回答，这两个分支会得到 final_response=None + failed（复审实测）。
@@ -1218,15 +1364,17 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
             ),
             evidence=tuple(unique_evidence),
         ),
-        "plan": _updated_plan(
-            state, goal_achieved=goal_achieved, next_action=next_action, decision=decision
-        ),
+        "plan": progress.plan,
+        "current_step_index": progress.current_step_index,
         "retry_count": int(state.get("retry_count", 0))
         + (1 if next_action == "retry" else 0),
         "decision_trace": merge_appended(
             state.get("decision_trace", []), [trace], decision_record_key
         ),
     }
+    if progress.completed_steps:
+        # 只追加、不清空（追加型 reducer）；步骤 id 含 run_id，历史任务的步骤不会命中新任务
+        update["completed_steps"] = list(progress.completed_steps)
     if endings:
         update["messages"] = endings
     if final_answer is not None:
@@ -1400,13 +1548,27 @@ def _apply_mechanical_guard(
 def _apply_retry_limit(
     state: AgentState, next_action: ReflectionAction, *, max_retries: int
 ) -> tuple[ReflectionAction, str | None]:
-    """重试次数达到 ``agent.max_retries_per_step`` 后不再重试，改为向用户说明。"""
+    """重试次数达到 ``agent.max_retries_per_step`` 后不再重试，改为向用户说明。
+
+    T20 起按**当前步骤**的 ``retry_count`` 判定：进入下一步后从 0 重新开始。用整个任务的计数器会让
+    第一步花掉的重试额度把后面每一步都锁死（复审指出的口径）。没有可用计划对象时（直接把 State 传给
+    节点的单测）回退到顶层 ``retry_count``。
+    """
     if next_action != "retry":
         return next_action, None
-    used = int(state.get("retry_count", 0))
+    used = _current_step_retry_count(state)
     if used >= max_retries:
-        return "ask_user", f"重试已达上限（{max_retries} 次），改为向用户说明"
+        return "ask_user", f"当前步骤重试已达上限（{max_retries} 次），改为向用户说明"
     return next_action, None
+
+
+def _current_step_retry_count(state: AgentState) -> int:
+    """当前步骤已重试的次数；没有可用步骤时回退到顶层 ``retry_count``。"""
+    plan = list(state.get("plan") or [])
+    index = int(state.get("current_step_index", 0))
+    if 0 <= index < len(plan):
+        return int(plan[index].retry_count)
+    return int(state.get("retry_count", 0))
 
 
 def _updated_plan(
@@ -1435,6 +1597,119 @@ def _updated_plan(
         retry_count=step.retry_count + (1 if next_action == "retry" else 0),
     )
     return plan
+
+
+@dataclass(frozen=True, kw_only=True)
+class _PlanProgress:
+    """一次反思之后计划的推进结果。"""
+
+    plan: list[PlanStep]
+    current_step_index: int
+    #: 本次新增的已完成步骤 id（追加进 ``completed_steps``）。
+    completed_steps: tuple[str, ...]
+    next_action: ReflectionAction
+    #: 计划还没走完时强制置 ``False``：否则"第一步做完"会被当成"任务完成"，
+    #: ``task_status`` 会显示 completed，与"仍在继续执行计划"自相矛盾。
+    goal_achieved: bool
+    note: str | None = None
+
+
+def _advance_plan(
+    state: AgentState,
+    *,
+    goal_achieved: bool,
+    next_action: ReflectionAction,
+    decision: ReflectionDecision,
+) -> _PlanProgress:
+    """按反思结论推进计划（T20 的三条硬语义，复审定稿）。
+
+    1. **完成一步 ≠ 完成整个任务**：当前步完成、但计划里还有未走完的步骤时，即使模型给了
+       ``finish`` 也改成 ``continue``——这是机械规则，不接受"第一步做完就宣布收尾"；只有全部步骤
+       完成后才允许收尾。当前步同时记入 ``completed_steps``（步骤 id 含 ``run_id``，天然按任务隔离）。
+    2. **重规划必须真的改计划**：``plan_adjustment`` 非空且当前步失败时，把该步标为 ``failed``，
+       并**在它之后插入一步**（描述即调整内容），``current_step_index`` 指向新步。只把调整写进
+       ``result_summary`` 不算重规划——那样模型以为改了、执行仍按老计划走。T20 只实现这一种调整
+       方式：够用、可验证，也不会误伤已完成步骤。
+    3. **已完成步骤不可重写、不可重跑**：只更新当前步及其之后；``completed_steps`` 只追加、不清空。
+    """
+    plan = list(
+        _updated_plan(
+            state, goal_achieved=goal_achieved, next_action=next_action, decision=decision
+        )
+    )
+    index = int(state.get("current_step_index", 0))
+    if not plan or index < 0 or index >= len(plan):
+        return _PlanProgress(
+            plan=plan,
+            current_step_index=index,
+            completed_steps=(),
+            next_action=next_action,
+            goal_achieved=goal_achieved,
+        )
+    step = plan[index]
+    known = set(state.get("completed_steps") or ())
+    completed: tuple[str, ...] = ()
+    action = next_action
+    achieved = goal_achieved
+    note: str | None = None
+    if goal_achieved:
+        if step.id not in known:
+            completed = (step.id,)
+        remaining = [item for item in plan[index + 1 :] if item.status != "completed"]
+        if remaining:
+            action = "continue"
+            # 计划没走完就不是"任务完成"：否则 task_status 会显示 completed，与"仍在继续"矛盾
+            achieved = False
+            note = (
+                f"步骤 {index + 1}「{step.description}」已完成，计划还有 {len(remaining)} 步，"
+                "继续执行（完成一步不等于完成整个任务）"
+            )
+            next_index = index + 1
+            plan[next_index] = replace(plan[next_index], status="running")
+        else:
+            next_index = index
+    elif _should_replan(step, next_action=next_action, decision=decision):
+        adjustment = decision.plan_adjustment.strip()
+        plan[index] = replace(step, status="failed")
+        plan.insert(
+            index + 1,
+            PlanStep(
+                id=f"{_step_scope(step.id)}:step-{len(plan) + 1}",
+                description=adjustment,
+                status="running",
+                expected_evidence="按调整做法之后的工具结果",
+            ),
+        )
+        next_index = index + 1
+        action = "continue"
+        note = f"步骤 {index + 1} 失败，按反思的调整插入新步骤「{adjustment}」"
+    else:
+        next_index = index
+    return _PlanProgress(
+        plan=plan,
+        current_step_index=next_index,
+        completed_steps=completed,
+        next_action=action,
+        goal_achieved=achieved,
+        note=note,
+    )
+
+
+def _should_replan(
+    step: PlanStep, *, next_action: ReflectionAction, decision: ReflectionDecision
+) -> bool:
+    """是否要按 ``plan_adjustment`` 真的改计划（T20 只处理这一种调整方式）。"""
+    if next_action not in ("continue", "retry"):
+        return False
+    if step.status == "completed":
+        return False
+    return bool(decision.plan_adjustment.strip())
+
+
+def _step_scope(step_id: str) -> str:
+    """从步骤 id 取出任务作用域前缀（``<run_id>:step-N`` → ``<run_id>``）。"""
+    head, sep, _ = step_id.partition(":step-")
+    return head if sep else step_id
 
 
 #: ``finish`` 分支的合成指令：要求不绑定工具地给出最终回答（架构 §5.3 的完成出口）。
@@ -2491,30 +2766,45 @@ def approval_interrupt_node(state: AgentState, runtime: Runtime[RuntimeContext])
         reason=str(decision_input.get("reason") or ""),
     )
 
+    approved_id = str(request.get("tool_call_id") or "")
+    approved_name = str(request.get("tool_name") or "")
+    records: list[DecisionRecord] = [
+        _decision(
+            state,
+            stage="approval_interrupt",
+            summary=f"人工决策 {choice}：{approved_name}",
+            tool_call_id=approved_id,
+        )
+    ]
+    if choice == "approve":
+        # 人工批准也是一次**放行**，必须在这里留下放行标记：批准后走的是
+        # ``approval_interrupt_node → tool_execution_node``，**不经过安全门**，
+        # 所以以前整条审批路径都没有放行标记——批准后执行中崩溃时无从判断
+        # "副作用可能已经发生"，重启后会把同一个副作用再执行一次（复审实证）。
+        records.append(
+            _decision(
+                state,
+                stage="tool_start",
+                summary=f"人工批准后放行 {approved_name}",
+                tool_call_id=approved_id,
+                salt=approved_name,
+            )
+        )
+
     update: AgentState = {
         "pending_approval": None,
         "approval_history": merge_appended(
             state.get("approval_history", []), [record], approval_key
         ),
         "decision_trace": merge_appended(
-            state.get("decision_trace", []),
-            [
-                _decision(
-                    state,
-                    stage="approval_interrupt",
-                    summary=f"人工决策 {choice}：{request.get('tool_name')}",
-                    tool_call_id=str(request.get("tool_call_id") or ""),
-                )
-            ],
-            decision_record_key,
+            state.get("decision_trace", []), records, decision_record_key
         ),
     }
 
     if choice == "approve":
         # 用审批请求里的参数重建调用：执行的就是人工看到并批准的那一份（架构 §5.3）
-        approved_id = str(request.get("tool_call_id") or "")
         approved_call: ToolCall = {
-            "name": str(request.get("tool_name") or ""),
+            "name": approved_name,
             "args": dict(request.get("arguments") or {}),
             "id": approved_id,
             "type": "tool_call",
@@ -2714,6 +3004,104 @@ def unconfirmed_calls(state: AgentState) -> list[str]:
         if _in_current_task(record.get("run_id"), scope=scope)
     }
     return sorted(_started_call_ids(state) - confirmed)
+
+
+#: "已就把某个遗留放行提示过人工核对"的决策记录 stage：写入后同一批遗留不再拦截。
+#: 没有它，一次异常结束会让之后每一次运行都拒绝执行副作用（永久阻断，用户无法解除）。
+SIDE_EFFECT_RECHECK_STAGE = "side_effect_recheck"
+
+
+@dataclass(frozen=True, kw_only=True)
+class StaleSideEffect:
+    """更早运行遗留的"已放行但没有确认结果"的副作用调用。"""
+
+    run_id: str
+    tool_call_id: str
+    tool_name: str
+
+
+def _is_side_effect_tool(tool_name: str) -> bool:
+    """该工具是否会改动机器状态（架构 §4.2 说的"文件或 Shell 副作用"）。
+
+    只读工具重复调用没有副作用，不该被"不确定"挡住——否则一次崩溃会让读文件也做不了。
+    """
+    return tool_name in (*WRITE_TOOLS, *SHELL_TOOLS, *ALWAYS_APPROVAL_TOOLS)
+
+
+def _parse_tool_start_record(record: Mapping[str, Any]) -> tuple[str, str, str] | None:
+    """解析 ``tool_start`` 决策记录，返回 ``(run_id, tool_call_id, tool_name)``。
+
+    ``record_id`` 形如 ``{run_id}:decision:tool_start:{loop_count}:{tool_call_id}[:{tool_name}]``，
+    最后一段的工具名由 ``_decision(..., salt=name)`` 写入（见 ``safety_gate_node`` 与
+    ``approval_interrupt_node``）。解析集中在这里，避免调用方各自切字符串。
+    """
+    parts = str(record.get("record_id", "")).split(":")
+    if len(parts) < 3 or parts[1] != "decision" or parts[2] != "tool_start":
+        return None
+    call_id = str(record.get("tool_call_id") or "")
+    if not call_id:
+        return None
+    tail = parts[-1] if len(parts) >= 6 else ""
+    # 只有"确实是已知工具名"才认作工具名：调用 ID 里带冒号时最后一段会是 ID 的一部分
+    tool_name = tail if tail in KNOWN_TOOLS else ""
+    return (parts[0], call_id, tool_name)
+
+
+def stale_side_effects(state: AgentState) -> list[StaleSideEffect]:
+    """**更早运行**里"已放行但没有确认结果"的副作用调用（架构 §4.2）。
+
+    与 :func:`unconfirmed_calls` 的区别是**时间视角**：
+
+    - ``unconfirmed_calls`` 看**当前**运行——放行与结果都写在同一次运行里，所以它只回答
+      "这一轮是不是正常收尾了"（页面重启后的提示、反思的异常清单）；
+    - 本函数看**更早**的运行——那些放行标记的结果永远不会再出现了（产生它的运行已经结束），
+      它们才是"副作用可能已发生、但 Checkpoint 没有确认"的真正来源，也正是执行前必须拦住的东西。
+
+    正常完成的运行里每个放行标记都有配对结果，所以本函数只在**异常结束**后才非空。
+    三类标记被排除：当前运行的在途标记（那是本轮正要执行的）、人工已按动作指纹拒绝/改参数的
+    （不可能产生副作用）、以及已经提示过人工核对的（不重复拦截）。
+    """
+    scope = current_task_scope(state)
+    confirmed = {
+        (str(record.get("run_id") or ""), str(record.get("tool_call_id") or ""))
+        for record in state.get("tool_results", [])
+    }
+    cancelled = {
+        str(record.get("tool_call_id") or "")
+        for record in state.get("approval_history", [])
+        if str(record.get("decision")) in {"reject", "edit"}
+    }
+    rechecked: set[str] = set()
+    for record in state.get("decision_trace", []):
+        parts = str(record.get("record_id", "")).split(":")
+        if (
+            len(parts) >= 3
+            and parts[1] == "decision"
+            and parts[2] == SIDE_EFFECT_RECHECK_STAGE
+            and record.get("tool_call_id")
+        ):
+            rechecked.add(str(record["tool_call_id"]))
+    # 两遍遍历：先收齐"已提示过核对"的记录，再判定遗留。一遍遍历时旧记录排在前面，
+    # 判定它的时候还读不到后面那条 recheck 记录（复审实测：第二次仍被拦）。
+    stale: dict[str, StaleSideEffect] = {}
+    for record in state.get("decision_trace", []):
+        parsed = _parse_tool_start_record(record)
+        if parsed is None:
+            continue
+        run_id, call_id, tool_name = parsed
+        if run_id == scope:  # 当前运行的在途标记：交给 unconfirmed_calls，不能在这里拦
+            continue
+        if (run_id, call_id) in confirmed:
+            continue
+        if call_id in cancelled or call_id in rechecked:
+            continue
+        if not _is_side_effect_tool(tool_name):
+            continue
+        stale.setdefault(
+            call_id,
+            StaleSideEffect(run_id=run_id, tool_call_id=call_id, tool_name=tool_name),
+        )
+    return list(stale.values())
 
 
 def _dedupe_evidence(evidences: Sequence[EvidenceReference]) -> list[EvidenceReference]:

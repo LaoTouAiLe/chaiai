@@ -199,7 +199,16 @@ def _record_scope(*, loop_count: int, tool_call_id: str | None, salt: str | None
 
 @dataclass(frozen=True)
 class PlanStep:
-    """架构 §4.3；``status`` 的取值集合由 T20 确定。"""
+    """架构 §4.3 的计划步骤。
+
+    ``status`` 取值（T20 定稿）：``pending``（还没轮到）/ ``running``（正在做）/
+    ``completed``（做完且证据通过）/ ``failed``（失败且不再重试）/ ``skipped``（被重规划跳过）/
+    ``blocked``（需要用户补充信息才能继续）。
+
+    ``retry_count`` 是**本步骤**的重试次数：进入下一步后从 0 重新开始（``agent.max_retries_per_step``
+    按步骤判定，``agent.max_tool_loops`` 仍是整个任务的总上限）。``id`` 含 ``run_id``，所以
+    ``completed_steps`` 里留下的历史任务步骤不会让新任务误判"这一步已完成"。
+    """
 
     id: str
     description: str

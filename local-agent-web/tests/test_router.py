@@ -24,6 +24,7 @@ from local_agent.context import agents_loader, prompt_context
 from local_agent.exceptions import MemoryStoreError
 from local_agent.graph import builder, nodes, projection, routers
 from local_agent.graph.routers import ROUTE_CLASSIFIER_MARKER, RouteDecision
+from local_agent.reflection.reflector import ReflectionDecision
 
 
 def _assert_usage_adds_up(result: dict[str, Any]) -> None:
@@ -2175,6 +2176,183 @@ def test_successful_recall_keeps_the_answer_untouched(
     )
 
     assert "直接告诉我" in str(result["final_response"])
+
+
+def _plan_state(
+    *, steps: int = 3, index: int = 1, completed: tuple[str, ...] = (), retry_count: int = 0
+) -> dict[str, Any]:
+    """构造一份带计划的最小 State（供 ``_advance_plan`` / ``_apply_retry_limit`` 直调）。"""
+    return {
+        "run_id": "run-1",
+        "plan": [
+            nodes.PlanStep(
+                id=f"run-1:step-{item + 1}",
+                description=f"第 {item + 1} 步",
+                status="running" if item == index else "pending",
+                retry_count=retry_count if item == index else 0,
+            )
+            for item in range(steps)
+        ],
+        "current_step_index": index,
+        "completed_steps": list(completed),
+    }
+
+
+def test_multi_step_plan_continues_after_the_first_step(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """T20：计划有多步时，**完成第一步不等于完成整个任务**，三步必须真的走完。
+
+    模型基于已验证的工具结果想 ``finish``，机械规则仍改成 ``continue`` 并推进索引——否则整图会在
+    第二步收尾、第三步永远不执行，而 ``task_status`` 还是 ``running``，用户拿到一个半截任务
+    （复审实证：修复前这条用例只断言到索引 1 就结束）。
+    """
+    (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
+    model = model_factory(
+        decision="tool",
+        reply="读完了",
+        tool_calls=[{"name": "read_file", "args": {"path": "note.txt"}, "id": "call_1"}],
+        plan_steps=["读取 note.txt", "总结内容", "给出结论"],
+        reflection={"goal_achieved": True, "next_action": "finish"},
+    )
+
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "读取并总结 note.txt"},
+        context=_context_with(tmp_path, model, app_config),
+    )
+
+    plan = list(result["plan"])
+    assert [step.description for step in plan] == ["读取 note.txt", "总结内容", "给出结论"]
+    assert [step.status for step in plan] == ["completed", "completed", "completed"]
+    assert result["current_step_index"] == 2  # 停在最后一步：没有"下一步"可推进
+    assert [step.id for step in plan] == list(result["completed_steps"])  # 三步都记了完成
+    assert result["task_status"] == "completed"
+    # 中途的反思被机械改成 continue：出现过"完成一步不等于完成整个任务"的规范化说明
+    assert any(
+        "完成一步不等于完成整个任务" in record["summary"]
+        for record in result["decision_trace"]
+    )
+
+
+def test_route_after_decision_keeps_working_on_an_unfinished_plan() -> None:
+    """计划还没走完时不能直接收尾；有工具调用优先，单步计划照旧（验收基线：不回归）。"""
+
+    def step(number: int, status: str) -> nodes.PlanStep:
+        return nodes.PlanStep(
+            id=f"run-1:step-{number}",
+            description=f"第 {number} 步",
+            status=status,  # type: ignore[arg-type]
+        )
+
+    multi = [step(1, "completed"), step(2, "running"), step(3, "pending")]
+
+    assert routers.route_after_decision({"plan": multi}) == routers.ROUTE_REFLECT
+    # 有工具调用时仍走安全门：执行优先于"计划没走完"这个判断
+    assert (
+        routers.route_after_decision(
+            {"plan": multi, "pending_tool_calls": [{"name": "read_file"}]}
+        )
+        == routers.ROUTE_WITH_TOOLS
+    )
+    # 多步计划全部完成 → 正常收尾
+    assert (
+        routers.route_after_decision({"plan": [step(1, "completed"), step(2, "completed")]})
+        == routers.ROUTE_WITHOUT_TOOLS
+    )
+    # 单步计划不回归：旧行为就是"模型直接回答即收尾"
+    assert (
+        routers.route_after_decision({"plan": [step(1, "running")]})
+        == routers.ROUTE_WITHOUT_TOOLS
+    )
+
+
+def test_replanning_inserts_an_adjustment_step() -> None:
+    """T20：``plan_adjustment`` 必须**真的改计划**（只写进摘要不算），且已完成步骤不被重写。"""
+    state = _plan_state(index=1, completed=("run-1:step-1",))
+    decision = ReflectionDecision(
+        goal_achieved=False,
+        next_action="continue",
+        plan_adjustment="先列目录确认结构，再决定读哪个文件",
+    )
+
+    progress = nodes._advance_plan(
+        state, goal_achieved=False, next_action="continue", decision=decision
+    )
+
+    assert progress.plan[1].status == "failed"  # 失败步骤被标记
+    assert progress.plan[2].description == "先列目录确认结构，再决定读哪个文件"  # 插入的调整步骤
+    assert progress.plan[2].status == "running"
+    assert progress.current_step_index == 2  # 索引指向新步骤
+    assert progress.next_action == "continue"
+    assert progress.completed_steps == ()  # 失败的步骤不算完成
+    assert progress.plan[0] == state["plan"][0]  # 已完成步骤原样保留
+
+
+def test_retry_budget_is_per_step() -> None:
+    """T20：重试上限按 ``PlanStep.retry_count`` 判定，进入下一步后不沿用上一步的次数。"""
+    used_up = _plan_state(steps=1, index=0, retry_count=2)
+    fresh = _plan_state(index=1, retry_count=0, completed=("run-1:step-1",))
+
+    blocked, note = nodes._apply_retry_limit(used_up, "retry", max_retries=2)
+    allowed, _ = nodes._apply_retry_limit(fresh, "retry", max_retries=2)
+
+    assert blocked == "ask_user" and note is not None
+    assert allowed == "retry"  # 第二步从 0 开始，不受第一步影响
+
+
+def test_historical_completed_steps_do_not_leak_into_a_new_task() -> None:
+    """T20：历史 ``completed_steps`` 只是追加记录，不能让新任务误判"已完成"。
+
+    步骤 id 含 ``run_id``，旧任务的步骤 id 不会命中新任务的步骤。
+    """
+    state = {
+        "run_id": "run-new",
+        "plan": [
+            nodes.PlanStep(id="run-new:step-1", description="新任务第一步", status="running")
+        ],
+        "current_step_index": 0,
+        "completed_steps": ["run-old:step-1"],  # 上一次任务留下的记录
+    }
+    decision = ReflectionDecision(goal_achieved=True, next_action="finish")
+
+    progress = nodes._advance_plan(
+        state, goal_achieved=True, next_action="finish", decision=decision
+    )
+
+    assert progress.completed_steps == ("run-new:step-1",)  # 新步骤被正常记为完成
+    assert progress.goal_achieved is True  # 单步计划：确实做完了
+    assert "run-old:step-1" not in progress.completed_steps  # 不是"再次完成"
+
+
+def test_unconfirmed_side_effect_asks_the_user_to_verify(
+    tmp_path: Path,
+    model_factory: ModelFactory,
+    app_config: AppConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T20：副作用可能已发生、但 Checkpoint 未确认时**不自动重放**，改为请用户核对（架构 §4.2/§251）。
+
+    这类调用不能靠 State 证明"恰好执行过一次"，所以即使本轮工具结果看起来正常，也要停下来。
+    """
+    (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
+    monkeypatch.setattr(nodes, "unconfirmed_calls", lambda state: ["call-ghost"])
+    model = model_factory(
+        decision="tool",
+        reply="读完了",
+        tool_calls=[{"name": "read_file", "args": {"path": "note.txt"}, "id": "call_1"}],
+        reflection={"goal_achieved": True, "next_action": "finish"},
+    )
+
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "读取 note.txt"}, context=_context_with(tmp_path, model, app_config)
+    )
+
+    assert result["reflection_result"].next_action == "ask_user"
+    assert result["reflection_result"].goal_achieved is False
+    answer = str(result["final_response"])
+    assert "核对" in answer  # 明确要求人工核对，而不是继续自动执行
+    assert "call-ghost" in answer
+    assert result["task_status"] == "running"
 
 
 def test_memory_section_distinguishes_failure_from_empty() -> None:

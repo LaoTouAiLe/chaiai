@@ -21,7 +21,7 @@ from pydantic import Field
 from local_agent.config import AppConfig, load_config
 from local_agent.graph.routers import ROUTE_CLASSIFIER_MARKER
 from local_agent.memory.summarizer import SUMMARIZE_INSTRUCTION
-from local_agent.reflection.reflector import MEMORY_INTENT_MARKER
+from local_agent.reflection.reflector import MEMORY_INTENT_MARKER, PLAN_DRAFT_MARKER
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,6 +57,9 @@ class RoutingFakeModel(GenericFakeChatModel):
     #: 闲聊分支"记忆意图审核"给出的候选（默认空 = 普通闲聊，不写任何记忆）。
     memory_intent: list[dict[str, Any]] = Field(default_factory=list)
     fail_memory_intent: bool = False
+    #: 计划拆步（T20）：模型给出的步骤描述。**空**表示拆不出步骤 → 调用方退化为单步，
+    #: 因此所有既有用例的行为不变。
+    plan_steps: list[str] = Field(default_factory=list)
     #: 审核结论里的 ``user_requested``（"用户本轮是否要求记住"）；默认 ``False``。它与候选列表
     #: 相互独立：用户要求记住但没能提炼出候选时，脚本可以只把这一项设为 ``True``。
     memory_requested: bool = False
@@ -96,6 +99,8 @@ class RoutingFakeModel(GenericFakeChatModel):
                         "memory_candidates": self.memory_intent,
                     }
                 )
+            if schema.__name__ == "PlanDraft":  # T20：计划拆步（空列表 → 退化单步）
+                return schema.model_validate({"steps": self.plan_steps})
             if self.fail_classification:
                 raise RuntimeError("分类调用失败（测试故意触发）")
             if self.invalid_classification:
@@ -128,6 +133,17 @@ class RoutingFakeModel(GenericFakeChatModel):
                 else json.dumps(self.classification(), ensure_ascii=False)
             )
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
+
+        if PLAN_DRAFT_MARKER in text:  # T20：计划拆步（不支持原生 JSON Schema 时的降级路径）
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(
+                            content=json.dumps({"steps": self.plan_steps}, ensure_ascii=False)
+                        )
+                    )
+                ]
+            )
 
         if MEMORY_INTENT_MARKER in text:  # T18：闲聊分支的记忆意图审核
             if self.fail_memory_intent:

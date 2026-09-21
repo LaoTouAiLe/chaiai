@@ -396,6 +396,179 @@ def test_confirmed_call_is_not_executed_twice(
     )
 
 
+def _write_call(call_id: str) -> dict[str, Any]:
+    """一个会改变机器状态的调用（``write_file`` 在工作区内且目标不存在 → 免审放行）。"""
+    return {
+        "name": "write_file",
+        "args": {"path": "created.py", "content": "print(1)\n"},
+        "id": call_id,
+        "type": "tool_call",
+    }
+
+
+def _stale_effect_state(**overrides: Any) -> dict[str, Any]:
+    """**更早运行**放行了 ``write_file``、却没有留下结果的 State（当前 run 是另一个）。"""
+    state: dict[str, Any] = {
+        "run_id": "current-run",
+        "loop_count": 0,
+        "messages": [],
+        "pending_tool_calls": [_write_call("call-2")],
+        "decision_trace": [
+            make_decision_record(
+                "old-run",
+                stage="tool_start",
+                summary="放行 write_file",
+                tool_call_id="call-1",
+                salt="write_file",
+            )
+        ],
+    }
+    state.update(overrides)
+    return state
+
+
+def test_stale_side_effect_is_not_replayed_before_execution(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """更早运行遗留的未确认副作用：**执行前**就拦住，不自动重放（架构 §4.2）。
+
+    与 ``_crashed_state`` 的区别是放行标记来自**另一次运行**（``run_id`` 不同）——那才是"结果
+    永远不会再出现"的情况。检查必须在 ``tool_execution_node`` 里：等反思发现时副作用已经又跑过一次。
+    """
+    context = _context(tmp_path, app_config, model_factory(decision="tool", reply="x"))
+    state = _stale_effect_state()
+
+    update = nodes.tool_execution_node(state, _runtime(context, state))  # type: ignore[arg-type]
+
+    assert not (tmp_path / "created.py").exists()  # 没有被重放执行
+    assert update["tool_results"][0]["status"] == "denied"
+    assert "没有执行" in update["messages"][0].content
+    assert any("没有确认结果" in item["message"] for item in update["error_events"])
+    # 遗留放行只提示一次：记下"已就它提示过人工核对"，否则之后每次运行都会拒绝执行副作用
+    assert any(
+        record["record_id"].split(":")[2] == nodes.SIDE_EFFECT_RECHECK_STAGE
+        for record in update["decision_trace"]
+    )
+
+
+def test_stale_side_effect_is_only_blocked_once(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """提示过一次之后不再拦截：一次异常结束不该变成永久阻断（用户无从解除）。"""
+    context = _context(tmp_path, app_config, model_factory(decision="tool", reply="x"))
+    state = _stale_effect_state()
+
+    first = nodes.tool_execution_node(state, _runtime(context, state))  # type: ignore[arg-type]
+    assert not (tmp_path / "created.py").exists()
+
+    resumed = {
+        **state,
+        "decision_trace": [*state["decision_trace"], *first["decision_trace"]],
+    }
+    nodes.tool_execution_node(resumed, _runtime(context, resumed))  # type: ignore[arg-type]
+
+    assert (tmp_path / "created.py").read_text(encoding="utf-8") == "print(1)\n"
+
+
+def test_in_flight_release_is_not_blocked(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """**当前运行**的放行标记不算遗留：否则正常的每一次工具执行都会被自己挡住。"""
+    context = _context(tmp_path, app_config, model_factory(decision="tool", reply="x"))
+    state = _stale_effect_state(
+        decision_trace=[
+            make_decision_record(
+                "current-run",  # 与 state 的 run_id 相同：本轮刚刚放行、正要执行
+                stage="tool_start",
+                summary="放行 write_file",
+                tool_call_id="call-2",
+                salt="write_file",
+            )
+        ]
+    )
+
+    assert nodes.stale_side_effects(state) == []
+    nodes.tool_execution_node(state, _runtime(context, state))  # type: ignore[arg-type]
+
+    assert (tmp_path / "created.py").read_text(encoding="utf-8") == "print(1)\n"
+
+
+def test_read_only_tools_are_never_blocked_as_stale(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """只读工具的重复调用没有副作用，不该被"不确定"挡住。"""
+    (tmp_path / "note.py").write_text("value = 1\n", encoding="utf-8", newline="")
+    context = _context(tmp_path, app_config, model_factory(decision="tool", reply="x"))
+    state = _stale_effect_state(
+        pending_tool_calls=[
+            {"name": "read_file", "args": {"path": "note.py"}, "id": "call-3", "type": "tool_call"}
+        ],
+        decision_trace=[
+            make_decision_record(
+                "old-run",
+                stage="tool_start",
+                summary="放行 read_file",
+                tool_call_id="call-1",
+                salt="read_file",
+            )
+        ],
+    )
+
+    assert nodes.stale_side_effects(state) == []
+    update = nodes.tool_execution_node(state, _runtime(context, state))  # type: ignore[arg-type]
+
+    assert update["tool_results"][0]["status"] == "ok"
+
+
+def test_trust_follows_the_latest_attempt_of_each_tool(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """同一工具的失败被后续尝试修复后，整体可信度不再被历史失败永久拖住（复审实证）。
+
+    ``tool_events`` 覆盖整个任务，"第二步失败、调整后成功"必须能判成完成，
+    否则任务永远收不了尾。证据列表仍全量重算，历史失败照样留在里面供审计。
+    """
+    context = _context(tmp_path, app_config, model_factory(decision="tool", reply="x"))
+    state = _verified_state(
+        loop_count=2,
+        tool_events=[
+            ToolEvent(tool_call_id="c1", tool_name="read_file", status="error", run_id=RUN_ID),
+            ToolEvent(tool_call_id="c2", tool_name="read_file", status="ok", run_id=RUN_ID),
+        ],
+        tool_results=[
+            {**_tool_result(status="error"), "tool_call_id": "c1"},
+            {**_tool_result(), "tool_call_id": "c2"},
+        ],
+    )
+
+    update = nodes.reflection_node(state, _runtime(context, state))  # type: ignore[arg-type]
+
+    assert update["reflection_result"].result_trust == "verified"
+    assert len(update["final_evidence"]) == 2  # 证据全量：成功与失败两条都在
+
+
+def test_trust_still_fails_when_the_last_attempt_failed(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """反向：最后一次尝试仍是失败时整体可信度仍是 ``failed``——不是"成功过就算好"。"""
+    context = _context(tmp_path, app_config, model_factory(decision="tool", reply="x"))
+    state = _verified_state(
+        loop_count=2,
+        tool_events=[
+            ToolEvent(tool_call_id="c1", tool_name="read_file", status="ok", run_id=RUN_ID),
+            ToolEvent(tool_call_id="c2", tool_name="read_file", status="error", run_id=RUN_ID),
+        ],
+        tool_results=[
+            {**_tool_result(), "tool_call_id": "c1"},
+            {**_tool_result(status="error"), "tool_call_id": "c2"},
+        ],
+    )
+
+    update = nodes.reflection_node(state, _runtime(context, state))  # type: ignore[arg-type]
+
+    assert update["reflection_result"].result_trust == "failed"
+
+
 def _runtime(context: Any, state: dict[str, Any]) -> Any:
     """构造节点需要的 ``Runtime`` 包装（只暴露 ``context``）。"""
 
