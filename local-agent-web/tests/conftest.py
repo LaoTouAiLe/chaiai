@@ -251,5 +251,19 @@ def model_factory() -> Callable[..., RoutingFakeModel]:
 
 @pytest.fixture
 def app_config() -> AppConfig:
-    """用示例配置构造配置对象（该文件同时被 test_web 验证为合法）。"""
-    return load_config(PROJECT_ROOT / "config.yaml.example")
+    """通用单测配置：从示例构造，但关闭会增加模型调用或持久化状态的两项能力。
+
+    示例文件自己的默认值由 ``test_config_example_is_valid`` 单独固定；与记忆/压缩无关的用例
+    不应因为产品默认开关变化而悄悄多一次审核调用、创建长期库或触发摘要。
+    """
+    base = load_config(PROJECT_ROOT / "config.yaml.example")
+    return base.model_copy(
+        update={
+            "memory": base.memory.model_copy(
+                update={
+                    "long_term": base.memory.long_term.model_copy(update={"enabled": False}),
+                    "compression": base.memory.compression.model_copy(update={"enabled": False}),
+                }
+            )
+        }
+    )

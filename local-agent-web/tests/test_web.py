@@ -82,17 +82,17 @@ def _run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> object:
     reason="需要可选依赖 memory（fastembed）：uv sync --extra memory",
 )
 def test_memory_status_lines_describe_each_layer(tmp_path: Path) -> None:
-    """侧栏状态块：三层各一行；关闭的层写明"已关闭"，配置问题必须报出来（架构 §1.4）。"""
+    """侧栏状态块：三层各一行；默认开关与配置问题都必须如实展示（架构 §1.4）。"""
     base = load_config(PROJECT_ROOT / "config.yaml.example")
 
-    disabled_lines, disabled_warn = web.memory_status_lines(
+    default_lines, default_warn = web.memory_status_lines(
         SimpleNamespace(app_config=base)  # type: ignore[arg-type]
     )
-    disabled_text = "\n".join(disabled_lines)
-    assert "短期" in disabled_text
-    assert "中期：已关闭" in disabled_text
-    assert "长期：已关闭" in disabled_text
-    assert disabled_warn is False
+    default_text = "\n".join(default_lines)
+    assert "短期" in default_text
+    assert "中期：已关闭" in default_text
+    assert "长期：已启用" in default_text
+    assert default_warn is False
 
     data = base.model_dump()
     data["memory"]["medium_term"].update(
@@ -231,8 +231,16 @@ def test_config_example_is_valid() -> None:
     assert config.llm.model == "deepseek-flash"
     assert config.llm.api_key_env == "DEEPSEEK_API_KEY"
     assert config.memory.medium_term.enabled is False
-    assert config.memory.compression.enabled is False
+    assert config.memory.long_term.enabled is True
+    assert config.memory.compression.enabled is True
     assert config.security.require_approval.delete_file is True
+
+
+def test_memory_features_default_on_when_section_is_omitted(tmp_path: Path) -> None:
+    config = load_config(_write_config(tmp_path, MINIMAL_CONFIG))
+
+    assert config.memory.long_term.enabled is True
+    assert config.memory.compression.enabled is True
 
 
 def test_missing_config_file_is_reported(tmp_path: Path) -> None:

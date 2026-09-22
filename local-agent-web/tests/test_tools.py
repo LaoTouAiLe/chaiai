@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 import sys
 from pathlib import Path
 
@@ -196,6 +197,59 @@ def test_read_file_respects_max_file_size(tmp_path: Path, app_config: AppConfig)
     assert result.truncated
     assert result.content == "0123"
     assert "超过" in (result.note or "")
+    assert result.sha256 == _sha256(tmp_path / "a.txt")
+
+
+def test_edit_file_preserves_utf8_bom(tmp_path: Path, policy: SecurityPolicy) -> None:
+    target = tmp_path / "bom.txt"
+    target.write_bytes(b"\xef\xbb\xbfalpha\n")
+
+    edit_file_content(
+        "bom.txt",
+        policy=policy,
+        old_text="alpha",
+        new_text="beta",
+        expected_sha256=_sha256(target),
+    )
+
+    assert target.read_bytes() == b"\xef\xbb\xbfbeta\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX 文件权限位语义")
+def test_edit_file_preserves_posix_mode(tmp_path: Path, policy: SecurityPolicy) -> None:
+    target = tmp_path / "script.sh"
+    target.write_text("echo old\n", encoding="utf-8", newline="")
+    target.chmod(0o755)
+
+    edit_file_content(
+        "script.sh",
+        policy=policy,
+        old_text="old",
+        new_text="new",
+        expected_sha256=_sha256(target),
+    )
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o755
+
+
+def test_action_fingerprint_streams_existing_file_hash(
+    tmp_path: Path, policy: SecurityPolicy, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """审批指纹不能用 ``Path.read_bytes`` 把任意大的已有文件整体装进内存。"""
+    target = tmp_path / "large.txt"
+    target.write_bytes(b"x" * (2 * 1024 * 1024))
+
+    def _forbidden(_path: Path) -> bytes:
+        raise AssertionError("动作指纹不应整体读取文件")
+
+    monkeypatch.setattr(Path, "read_bytes", _forbidden)
+    fingerprint = action_fingerprint(
+        "write_file",
+        {"path": "large.txt", "content": "replacement", "overwrite": True},
+        policy=policy,
+    )
+
+    assert fingerprint
 
 
 def test_read_file_blocks_secret_files(tmp_path: Path, policy: SecurityPolicy) -> None:

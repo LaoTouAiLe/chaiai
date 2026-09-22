@@ -9,9 +9,11 @@
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import os
 import shutil
+import stat
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -171,11 +173,7 @@ def read_file_content(
     """
     resolved = policy.resolve_readable_file(path)
     max_bytes = policy.workspace.max_file_size_bytes
-    size = resolved.stat().st_size
-
-    with resolved.open("rb") as handle:
-        data = handle.read(max_bytes)
-    size_limited = size > len(data)
+    data, file_sha256, size_limited = _read_prefix_and_sha256(resolved, max_bytes)
 
     encoding: str | None = None
     text = ""
@@ -207,7 +205,7 @@ def read_file_content(
     return ReadFileResult(
         path=_display_path(resolved, policy.workspace_root),
         encoding=encoding,
-        sha256=hashlib.sha256(data).hexdigest(),
+        sha256=file_sha256,
         line_count=line_count,
         truncated=truncated,
         is_binary=is_binary,
@@ -335,7 +333,11 @@ def edit_file_content(
     if not diff.strip():
         raise SecurityError("计算出的 diff 为空，没有可写入的改动")
 
-    new_data = updated.encode("utf-8")
+    # ``utf-8-sig`` 解码会有意移除 BOM；编辑已有文件时必须把原来的编码标记写回去，
+    # 否则一次普通文本替换会静默改变文件格式。
+    new_data = (codecs.BOM_UTF8 if data.startswith(codecs.BOM_UTF8) else b"") + updated.encode(
+        "utf-8"
+    )
     _atomic_write(resolved, new_data)
 
     return EditFileResult(
@@ -632,14 +634,36 @@ def _decode_text(data: bytes) -> str:
         raise SecurityError("目标文件不是 UTF-8 文本（未知编码），不支持编辑") from exc
 
 
+def _read_prefix_and_sha256(path: Path, max_bytes: int) -> tuple[bytes, str, bool]:
+    """有界保留文件前缀，同时流式计算**整文件** Hash。
+
+    ``read_file`` 的正文受 ``max_file_size_bytes`` 限制，但返回的 ``sha256`` 会被
+    ``edit_file.expected_sha256`` 当成整文件版本号。只对前缀计算 Hash 会让被截断的文件永远
+    无法通过编辑前校验；这里流式扫完整文件，不把完整内容装进内存。
+    """
+    digest = hashlib.sha256()
+    prefix = bytearray()
+    total = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            total += len(chunk)
+            remaining = max_bytes - len(prefix)
+            if remaining > 0:
+                prefix.extend(chunk[:remaining])
+    return bytes(prefix), digest.hexdigest(), total > max_bytes
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
-    """先写同目录临时文件再原子替换，避免写到一半留下损坏文件（架构 §6.3）。"""
+    """先写同目录临时文件再原子替换，并保留已有文件的权限位（架构 §6.3）。"""
+    original_mode = stat.S_IMODE(path.stat().st_mode)
     handle_fd, temp_name = tempfile.mkstemp(
         dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
     )
     try:
         with os.fdopen(handle_fd, "wb") as handle:
             handle.write(data)
+        os.chmod(temp_name, original_mode)
         os.replace(temp_name, path)
     except BaseException:
         Path(temp_name).unlink(missing_ok=True)

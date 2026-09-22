@@ -223,7 +223,7 @@ class MediumTermMemoryConfig(_StrictModel):
 class LongTermMemoryConfig(_StrictModel):
     """长期记忆：SQLite 实体库（T15 启用）。"""
 
-    enabled: bool = False
+    enabled: bool = True
     backend: Literal["sqlite"] = "sqlite"
     path: str = "data/memories.sqlite"
     confidence_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
@@ -242,7 +242,7 @@ class LongTermMemoryConfig(_StrictModel):
 class CompressionConfig(_StrictModel):
     """Prompt 窗口压缩（T16 启用）。"""
 
-    enabled: bool = False
+    enabled: bool = True
     trigger_ratio: float = Field(default=0.8, gt=0.0, le=1.0)
     preserve_recent_turns: int = Field(default=8, ge=1)
     #: 窗口里最多保留的**最近完整工具步**数量，更早的整步省略并留一条带摘要的说明占位。

@@ -283,7 +283,11 @@ def _file_digest(path_text: str) -> str:
     path = Path(path_text)
     try:
         if path.is_file():
-            return hashlib.sha256(path.read_bytes()).hexdigest()
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+            return digest.hexdigest()
     except OSError:
         return "unreadable"
     return "missing"

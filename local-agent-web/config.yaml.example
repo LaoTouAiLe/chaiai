@@ -74,7 +74,7 @@ memory:
       - "explicit_user_preference"
 
   long_term:
-    enabled: false                 # v0.1a / v0.1b 保持关闭
+    enabled: true                  # 默认启用本地 SQLite 长期记忆；不依赖 Embedding 或网络
     backend: "sqlite"
     path: "data/memories.sqlite"
     confidence_threshold: 0.75
@@ -87,7 +87,7 @@ memory:
     allow_user_scope: false
 
   compression:
-    enabled: false                 # v0.1a / v0.1b 保持关闭
+    enabled: true                  # 默认启用 Prompt 窗口压缩；Checkpoint 原始 messages 不删
     trigger_ratio: 0.8
     preserve_recent_turns: 8
     preserve_recent_tool_steps: 3  # 窗口最多保留的最近完整工具步，更早的整步省略

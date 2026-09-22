@@ -72,8 +72,16 @@ def _graph(database: Path) -> builder.ChatGraph:
 
 
 def _context(tmp_path: Path) -> RuntimeContext:
+    base = load_config(PROJECT_ROOT / "config.yaml.example")
+    isolated = base.model_copy(
+        update={
+            "memory": base.memory.model_copy(
+                update={"long_term": base.memory.long_term.model_copy(update={"enabled": False})}
+            )
+        }
+    )
     return builder.build_runtime_context(
-        app_config=load_config(PROJECT_ROOT / "config.yaml.example"),
+        app_config=isolated,
         model_adapter=_model(),
         workspace_root=tmp_path,
         current_cwd=tmp_path,
@@ -1881,6 +1889,7 @@ def _compression_config(
                     "short_term": base.memory.short_term.model_copy(
                         update={"prompt_window_messages": prompt_window_messages}
                     ),
+                    "long_term": base.memory.long_term.model_copy(update={"enabled": False}),
                     "compression": base.memory.compression.model_copy(
                         update={
                             "enabled": enabled,

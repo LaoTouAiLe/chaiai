@@ -276,7 +276,8 @@ python -m mypy src
   （任务结论没有重要度列，按 1.0 计，且只按当前项目召回）。**自动老化在召回时实时生效**：
   `aging_enabled=true` 时超期事实当场排除、其余用线性衰减后的有效重要度参与阈值、返回字段与分数
   （库里的原始 `importance` 一个字不动），不依赖维护任务先跑一遍。T18 起反思验证过的候选会写进
-  这个库（见下），遗忘由显式任务处理；`memory.long_term.enabled` 保持 `false` 时节点按透传处理
+  这个库（见下），遗忘由显式任务处理；长期记忆默认启用，显式设为
+  `memory.long_term.enabled=false` 时节点按透传处理
   （不建库、不写入）。
 - Prompt 预算与摘要压缩（T16）已接入对话链路：使用比 = 估算 Prompt 用量 ÷
   （`llm.context_window_tokens` − `llm.max_tokens`），达到 `memory.compression.trigger_ratio`
@@ -290,7 +291,8 @@ python -m mypy src
   它，靠这条才能收缩；**未拿到结果的调用、id 重复或缺失的调用、不匹配结果与孤立结果都不会被
   裁掉**（省略的消息仍在 Checkpoint 里，等轮次推进后被摘要覆盖）。
   压缩只改模型输入，Checkpoint 里的原始
-  `messages` 一条都不删；`compression.enabled=false` 时窗口原样返回全部消息、不生成摘要；
+  `messages` 一条都不删；压缩默认启用，显式设为 `compression.enabled=false` 时窗口原样返回全部消息、
+  不生成摘要；
   摘要失败只记一条错误事件（`error_events`）并继续本轮。摘要成功后会记录**覆盖边界**
   （`summary_covered_messages`）：已被摘要代表的旧消息不再进窗口，预算按新窗口与新摘要重算，
   不会重复摘要同一批历史。估算覆盖系统提示、消息窗口、**工具调用参数**与**绑定给模型的工具定义**。
