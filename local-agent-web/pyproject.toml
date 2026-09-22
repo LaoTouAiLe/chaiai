@@ -59,7 +59,8 @@ warn_unused_ignores = true
 
 # 无类型存根或会带进大量可选依赖的间接依赖，按 Any 处理：
 # streamlit（带进 pandas/pyarrow 等）、yaml（无存根）、tiktoken（langchain-openai 的间接依赖）、
-# chromadb（可选依赖 memory extra，默认不装；memory/medium_term.py 只做延迟导入）。
+# chromadb 与 fastembed（可选依赖 memory extra，默认不装；memory/medium_term.py 与
+# llm/embedding.py 都只做延迟导入）——只装基础依赖时 `mypy src` 也必须干净。
 [[tool.mypy.overrides]]
 module = [
   "streamlit",
@@ -70,6 +71,8 @@ module = [
   "tiktoken.*",
   "chromadb",
   "chromadb.*",
+  "fastembed",
+  "fastembed.*",
 ]
 follow_imports = "skip"
 ignore_missing_imports = true

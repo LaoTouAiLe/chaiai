@@ -34,7 +34,7 @@
 | v0.2 / T18 | 记忆写入审核与遗忘（候选校验与落库映射、按来源幂等、老化与显式遗忘任务） | 已完成 |
 | v0.2 / T19 | 三层记忆集成（中期 + 长期统一召回与注入）与 Embedding 准备状态展示 | 已完成 |
 | v0.3 / T20 | 多步骤规划与恢复（步骤推进、失败重规划、步级重试、重启不重做副作用） | 已完成 |
-| v0.3 / T22 | 编辑预览与 Patch 冲突（`edit_file` 新增 unified diff 输入模式，冲突/错 hunk/旧 Hash 不符即拒绝） | 进行中 |
+| v0.3 / T22 | 编辑预览与 Patch 冲突（`edit_file` 新增 unified diff 输入模式，冲突/错 hunk/旧 Hash 不符即拒绝） | 已完成 |
 | v0.3 / T21 | 按需代码 RAG（工作区搜索 + 有界片段读取，不建持久索引，局部 AST 可选） | 已完成（检索/注入/来源定位契约；回答质量记入 T23 基线） |
 | v0.3 / T23 | 轨迹与评测（固定任务集指标与报表，双层评测 + 最终回答流式展示） | 已完成（T24 继续遥测/全功能回归） |
 
@@ -213,6 +213,11 @@ python -m mypy src
 ```
 
 运行前请先 `uv sync`，或使用 `uv run python -m pytest` 等命令。
+
+- 只装基础依赖（`uv sync`）时套件同样是绿的：缺少可选依赖 `memory` 的 20 条用例会**跳过并写明原因**
+  （判据是"装没装可选组"，不是"跑起来报什么错"）；要跑全部记忆 / Embedding 用例请
+  `uv sync --extra memory`。`mypy src` 在两种环境下都干净（`chromadb` / `fastembed` 在
+  `pyproject.toml` 的 `ignore_missing_imports` 名单里）。
 
 ## 已知限制与安全边界
 
@@ -467,10 +472,13 @@ python -m mypy src
     CLI 查到该事实、新会话 Checkpoint 含记忆引用；人工删除后不再召回；`forget --dry-run` 与执行**同范围**
     （两个项目共 2 条超龄，执行后均落 `expired`）；召回失败时页面显示 `[recall_memory]` 与可读原因，
     回答不冒充"没有相关记忆"；T14A/T14B 的离线、复用、缓存缺失均可读失败。
-  - **待补验（外部环境阻断，非代码缺陷）**：全新空缓存的**首次在线下载成功** —— 多次尝试均以
-    `WinError 10060` 连接超时结束，`memory probe` 返回非零。网络恢复后执行
-    `python -m local_agent.cli memory probe` 即可补验。**这一项没有被标为通过**，按开发计划（§6 T19）
-    属人工验收、不是 CI 门槛，因此不阻塞后续任务，但会保留在待补验清单里直到实测通过。
+  - **曾判"待补验（外部环境阻断）"→ 2026-09-22 已补验通过**：全新空缓存的**首次在线下载**最初多次以
+    `WinError 10060` 连接超时结束（`memory probe` 返回非零）。T24 用全新空缓存目录
+    （`E:\tmp\t24-embed-cache`、`local_files_only: false`）重跑 `memory probe`：13 s 拉取 5 个文件、
+    首次含加载 16.0 s、512 维有限向量、同进程复用 0.003 s；随后用同一目录把 `local_files_only` 改为
+    `true`（禁止下载）再跑一次，0.150 s 通过——**"首次在线下载"与"断网复用"两项都实测通过**。
+    按开发计划（§6 T19）这一项属人工验收、不是 CI 门槛；它与"发布门槛是否全部通过"是两件事，
+    后者仍未全部通过（见下一节的未验证项），不因此创建发布标签。
 - 长期记忆库与聊天库是两套迁移、各自持有 `schema_migrations`，必须使用不同的文件
   （`scripts/init_db.py` 会在指向同一个文件时报错）。
 - 多步骤规划与恢复（T20）：复杂请求由 `planner_node` 拆成最多 5 步的计划（步骤 id 形如
@@ -546,7 +554,9 @@ python -m mypy src
   变成联网+有费用的操作）覆盖读文件 / 白名单内命令 / 覆盖写审批 / 代码检索问句四个代表场景，记录同样的
   质量维度加上**成功率与失败分类**（硬问题 vs 质量问题），写 `eval/smoke-latest.json` 与 `.md`，
   **不比对逐字输出**——这一层的价值是发现协议级/兼容性问题（这次的 `reasoning_content` 就是它发现的），
-  不是打分。**未做**：流式输出的 token/时间维度、页面上的阶段/轮次/工具/token 遥测——留给 T24。
+  不是打分。**未做（T24 复核后仍未做，记为已知限制，不再是"留给 T24"的承诺）**：流式输出的 token/时间
+  维度、页面上的阶段/轮次/工具/token 遥测。T24 的范围是回归、物料与验收记录，**没有**扩展遥测；页面上
+  能看到的是工具事件、审批卡片与错误事件的既有展示，轮次 / token 统计只在 `eval/*.json` 报表里。
 - **最终回答的流式展示（T23，`llm.streaming` 打开后生效）**：只流式**最终自然语言回答**——
   planner、反思、工具调用、工具结果与隐藏推理都不流式（`agent_decision_node` 的调用可能产出工具调用，
   事先无法区分，所以不接）。增量只进页面上的临时占位符，**不逐块写 Checkpoint**：节点结束时仍写
@@ -558,3 +568,69 @@ python -m mypy src
   构造模型时**不要传** `streaming=`（传 `False` 会让 `.stream()` 退化成一次 `invoke`，传 `True` 会让所有
   `invoke()` 丢掉供应商字段并被 400 拒绝）；真增量流式本身也会丢字段，因此对"见过该字段的供应商"要给
   流式回答补一个空值占位。开关默认关闭（`config.yaml` 的 `llm.streaming`），关闭时行为与之前完全一致。
+
+## v0.3 退出条件（T24 验收矩阵核对）
+
+**核对方式**：对照开发文档 §10 全链路验收矩阵逐项做自动验证 + 手工观察，分四类标记——**自动通过** /
+**手工通过** / **外部阻断** / **未覆盖**。本轮实测环境：Windows + CPython 3.13.12 + `uv 0.12.13`，
+模型端点为 DeepSeek（`deepseek-flash`、`deepseek-v4-pro`）。
+
+| §10 场景 | 自动验证（用例数 = 本轮实测） | 手工观察项 | 标记 |
+|---|---|---|---|
+| 网页闲聊不调用工具 | test_web（53）、test_router（103） | 网页启动实测 HTTP 200；两轮上下文由 AppTest 用例覆盖 | 自动通过 |
+| 只读/编辑/新建/安全 Shell | test_tools（71）、test_security（47 + 1 环境跳过） | 内容/Hash/退出码与页面一致、刷新不重复副作用：AppTest 用例覆盖 | 自动通过 |
+| 删除、覆盖、大改、危险 Shell | test_security、test_graph_resume（63） | 未批准不执行 / 批准后重新审批 / 递归删除二次确认 / 拒绝不循环：用例覆盖 | 自动通过 |
+| Checkpoint 与多会话 | test_graph_resume（63）、test_web（53） | 重启恢复、跨会话不串线：用例 + 基础配置真实模型两轮实测 | 自动通过 |
+| 工作区选择与外部路径 | test_web、test_tools、test_security、test_graph_resume | 严格/允许模式与外部只读、外部副作用强制审批：用例覆盖 | 自动通过（1 条符号链接用例因本机不支持创建链接而跳过） |
+| 模型能力与错误输出 | test_router（103）、test_web（53） | 不支持 Tool Calling 不伪装完成、JSON 错误有界重试：用例覆盖 | 自动通过 |
+| 本地 Embedding 与模型缓存 | test_memory（127，含假 Embedding；缺可选组时相关用例跳过） | **首次在线下载**：2026-09-22 用全新空缓存实测通过（13 s 拉 5 文件、512 维、含加载 16.0 s、复用 0.003 s、`local_files_only` 再跑 0.150 s） | 自动通过 + 手工通过 |
+| 中长期记忆召回和写入 | test_memory、test_reflection（42） | 跨会话召回 / 跨项目不召回 / 删除后不召回：见 v0.2 验收状态 | 自动通过 |
+| 摘要压缩 | test_memory、test_graph_resume（63） | 窗口变短、Checkpoint 原消息不减：用例覆盖 | 自动通过 |
+| 反思、重规划和循环上限 | test_reflection（42）、test_router（103） | 错误工具不 verified、失败可调计划、循环有明确终点：用例 + 空转保护用例 | 自动通过 |
+| 按需代码 RAG | test_rag（22） | 开启后有界片段 + 路径行号、关闭时零访问：用例覆盖；真实模型检索/注入/来源定位见 T21 记录 | 自动通过（局部 AST **未采用**，不在本轮范围） |
+| 轨迹与评测 | test_agent_eval（19） | 固定集产出指标与失败原因、轨迹无密钥与隐藏思维链：用例断言 + `eval/*.md` | 自动通过 |
+
+**T24 额外做的真实模型记录（不比对逐字输出）**：
+
+- 冒烟层（`DS_SMOKE=1`）：`deepseek-flash` **4/4** 无硬问题（增量块 246–509、单场景 1–2 轮）；
+  `deepseek-v4-pro` **4/4** 无硬问题（增量块 43–333、单场景 1–3 轮）。两模型在"覆盖写"场景都选了
+  `edit_file` 而不是 `write_file`（记为观察，不是缺陷）；`deepseek-v4-pro` 这次对检索自然问法给出了
+  **完整回答**，`deepseek-flash` 仍是诚实追问——同一问句的差异正是"两层评测"要保留的信息。
+- 基础配置（示例配置：中期/长期记忆、Embedding、RAG、流式全关）+ 真实模型两轮：闲聊 `completed`、
+  无工具事件；工具轮 `read_file` 命中 `README.md` 且机械证据 `verified`。**没有加分项**：工具轮之后
+  反思未判定完成，多轮无新动作后由空转保护转为 `ask_user`，最终文本是"停下来问你"——属质量基线
+  （同样是 `rag-natural-question-asks` 那条用例记录的现象），不是崩溃或虚假完成。
+- 网页：`python -m streamlit run src/local_agent/web.py` 在本机启动成功、`GET /` 返回 200、Ctrl-C
+  后端口释放。
+
+**本次执行的命令与结果**：
+
+```powershell
+uv lock --check                                  # exit 0（155 包）
+python -m pytest                                 # 597 passed / 4 skipped（含 memory 可选组）
+python -m pytest                                 # 578 passed / 23 skipped（仅基础依赖：缺可选组的 20 条跳过）
+python -m ruff check . ; python -m mypy src       # 两种环境都干净（60 文件）
+```
+
+干净环境（`uv` 新建、CPython 3.13.12）：`uv lock --check` → `uv sync --extra memory`（155 包）→
+`uv pip check` 报 "All installed packages are compatible" → 同一套门槛全绿。
+
+**未验证项（如实记录，不算通过）**：
+
+- **第二端点未验证**：本机只有 DeepSeek 一个兼容端点；`deepseek-flash` 与 `deepseek-v4-pro` 是**同一端点**
+  上的两个模型，不构成"第二种兼容端点"。
+- **POSIX 未实测**：真执行只在 Windows 上验证过，POSIX 结论全部来自解析层单元测试；平台相关跳过项为
+  `test_is_under_is_case_sensitive_on_posix`（POSIX 专用）与 `test_path_guard_blocks_symlink_escape`
+  （本机不支持创建符号链接）。
+- **网页人工点击**：页面行为由 AppTest（53 条）与本机启动实测覆盖，逐项人工点击未由本轮执行。
+- **页面遥测**：阶段/轮次/工具/token 的页面展示**未实现**（T23 起即记为未做，T24 未扩展）。
+- **checkpoint 反序列化白名单**：langgraph 1.2.11 对自定义 State 类型（`ReflectionResult`、`PlanStep`、
+  `ToolEvent`、`EvidenceReference`、`TokenUsage`、`ContextBudget`）在读 Checkpoint 时给出
+  "will be blocked in a future version" 告警；当前版本可用，但升级后默认阻断，需要给 checkpointer 的
+  `JsonPlusSerializer` 配 `allowed_msgpack_modules`。**本轮不改序列化**，建议单独立项。
+- **本端点的结构化输出降级**：`deepseek-flash` 对 `json_schema` 方式返回 `OpenAIInvalidRequestError`，
+  能力探测按失败闭合把 `structured_json_schema` 降为 `false`，链路继续走降级路径（架构 §11.7 的设计行为，
+  但说明"兼容端点 ≠ 完全等价"）。
+
+**结论**：v0.3 的**代码与验收记录**已具备提交条件；**发布门槛尚未全部通过**（第二端点、POSIX 未验证），
+在获得明确豁免前不创建发布标签、不宣称整体验收通过。

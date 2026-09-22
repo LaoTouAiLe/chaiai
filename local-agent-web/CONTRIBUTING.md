@@ -13,8 +13,10 @@
 
 ```powershell
 uv lock --check
-uv sync
+uv sync                 # 基础依赖 + dev 组
+uv sync --extra memory  # 可选组：中期向量记忆与本地 ONNX Embedding
 ```
+
 
 ## 质量门槛
 
@@ -30,6 +32,9 @@ python -m mypy src
 - 每个新增模块至少覆盖正常、错误和安全边界三类测试。
 - 自动测试使用临时工作区、隔离数据库和假模型，不得依赖密钥、网络或模型输出稳定性。
 - 不提交 `config.yaml`、`.env`、`data/`；`uv.lock` 必须提交。
+- 可选组的处理口径：装了就真跑、没装就**跳过并写明原因**（`uv sync --extra memory` 会跑全部记忆与
+  Embedding 用例；只装基础依赖时它们跳过，套件**不因此变红**）。`ruff` 与 `mypy src` 在两种环境下都要干净。
+- 真实模型验证（冒烟、演示）属于人工记录，不要塞进默认门槛：默认 `pytest` 不联网、不产生费用。
 
 ## 提交约定
 

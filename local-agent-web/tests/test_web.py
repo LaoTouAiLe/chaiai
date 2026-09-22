@@ -74,6 +74,13 @@ def _run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> object:
 # --------------------------------------------------------------------------- 配置层
 
 
+# 后半段断言的是"依赖已装、缓存目录合法 → 无警告"（`warn is False`）。没装可选组时
+# `readiness` 会如实给出 `unavailable`，那条断言测的东西就不存在了——跳过而不是放宽成
+# 两种结果都接受（否则真出问题时这条用例反而抓不住）。
+@pytest.mark.skipif(
+    not embedding_module.fastembed_available(),
+    reason="需要可选依赖 memory（fastembed）：uv sync --extra memory",
+)
 def test_memory_status_lines_describe_each_layer(tmp_path: Path) -> None:
     """侧栏状态块：三层各一行；关闭的层写明"已关闭"，配置问题必须报出来（架构 §1.4）。"""
     base = load_config(PROJECT_ROOT / "config.yaml.example")

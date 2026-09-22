@@ -11,8 +11,9 @@
 - T15：长期事实 CRUD 的版本记录与冲突不静默覆盖、过期处理、软删除、召回与旧库迁移。
 - T16：Prompt 预算口径（窗口 − 输出预留）、窗口按完整轮次裁剪、摘要生成与限长。
 
-全部使用临时目录与临时 SQLite；不依赖网络，也不加载真实模型：``fastembed`` 用假模块替身，
-``chromadb`` 不会被导入。
+全部使用临时目录与临时 SQLite；不依赖网络，也不加载真实模型：``fastembed`` 用假模块替身。
+缺少可选依赖 ``memory``（chromadb / fastembed）时，只跳过针对这两组的用例（见下面的
+``requires_chromadb`` / ``requires_fastembed``），基础路径照常验证。
 """
 
 from __future__ import annotations
@@ -77,6 +78,19 @@ from local_agent.persistence.session_store import SessionStore
 from local_agent.reflection.memory_candidates import RejectedCandidate, plan_writes
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+#: 缺少可选依赖 ``memory`` 时的跳过条件（开发文档 §9.1：运行全量测试时只安装实际启用的可选组）。
+#: 中期向量库（chromadb）与本地 ONNX 适配器（fastembed）本身就是这两组依赖的测试对象——没装就
+#: 无处可测；但基础路径（长期库、压缩、召回注入、作用域与权限）在两种环境下都必须照常跑，
+#: 所以**不**整份文件跳过。判据复用源码里的可用性函数，避免在测试里再写一份 ``find_spec``。
+requires_chromadb = pytest.mark.skipif(
+    not medium_term.chromadb_available(),
+    reason="需要可选依赖 memory（chromadb）：uv sync --extra memory",
+)
+requires_fastembed = pytest.mark.skipif(
+    not embedding_module.fastembed_available(),
+    reason="需要可选依赖 memory（fastembed）：uv sync --extra memory",
+)
 
 #: 架构 §10.2 列出的中期记录字段（顺序即契约顺序）。
 ARCHITECTURE_MEDIUM_TERM_FIELDS = (
@@ -807,7 +821,12 @@ def memory_store(tmp_path: Path) -> Iterator[medium_term.MediumTermStore]:
 
     Chroma 的 ``PersistentClient`` 没有 ``close()``（1.5.9 实测），所以这里不显式清理：
     临时目录里的句柄会随进程结束释放，既有测试同样是这个模式。
+
+    缺可选依赖时跳过：pytest 不允许给 fixture 加 mark（``Marks cannot be applied to fixtures``），
+    所以判据放在函数体里，与 ``requires_chromadb`` 共用同一个可用性函数。
     """
+    if not medium_term.chromadb_available():
+        pytest.skip("需要可选依赖 memory（chromadb）：uv sync --extra memory")
     store = medium_term.open_store(
         _memory_config(tmp_path),
         embedding_function=ScriptedEmbedding({QUERY_TEXT: CLOSE_VECTOR}),
@@ -983,6 +1002,7 @@ def test_visible_scope_keys_cover_four_scopes(tmp_path: Path) -> None:
     assert keys[3][1] == scope.stable_hash(scope.normalize_path(tmp_path))
 
 
+@requires_chromadb
 def test_open_store_rejects_incompatible_collection(tmp_path: Path) -> None:
     """换过 embedding 模型/维度后必须拒绝复用旧 collection 并提示重建（架构 §10.2、§11.6）。"""
     config = _memory_config(tmp_path)
@@ -1017,6 +1037,7 @@ def test_open_store_rejects_incompatible_collection(tmp_path: Path) -> None:
     assert "重建索引" in message
 
 
+@requires_chromadb
 def test_upsert_reports_dimension_mismatch(tmp_path: Path) -> None:
     """维度不一致时要给出"换过模型就重建"的可读错误，而不是裸 Chroma 异常。
 
@@ -1053,6 +1074,7 @@ def test_medium_term_delete_removes_records(memory_store, tmp_path: Path) -> Non
     assert memory_store.count() == 0
 
 
+@requires_chromadb
 def test_upsert_rejects_foreign_vector(tmp_path: Path) -> None:
     """同维度但来源不明的预计算向量必须被拒（架构 §10.2：不得混用不同模型的向量）。
 
@@ -1076,6 +1098,7 @@ def test_upsert_rejects_foreign_vector(tmp_path: Path) -> None:
     assert store.count() == 0
 
 
+@requires_chromadb
 def test_upsert_computes_vectors_even_when_record_carries_one(tmp_path: Path) -> None:
     """自带向量与适配器算出来的一致时接受（等价于冗余），但向量始终由适配器计算。"""
     embedding = CountingEmbedding({QUERY_TEXT: CLOSE_VECTOR})
@@ -1094,6 +1117,7 @@ def test_upsert_computes_vectors_even_when_record_carries_one(tmp_path: Path) ->
     assert store.count() == 1
 
 
+@requires_chromadb
 def test_collection_uses_explicit_cosine_space(tmp_path: Path) -> None:
     """距离度量必须真的设成 cosine。
 
@@ -1127,6 +1151,7 @@ def test_collection_uses_explicit_cosine_space(tmp_path: Path) -> None:
     assert references[0]["similarity"] == pytest.approx(math.sqrt(0.5), abs=1e-4)
 
 
+@requires_chromadb
 def test_open_store_rejects_collection_from_older_schema(tmp_path: Path) -> None:
     """旧版本建的 collection（没有距离度量/维度记录）必须失效并提示重建。"""
     import chromadb
@@ -1149,6 +1174,7 @@ def test_open_store_rejects_collection_from_older_schema(tmp_path: Path) -> None
     assert "重建索引" in message
 
 
+@requires_chromadb
 def test_open_store_rejects_collection_bound_to_other_embedding_function(tmp_path: Path) -> None:
     """被别的 embedding 函数绑定的 collection（例如 Chroma 默认 EF）要给出可读的拒绝原因。"""
     import chromadb
@@ -1167,6 +1193,7 @@ def test_open_store_rejects_collection_bound_to_other_embedding_function(tmp_pat
     assert "重建索引" in message
 
 
+@requires_chromadb
 def test_open_store_requires_dimension(tmp_path: Path) -> None:
     """维度拿不到就拒绝建 collection：没有维度就无法校验"不混用不同模型向量"。"""
     with pytest.raises(MemoryStoreError) as error:
@@ -1288,6 +1315,7 @@ def test_onnx_adapter_sets_hf_cache_at_construction(
     assert expected in os.environ["HF_HUB_CACHE"]
 
 
+@requires_fastembed
 def test_onnx_adapter_fails_when_huggingface_hub_cache_is_already_frozen(
     fake_fastembed: type[FakeTextEmbedding],
     monkeypatch: pytest.MonkeyPatch,
@@ -1312,6 +1340,7 @@ def test_onnx_adapter_fails_when_huggingface_hub_cache_is_already_frozen(
     assert (tmp_path / "models").as_posix() in message
 
 
+@requires_fastembed
 def test_onnx_adapter_accepts_huggingface_hub_frozen_at_cache_dir(
     fake_fastembed: type[FakeTextEmbedding],
     monkeypatch: pytest.MonkeyPatch,
@@ -2226,6 +2255,7 @@ def test_recall_accepts_naive_now(store: long_term.LongTermStore, tmp_path: Path
     assert [item["memory_id"] for item in references] == [fact.record.id]
 
 
+@requires_fastembed
 def test_embedding_readiness_is_static_and_actionable(tmp_path: Path) -> None:
     """Embedding 准备状态：只做静态判断（不加载模型），每种状态都给可照做的说明。"""
     disabled = embedding_module.readiness(EmbeddingConfig(enabled=False))
@@ -2268,6 +2298,7 @@ def test_embedding_readiness_for_api_provider_needs_credentials() -> None:
     assert ready.cache_dir is None
 
 
+@requires_fastembed
 def test_embedding_readiness_checks_the_directory_it_will_use(tmp_path: Path) -> None:
     """静态检查要覆盖"存在但不是目录""上级是文件"与离线模式文案。
 

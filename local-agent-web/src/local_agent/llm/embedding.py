@@ -568,6 +568,15 @@ class EmbeddingReadiness:
     detail: str
 
 
+def fastembed_available() -> bool:
+    """``fastembed``（可选依赖 ``memory``）是否已安装。
+
+    与 :func:`local_agent.memory.medium_term.chromadb_available` 同一用途：让调用方（就绪状态、
+    页面、测试）能区分"没装可选组"和"装了但就绪检查没过"，而不是靠捕获 ``ImportError``。
+    """
+    return importlib.util.find_spec("fastembed") is not None
+
+
 def readiness(config: EmbeddingConfig, *, api_key: str | None = None) -> EmbeddingReadiness:
     """判断 embedding 是否具备启用条件；**不加载模型、不写磁盘**。
 
@@ -608,7 +617,7 @@ def readiness(config: EmbeddingConfig, *, api_key: str | None = None) -> Embeddi
             cache_dir=None,
             detail="使用远端 embedding 接口，无需本地模型",
         )
-    if importlib.util.find_spec("fastembed") is None:
+    if not fastembed_available():
         return EmbeddingReadiness(
             state="unavailable",
             provider=provider,
