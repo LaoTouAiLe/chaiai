@@ -374,7 +374,8 @@ T01 → T02 → T03 可演示本机网页两轮闲聊和重启恢复；T04 → T
 - **门槛**：含 `memory` 组与**仅基础依赖**两种环境都跑 `pytest` / `ruff` / `mypy`；干净环境另跑 `uv lock --check`、`uv sync --extra memory`、`uv pip check`（全部通过）。本地环境使用 `uv 0.12.13` / CPython 3.13.12。
 - **本轮修的两处不一致**（都是"仅基础依赖"环境暴露的）：① 20 条依赖 `memory` 组的用例在缺组时**失败**而不是跳过——改为按"装没装"跳过并写明原因（新增 `llm.embedding.fastembed_available()` 与 `medium_term.chromadb_available()` 对齐，测试复用同一判据，不各写一份 `find_spec`）；② `pyproject.toml` 的 mypy `ignore_missing_imports` 名单漏了 `fastembed`，导致缺可选组时 `mypy src` 报 1 条 `import-not-found`。文档同步：README（T22 状态、质量命令的可选组口径、页面遥测从"留给 T24"改记为已知限制、新增 v0.3 退出条件）与 CONTRIBUTING（可选组/人工验证口径）。
 - **本轮不改**：Prompt、规划器、T21/T23 指标、流式默认值与接线范围（仍只在 `chat_node` 与收尾合成两处）、无异步 `astream`、冒烟驱动与多轮真实模型聚合。
-- **建议单独立项（本轮只记录）**：页面遥测（阶段/轮次/工具/token）未实现；checkpoint 反序列化的 `allowed_msgpack_modules` 白名单（langgraph 1.2.11 已预告未来版本会阻断自定义 State 类型）。
+- **后续单独立项（用户裁定）**：① 页面遥测（阶段/轮次/工具/token）——产品增强项，不阻塞 v0.3 代码提交；② checkpoint 反序列化的 `allowed_msgpack_modules` 白名单（langgraph 1.2.11 已预告未来版本会阻断自定义 State 类型）——**优先级较高，已在升级 LangGraph 之前完成**（见下条）。
+- **发布前修复：Checkpoint 反序列化白名单（2026-09-22，T24 之后单独提交）**：`persistence/checkpoint.py` 用显式白名单打开 saver（`CHECKPOINT_ALLOWED_TYPES` = 实测会落盘的 7 个自定义类型）+ 显式关闭 `pickle_fallback`；未登记类型 fail-closed。证据：`tests/test_checkpoint_serde.py`（8 条，真实图 + 真实 SQLite，覆盖多轮/工具步/多步计划/记忆候选/审批中断后重启恢复）三层守住；全量套件（除该文件 597 条）在 serde 事件收集器下**零**事件；本机真实旧库（4 thread，含 `local-default`）纯白名单恢复无损（ToolEvent 87 / EvidenceReference 39 / ReflectionResult 2 / PlanStep 1 / TokenUsage 1 / ContextBudget 1 全为 dataclass 实例），源库哈希不变 → **不需要迁移方案**。未做：LangGraph 升级、State 契约调整、库结构迁移、页面遥测。
 - **未纳入**：未跟踪的 `PRODUCT_EVOLUTION_ROADMAP.md` 继续保持未跟踪。
 
 ## 8. 配置文件与密钥

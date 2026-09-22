@@ -624,13 +624,33 @@ python -m ruff check . ; python -m mypy src       # 两种环境都干净（60 �
   （本机不支持创建符号链接）。
 - **网页人工点击**：页面行为由 AppTest（53 条）与本机启动实测覆盖，逐项人工点击未由本轮执行。
 - **页面遥测**：阶段/轮次/工具/token 的页面展示**未实现**（T23 起即记为未做，T24 未扩展）。
-- **checkpoint 反序列化白名单**：langgraph 1.2.11 对自定义 State 类型（`ReflectionResult`、`PlanStep`、
-  `ToolEvent`、`EvidenceReference`、`TokenUsage`、`ContextBudget`）在读 Checkpoint 时给出
-  "will be blocked in a future version" 告警；当前版本可用，但升级后默认阻断，需要给 checkpointer 的
-  `JsonPlusSerializer` 配 `allowed_msgpack_modules`。**本轮不改序列化**，建议单独立项。
 - **本端点的结构化输出降级**：`deepseek-flash` 对 `json_schema` 方式返回 `OpenAIInvalidRequestError`，
   能力探测按失败闭合把 `structured_json_schema` 降为 `false`，链路继续走降级路径（架构 §11.7 的设计行为，
   但说明"兼容端点 ≠ 完全等价"）。
+
+### 发布前修复：Checkpoint 反序列化白名单
+
+langgraph 1.2.11 起，`JsonPlusSerializer` 对**未登记**的自定义类型只告警放行（serde 事件
+`msgpack_unregistered_allowed`），并预告未来版本改为直接阻止；严格模式或显式白名单下，未登记类型不会被
+构造，而是退回原始 tuple/`dict`。本项目 State 里有 7 个自定义 frozen dataclass 会落盘，原先依赖默认行为。
+
+现在 `persistence/checkpoint.py` 用显式白名单打开 saver（`CHECKPOINT_ALLOWED_TYPES` +
+`build_checkpoint_serializer()`），并显式关闭 `pickle_fallback`：
+
+- **白名单只含实测会落盘的类型**（`ContextBudget`、`TokenUsage`、`EvidenceReference`、
+  `MemoryCandidate`、`PlanStep`、`ReflectionResult`、`ToolEvent`）——不猜模块、不按包名放开、不预留
+  "以后可能用到"；langchain 消息与 `datetime` / `UUID` / `Path` 由 langgraph 的 `SAFE_MSGPACK_TYPES` 覆盖。
+- **未登记类型被拒绝**（fail-closed）：加载时不会构造它，也不会被静默放行；`pickle` 载荷直接拒绝。
+- **读取不迁移、不重写**：旧库打开后逐 thread 恢复状态，Checkpoint 记录与文件哈希都不变。
+- `tests/test_checkpoint_serde.py`（8 条）三层守住：默认序列化器下**复现**告警并钉住"实际落盘类型集合"、
+  项目序列化器下**零** serde 事件、边界（未登记被拒 / pickle 拒绝 / 旧记录无损恢复 / 读取不改写）。
+  它跑的是真实图与真实 SQLite，覆盖多轮消息、工具步、多步计划、记忆候选、审批中断后重启恢复。
+- **实测证据**：全量套件（除该文件外 597 条）在收集器下**零** serde 事件；用本机**真实旧库**
+  （4 个 thread，含 v0.1a 时代的 `local-default`）的白名单恢复：`ToolEvent` 87、`EvidenceReference` 39、
+  `ReflectionResult` 2、`PlanStep` 1、`TokenUsage` 1、`ContextBudget` 1 全部复活为 dataclass 实例，
+  源库哈希不变——**纯白名单足够，不需要迁移方案**。
+- 一个往返表示差异（无害但已写明）：msgpack 没有 tuple，`PlanStep.dependencies` 读回来是 `list`；
+  该字段在源码里没有使用点，真要做相等比较需先归一化。
 
 **结论**：v0.3 的**代码与验收记录**已具备提交条件；**发布门槛尚未全部通过**（第二端点、POSIX 未验证），
 在获得明确豁免前不创建发布标签、不宣称整体验收通过。

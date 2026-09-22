@@ -6,6 +6,8 @@
   :func:`open_database` 共用一个连接，避免多连接互相加锁。
 - 连接由调用方（Streamlit 的 ``cache_resource``）持有并在进程存活期间复用，
   因此连接需要 ``check_same_thread=False``：Streamlit 每次重绘可能在不同线程执行。
+
+反序列化安全口径见 :data:`CHECKPOINT_ALLOWED_TYPES` 与 :func:`build_checkpoint_serializer`。
 """
 
 from __future__ import annotations
@@ -14,14 +16,57 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 
+from local_agent.context.token_budget import ContextBudget, TokenUsage
+from local_agent.graph.state import (
+    EvidenceReference,
+    MemoryCandidate,
+    PlanStep,
+    ReflectionResult,
+    ToolEvent,
+)
 from local_agent.persistence import migrations
 from local_agent.persistence.session_store import SessionStore
 
 #: 第一个会话（也是 v0.1a 的唯一会话）使用的 ``thread_id``。
 #: T11 起新会话用 ``thread-<session_id>``，保留这个常量是为了让升级前的历史仍可恢复。
 DEFAULT_THREAD_ID = "local-default"
+
+#: 允许从 Checkpoint 反序列化的**自定义**类型（架构 §10.1）。
+#:
+#: 为什么需要它（langgraph 1.2.11 实测）：``JsonPlusSerializer`` 默认对**未登记**类型只告警放行
+#: （serde 事件 ``msgpack_unregistered_allowed``），并预告未来版本改为直接阻止；到了严格模式或显式
+#: 白名单下，未登记类型不会被构造，而是退回原始 tuple/``dict``——状态字段就不再是它该有的类型。
+#: 显式登记等于提前对齐将来的默认行为，同时关掉"谁能写这个数据库，就能让加载时 import 并执行任意
+#: callable"的口子（``pickle_fallback`` 也在 :func:`build_checkpoint_serializer` 里显式关闭）。
+#:
+#: **只登记实测会落盘的类型**：集合来自 ``tests/test_checkpoint_serde.py`` 在真实链路上用 serde 事件
+#: 的收集（不猜模块、不用通配、不按包名放开）。langchain 消息、``datetime`` / ``UUID`` / ``Path`` 等
+#: 由 langgraph 的 ``SAFE_MSGPACK_TYPES`` 覆盖，不在这里重复。**新增 State 字段若引入新的自定义类型，
+#: 那条用例会失败**（这正是它存在的意义）。
+CHECKPOINT_ALLOWED_TYPES: tuple[type, ...] = (
+    ContextBudget,
+    EvidenceReference,
+    MemoryCandidate,
+    PlanStep,
+    ReflectionResult,
+    TokenUsage,
+    ToolEvent,
+)
+
+
+def build_checkpoint_serializer() -> JsonPlusSerializer:
+    """构造 Checkpoint 序列化器：显式 msgpack 白名单 + **禁止** pickle 回退（架构 §10.1）。
+
+    Returns:
+        每个 saver 一份实例；未登记的类型在反序列化时会被拒绝并记 serde 事件。
+    """
+    return JsonPlusSerializer(
+        allowed_msgpack_modules=CHECKPOINT_ALLOWED_TYPES,
+        pickle_fallback=False,
+    )
 
 
 @dataclass
@@ -42,7 +87,7 @@ def _prepare(database_path: Path) -> tuple[sqlite3.Connection, SqliteSaver]:
     """打开连接、升级库结构、建好 Checkpoint 表。"""
     connection = _connect(database_path)
     migrations.apply_migrations(connection)
-    saver = SqliteSaver(connection)
+    saver = SqliteSaver(connection, serde=build_checkpoint_serializer())
     saver.setup()
     return connection, saver
 

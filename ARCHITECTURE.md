@@ -872,6 +872,19 @@ AGENTS 文件可以约束工作方式，但不能覆盖系统安全策略、人�
 
 持久化：使用 SQLite Checkpoint，支持中断恢复和多会话隔离。
 
+反序列化口径：Checkpoint 必须用**显式登记白名单**的序列化器打开（`SqliteSaver(serde=JsonPlusSerializer(...))`），
+只允许复活实际会落盘的自定义类型，并**关闭 pickle 回退**。理由：LangGraph 的默认 `JsonPlusSerializer` 对未登记
+类型只告警放行（serde 事件 `msgpack_unregistered_allowed`），并预告未来版本改为拒绝；到了严格模式或显式白名单下，
+未登记类型不会被构造，而是退回原始 tuple/`dict`，状态字段就不再是它该有的类型。显式登记等于提前对齐将来的
+默认行为，同时消除"谁能写这个数据库，就能让加载时 import 并执行任意 callable"的口子。因此：
+
+- 未登记类型必须**被拒绝**（fail-closed），不能静默放行；
+- 新增会落盘的自定义类型时**必须同步登记**，由 `tests/test_checkpoint_serde.py` 守住"实际落盘类型集合"
+  （该用例在真实链路上用 serde 事件收集类型，集合对不上就失败）；
+- 读取历史记录**不迁移、不重写**（只有显式迁移脚本能改库结构）；
+- langchain 消息、`datetime` / `UUID` / `Path` 等由 LangGraph 的 `SAFE_MSGPACK_TYPES` 覆盖，不重复登记；
+- msgpack 没有 tuple：dataclass 的 tuple 字段读回来是 `list`（类型与标量字段不变），需要相等比较时先归一化。
+
 必须区分两种数据：
 
 - Checkpoint 中的 `messages` 是审计和恢复用的原始记录，默认保留，不因摘要压缩而删除。
