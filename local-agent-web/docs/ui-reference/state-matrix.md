@@ -42,7 +42,7 @@
 | 15 | 工具：待办行 + 计划条 | `15-tool-todo-plan-strip.png` × | 展开 `更新任务清单` 行 | 工具行 + 输入区上方计划条 | T31（计划面板） |
 | 16 | 推理块展开/折叠 | `16-reasoning-expanded.png` | 点 `Think …` 行 | 可折叠 reasoning（**本项目按 §6.7 不展示思维链**） | T31 |
 | 17 | 提问卡接管输入区 | `17-question-takeover.png` | 见 §1 | 输入区被提问卡替换（选项/上一题/下一题/跳过） | 不属 v0.4 范围 |
-| 18 | 审批卡接管输入区 | `18-approval-takeover.png` × | 见 §1 | 警告色卡片 + 拒绝 / 允许一次 | T32 |
+| 18 | 审批卡接管输入区 | `18-approval-takeover.png` × | 见 §1 | 警告色卡片 + 拒绝 / 允许一次；**高风险（如 `delete_file`）首屏按钮是「进入二次确认」**，二次确认须勾选确认框后才可批准（T32 分档，T37 补齐本条差异） | T32 |
 | 19 | 输出上限截断提示 | `19-max-tokens-notice.png` | 定位到第 72 轮 | 轮次级提示条（含「发送继续」引导） | T31 / T34 |
 | 20 | 轨迹列表（表格态） | `20-trace-list.png` × | 点顶部「轨迹」页签 | 轨迹表格：类型 / 参数 / 结果摘要 | T31（任务轨迹） |
 | 21 | 轨迹时间线 + 检查器 | `21-trace-inspector.png` | 工具卡上的 `Inspect` | 时间线小地图 + 右侧检查器（Summary/Payload/Result/Schema/Timing） | T31 / T34 |

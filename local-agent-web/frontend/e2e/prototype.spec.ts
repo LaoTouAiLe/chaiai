@@ -141,14 +141,16 @@ test('tool checkpoint renders every card shape, capped results included', async 
 test('an approval takes over the composer and a stale one offers no decision', async ({ page }) => {
   await page.goto('/?state=approval')
   await expect(page.getByRole('region', { name: '审批' })).toBeVisible()
-  await expect(page.getByRole('button', { name: '允许一次' })).toBeVisible()
+  // 本场景 fixture 是 delete_file 高风险审批：首屏按钮是**二次确认的入口**，不是"允许一次"。
+  // 普通风险仍直接给"允许一次"（真后端用例 `approval-live.spec.ts` 覆盖那一支）。
+  await expect(page.getByRole('button', { name: '进入二次确认' })).toBeVisible()
   await expect(page.getByRole('button', { name: '拒绝' })).toBeVisible()
   // The chat input must not stay reachable under a pending decision.
   await expect(page.getByRole('textbox', { name: '给智能体发消息' })).toHaveCount(0)
 
   await page.goto('/?state=approval-expired')
   await expect(page.getByText('审批已失效')).toBeVisible()
-  await expect(page.getByRole('button', { name: '允许一次' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '进入二次确认' })).toHaveCount(0)
   await expect(page.getByText(/该审批已超时失效，未执行任何操作/)).toBeVisible()
   // A card telling the user to re-issue a request must not be the reason they
   // cannot: the composer comes back while the outcome stays on screen.
