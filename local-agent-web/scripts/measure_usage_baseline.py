@@ -1,0 +1,234 @@
+"""T34 真实基线采集：固定场景跑一遍真实模型，逐次调用保存供应商实际上报的用量。
+
+为什么需要这个脚本（而不是"跑一次 pytest 就算数"）：T34 的"真实基线"要求的是一份**可重跑**的
+证据——固定模型、端点、工作区和工具集，跑一条四步多轮场景，逐调用保存 uncached / cache-read /
+output、端点与工具 Schema 指纹，以及发生压缩的位置。T35 的真实验收要"重跑 T34 场景"并给出
+优化前后对照，所以场景本身必须留在仓库里，不能是一次性脚本。
+
+隔离口径（都不该碰用户的东西）：
+
+- 数据目录默认是临时目录，配置由 ``config.yaml.example`` 派生并**覆盖 llm 段为真实 ``config.yaml``
+  的那一份**（模型、端点以真实配置为准，不在这里另写一套）；
+- ``model_settings.credential_store`` 强制 ``memory``：绝不写系统凭据存储；
+- ``instance_lock=False``：它不占用户单实例的位置；
+- 密钥只从 ``.env`` 读进本进程环境变量，**不打印、不落盘**。
+
+用法::
+
+    uv run python scripts/measure_usage_baseline.py --data E:/tmp/t34-baseline
+    uv run python scripts/measure_usage_baseline.py            # 用临时目录
+
+退出码：0 成功；2 缺密钥 / 缺配置；3 场景里出现了未预期的终态（见 stderr）。
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+
+#: 固定场景：四步多轮。第 1 轮期望工具（读文件）、第 2 轮纯聊天、第 3 轮写新文件、第 4 轮纯聊天。
+#: 文本改掉就等于换了基线，**改前先想清楚**：T35 的对照要求重跑的就是这一份。
+TURNS: tuple[str, ...] = (
+    "请读取 notes.md，然后用一句话说明这份笔记的主题。",
+    "它第一条内容是什么？只回答那一条，不要读文件。",
+    "把 notes.md 原样复制一份为 notes_copy.md。",
+    "用一句话总结你在这几轮里做了哪三件事。",
+)
+
+#: 工作区种子文件。内容固定（含固定的 AGENTS.md），这样系统前缀在轮次之间不会因为种子变化而变。
+NOTES_MD = """# T34 基线笔记
+
+1. 这份笔记用于 T34 的真实用量基线。
+2. 模型、端点、工作区与工具集在四轮之间保持不变。
+3. 观测点是供应商在 usage 里上报的实际 token 与缓存命中。
+4. 没有命中也要如实记录，不省略、不改写。
+"""
+
+AGENTS_MD = """# 工作区约定
+
+- 只在本工作区内读写文件。
+- 回答保持简短。
+"""
+
+
+def _load_env(path: Path) -> None:
+    """把 ``.env`` 里的键值放进当前进程环境（只补缺，不覆盖已有值）。"""
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        os.environ.setdefault(key.strip(), value.strip())
+
+
+def _write_config(data_dir: Path) -> Path:
+    """由示例配置派生一份：llm 段换成真实 ``config.yaml`` 的，凭据存储改内存态。"""
+    example_path = ROOT / "config.yaml.example"
+    real_path = ROOT / "config.yaml"
+    if not real_path.is_file():
+        print(f"缺少真实配置：{real_path}", file=sys.stderr)
+        raise SystemExit(2)
+    text = yaml.safe_load(example_path.read_text(encoding="utf-8"))
+    real = yaml.safe_load(real_path.read_text(encoding="utf-8"))
+    text["llm"] = real["llm"]
+    text["model_settings"] = dict(text.get("model_settings") or {})
+    text["model_settings"]["credential_store"] = "memory"
+    config_path = data_dir / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(text, allow_unicode=True, sort_keys=False), encoding="utf-8"
+    )
+    return config_path
+
+
+def _seed_workspace(data_dir: Path) -> None:
+    """种下固定的种子文件（工作区根就是数据目录，示例配置里 ``workspace.root: "."``）。"""
+    (data_dir / "notes.md").write_text(NOTES_MD, encoding="utf-8")
+    (data_dir / "AGENTS.md").write_text(AGENTS_MD, encoding="utf-8")
+
+
+def _dump(snapshot: Any) -> dict[str, Any]:
+    """把快照裁成记录用得上的那几段（不把整份 messages 抄进基线）。"""
+    usage = snapshot.usage
+    return {
+        "session_state": snapshot.session_state,
+        "approval": None
+        if snapshot.approval is None
+        else {"state": snapshot.approval.state, "tool_name": snapshot.approval.tool_name},
+        "context": snapshot.context.model_dump(mode="json"),
+        "usage": None if usage is None else usage.model_dump(mode="json"),
+        "model_calls": [call.model_dump(mode="json") for call in snapshot.model_calls],
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="T34 真实基线采集（真实模型）")
+    parser.add_argument("--data", default=None, help="数据/工作区目录；默认用临时目录")
+    parser.add_argument(
+        "--out",
+        default=None,
+        help="结果 JSON 的落盘路径；默认写到数据目录下的 baseline_result.json",
+    )
+    parser.add_argument(
+        "--no-probe",
+        action="store_true",
+        help=(
+            "跳过启动前的能力检测。默认**做**检测：产品只在'流式能力已确认'时才流式，"
+            "不检测就测不到首 Token 时间（ttft），等于少覆盖 T34 改动过的流式链路"
+        ),
+    )
+    args = parser.parse_args()
+
+    _load_env(ROOT / ".env")
+    llm_env = "DEEPSEEK_API_KEY"
+    if not os.environ.get(llm_env, "").strip():
+        print(f"环境里没有 {llm_env}：先确认 .env 存在且已填值", file=sys.stderr)
+        return 2
+
+    data_dir = (
+        Path(args.data) if args.data is not None else Path(tempfile.mkdtemp(prefix="t34-baseline"))
+    )
+    data_dir.mkdir(parents=True, exist_ok=True)
+    config_path = _write_config(data_dir)
+    _seed_workspace(data_dir)
+
+    # 放在这里 import：路径与依赖都就绪后再导入，`--help` 不需要装齐环境。
+    from local_agent.api.container import open_runtime
+    from local_agent.config import load_config
+
+    config = load_config(config_path)
+    runtime = open_runtime(config, base_dir=data_dir, instance_lock=False)
+    try:
+        service = runtime.service
+        capability: dict[str, Any] | None = None
+        if not args.no_probe:
+            # 真实用户的第一件事就是"测试连接"。能力检测的结果决定这一轮走不走流式，
+            # 所以基线必须把它记下来（不记的话 ttft 全空，无法解释是"没流"还是"丢了数据"）。
+            connection_id = service.default_model_connection()
+            if connection_id:
+                view = service.test_model_connection(connection_id)
+                capability = {
+                    "connection_id": view.connection_id,
+                    "capabilities": [item.model_dump(mode="json") for item in view.capabilities],
+                }
+                print(f"[probe] {capability}", flush=True)
+        summary = service.create_session(workspace_root=data_dir, title="T34 真实基线")
+        session_id = summary.session_id
+        turns: list[dict[str, Any]] = []
+        for index, text in enumerate(TURNS, start=1):
+            result = service.submit_message(session_id, text, f"t34-baseline-{index}")
+            # 需要人工审批的操作按"允许一次"放行；这本身也是基线的一部分（审批等待耗时）。
+            approves = 0
+            while result.status == "awaiting_approval" and approves < 5:
+                snapshot = service.get_session_snapshot(session_id)
+                if snapshot.approval is None:
+                    break
+                approves += 1
+                result = service.resolve_approval(
+                    session_id,
+                    snapshot.approval.approval_id,
+                    "approve",
+                    f"t34-baseline-{index}-approve-{approves}",
+                )
+            snapshot = service.get_session_snapshot(session_id)
+            turns.append(
+                {
+                    "turn": index,
+                    "input": text,
+                    "result": {
+                        "status": result.status,
+                        "run_id": result.run_id,
+                        "snapshot_id": result.snapshot_id,
+                        "replayed": result.replayed,
+                        "error": None
+                        if result.error is None
+                        else result.error.model_dump(mode="json"),
+                    },
+                    "approvals": approves,
+                    **_dump(snapshot),
+                }
+            )
+            print(
+                f"[turn {index}] status={result.status} "
+                f"calls={len(snapshot.model_calls)} approvals={approves}",
+                flush=True,
+            )
+
+        payload = {
+            "model": config.llm.model if config.llm is not None else None,
+            "base_url": config.llm.base_url if config.llm is not None else None,
+            "streaming": config.llm.streaming if config.llm is not None else None,
+            "workspace": str(data_dir),
+            "capability": capability,
+            "turns": turns,
+            "turns_count": len(turns),
+            "lines": "notes.md / AGENTS.md",
+            "no_compaction_expected": True,
+        }
+        out_path = Path(args.out) if args.out is not None else data_dir / "baseline_result.json"
+        out_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"数据目录：{data_dir}")
+        print(f"结果：{out_path}")
+        failed = [turn["turn"] for turn in turns if turn["result"]["status"] == "failed"]
+        if failed:
+            print(f"有轮次失败：{failed}", file=sys.stderr)
+            return 3
+        return 0
+    finally:
+        runtime.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

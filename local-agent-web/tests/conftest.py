@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.runnables import RunnableLambda
 from pydantic import Field
@@ -65,8 +66,21 @@ class RoutingFakeModel(GenericFakeChatModel):
     memory_requested: bool = False
     #: 流式测试用：把回答切成几块（确定性均分；``<=1`` 表示整段一块）。
     stream_chunks: int = 3
+    #: 端到端观察中间态时可放慢假模型；默认不改变已有测试的速度。
+    stream_delay_seconds: float = 0.0
     #: 流式测试用：产出第 N 块之后就抛错（模拟"中途失败"）；``None`` 表示不失败。
     fail_stream_after_chunks: int | None = None
+    #: 只让普通回答失败；分类、记忆审核仍可完成，用于真实服务的模型错误路径。
+    fail_answer: bool = False
+    #: 假服务的页面边界用例：按最后一条用户消息选择确定性回复或故障。
+    response_by_input: dict[str, str] = Field(default_factory=dict)
+    fail_on_input: list[str] = Field(default_factory=list)
+    #: 端到端（T32）按**用户输入**脚本化这一轮的工具调用：键是最后一条用户消息，值是这一轮要发
+    #: 的工具调用。与 ``response_by_input`` 同一套"按输入脚本化"的口径，区别是它作用在决策调用上，
+    #: 因此需要在同一进程里分别触发"批准"与"拒绝"两条路径时用它——``tool_calls`` 只认第一次决策调用。
+    tool_calls_by_input: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    #: 已经脚本化过的输入（内部记账；见 ``_generate`` 里为什么必须记住）。
+    scripted_inputs: set[str] = Field(default_factory=set)
     seen_prompts: list[str] = Field(default_factory=list)
     #: 结构化输出调用（反思、分类、记忆意图审核）收到的提示文本。
     structured_prompts: list[str] = Field(default_factory=list)
@@ -183,10 +197,27 @@ class RoutingFakeModel(GenericFakeChatModel):
             )
 
         self.decision_calls += 1
+        latest_user = next((message.text for message in reversed(messages) if isinstance(message, HumanMessage)), "")
+        if self.fail_answer or latest_user in self.fail_on_input:
+            raise RuntimeError("模型回答失败（测试故意触发）")
+        scripted = self.tool_calls_by_input.get(latest_user)
+        if scripted and latest_user not in self.scripted_inputs:
+            # 同一条输入只脚本化一次：工具结果回填后会对**同一条**用户消息再决策一次，
+            # 不记住"已经发过"就会一直发同一个工具调用（这就是它和 repeated_tool_calls 的区别）。
+            self.scripted_inputs.add(latest_user)
+            return ChatResult(
+                generations=[
+                    ChatGeneration(
+                        message=AIMessage(
+                            content="", tool_calls=[dict(call) for call in scripted]
+                        )
+                    )
+                ]
+            )
         if self.tool_calls and (self.repeated_tool_calls or self.decision_calls == 1):
             message = AIMessage(content="", tool_calls=self._materialize_calls())
             return ChatResult(generations=[ChatGeneration(message=message)])
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.reply))])
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.response_by_input.get(latest_user, self.reply)))])
 
     def _stream(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[no-untyped-def]
         """按 ``_generate`` 的同一套脚本产出**增量块**（真实模型是 token 级，这里按块）。
@@ -205,6 +236,8 @@ class RoutingFakeModel(GenericFakeChatModel):
         for index, piece in enumerate(_split_chunks(str(message.content), self.stream_chunks)):
             if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
                 raise RuntimeError("流式中途失败（测试故意触发）")
+            if self.stream_delay_seconds > 0:
+                time.sleep(self.stream_delay_seconds)
             # `_stream` 的契约是产出 `ChatGenerationChunk`（langchain-core 会解包 .message）
             yield ChatGenerationChunk(
                 message=AIMessageChunk(
@@ -250,13 +283,18 @@ def model_factory() -> Callable[..., RoutingFakeModel]:
 
 
 @pytest.fixture
-def app_config() -> AppConfig:
+def app_config(monkeypatch: pytest.MonkeyPatch) -> AppConfig:
     """通用单测配置：从示例构造，但关闭会增加模型调用或持久化状态的两项能力。
 
     示例文件自己的默认值由 ``test_config_example_is_valid`` 单独固定；与记忆/压缩无关的用例
     不应因为产品默认开关变化而悄悄多一次审核调用、创建长期库或触发摘要。
+
+    同时把 ``llm.api_key_env`` 指向的变量**设上值**（T29A 之后运行期按连接取密钥：连接是从
+    这段配置幂等导入的，指向的还是这个变量名）。不设的话，提交会正确地被 `MODEL_AUTH_FAILED`
+    拒绝——那是产品行为没错，但会让"注入假模型"的用例莫名其妙地失败。
     """
     base = load_config(PROJECT_ROOT / "config.yaml.example")
+    monkeypatch.setenv(base.llm.api_key_env, "sk-test-secret")
     return base.model_copy(
         update={
             "memory": base.memory.model_copy(

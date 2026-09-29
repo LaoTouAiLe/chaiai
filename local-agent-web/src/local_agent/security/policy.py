@@ -109,7 +109,11 @@ class SecurityPolicy:
         env = os.environ if environ is None else environ
         secret_names = [
             name
-            for name in (app_config.llm.api_key_env, app_config.embedding.api_key_env)
+            for name in (
+                # `llm` 段可以为空（Web 初始设置模式），这里只做"把环境变量值纳入脱敏"的收集。
+                "" if app_config.llm is None else app_config.llm.api_key_env,
+                app_config.embedding.api_key_env,
+            )
             if name
         ]
         secret_values = tuple(

@@ -1,0 +1,151 @@
+.meter {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  height: 28px;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--law-radius-pill);
+}
+
+.trigger:focus-visible {
+  outline: 2px solid var(--law-state-info);
+  outline-offset: 2px;
+}
+
+/* Hover popover (matrix 22). No gap from the trigger, so hover is continuous;
+   `focus-within` gives the keyboard the same content. */
+.popover {
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  z-index: 2;
+  visibility: hidden;
+  width: 340px;
+  padding: var(--law-space-md) var(--law-space-lg);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+  background: var(--law-surface-menu);
+  box-shadow: var(--law-shadow-lv2);
+}
+
+.meter:hover .popover,
+.meter:focus-within .popover {
+  visibility: visible;
+}
+
+/* Pinned panel (matrix 23): same detail, no overlap to reason about. */
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-sm);
+  padding: var(--law-space-md) var(--law-space-xl);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+  background: var(--law-bg-layer-2);
+}
+
+.panelHead {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+}
+
+.panelTitle {
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  font-weight: var(--law-weight-medium);
+}
+
+.panelClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: auto;
+  border-radius: var(--law-radius-md);
+  color: var(--law-text-tertiary);
+}
+
+.panelClose:hover {
+  background: var(--law-button-ghost-hover);
+  color: var(--law-text-primary);
+}
+
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--law-space-xs) var(--law-space-2xl);
+}
+
+.fact {
+  display: flex;
+  align-items: baseline;
+  gap: var(--law-space-md);
+}
+
+.fact dt {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.fact dd {
+  margin: 0;
+  color: var(--law-text-primary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.basis {
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-md);
+}
+
+.ring {
+  position: relative;
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--law-radius-pill);
+  /* The ring reads the ratio from a custom property so the JSX stays declarative. */
+  background: conic-gradient(
+    var(--law-state-info) calc(var(--law-meter-ratio, 0) * 360deg),
+    var(--law-border-l2) 0
+  );
+}
+
+.ringWarn {
+  background: conic-gradient(
+    var(--law-state-warn) calc(var(--law-meter-ratio, 0) * 360deg),
+    var(--law-border-l2) 0
+  );
+}
+
+.ringUnknown {
+  background: var(--law-border-l2);
+}
+
+.hole {
+  position: absolute;
+  inset: 3px;
+  border-radius: var(--law-radius-pill);
+  background: var(--law-bg-layer-1);
+}
+
+.readout {
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  font-variant-numeric: tabular-nums;
+}

@@ -1,0 +1,230 @@
+.scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--law-space-3xl) 0 var(--law-space-xl);
+}
+
+.column {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xl);
+  width: 100%;
+  max-width: var(--law-conversation-max-width);
+  margin: 0 auto;
+  padding: 0 var(--law-space-2xl);
+}
+
+.userRow {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--law-space-xs);
+}
+
+.userBubble {
+  max-width: 76%;
+  padding: var(--law-space-md) var(--law-space-lg);
+  border-radius: var(--law-radius-xl);
+  background: var(--law-surface-bubble);
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  color: var(--law-text-primary);
+}
+
+.userTime {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.assistantRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-sm);
+}
+
+.assistantText {
+  font-size: var(--law-text-base);
+  line-height: var(--law-leading-lg);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  color: var(--law-text-caption);
+}
+
+.action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--law-radius-sm);
+  color: var(--law-text-tertiary);
+  transition: background var(--law-duration-fast) var(--law-ease);
+}
+
+.action:hover {
+  background: var(--law-hover-solid);
+  color: var(--law-text-primary);
+}
+
+.assistantTime {
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.toolSlot,
+.errorSlot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-md);
+}
+
+.memorySlot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-md);
+}
+
+/* Empty state. Fixed min-height keeps the capture independent of viewport size. */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--law-space-sm);
+  min-height: 320px;
+  text-align: center;
+}
+
+.emptyTitle {
+  font-size: var(--law-text-xl);
+  line-height: var(--law-leading-xl);
+  font-weight: var(--law-weight-semibold);
+}
+
+.emptyText {
+  max-width: 460px;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-md);
+}
+
+/* Loading state. The skeleton has no animation: baselines stay deterministic. */
+.loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xs);
+  padding-top: var(--law-space-2xl);
+}
+
+.loadingLabel {
+  color: var(--law-text-primary);
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  font-weight: var(--law-weight-medium);
+}
+
+.loadingDetail {
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-md);
+}
+
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-md);
+  margin-top: var(--law-space-xl);
+}
+
+.skeletonRow {
+  display: block;
+  height: 12px;
+  border-radius: var(--law-radius-xs);
+  background: var(--law-surface-selector);
+}
+
+.stats {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm);
+  margin-top: var(--law-space-sm);
+  padding-top: var(--law-space-md);
+  border-top: 1px solid var(--law-border-l1);
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.statsDivider {
+  color: var(--law-border-l4);
+}
+
+/* Estimated numbers must be visibly different from reported ones. */
+.estimated {
+  margin-left: var(--law-space-xs);
+  padding: 0 var(--law-space-xs);
+  border-radius: var(--law-radius-xs);
+  background: var(--law-surface-selector);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+}
+
+.breakdown {
+  flex: 1 1 100%;
+  margin-top: var(--law-space-xs);
+}
+
+.breakdown > summary {
+  cursor: pointer;
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-lg);
+}
+
+.breakdown > summary:hover {
+  color: var(--law-text-primary);
+}
+
+.callList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xxs);
+  padding: var(--law-space-sm) 0 0 var(--law-space-lg);
+}
+
+.callRow {
+  display: flex;
+  align-items: baseline;
+  gap: var(--law-space-lg);
+  color: var(--law-text-secondary);
+}
+
+.callPurpose {
+  flex: 0 0 96px;
+  color: var(--law-text-primary);
+}
+
+.callModel {
+  flex: 0 0 auto;
+  color: var(--law-text-tertiary);
+}
+
+.callNumbers {
+  flex: 1 1 auto;
+}
+
+.callElapsed {
+  flex: 0 0 auto;
+  color: var(--law-text-caption);
+}

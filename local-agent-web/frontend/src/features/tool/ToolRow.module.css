@@ -1,0 +1,112 @@
+.wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-md);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  height: 24px;
+  padding: 0 var(--law-space-xs);
+  border-radius: var(--law-radius-sm);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  text-align: left;
+  transition: background var(--law-duration-fast) var(--law-ease);
+}
+
+.row:hover {
+  background: var(--law-hover-solid);
+  color: var(--law-text-primary);
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+}
+
+.statusSucceeded {
+  color: var(--law-state-success);
+}
+
+.statusFailed {
+  color: var(--law-state-error);
+}
+
+.statusRunning {
+  color: var(--law-state-warn);
+}
+
+.pulseDot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--law-radius-pill);
+  background: currentColor;
+  animation: pulse 1.4s var(--law-ease) infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.chevron {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--law-text-caption);
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--law-text-tertiary);
+}
+
+.name {
+  flex: 0 0 auto;
+  font-weight: var(--law-weight-medium);
+  color: var(--law-text-primary);
+}
+
+.summary {
+  flex: 0 0 auto;
+  color: var(--law-text-secondary);
+}
+
+.target {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--law-font-mono);
+  color: var(--law-text-tertiary);
+}
+
+.duration {
+  flex: 0 0 auto;
+  color: var(--law-text-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.evidence {
+  margin: 0;
+  padding: 0 var(--law-space-xs);
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}

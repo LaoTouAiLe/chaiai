@@ -1,0 +1,26 @@
+.app {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  background: var(--law-bg-base);
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Transport-level notice from the event stream (`stream_overrun`, idle timeout,
+   an unparsable frame). It states what happened instead of pretending the
+   connection was healthy — T30. */
+.notice {
+  margin: 0;
+  padding: var(--law-space-xs) var(--law-space-2xl);
+  background: var(--law-surface-tip);
+  border-bottom: 1px solid var(--law-border-l1);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}

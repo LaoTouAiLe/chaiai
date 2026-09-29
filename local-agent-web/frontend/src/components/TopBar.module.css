@@ -1,0 +1,79 @@
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--law-space-xl);
+  height: var(--law-header-height);
+  padding: 0 var(--law-space-3xl) 0 var(--law-space-2xl);
+  border-bottom: 1px solid var(--law-border-l1);
+}
+
+.left {
+  min-width: 0;
+}
+
+.breadcrumb {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.title {
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  font-weight: var(--law-weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.right {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+}
+
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-xxs);
+  padding: var(--law-space-xxs);
+  border-radius: var(--law-radius-md);
+  background: var(--law-surface-selector);
+}
+
+.tab {
+  height: 27px;
+  padding: 0 var(--law-space-lg);
+  border-radius: var(--law-radius-sm);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  transition: background var(--law-duration-fast) var(--law-ease);
+}
+
+.tab:hover {
+  color: var(--law-text-primary);
+}
+
+.tabActive {
+  background: var(--law-bg-layer-1);
+  color: var(--law-text-primary);
+  font-weight: var(--law-weight-medium);
+  box-shadow: var(--law-shadow-lv1);
+}
+
+.log {
+  height: 32px;
+  padding: 0 var(--law-space-lg);
+  border-radius: var(--law-radius-md);
+  border: 1px solid var(--law-border-l2);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.log:hover {
+  background: var(--law-button-ghost-hover);
+  color: var(--law-text-primary);
+}

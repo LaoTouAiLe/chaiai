@@ -170,3 +170,34 @@ agent:
   max_tool_loops: 20
   max_retries_per_step: 2
   require_evidence_for_completion: true
+
+# v0.4 独立 Web 前端与 HTTP API（T29，契约 §15.3）。
+# 默认只绑定回环地址：v0.4 没有鉴权，改 host 必须同时打开 allow_non_loopback，
+# 否则启动校验直接拒绝（不允许"改了就暴露到公网"这种静默升级）。
+web:
+  host: "127.0.0.1"
+  port: 8000
+  allow_non_loopback: false
+  # 允许的 Host 头（防 DNS rebinding）；非回环部署时把域名写进来。
+  allowed_hosts:
+    - "127.0.0.1"
+    - "localhost"
+    - "[::1]"
+  # 开发期跨源：只允许 Vite dev server；生产同源（由本服务托管前端产物）。
+  dev_origins:
+    - "http://127.0.0.1:5173"
+    - "http://localhost:5173"
+  max_body_bytes: 1000000          # 请求体上限；超限 413，不进入业务逻辑
+  static_dir: "frontend/dist"      # 相对配置文件所在目录；不存在时只提供 API
+  sse_heartbeat_seconds: 15        # SSE 心跳间隔：死连接不能一直占着订阅
+  sse_idle_timeout_seconds: 300    # SSE 空闲上限：超过则关闭该连接（不取消任务）
+  sse_max_pending_events: 200      # 单次排空超过它就判定客户端落后：结束订阅并要求重连
+  keepalive_seconds: 15            # HTTP keep-alive 超时（uvicorn timeout_keep_alive）
+
+# 可视化模型连接设置（T29A，契约 §6.8）。
+# 非秘密设置（连接、默认与会话选择、能力检测结果）存在这个**独立**库里；
+# 密钥永远不进这个库：Windows 存系统凭据存储，其它平台只在本进程内有效（重启后需重新录入）。
+# 已有 config.yaml 时，首次启动会把上面的 llm 段**幂等导入**成一条默认连接，之后以页面为准。
+model_settings:
+  path: "data/model_settings.sqlite"
+  credential_store: "auto"         # auto（Windows 用系统凭据存储）| memory（强制临时模式）

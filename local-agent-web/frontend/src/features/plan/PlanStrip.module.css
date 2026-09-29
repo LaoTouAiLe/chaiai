@@ -1,0 +1,123 @@
+.strip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-sm);
+  padding: var(--law-space-md) var(--law-space-lg);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+  background: var(--law-bg-layer-1);
+  box-shadow: var(--law-shadow-lv1);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  min-width: 0;
+}
+
+.goal {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  font-weight: var(--law-weight-medium);
+}
+
+.count {
+  flex: 0 0 auto;
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.current {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.expand {
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+  color: var(--law-text-caption);
+}
+
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm) var(--law-space-lg);
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  color: var(--law-text-secondary);
+}
+
+.stepIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+}
+
+.completed {
+  color: var(--law-text-tertiary);
+}
+
+.completed .stepIcon {
+  color: var(--law-state-success);
+}
+
+.running {
+  color: var(--law-text-primary);
+  font-weight: var(--law-weight-medium);
+}
+
+.running .stepIcon::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: var(--law-radius-pill);
+  background: var(--law-state-warn);
+}
+
+.failed {
+  color: var(--law-state-error);
+}
+
+.failed .stepIcon {
+  color: var(--law-state-error);
+}
+
+.pending .stepIcon::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: var(--law-radius-pill);
+  border: 1px solid var(--law-border-l4);
+}
+
+.stepTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stepStatus {
+  color: var(--law-text-caption);
+}

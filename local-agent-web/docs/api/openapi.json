@@ -1,0 +1,5326 @@
+{
+  "components": {
+    "schemas": {
+      "ApprovalDecisionRequest": {
+        "additionalProperties": false,
+        "description": "审批决定。\n\n`edit` 必须带 `edited_arguments`（否则服务不知道该执行什么）；反过来，非 `edit` 带参数\n会被拒绝——那会让\"用户改了参数\"与\"实际执行的参数\"出现两份不一致的真相（§15.7）。",
+        "properties": {
+          "client_request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Client Request Id",
+            "type": "string"
+          },
+          "confirm_recursive": {
+            "default": false,
+            "title": "Confirm Recursive",
+            "type": "boolean"
+          },
+          "decision": {
+            "enum": [
+              "approve",
+              "edit",
+              "reject"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "edited_arguments": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edited Arguments"
+          },
+          "reason": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision",
+          "client_request_id"
+        ],
+        "title": "ApprovalDecisionRequest",
+        "type": "object"
+      },
+      "ApprovalRequiredEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "approval_required",
+            "default": "approval_required",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ApprovalRequiredPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "ApprovalRequiredEvent",
+        "type": "object"
+      },
+      "ApprovalRequiredPayload": {
+        "properties": {
+          "approval": {
+            "$ref": "#/components/schemas/ApprovalView"
+          }
+        },
+        "required": [
+          "approval"
+        ],
+        "title": "ApprovalRequiredPayload",
+        "type": "object"
+      },
+      "ApprovalResolvedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "approval_resolved",
+            "default": "approval_resolved",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ApprovalResolvedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "ApprovalResolvedEvent",
+        "type": "object"
+      },
+      "ApprovalResolvedPayload": {
+        "properties": {
+          "approval_id": {
+            "minLength": 1,
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Note"
+          },
+          "state": {
+            "enum": [
+              "approved",
+              "rejected",
+              "expired"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id",
+          "state"
+        ],
+        "title": "ApprovalResolvedPayload",
+        "type": "object"
+      },
+      "ApprovalView": {
+        "description": "审批的**派生视图状态**。\n\n底层只有 `pending_approval` 与 `approval_history`（决定值 `approve`/`edit`/`reject`），没有状态机字段。\n映射规则（T28 实现）：运行活跃且存在待决请求 → `pending`；决定已被接受、工具仍在跑 → `executing`；\n`approve` → `approved`；`reject` → `rejected`；运行在待决期间结束 → `expired`。\n`edit` 目前归入 `approved`，被改写的参数通过 `edited_arguments` 携带，不新增页面状态。",
+        "properties": {
+          "action_fingerprint": {
+            "minLength": 1,
+            "title": "Action Fingerprint",
+            "type": "string"
+          },
+          "approval_id": {
+            "minLength": 1,
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "confirmation_stage": {
+            "default": 1,
+            "enum": [
+              1,
+              2
+            ],
+            "title": "Confirmation Stage",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "edited_arguments": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Edited Arguments",
+            "type": "object"
+          },
+          "impact_summary": {
+            "minLength": 1,
+            "title": "Impact Summary",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "outside_workspace": {
+            "default": false,
+            "title": "Outside Workspace",
+            "type": "boolean"
+          },
+          "redacted_arguments": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Redacted Arguments",
+            "type": "object"
+          },
+          "risk": {
+            "enum": [
+              "normal",
+              "high"
+            ],
+            "title": "Risk",
+            "type": "string"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "executing",
+              "approved",
+              "rejected",
+              "expired"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target"
+          },
+          "tool_call_id": {
+            "minLength": 1,
+            "title": "Tool Call Id",
+            "type": "string"
+          },
+          "tool_name": {
+            "minLength": 1,
+            "title": "Tool Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id",
+          "run_id",
+          "tool_call_id",
+          "tool_name",
+          "action_fingerprint",
+          "impact_summary",
+          "risk",
+          "state",
+          "created_at"
+        ],
+        "title": "ApprovalView",
+        "type": "object"
+      },
+      "AssistantMessageView": {
+        "properties": {
+          "complete": {
+            "default": true,
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "kind": {
+            "const": "assistant",
+            "default": "assistant",
+            "title": "Kind",
+            "type": "string"
+          },
+          "message_id": {
+            "minLength": 1,
+            "title": "Message Id",
+            "type": "string"
+          },
+          "model_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Call Id"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "text"
+        ],
+        "title": "AssistantMessageView",
+        "type": "object"
+      },
+      "CapabilityCheckView": {
+        "description": "单项能力检测结果。未检测就是 `unknown`，不能写成 `passed`。",
+        "properties": {
+          "capability": {
+            "enum": [
+              "chat",
+              "tool_calling",
+              "streaming"
+            ],
+            "title": "Capability",
+            "type": "string"
+          },
+          "result": {
+            "enum": [
+              "passed",
+              "failed",
+              "unknown"
+            ],
+            "title": "Result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability",
+          "result"
+        ],
+        "title": "CapabilityCheckView",
+        "type": "object"
+      },
+      "CommandResultView": {
+        "description": "一次**执行状态修改**的命令结果引用（§6.2）。\n\nPOST 完成时必须能凭它确认结局，不需要 SSE 才能知道命令成没成。`replayed=True` 表示\n这条结果是幂等台账给的（本次没有真的跑图）。",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ErrorView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "operation": {
+            "enum": [
+              "submit_message",
+              "resolve_approval"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "replayed": {
+            "default": false,
+            "title": "Replayed",
+            "type": "boolean"
+          },
+          "request_id": {
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "session_state": {
+            "enum": [
+              "idle",
+              "running",
+              "awaiting_approval",
+              "blocked",
+              "completed",
+              "failed"
+            ],
+            "title": "Session State",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "minLength": 1,
+            "title": "Snapshot Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "completed",
+              "awaiting_approval",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "operation",
+          "session_id",
+          "snapshot_id",
+          "status",
+          "session_state"
+        ],
+        "title": "CommandResultView",
+        "type": "object"
+      },
+      "ContextMeterView": {
+        "description": "圆形计量器的口径。\n\n`scope`：执行中为 `current`（正在组装的这一次请求），空闲为 `previous`（装配器上一次构造的请求），\n从未组装或窗口未知为 `unknown`。",
+        "properties": {
+          "completion_reserve_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completion Reserve Tokens"
+          },
+          "scope": {
+            "default": "unknown",
+            "enum": [
+              "current",
+              "previous",
+              "unknown"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "used_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used Tokens"
+          },
+          "window_tokens": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window Tokens"
+          }
+        },
+        "title": "ContextMeterView",
+        "type": "object"
+      },
+      "CreateSessionRequest": {
+        "additionalProperties": false,
+        "description": "新建会话；两项都可以缺省（沿用库的启动默认工作区、自动命名）。",
+        "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 1000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
+          }
+        },
+        "title": "CreateSessionRequest",
+        "type": "object"
+      },
+      "ErrorMessageView": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorView"
+          },
+          "kind": {
+            "const": "error",
+            "default": "error",
+            "title": "Kind",
+            "type": "string"
+          },
+          "message_id": {
+            "minLength": 1,
+            "title": "Message Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "error"
+        ],
+        "title": "ErrorMessageView",
+        "type": "object"
+      },
+      "ErrorResponse": {
+        "description": "统一错误信封：业务错误一律 `{\"error\": ErrorView}`（§15.5）。\n\n响应体刻意**不是** `{\"detail\": ...}`：那会和 FastAPI 自己的 422/403 撞形状，前端就分不清\n\"业务错误\"和\"传输层拒绝\"了。",
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorView"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse",
+        "type": "object"
+      },
+      "ErrorView": {
+        "description": "页面可见的错误 DTO。\n\n`message` / `hint` / `detail` 都是**已脱敏的展示文本**：供应商原文、密钥与绝对私人路径\n不得进入这里（§15.5、§15.8）。原始异常只进本地日志。",
+        "properties": {
+          "blocked_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Blocked Reason"
+          },
+          "category": {
+            "enum": [
+              "configuration",
+              "model",
+              "tool",
+              "security",
+              "approval",
+              "recovery",
+              "system"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "code": {
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "diagnostic_id": {
+            "minLength": 1,
+            "title": "Diagnostic Id",
+            "type": "string"
+          },
+          "hint": {
+            "minLength": 1,
+            "title": "Hint",
+            "type": "string"
+          },
+          "message": {
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "retry_condition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry Condition"
+          },
+          "retryable": {
+            "title": "Retryable",
+            "type": "boolean"
+          },
+          "severity": {
+            "default": "error",
+            "enum": [
+              "error",
+              "warning"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "title": {
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "category",
+          "title",
+          "message",
+          "hint",
+          "retryable",
+          "diagnostic_id",
+          "occurred_at"
+        ],
+        "title": "ErrorView",
+        "type": "object"
+      },
+      "EventEnvelope": {
+        "discriminator": {
+          "mapping": {
+            "approval_required": "#/components/schemas/ApprovalRequiredEvent",
+            "approval_resolved": "#/components/schemas/ApprovalResolvedEvent",
+            "memory_recalled": "#/components/schemas/MemoryRecalledEvent",
+            "memory_written": "#/components/schemas/MemoryWrittenEvent",
+            "message_completed": "#/components/schemas/MessageCompletedEvent",
+            "message_delta": "#/components/schemas/MessageDeltaEvent",
+            "message_started": "#/components/schemas/MessageStartedEvent",
+            "model_call_completed": "#/components/schemas/ModelCallCompletedEvent",
+            "model_call_started": "#/components/schemas/ModelCallStartedEvent",
+            "model_usage_reported": "#/components/schemas/ModelUsageReportedEvent",
+            "plan_updated": "#/components/schemas/PlanUpdatedEvent",
+            "session_snapshot": "#/components/schemas/SessionSnapshotEvent",
+            "step_completed": "#/components/schemas/StepCompletedEvent",
+            "step_started": "#/components/schemas/StepStartedEvent",
+            "task_completed": "#/components/schemas/TaskCompletedEvent",
+            "task_failed": "#/components/schemas/TaskFailedEvent",
+            "tool_completed": "#/components/schemas/ToolCompletedEvent",
+            "tool_output": "#/components/schemas/ToolOutputEvent",
+            "tool_started": "#/components/schemas/ToolStartedEvent"
+          },
+          "propertyName": "event_type"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/SessionSnapshotEvent"
+          },
+          {
+            "$ref": "#/components/schemas/MessageStartedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/MessageDeltaEvent"
+          },
+          {
+            "$ref": "#/components/schemas/MessageCompletedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/PlanUpdatedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/StepStartedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/StepCompletedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ToolStartedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ToolOutputEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ToolCompletedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalRequiredEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ApprovalResolvedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/MemoryRecalledEvent"
+          },
+          {
+            "$ref": "#/components/schemas/MemoryWrittenEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ModelCallStartedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ModelUsageReportedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/ModelCallCompletedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaskCompletedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/TaskFailedEvent"
+          }
+        ]
+      },
+      "FileDiffHunkView": {
+        "description": "一个 hunk：`@@ -x,y +z,w @@` 头部加它覆盖的行。",
+        "properties": {
+          "header": {
+            "title": "Header",
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/FileDiffLineView"
+            },
+            "title": "Lines",
+            "type": "array"
+          }
+        },
+        "required": [
+          "header"
+        ],
+        "title": "FileDiffHunkView",
+        "type": "object"
+      },
+      "FileDiffLineView": {
+        "description": "unified diff 的一行（§15.8 工具行）。\n\n`old_line`/`new_line` 是**解析出来的行号**：新增行在旧文件里没有行号（`None`），\n删除行在新文件里没有行号。页面据此对齐两侧 gutter，不需要自己数行。",
+        "properties": {
+          "kind": {
+            "enum": [
+              "context",
+              "add",
+              "del"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "new_line": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Line"
+          },
+          "old_line": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Old Line"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "text"
+        ],
+        "title": "FileDiffLineView",
+        "type": "object"
+      },
+      "FileDiffView": {
+        "description": "结构化的文件改动（§15.8 工具行）。\n\n这是\"已解析\"的 diff，不是一段文本：页面直接渲染 hunk 与行号，**不从自然语言或\nunified diff 文本里重新解析**（架构 §6.1）。`additions`/`deletions` 如实计数\nhunk 里的 `+`/`-` 行，供卡片折叠时显示。",
+        "properties": {
+          "additions": {
+            "minimum": 0.0,
+            "title": "Additions",
+            "type": "integer"
+          },
+          "deletions": {
+            "minimum": 0.0,
+            "title": "Deletions",
+            "type": "integer"
+          },
+          "hunks": {
+            "items": {
+              "$ref": "#/components/schemas/FileDiffHunkView"
+            },
+            "title": "Hunks",
+            "type": "array"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "additions",
+          "deletions"
+        ],
+        "title": "FileDiffView",
+        "type": "object"
+      },
+      "FinalResultView": {
+        "description": "本轮最终结果的可读摘要与证据引用。",
+        "properties": {
+          "evidence_references": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Evidence References",
+            "type": "array"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "completed",
+              "blocked",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "state",
+          "summary"
+        ],
+        "title": "FinalResultView",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HealthView": {
+        "description": "健康检查：只说可用性，不含路径、密钥或内部标识（§15.8）。\n\n- `model_configured=false` 是初始设置模式的正常状态（§15.9）；\n- `credential_store` 让**设置页**在还没有任何连接时也能说清\"密钥重启后还在不在\"\n  （§6.8 要求凭据存储不可用时必须明确提示，而不是等用户录完密钥才发现）。",
+        "properties": {
+          "credential_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credential Note"
+          },
+          "credential_store": {
+            "default": "memory",
+            "enum": [
+              "os",
+              "memory"
+            ],
+            "title": "Credential Store",
+            "type": "string"
+          },
+          "model_configured": {
+            "title": "Model Configured",
+            "type": "boolean"
+          },
+          "model_name": {
+            "title": "Model Name",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "static_frontend": {
+            "title": "Static Frontend",
+            "type": "boolean"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "storage": {
+            "const": "sqlite",
+            "default": "sqlite",
+            "title": "Storage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_configured",
+          "model_name",
+          "static_frontend"
+        ],
+        "title": "HealthView",
+        "type": "object"
+      },
+      "MemoryMessageView": {
+        "properties": {
+          "kind": {
+            "const": "memory",
+            "default": "memory",
+            "title": "Kind",
+            "type": "string"
+          },
+          "memory": {
+            "$ref": "#/components/schemas/MemoryUseView"
+          },
+          "message_id": {
+            "minLength": 1,
+            "title": "Message Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "memory"
+        ],
+        "title": "MemoryMessageView",
+        "type": "object"
+      },
+      "MemoryRecalledEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "memory_recalled",
+            "default": "memory_recalled",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/MemoryRecalledPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "MemoryRecalledEvent",
+        "type": "object"
+      },
+      "MemoryRecalledPayload": {
+        "properties": {
+          "memory": {
+            "$ref": "#/components/schemas/MemoryUseView"
+          }
+        },
+        "required": [
+          "memory"
+        ],
+        "title": "MemoryRecalledPayload",
+        "type": "object"
+      },
+      "MemoryUseView": {
+        "description": "一轮的检索与长期记忆结果。\n\n`miss`（查了没有）与 `failed`（看不了）是两个不同事实，不得合并；写入失败不影响本轮回答。",
+        "properties": {
+          "retrieval_note": {
+            "minLength": 1,
+            "title": "Retrieval Note",
+            "type": "string"
+          },
+          "retrieval_outcome": {
+            "enum": [
+              "hit",
+              "miss",
+              "failed"
+            ],
+            "title": "Retrieval Outcome",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/RetrievalSourceView"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "write_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Write Detail"
+          },
+          "write_outcome": {
+            "anyOf": [
+              {
+                "enum": [
+                  "written",
+                  "failed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Write Outcome"
+          }
+        },
+        "required": [
+          "retrieval_outcome",
+          "retrieval_note"
+        ],
+        "title": "MemoryUseView",
+        "type": "object"
+      },
+      "MemoryWrittenEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "memory_written",
+            "default": "memory_written",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/MemoryWrittenPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "MemoryWrittenEvent",
+        "type": "object"
+      },
+      "MemoryWrittenPayload": {
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "written",
+              "failed"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome",
+          "detail"
+        ],
+        "title": "MemoryWrittenPayload",
+        "type": "object"
+      },
+      "MessageCompletedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "message_completed",
+            "default": "message_completed",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/MessageCompletedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "MessageCompletedEvent",
+        "type": "object"
+      },
+      "MessageCompletedPayload": {
+        "properties": {
+          "complete": {
+            "default": true,
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "message_id": {
+            "minLength": 1,
+            "title": "Message Id",
+            "type": "string"
+          },
+          "model_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model Call Id"
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "role",
+          "text"
+        ],
+        "title": "MessageCompletedPayload",
+        "type": "object"
+      },
+      "MessageDeltaEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "message_delta",
+            "default": "message_delta",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/MessageDeltaPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "MessageDeltaEvent",
+        "type": "object"
+      },
+      "MessageDeltaPayload": {
+        "properties": {
+          "chunk_sequence": {
+            "minimum": 0,
+            "title": "Chunk Sequence",
+            "type": "integer"
+          },
+          "message_id": {
+            "minLength": 1,
+            "title": "Message Id",
+            "type": "string"
+          },
+          "model_call_id": {
+            "minLength": 1,
+            "title": "Model Call Id",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "text_delta": {
+            "title": "Text Delta",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "role",
+          "model_call_id",
+          "chunk_sequence",
+          "text_delta"
+        ],
+        "title": "MessageDeltaPayload",
+        "type": "object"
+      },
+      "MessageStartedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "message_started",
+            "default": "message_started",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/MessageStartedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "MessageStartedEvent",
+        "type": "object"
+      },
+      "MessageStartedPayload": {
+        "properties": {
+          "message_id": {
+            "minLength": 1,
+            "title": "Message Id",
+            "type": "string"
+          },
+          "model_call_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model Call Id"
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "role"
+        ],
+        "title": "MessageStartedPayload",
+        "type": "object"
+      },
+      "ModelCallCompletedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "model_call_completed",
+            "default": "model_call_completed",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ModelCallCompletedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "ModelCallCompletedEvent",
+        "type": "object"
+      },
+      "ModelCallCompletedPayload": {
+        "properties": {
+          "model_call_id": {
+            "minLength": 1,
+            "title": "Model Call Id",
+            "type": "string"
+          },
+          "model_elapsed_ms": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Model Elapsed Ms"
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "error",
+              "aborted"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "time_to_first_token_ms": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Time To First Token Ms"
+          }
+        },
+        "required": [
+          "model_call_id",
+          "status"
+        ],
+        "title": "ModelCallCompletedPayload",
+        "type": "object"
+      },
+      "ModelCallRecordView": {
+        "description": "一次模型调用的记录（§15.6）。\n\n**重试使用新的 `model_call_id`**，用 `retry_of` 关联，不覆盖失败尝试。",
+        "properties": {
+          "actual_cache_read_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Cache Read Tokens"
+          },
+          "actual_cache_write_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Cache Write Tokens"
+          },
+          "actual_output_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Output Tokens"
+          },
+          "actual_reasoning_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Reasoning Tokens"
+          },
+          "actual_uncached_input_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Uncached Input Tokens"
+          },
+          "cache_metrics_reported": {
+            "default": false,
+            "title": "Cache Metrics Reported",
+            "type": "boolean"
+          },
+          "config_version": {
+            "minLength": 1,
+            "title": "Config Version",
+            "type": "string"
+          },
+          "connection_id": {
+            "minLength": 1,
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "context_used_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Used Tokens"
+          },
+          "context_window_tokens": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window Tokens"
+          },
+          "dynamic_context_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dynamic Context Fingerprint"
+          },
+          "endpoint_fingerprint": {
+            "minLength": 1,
+            "title": "Endpoint Fingerprint",
+            "type": "string"
+          },
+          "estimated_prompt_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Prompt Tokens"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "first_token_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Token At"
+          },
+          "history_prefix_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "History Prefix Fingerprint"
+          },
+          "model_call_id": {
+            "minLength": 1,
+            "title": "Model Call Id",
+            "type": "string"
+          },
+          "model_elapsed_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Elapsed Ms"
+          },
+          "model_id": {
+            "minLength": 1,
+            "title": "Model Id",
+            "type": "string"
+          },
+          "provider": {
+            "minLength": 1,
+            "title": "Provider",
+            "type": "string"
+          },
+          "purpose": {
+            "minLength": 1,
+            "title": "Purpose",
+            "type": "string"
+          },
+          "retry_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retry Of"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "running",
+              "ok",
+              "error",
+              "aborted"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "system_prompt_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "System Prompt Fingerprint"
+          },
+          "time_to_first_token_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time To First Token Ms"
+          },
+          "tools_schema_fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tools Schema Fingerprint"
+          }
+        },
+        "required": [
+          "model_call_id",
+          "run_id",
+          "purpose",
+          "connection_id",
+          "config_version",
+          "provider",
+          "model_id",
+          "endpoint_fingerprint",
+          "started_at",
+          "status"
+        ],
+        "title": "ModelCallRecordView",
+        "type": "object"
+      },
+      "ModelCallStartedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "model_call_started",
+            "default": "model_call_started",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ModelCallStartedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "ModelCallStartedEvent",
+        "type": "object"
+      },
+      "ModelCallStartedPayload": {
+        "properties": {
+          "config_version": {
+            "minLength": 1,
+            "title": "Config Version",
+            "type": "string"
+          },
+          "connection_id": {
+            "minLength": 1,
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "model_call_id": {
+            "minLength": 1,
+            "title": "Model Call Id",
+            "type": "string"
+          },
+          "model_id": {
+            "minLength": 1,
+            "title": "Model Id",
+            "type": "string"
+          },
+          "purpose": {
+            "minLength": 1,
+            "title": "Purpose",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_call_id",
+          "purpose",
+          "connection_id",
+          "config_version",
+          "model_id"
+        ],
+        "title": "ModelCallStartedPayload",
+        "type": "object"
+      },
+      "ModelConnectionRequest": {
+        "additionalProperties": false,
+        "description": "新增 / 编辑一条模型连接（§6.8）。\n\n请求体**只描述连接字段**：没有 `credential_ref`（引用由服务端生成）、没有连接 id\n（路径里给）、也没有任何能改安全策略、工具权限或 Graph 配置的入口——模型设置不是提权通道。\n`api_key` 是\"本次录入的密钥\"，不填表示不改密钥（编辑时不重填不会把已保存的 Key 抹掉）。",
+        "properties": {
+          "allow_plaintext_http": {
+            "default": false,
+            "title": "Allow Plaintext Http",
+            "type": "boolean"
+          },
+          "api_key": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "auth_mode": {
+            "default": "api_key",
+            "enum": [
+              "api_key",
+              "none"
+            ],
+            "title": "Auth Mode",
+            "type": "string"
+          },
+          "base_url": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "context_window_tokens": {
+            "exclusiveMinimum": 0.0,
+            "title": "Context Window Tokens",
+            "type": "integer"
+          },
+          "display_name": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "expected_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          },
+          "max_tokens": {
+            "default": 4096,
+            "exclusiveMinimum": 0.0,
+            "title": "Max Tokens",
+            "type": "integer"
+          },
+          "model": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Model",
+            "type": "string"
+          },
+          "retry_count": {
+            "default": 2,
+            "maximum": 10.0,
+            "minimum": 0.0,
+            "title": "Retry Count",
+            "type": "integer"
+          },
+          "streaming": {
+            "default": false,
+            "title": "Streaming",
+            "type": "boolean"
+          },
+          "temperature": {
+            "default": 0.2,
+            "maximum": 2.0,
+            "minimum": 0.0,
+            "title": "Temperature",
+            "type": "number"
+          },
+          "timeout_seconds": {
+            "default": 120,
+            "exclusiveMinimum": 0.0,
+            "title": "Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "display_name",
+          "base_url",
+          "model",
+          "context_window_tokens"
+        ],
+        "title": "ModelConnectionRequest",
+        "type": "object"
+      },
+      "ModelConnectionView": {
+        "description": "聊天模型连接的**读** DTO。\n\n密钥只以 `key_status` 出现（已配置 / 未配置 / 仅本次进程内）：本 DTO **没有**任何承载密钥值的字段，\n因此即使上游多传一个 `api_key`，它也会被 `extra=\"ignore\"` 丢掉。公开 URL\n还必须拒绝内嵌凭据，不能仅靠“没有 api_key 字段”断言安全（§15.9）。",
+        "properties": {
+          "auth_mode": {
+            "enum": [
+              "api_key",
+              "none"
+            ],
+            "title": "Auth Mode",
+            "type": "string"
+          },
+          "base_url": {
+            "minLength": 1,
+            "title": "Base Url",
+            "type": "string"
+          },
+          "capabilities": {
+            "items": {
+              "$ref": "#/components/schemas/CapabilityCheckView"
+            },
+            "title": "Capabilities",
+            "type": "array"
+          },
+          "config_version": {
+            "minLength": 1,
+            "title": "Config Version",
+            "type": "string"
+          },
+          "connection_id": {
+            "minLength": 1,
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "context_window_tokens": {
+            "exclusiveMinimum": 0.0,
+            "title": "Context Window Tokens",
+            "type": "integer"
+          },
+          "credential_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Credential Ref"
+          },
+          "display_name": {
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "is_default": {
+            "default": false,
+            "title": "Is Default",
+            "type": "boolean"
+          },
+          "key_status": {
+            "enum": [
+              "configured",
+              "missing",
+              "session_only"
+            ],
+            "title": "Key Status",
+            "type": "string"
+          },
+          "max_tokens": {
+            "exclusiveMinimum": 0.0,
+            "title": "Max Tokens",
+            "type": "integer"
+          },
+          "model_id": {
+            "minLength": 1,
+            "title": "Model Id",
+            "type": "string"
+          },
+          "provider": {
+            "const": "openai_compatible",
+            "default": "openai_compatible",
+            "title": "Provider",
+            "type": "string"
+          },
+          "retry_count": {
+            "minimum": 0.0,
+            "title": "Retry Count",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "unverified",
+              "testing",
+              "verified",
+              "failed",
+              "unsupported"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "streaming": {
+            "title": "Streaming",
+            "type": "boolean"
+          },
+          "temperature": {
+            "maximum": 2.0,
+            "minimum": 0.0,
+            "title": "Temperature",
+            "type": "number"
+          },
+          "timeout_seconds": {
+            "exclusiveMinimum": 0.0,
+            "title": "Timeout Seconds",
+            "type": "integer"
+          },
+          "transport": {
+            "enum": [
+              "https",
+              "loopback_http",
+              "plaintext_http"
+            ],
+            "title": "Transport",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "display_name",
+          "base_url",
+          "transport",
+          "model_id",
+          "context_window_tokens",
+          "max_tokens",
+          "temperature",
+          "timeout_seconds",
+          "retry_count",
+          "streaming",
+          "auth_mode",
+          "key_status",
+          "status",
+          "config_version"
+        ],
+        "title": "ModelConnectionView",
+        "type": "object"
+      },
+      "ModelSelectionView": {
+        "description": "某个作用域**当前选中的连接**（默认或某个会话的下一轮模型）。\n\n`connection_id` 与 `config_version` 与连接视图同源、也同义：页面把这两个值**原样回传**\n做写入校验（§6.1 的\"选择也必须按版本校验\"）。因此它必须来自设置库的那一行，\n不能由页面自己拼。",
+        "properties": {
+          "config_version": {
+            "minLength": 1,
+            "title": "Config Version",
+            "type": "string"
+          },
+          "connection_id": {
+            "minLength": 1,
+            "title": "Connection Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "connection_id",
+          "config_version"
+        ],
+        "title": "ModelSelectionView",
+        "type": "object"
+      },
+      "ModelUsagePayload": {
+        "description": "供应商用量上报。没返回的字段是 `None`，不是 0（§15.6）。",
+        "properties": {
+          "actual_cache_read_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Actual Cache Read Tokens"
+          },
+          "actual_cache_write_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Actual Cache Write Tokens"
+          },
+          "actual_output_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Actual Output Tokens"
+          },
+          "actual_reasoning_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Actual Reasoning Tokens"
+          },
+          "actual_uncached_input_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Actual Uncached Input Tokens"
+          },
+          "cache_metrics_reported": {
+            "default": false,
+            "title": "Cache Metrics Reported",
+            "type": "boolean"
+          },
+          "model_call_id": {
+            "minLength": 1,
+            "title": "Model Call Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "model_call_id"
+        ],
+        "title": "ModelUsagePayload",
+        "type": "object"
+      },
+      "ModelUsageReportedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "model_usage_reported",
+            "default": "model_usage_reported",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ModelUsagePayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "ModelUsageReportedEvent",
+        "type": "object"
+      },
+      "PlanStepView": {
+        "description": "计划步骤。**完成一步不等于完成整个任务**，状态由 Graph 给出，页面不自算。",
+        "properties": {
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "skipped",
+              "blocked"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "step_id": {
+            "minLength": 1,
+            "title": "Step Id",
+            "type": "string"
+          },
+          "title": {
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "title",
+          "status"
+        ],
+        "title": "PlanStepView",
+        "type": "object"
+      },
+      "PlanUpdatedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "plan_updated",
+            "default": "plan_updated",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/PlanUpdatedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "PlanUpdatedEvent",
+        "type": "object"
+      },
+      "PlanUpdatedPayload": {
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/PlanView"
+          }
+        },
+        "required": [
+          "plan"
+        ],
+        "title": "PlanUpdatedPayload",
+        "type": "object"
+      },
+      "PlanView": {
+        "properties": {
+          "goal": {
+            "minLength": 1,
+            "title": "Goal",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/PlanStepView"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "goal"
+        ],
+        "title": "PlanView",
+        "type": "object"
+      },
+      "RetrievalSourceView": {
+        "description": "安全引用：只给定位与用途，**不给正文、向量或内部评分**。",
+        "properties": {
+          "kind": {
+            "enum": [
+              "workspace_file",
+              "long_term_memory",
+              "session_history"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "reference": {
+            "minLength": 1,
+            "title": "Reference",
+            "type": "string"
+          },
+          "usage": {
+            "minLength": 1,
+            "title": "Usage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reference",
+          "usage"
+        ],
+        "title": "RetrievalSourceView",
+        "type": "object"
+      },
+      "RuntimeContextSnapshotView": {
+        "description": "**公开**的运行上下文快照视图。\n\n刻意**不含** `canonical_text`：提示词正文属于\"明确不展示\"的一类（§15.8）。页面可以显示上下文\n快照的标识、版本、内容哈希与来源版本，用来解释\"这一轮带了哪些上下文\"，但不能显示其文本。",
+        "properties": {
+          "content_hash": {
+            "minLength": 1,
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "context_version": {
+            "minimum": 0.0,
+            "title": "Context Version",
+            "type": "integer"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "snapshot_id": {
+            "minLength": 1,
+            "title": "Snapshot Id",
+            "type": "string"
+          },
+          "source_versions": {
+            "items": {
+              "$ref": "#/components/schemas/RuntimeSourceVersionView"
+            },
+            "title": "Source Versions",
+            "type": "array"
+          },
+          "text_length": {
+            "minimum": 0.0,
+            "title": "Text Length",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "run_id",
+          "context_version",
+          "created_at",
+          "content_hash",
+          "text_length"
+        ],
+        "title": "RuntimeContextSnapshotView",
+        "type": "object"
+      },
+      "RuntimeSourceVersionView": {
+        "description": "来源与其版本/安全引用；只记引用，不复制正文或密钥。",
+        "properties": {
+          "source": {
+            "minLength": 1,
+            "title": "Source",
+            "type": "string"
+          },
+          "version": {
+            "minLength": 1,
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "version"
+        ],
+        "title": "RuntimeSourceVersionView",
+        "type": "object"
+      },
+      "SelectDefaultConnectionRequest": {
+        "additionalProperties": false,
+        "description": "设置新会话继承的默认连接。\n\n`expected_selection` **必填**：不填就等于\"我不管别人改了什么，覆盖掉\"，\n那正是 §6.1 要避免的两个页面互相覆盖。",
+        "properties": {
+          "connection_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Connection Id",
+            "type": "string"
+          },
+          "expected_selection": {
+            "$ref": "#/components/schemas/SelectionExpectation"
+          },
+          "expected_version": {
+            "minimum": 1.0,
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "connection_id",
+          "expected_selection",
+          "expected_version"
+        ],
+        "title": "SelectDefaultConnectionRequest",
+        "type": "object"
+      },
+      "SelectSessionModelRequest": {
+        "additionalProperties": false,
+        "description": "为某个会话选择**下一轮**用的连接；`connection_id=None` 表示恢复为跟随默认。\n\n`expected_selection` 对\"恢复跟随默认\"同样是必填的（那也是一次写入）。",
+        "properties": {
+          "connection_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Id"
+          },
+          "expected_selection": {
+            "$ref": "#/components/schemas/SelectionExpectation"
+          },
+          "expected_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Version"
+          }
+        },
+        "required": [
+          "expected_selection"
+        ],
+        "title": "SelectSessionModelRequest",
+        "type": "object"
+      },
+      "SelectWorkspaceRequest": {
+        "additionalProperties": false,
+        "description": "选择工作区：`workspace_id`（已列出的工作区）与 `path`（新目录）二选一。",
+        "properties": {
+          "path": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
+          }
+        },
+        "title": "SelectWorkspaceRequest",
+        "type": "object"
+      },
+      "SelectionExpectation": {
+        "additionalProperties": false,
+        "description": "调用方**看到的当前选择**，用于选择写入的乐观校验（§6.1）。\n\n`connection_id=None` 表示\"我当时看到这个作用域没有选择\"（全新安装还没有默认，\n或某个会话跟随默认）。两个字段要么都给、要么都给 `None`——只给一半说明调用方自己没想清楚。",
+        "properties": {
+          "config_version": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Config Version"
+          },
+          "connection_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Connection Id"
+          }
+        },
+        "required": [
+          "connection_id",
+          "config_version"
+        ],
+        "title": "SelectionExpectation",
+        "type": "object"
+      },
+      "SessionSnapshot": {
+        "description": "`session_snapshot` 事件的载荷，也是刷新恢复的权威展示状态。\n\n只读：生成快照不得写回 State、调用模型或执行工具（§15.4）。`schema_version` 与\n`snapshot_id` 一起让恢复逻辑能判断\"这份快照来自哪个契约版本\"。",
+        "properties": {
+          "approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "context": {
+            "$ref": "#/components/schemas/ContextMeterView"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "current_task": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TaskRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/ErrorView"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "final_result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FinalResultView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "memory": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryUseView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "messages": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "assistant": "#/components/schemas/AssistantMessageView",
+                  "error": "#/components/schemas/ErrorMessageView",
+                  "memory": "#/components/schemas/MemoryMessageView",
+                  "tool": "#/components/schemas/ToolMessageView",
+                  "user": "#/components/schemas/UserMessageView"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/UserMessageView"
+                },
+                {
+                  "$ref": "#/components/schemas/AssistantMessageView"
+                },
+                {
+                  "$ref": "#/components/schemas/ToolMessageView"
+                },
+                {
+                  "$ref": "#/components/schemas/MemoryMessageView"
+                },
+                {
+                  "$ref": "#/components/schemas/ErrorMessageView"
+                }
+              ]
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "model_calls": {
+            "items": {
+              "$ref": "#/components/schemas/ModelCallRecordView"
+            },
+            "title": "Model Calls",
+            "type": "array"
+          },
+          "model_selection": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ModelSelectionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "runtime_context": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeContextSnapshotView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "session_state": {
+            "enum": [
+              "idle",
+              "running",
+              "awaiting_approval",
+              "blocked",
+              "completed",
+              "failed"
+            ],
+            "title": "Session State",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "minLength": 1,
+            "title": "Snapshot Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "turn_usages": {
+            "items": {
+              "$ref": "#/components/schemas/TurnUsageView"
+            },
+            "title": "Turn Usages",
+            "type": "array"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TurnRecordView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceRef"
+          }
+        },
+        "required": [
+          "snapshot_id",
+          "session_id",
+          "workspace",
+          "title",
+          "session_state",
+          "created_at"
+        ],
+        "title": "SessionSnapshot",
+        "type": "object"
+      },
+      "SessionSnapshotEvent": {
+        "description": "边界快照。空会话没有当前任务，因此 `task_id` / `run_id` 允许为 `None`（§15.4）。",
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "session_snapshot",
+            "default": "session_snapshot",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionSnapshot"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Run Id"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Task Id"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "payload"
+        ],
+        "title": "SessionSnapshotEvent",
+        "type": "object"
+      },
+      "SessionSummaryView": {
+        "description": "会话列表里的一行。\n\n**不含运行状态**：运行中/等待审批/已完成要从该会话线程的 Checkpoint 推出来，逐行读所有线程的\nCheckpoint 不属于列表用例。T30 的列表工作要么按需读、要么落一份会话级摘要；本节不伪造状态。",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "is_active": {
+            "default": false,
+            "title": "Is Active",
+            "type": "boolean"
+          },
+          "last_checkpoint_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Checkpoint Id"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "thread_id": {
+            "minLength": 1,
+            "title": "Thread Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "workspace": {
+            "$ref": "#/components/schemas/WorkspaceRef"
+          }
+        },
+        "required": [
+          "session_id",
+          "thread_id",
+          "title",
+          "workspace",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SessionSummaryView",
+        "type": "object"
+      },
+      "StepCompletedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "step_completed",
+            "default": "step_completed",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StepCompletedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "StepCompletedEvent",
+        "type": "object"
+      },
+      "StepCompletedPayload": {
+        "properties": {
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "skipped",
+              "blocked"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "step_id": {
+            "minLength": 1,
+            "title": "Step Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "status"
+        ],
+        "title": "StepCompletedPayload",
+        "type": "object"
+      },
+      "StepStartedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "step_started",
+            "default": "step_started",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/StepStartedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "StepStartedEvent",
+        "type": "object"
+      },
+      "StepStartedPayload": {
+        "properties": {
+          "step_id": {
+            "minLength": 1,
+            "title": "Step Id",
+            "type": "string"
+          },
+          "title": {
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "step_id",
+          "title"
+        ],
+        "title": "StepStartedPayload",
+        "type": "object"
+      },
+      "SubmitMessageRequest": {
+        "additionalProperties": false,
+        "description": "提交消息。`client_request_id` 是幂等键（§6.1），由前端生成并复用。",
+        "properties": {
+          "client_request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Client Request Id",
+            "type": "string"
+          },
+          "text": {
+            "maxLength": 100000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text",
+          "client_request_id"
+        ],
+        "title": "SubmitMessageRequest",
+        "type": "object"
+      },
+      "TaskCompletedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "task_completed",
+            "default": "task_completed",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/TaskCompletedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "TaskCompletedEvent",
+        "type": "object"
+      },
+      "TaskCompletedPayload": {
+        "properties": {
+          "final_result": {
+            "$ref": "#/components/schemas/FinalResultView"
+          }
+        },
+        "required": [
+          "final_result"
+        ],
+        "title": "TaskCompletedPayload",
+        "type": "object"
+      },
+      "TaskFailedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "task_failed",
+            "default": "task_failed",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/TaskFailedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "TaskFailedEvent",
+        "type": "object"
+      },
+      "TaskFailedPayload": {
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorView"
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "title": "TaskFailedPayload",
+        "type": "object"
+      },
+      "TaskRef": {
+        "description": "任务引用。v0.4 一次用户提交就是一个任务；`task_id` 与 `run_id` 复用同一底层标识。",
+        "properties": {
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "task_id",
+          "run_id"
+        ],
+        "title": "TaskRef",
+        "type": "object"
+      },
+      "ToolCompletedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "tool_completed",
+            "default": "tool_completed",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ToolCompletedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "ToolCompletedEvent",
+        "type": "object"
+      },
+      "ToolCompletedPayload": {
+        "properties": {
+          "elapsed_ms": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Elapsed Ms"
+          },
+          "output_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Output Digest"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "ok",
+              "error",
+              "denied"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "minLength": 1,
+            "title": "Tool Call Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "tool_call_id",
+          "status"
+        ],
+        "title": "ToolCompletedPayload",
+        "type": "object"
+      },
+      "ToolEvidenceView": {
+        "description": "一次工具调用的机械校验证据（§4.3、§6.7）。\n\n`summary` 是**已脱敏**的可读摘要；`verified` 来自反思层的机械校验，不是模型的自我评价。",
+        "properties": {
+          "evidence_type": {
+            "minLength": 1,
+            "title": "Evidence Type",
+            "type": "string"
+          },
+          "summary": {
+            "minLength": 1,
+            "title": "Summary",
+            "type": "string"
+          },
+          "verified": {
+            "title": "Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "evidence_type",
+          "summary",
+          "verified"
+        ],
+        "title": "ToolEvidenceView",
+        "type": "object"
+      },
+      "ToolMessageView": {
+        "properties": {
+          "kind": {
+            "const": "tool",
+            "default": "tool",
+            "title": "Kind",
+            "type": "string"
+          },
+          "message_id": {
+            "minLength": 1,
+            "title": "Message Id",
+            "type": "string"
+          },
+          "tool": {
+            "$ref": "#/components/schemas/ToolUseView"
+          }
+        },
+        "required": [
+          "message_id",
+          "tool"
+        ],
+        "title": "ToolMessageView",
+        "type": "object"
+      },
+      "ToolOutcomeView": {
+        "description": "工具结果的**结构化、有界**展示分区（§15.8 工具行）。\n\n页面用它把\"输出详情\"分成路径、结果摘要、正文与 stdout/stderr 几块，而不是从自然语言里\n重新猜结构。所有正文都按展示上限截断：`truncated=True` 表示这里只是有界预览，完整内容仍\n保存在本地工具事件中，不进入页面（§15.8）。\n\n认不出的工具或解析不出的载荷**不产出**这个对象（`None`）：调用方必须退回安全的通用渲染器，\n不能把一段任意文本当成已知工具的结构。",
+        "properties": {
+          "diff": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileDiffView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "exit_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exit Code"
+          },
+          "kind": {
+            "enum": [
+              "read",
+              "list",
+              "edit",
+              "write",
+              "delete",
+              "shell"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Paths",
+            "type": "array"
+          },
+          "stderr": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stderr"
+          },
+          "stdout": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stdout"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "target": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target"
+          },
+          "text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Text"
+          },
+          "timed_out": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timed Out"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "ToolOutcomeView",
+        "type": "object"
+      },
+      "ToolOutputEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "tool_output",
+            "default": "tool_output",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ToolOutputPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "ToolOutputEvent",
+        "type": "object"
+      },
+      "ToolOutputPayload": {
+        "properties": {
+          "output_preview": {
+            "title": "Output Preview",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "minLength": 1,
+            "title": "Tool Call Id",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tool_call_id",
+          "output_preview"
+        ],
+        "title": "ToolOutputPayload",
+        "type": "object"
+      },
+      "ToolStartedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "tool_started",
+            "default": "tool_started",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/ToolStartedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "ToolStartedEvent",
+        "type": "object"
+      },
+      "ToolStartedPayload": {
+        "properties": {
+          "tool": {
+            "$ref": "#/components/schemas/ToolUseView"
+          }
+        },
+        "required": [
+          "tool"
+        ],
+        "title": "ToolStartedPayload",
+        "type": "object"
+      },
+      "ToolUseView": {
+        "description": "一次工具调用的可见信息（§15.8 工具行）。\n\n`redacted_arguments` 的值是**已脱敏的展示字符串**：布尔、数字与嵌套结构由投影层渲染成字符串，\n因此 DTO 结构上不可能携带任意对象或未脱敏原文。\n\n`outcome` 与 `evidence` 是可空的结构化分区：认不出的工具没有 `outcome`（页面走通用渲染器），\n尚未结算的调用没有 `evidence`（那是本轮收尾后由工具事件重算的事实）。",
+        "properties": {
+          "approval_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Id"
+          },
+          "elapsed_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elapsed Ms"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolEvidenceView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ToolOutcomeView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "output_digest": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Digest"
+          },
+          "output_preview": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Preview"
+          },
+          "redacted_arguments": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Redacted Arguments",
+            "type": "object"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "ok",
+              "error",
+              "denied"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "minLength": 1,
+            "title": "Tool Call Id",
+            "type": "string"
+          },
+          "tool_name": {
+            "minLength": 1,
+            "title": "Tool Name",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tool_call_id",
+          "tool_name",
+          "status"
+        ],
+        "title": "ToolUseView",
+        "type": "object"
+      },
+      "TurnRecordView": {
+        "description": "一轮（一次用户提交到终态）的汇总记录（§15.6）。\n\n用途有二：刷新恢复的用量真源，以及页面统计行的确定性来源。聚合值必须由明细计算得出，\n因此这里同时给出 `model_call_ids` / `tool_event_ids` 以便核对。",
+        "properties": {
+          "actual_cache_read_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Cache Read Tokens"
+          },
+          "actual_cache_write_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Cache Write Tokens"
+          },
+          "actual_output_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Output Tokens"
+          },
+          "actual_reasoning_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Reasoning Tokens"
+          },
+          "actual_uncached_input_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual Uncached Input Tokens"
+          },
+          "approval_wait_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Wait Ms"
+          },
+          "cache_hit_ratio": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Hit Ratio"
+          },
+          "cache_metrics_reported": {
+            "default": false,
+            "title": "Cache Metrics Reported",
+            "type": "boolean"
+          },
+          "context_usage_ratio": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Usage Ratio"
+          },
+          "context_used_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Used Tokens"
+          },
+          "context_window_tokens": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context Window Tokens"
+          },
+          "estimated_prompt_tokens": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Prompt Tokens"
+          },
+          "final_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Final At"
+          },
+          "final_state": {
+            "enum": [
+              "running",
+              "awaiting_approval",
+              "blocked",
+              "completed",
+              "failed"
+            ],
+            "title": "Final State",
+            "type": "string"
+          },
+          "model_call_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Model Call Ids",
+            "type": "array"
+          },
+          "model_elapsed_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Elapsed Ms"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "submitted_at": {
+            "format": "date-time",
+            "title": "Submitted At",
+            "type": "string"
+          },
+          "time_to_first_token_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Time To First Token Ms"
+          },
+          "tool_elapsed_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool Elapsed Ms"
+          },
+          "tool_event_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tool Event Ids",
+            "type": "array"
+          },
+          "turn_elapsed_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Turn Elapsed Ms"
+          },
+          "usage_recorded": {
+            "default": true,
+            "title": "Usage Recorded",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "run_id",
+          "submitted_at",
+          "final_state"
+        ],
+        "title": "TurnRecordView",
+        "type": "object"
+      },
+      "TurnUsageView": {
+        "description": "持久轮次与其消息锚点；供刷新后把统计放回对应轮次。",
+        "properties": {
+          "model_calls": {
+            "items": {
+              "$ref": "#/components/schemas/ModelCallRecordView"
+            },
+            "title": "Model Calls",
+            "type": "array"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/TurnRecordView"
+          },
+          "user_message_id": {
+            "minLength": 1,
+            "title": "User Message Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_message_id",
+          "usage"
+        ],
+        "title": "TurnUsageView",
+        "type": "object"
+      },
+      "UserMessageView": {
+        "properties": {
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "kind": {
+            "const": "user",
+            "default": "user",
+            "title": "Kind",
+            "type": "string"
+          },
+          "message_id": {
+            "minLength": 1,
+            "title": "Message Id",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "text"
+        ],
+        "title": "UserMessageView",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WorkspaceRef": {
+        "description": "工作区引用。\n\n**不含绝对路径**：`workspace_id` 是规范化工作区路径的稳定哈希，不是目录名；\n页面可凭它选回列表中的工作区，新工作区仍通过 `select_workspace(path)` 添加。\n路径本身可能暴露私人目录，不进入读 DTO（§15.8）。",
+        "properties": {
+          "display_name": {
+            "minLength": 1,
+            "title": "Display Name",
+            "type": "string"
+          },
+          "workspace_id": {
+            "minLength": 1,
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "workspace_id",
+          "display_name"
+        ],
+        "title": "WorkspaceRef",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "v0.4 本机 Web 服务（单进程、单 worker）。\n\n- 业务契约：`ARCHITECTURE.md` §15；路由形态：`V0_4_DEVELOPMENT_PLAN.md` §6.2。\n- 所有响应体是应用层的 DTO（`local_agent.application.models`）；业务错误统一是\n  `{\"error\": ErrorView}`，传输层拒绝（403/413/422）是 `{\"detail\": ...}`。\n- 前端类型由这份 OpenAPI 生成（`npm run generate:api`），生成文件不得手改。\n",
+    "title": "local-agent-web",
+    "version": "0.4.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/health": {
+      "get": {
+        "description": "服务可用性。不含路径、密钥或内部标识。\n\n`model_configured=false` 是**初始设置模式**的正常状态（§15.9）：服务照常可用，用户去设置页\n加一条连接就行；提交消息会得到可执行的配置提示。",
+        "operationId": "health_api_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "健康检查"
+      }
+    },
+    "/api/model-connections": {
+      "get": {
+        "description": "按创建顺序；默认连接带 `is_default`。停用的连接不在这里出现（历史仍在库里）。",
+        "operationId": "list_model_connections_api_model_connections_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ModelConnectionView"
+                  },
+                  "title": "Response List Model Connections Api Model Connections Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "模型连接列表"
+      },
+      "post": {
+        "description": "保存即可用（哪怕还没测）：未通过检测的连接标为\"未验证\"（§6.8）。",
+        "operationId": "create_model_connection_api_model_connections_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelConnectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "新增模型连接"
+      }
+    },
+    "/api/model-connections/default": {
+      "put": {
+        "description": "新会话继承它；只影响**下一次新用户提交**（正在运行/等待审批的那一轮已固定，§6.8）。\n\n必须带上你看到的**当前默认**（`expected_selection`）：库里已被别的页面改过就返回 409，\n而不是把对方的改动覆盖掉（§6.1）。",
+        "operationId": "select_default_model_api_model_connections_default_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectDefaultConnectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "设置默认连接"
+      }
+    },
+    "/api/model-connections/{connection_id}": {
+      "delete": {
+        "description": "删除是**停用**：历史模型标识与用量不删，也不物理清除凭据引用（§6.8）。",
+        "operationId": "delete_model_connection_api_model_connections__connection_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "expected_version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expected Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "停用模型连接"
+      },
+      "patch": {
+        "description": "编辑产生**新版本**；必须带 `expected_version`，否则拒绝（§6.1 的并发写入口径）。",
+        "operationId": "update_model_connection_api_model_connections__connection_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelConnectionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "编辑模型连接"
+      }
+    },
+    "/api/model-connections/{connection_id}/test": {
+      "post": {
+        "description": "用户主动触发的一次探测（会产生少量调用）：分项报告鉴权/聊天/工具/流式。\n\n失败只写进这条连接的检测结果，**不改变当前选择**，也不回退到别的模型（§6.8）。",
+        "operationId": "test_model_connection_api_model_connections__connection_id__test_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelConnectionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "测试模型连接"
+      }
+    },
+    "/api/sessions": {
+      "get": {
+        "description": "`workspace_id` 缺省表示列出全部会话。",
+        "operationId": "list_sessions_api_sessions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspace Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SessionSummaryView"
+                  },
+                  "title": "Response List Sessions Api Sessions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "会话列表"
+      },
+      "post": {
+        "description": "新建会话并切换过去；`workspace_id` 缺省表示沿用库的启动默认工作区。",
+        "operationId": "create_session_api_sessions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CreateSessionRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSummaryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "新建会话"
+      }
+    },
+    "/api/sessions/{session_id}": {
+      "get": {
+        "description": "只读快照；刷新与重连都以它为准（§15.3）。",
+        "operationId": "get_session_api_sessions__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSnapshot"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "会话快照"
+      }
+    },
+    "/api/sessions/{session_id}/approvals/{approval_id}": {
+      "post": {
+        "operationId": "resolve_approval_api_sessions__session_id__approvals__approval_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "approval_id",
+            "required": true,
+            "schema": {
+              "title": "Approval Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ApprovalDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResultView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "提交审批决定"
+      }
+    },
+    "/api/sessions/{session_id}/events": {
+      "get": {
+        "operationId": "session_events_api_sessions__session_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "会话事件流：先 `session_snapshot`，再实时增量；`:` 开头是心跳"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "会话事件流（SSE）"
+      }
+    },
+    "/api/sessions/{session_id}/messages": {
+      "post": {
+        "description": "同步跑完这一轮，返回**稳定的命令结果引用**：结局不依赖 SSE（§15.3）。",
+        "operationId": "submit_message_api_sessions__session_id__messages_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitMessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResultView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "提交消息"
+      }
+    },
+    "/api/sessions/{session_id}/model": {
+      "put": {
+        "description": "为这个会话选下一轮用的连接；`connection_id=null` 表示恢复为跟随默认。\n\n返回**新快照**：让页面直接看到\"下一轮会用哪条\"，而不用自己拼状态。\n`expected_selection` 必填（\"恢复跟随默认\"也是一次写入，同样不能覆盖别人的选择）。",
+        "operationId": "select_session_model_api_sessions__session_id__model_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectSessionModelRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSnapshot"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "选择会话下一轮模型"
+      }
+    },
+    "/api/workspaces": {
+      "get": {
+        "operationId": "list_workspaces_api_workspaces_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/WorkspaceRef"
+                  },
+                  "title": "Response List Workspaces Api Workspaces Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "已使用的工作区"
+      }
+    },
+    "/api/workspaces/select": {
+      "post": {
+        "description": "已列出的工作区用 `workspace_id`；新目录用绝对路径 `path`（服务端校验后绑定）。",
+        "operationId": "select_workspace_api_workspaces_select_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SelectWorkspaceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSummaryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "选择工作区"
+      }
+    }
+  }
+}

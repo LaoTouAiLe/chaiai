@@ -38,7 +38,11 @@ from langgraph.types import interrupt
 
 from local_agent.config import EmbeddingConfig, MediumTermMemoryConfig, resolve_api_key
 from local_agent.context.agents_loader import load_agents
-from local_agent.context.prompt_context import PromptContext, build_system_prompt
+from local_agent.context.prompt_context import (
+    PromptContext,
+    build_context_snapshot_text,
+    build_stable_system_prompt,
+)
 from local_agent.context.token_budget import (
     ContextBudget,
     TokenUsage,
@@ -63,6 +67,7 @@ from local_agent.graph.projection import (
 )
 from local_agent.graph.routers import LOOPING_ACTIONS
 from local_agent.graph.state import (
+    RUNTIME_CONTEXT_SCHEMA_VERSION,
     AgentState,
     DecisionRecord,
     ErrorEvent,
@@ -72,6 +77,7 @@ from local_agent.graph.state import (
     PlanStep,
     ReflectionResult,
     RuntimeContext,
+    RuntimeContextSnapshot,
     TaskStatus,
     ToolEvent,
     approval_key,
@@ -80,12 +86,20 @@ from local_agent.graph.state import (
     make_decision_record,
     make_error_event,
     merge_appended,
+    snapshot_key,
     tool_event_key,
     tool_result_key,
     tool_scope_key,
 )
 from local_agent.llm import embedding as embedding_module
 from local_agent.llm.models import TOOL_CALLING_UNAVAILABLE_REPLY, ModelCapabilities
+from local_agent.llm.usage_recording import (
+    current_recorder,
+    fingerprint_text,
+    record_model_call,
+    tools_fingerprint,
+    use_model_purpose,
+)
 from local_agent.memory import long_term, medium_term, recall, writer
 from local_agent.memory.schemas import MemoryReference
 from local_agent.memory.short_term import (
@@ -191,10 +205,14 @@ def prepare_context_node(state: AgentState) -> AgentState:
     ``error_events``、``completed_steps``）属于历史审计记录，不在这里清理。
     """
     user_input = str(state.get("user_input", ""))
+    run_id = uuid4().hex
     update: AgentState = {
         "thread_id": state.get("thread_id") or uuid4().hex,
         "session_id": state.get("session_id") or uuid4().hex,
-        "run_id": uuid4().hex,
+        "run_id": run_id,
+        "run_user_message_id": f"{run_id}:user",
+        # 整轮耗时从"应用服务接受提交"算起（架构 §15.6）：提交边界就是本节点，记下时刻。
+        "run_submitted_at": datetime.now(timezone.utc),
         "normalized_request": user_input.strip(),
         "task_status": "running",
         # 以下都是"本轮"字段（覆盖语义），新一轮必须回到初始值
@@ -203,6 +221,7 @@ def prepare_context_node(state: AgentState) -> AgentState:
         "current_step_index": 0,
         "pending_tool_calls": [],
         "pending_approval": None,
+        "approval_requested_at": None,
         "reflection_result": None,
         "retry_count": 0,
         "loop_count": 0,
@@ -212,7 +231,7 @@ def prepare_context_node(state: AgentState) -> AgentState:
         "final_evidence": [],
     }
     if user_input.strip():
-        update["messages"] = [HumanMessage(content=user_input)]
+        update["messages"] = [HumanMessage(content=user_input, id=f"{run_id}:user")]
     return update
 
 
@@ -515,6 +534,22 @@ def _tool_definition_tokens(state: AgentState, context: RuntimeContext) -> int:
     return estimate_tools_tokens(registry.tools_for_mode("tool"))
 
 
+def _snapshot_tokens(state: AgentState, context: RuntimeContext, *, summary: str | None = None) -> int:
+    """本轮注入的运行上下文快照块占用的估算 token（含消息包装开销）。
+
+    与出站内容同口径：本 run 已冻结（T36）时按**冻结正文**算，否则按将要注入的候选正文算
+    （压缩节点早于出站节点执行，用 ``summary`` 预演新摘要，那时快照还没写进 State）。
+    冻结之后若仍按带新摘要的正文估算，预算就会比真实请求多算一截。
+    """
+    frozen = _frozen_snapshot(state)
+    text = (
+        frozen.canonical_text
+        if frozen is not None
+        else _snapshot_text(state, context, summary=summary)
+    )
+    return estimate_message_tokens(HumanMessage(content=text))
+
+
 def _recall_failed(state: AgentState) -> bool:
     """本轮召回是否**失败过**（区别于"查了但没有结果"）。
 
@@ -545,15 +580,20 @@ def _rag_search_failed(state: AgentState) -> bool:
     )
 
 
-def _system_prompt(
-    state: AgentState, context: RuntimeContext, *, summary: str | None = None
-) -> PromptContext:
-    """系统提示；压缩节点的估算与出站节点实际发送必须用**同一个**函数，否则预算口径会脱节。
+def _stable_prompt(state: AgentState, context: RuntimeContext) -> PromptContext:
+    """稳定系统前缀（架构 §15.7）：只来自运行上下文与模式，**不读 State 的动态字段**。
 
-    ``summary`` 显式给出时用它（压缩节点写完摘要需要按新摘要重算预算），否则取 State 里的值。
+    出站节点实际发送的系统消息与压缩节点的估算必须调**同一个**函数，否则预算口径会脱节。
     """
-    return build_system_prompt(
-        mode=state.get("mode", "chat"),
+    return build_stable_system_prompt(mode=state.get("mode", "chat"), context=context)
+
+
+def _snapshot_text(state: AgentState, context: RuntimeContext, *, summary: str | None = None) -> str:
+    """本轮运行上下文快照正文（§15.7 的 ``canonical_text``）。
+
+    ``summary`` 显式给出时用它（压缩节点写完摘要需要按新摘要重算），否则取 State 里的值。
+    """
+    return build_context_snapshot_text(
         context=context,
         route_reason=str(state.get("route_reason", "")),
         memory_refs=state.get("memory_refs") or (),
@@ -568,6 +608,127 @@ def _system_prompt(
         task_goal=state.get("task_goal"),
         plan=state.get("plan") or (),
     )
+
+
+def _snapshot_source_versions(
+    state: AgentState, context: RuntimeContext, *, summary: str | None = None
+) -> tuple[tuple[str, str], ...]:
+    """快照来源清单：只放每个来源的**安全短指纹**，不放正文、不放密钥（§15.7）。
+
+    来源与录音机的动态指纹口径对齐（``context_version`` / ``compression_count`` /
+    ``conversation_summary`` / ``memory_refs`` / ``rag_refs`` / ``task_goal`` / ``plan``），
+    另加模式理由与当前目录。
+    """
+    values: tuple[tuple[str, object], ...] = (
+        ("mode_reason", str(state.get("route_reason", ""))),
+        ("current_cwd", context.current_cwd.as_posix()),
+        ("context_version", int(state.get("context_version", 0))),
+        ("compression_count", int(state.get("compression_count", 0))),
+        (
+            "conversation_summary",
+            (summary if summary is not None else state.get("conversation_summary")) or "",
+        ),
+        ("memory_refs", state.get("memory_refs") or []),
+        ("rag_refs", state.get("rag_refs") or []),
+        ("task_goal", state.get("task_goal") or ""),
+        ("plan", state.get("plan") or []),
+    )
+    versions: list[tuple[str, str]] = []
+    for name, value in values:
+        if value is None or value == "" or value == [] or value == ():
+            versions.append((name, "none"))
+            continue
+        digest = fingerprint_text(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str))
+        versions.append((name, digest))
+    return tuple(versions)
+
+
+def _frozen_snapshot(state: AgentState) -> RuntimeContextSnapshot | None:
+    """本 run 已经写入过的那一份快照（T36 的 run 内冻结口径）。
+
+    **一个 run 就是一个缓存 epoch**：首次注入之后，本 run 内的后续节点一律沿用它，出站请求里
+    这段字节因此不再变化。原因是探针实证的失效路径——快照块位于请求最前，工具循环里逐迭代
+    改写它，会让"改写点之后"的整条历史（本轮已完成的工具链）重新计费
+    （第 4 次决策 ``uncached`` 226 → 2210）。
+
+    取**最先**写入的一条（列表按追加顺序），与"首次注入即冻结"一致。代价是循环内模型看到的
+    "当前计划"滞后一版——已确认接受这一语义，计划在下一轮的快照里才更新。
+    """
+    run_id = _run_id(state)
+    for snapshot in state.get("runtime_context_snapshots", ()) or ():
+        if snapshot.run_id == run_id:
+            return snapshot
+    return None
+
+
+def _runtime_snapshot(
+    state: AgentState, context: RuntimeContext, *, summary: str | None = None
+) -> RuntimeContextSnapshot:
+    """构造本轮运行上下文快照；相同内容得到相同 ``snapshot_id``，写入时因此不会重复追加。
+
+    同一 ``run_id`` 已有快照时**整条复用**（T36 冻结），而不是重新构造一份同内容的记录：
+    压缩之后 ``context_version`` 会前移，重建出来的 ``snapshot_id`` 与前一条不同，
+    ``merge_appended`` 就吃不下重复项，State 里会多出一条等价记录、投影选中的也可能是它。
+    """
+    frozen = _frozen_snapshot(state)
+    if frozen is not None:
+        return frozen
+    text = _snapshot_text(state, context, summary=summary)
+    content_hash = fingerprint_text(text)
+    run_id = _run_id(state)
+    context_version = int(state.get("context_version", 0))
+    return RuntimeContextSnapshot(
+        schema_version=RUNTIME_CONTEXT_SCHEMA_VERSION,
+        snapshot_id=f"{run_id}:{context_version}:{content_hash}",
+        run_id=run_id,
+        context_version=context_version,
+        created_at=datetime.now(timezone.utc),
+        content_hash=content_hash,
+        canonical_text=text,
+        source_versions=_snapshot_source_versions(state, context, summary=summary),
+    )
+
+
+def _bind_snapshot(snapshot: RuntimeContextSnapshot) -> None:
+    """把快照指纹交给录音机（动态段口径与注入内容一致，避免两套指纹漂移）。"""
+    recorder = current_recorder()
+    if recorder is not None:
+        recorder.bind_snapshot(snapshot.content_hash)
+
+
+def _snapshot_update(state: AgentState, snapshot: RuntimeContextSnapshot) -> AgentState:
+    """快照写入 State 的局部更新（按 ``snapshot_id`` 去重：内容未变不追加）。"""
+    return {
+        "runtime_context_snapshots": merge_appended(
+            state.get("runtime_context_snapshots", []), [snapshot], snapshot_key
+        )
+    }
+
+
+def _snapshot_insert_index(messages: Sequence[AnyMessage], user_message_id: str | None) -> int:
+    """快照块在当前用户输入**之前**的插入位置。
+
+    - 命中本轮真实用户消息：插在它之前；同一 run 的工具循环迭代里位置因此保持稳定；
+    - 没命中（用户消息被摘要覆盖等边界）：退化为插在窗口末尾，不猜测、不拆开消息。
+    插入点永远在一条 HumanMessage 之前，不会切开 ``tool_call`` / ``ToolMessage`` 配对。
+    """
+    if user_message_id:
+        for index, message in enumerate(messages):
+            if message_id(message) == user_message_id:
+                return index
+    return len(messages)
+
+
+def _with_snapshot(
+    messages: Sequence[AnyMessage], snapshot: RuntimeContextSnapshot, state: AgentState
+) -> list[AnyMessage]:
+    """把快照作为独立的**数据块**插到当前用户输入之前（不拼入用户原文、不进 messages）。"""
+    index = _snapshot_insert_index(messages, state.get("run_user_message_id"))
+    return [
+        *messages[:index],
+        HumanMessage(content=snapshot.canonical_text),
+        *messages[index:],
+    ]
 
 
 def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
@@ -596,10 +757,11 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
     messages = list(state.get("messages") or [])
     covered = _covered_messages(state)
     window = _prompt_window(state, context, covered=covered)
-    prompt = _system_prompt(state, context)
+    prompt = _stable_prompt(state, context)
     tools_tokens = _tool_definition_tokens(state, context)
+    snapshot_tokens = _snapshot_tokens(state, context)
     window_tokens = estimate_messages_tokens(window.messages)
-    estimated = prompt.estimated_tokens + window_tokens + tools_tokens
+    estimated = prompt.estimated_tokens + snapshot_tokens + window_tokens + tools_tokens
     budget_tokens = prompt_budget_tokens(
         context_window_tokens=config.llm.context_window_tokens,
         completion_reserve_tokens=config.llm.max_tokens,
@@ -615,14 +777,19 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
         covered_now: int,
         window_now: PromptWindow,
         prompt_now: PromptContext,
+        snapshot_now: int,
         estimated_now: int,
         ratio_now: float,
     ) -> tuple[TokenUsage, ContextBudget]:
-        """按给定的窗口/系统提示生成这一轮的用量与预算记录。"""
+        """按给定的窗口/系统提示生成这一轮的用量与预算记录。
+
+        注入的快照块也算进 ``system_prompt_tokens``：它是系统侧的上下文，且必须与窗口、工具
+        定义一起解释 ``prompt_tokens``（分项之和 = 总量是不变量）。
+        """
         return (
             TokenUsage(
                 prompt_tokens=estimated_now,
-                system_prompt_tokens=prompt_now.estimated_tokens,
+                system_prompt_tokens=prompt_now.estimated_tokens + snapshot_now,
                 window_messages_tokens=estimate_messages_tokens(window_now.messages),
                 completion_reserve_tokens=config.llm.max_tokens,
                 tool_definition_tokens=tools_tokens,
@@ -648,6 +815,7 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
         covered_now=covered,
         window_now=window,
         prompt_now=prompt,
+        snapshot_now=snapshot_tokens,
         estimated_now=estimated,
         ratio_now=ratio,
     )
@@ -692,9 +860,13 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
     # 摘要成功：被覆盖的旧消息不再进窗口，按新边界与新摘要重算预算
     new_covered = covered + len(older)
     new_window = _prompt_window(state, context, covered=new_covered)
-    new_prompt = _system_prompt(state, context, summary=summary)
+    new_prompt = _stable_prompt(state, context)
+    new_snapshot_tokens = _snapshot_tokens(state, context, summary=summary)
     new_estimated = (
-        new_prompt.estimated_tokens + estimate_messages_tokens(new_window.messages) + tools_tokens
+        new_prompt.estimated_tokens
+        + new_snapshot_tokens
+        + estimate_messages_tokens(new_window.messages)
+        + tools_tokens
     )
     new_ratio = usage_ratio(
         estimated_prompt_tokens=new_estimated, prompt_budget_tokens=budget_tokens
@@ -705,6 +877,7 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
         covered_now=new_covered,
         window_now=new_window,
         prompt_now=new_prompt,
+        snapshot_now=new_snapshot_tokens,
         estimated_now=new_estimated,
         ratio_now=new_ratio,
     )
@@ -725,10 +898,13 @@ def chat_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState
     ``bind_tools``；模型实例来自 RuntimeContext（架构 §4.1），不在图内持有。
     """
     context = runtime.context
-    prompt = _system_prompt(state, context)
+    prompt = _stable_prompt(state, context)
+    window = _prompt_window(state, context)
+    snapshot = _runtime_snapshot(state, context)
+    _bind_snapshot(snapshot)
     messages = [
         SystemMessage(content=prompt.system_prompt),
-        *_prompt_window(state, context).messages,
+        *_with_snapshot(window.messages, snapshot, state),
     ]
     # 闲聊回答就是"最终回答"之一：开了流式就增量展示（不逐块写 Checkpoint，见 ui.streaming）
     answer = stream_answer(
@@ -737,7 +913,7 @@ def chat_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState
         capabilities=_model_capabilities(context),
         enabled=bool(context.app_config.llm.streaming),
     )
-    update: AgentState = {"messages": [answer.message]}
+    update: AgentState = {"messages": [answer.message], **_snapshot_update(state, snapshot)}
     if answer.failure is not None:
         update["error_events"] = merge_appended(
             state.get("error_events", []),
@@ -832,12 +1008,19 @@ def agent_decision_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
         # 架构 §11.7：不支持 Tool Calling 时不得静默退化成闲聊，要明确告知
         return _tool_calling_unavailable(state, capabilities)
     model = context.model_adapter.bind_tools(tools) if tools else context.model_adapter
-    condition = _system_prompt(state, context)
-    response = model.invoke(
-        [
-            SystemMessage(content=condition.system_prompt),
-            *_prompt_window(state, context).messages,
-        ]
+    condition = _stable_prompt(state, context)
+    window = _prompt_window(state, context)
+    snapshot = _runtime_snapshot(state, context)
+    _bind_snapshot(snapshot)
+    outbound = [
+        SystemMessage(content=condition.system_prompt),
+        *_with_snapshot(window.messages, snapshot, state),
+    ]
+    response = record_model_call(
+        lambda: model.invoke(outbound),
+        estimated_prompt_tokens=estimate_messages_tokens(outbound) + estimate_tools_tokens(tools),
+        tools_schema_fingerprint=tools_fingerprint(tools),
+        messages=outbound,
     )
     if not isinstance(response, AIMessage):
         raise LocalAgentError("模型没有返回 AI 消息，无法继续工具分支")
@@ -853,6 +1036,7 @@ def agent_decision_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
         "decision_trace": merge_appended(
             state.get("decision_trace", []), [record], decision_record_key
         ),
+        **_snapshot_update(state, snapshot),
     }
 
 
@@ -1060,6 +1244,12 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
             state.get("decision_trace", []), records, decision_record_key
         ),
     }
+    if isinstance(approval, Mapping):
+        # **只有本次新提出审批时**才覆盖"本轮最近一次审批请求时刻"。安全门在一个 run 里会因工具
+        # 循环被反复执行，后几次没有新审批（`approval is None`）；若无条件写入，就会把先前那次
+        # 请求的时刻抹成 None，让 §15.6 的 `approval_wait_ms` 恒为"未知"（T34 真实基线实测：
+        # 批准过一轮、随后还有工具步的运行，`approval_wait_ms` 全是 null）。
+        update["approval_requested_at"] = approval.get("created_at")
     if messages:
         update["messages"] = messages
         update["tool_events"] = merge_appended(
@@ -1277,7 +1467,20 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
                 tool_call_id=call_id,
             )
         )
-        if status != "ok":
+        if status == "denied":
+            # 被安全策略拒绝**不是**"工具执行失败"：只读工具在安全门一律放行，真正的边界拦截发生在
+            # 工具内部（`policy.resolve_path` → `path_guard`）。这里用 `safety_gate` 才会投影成
+            # `TOOL_CALL_BLOCKED`——否则用户看到"工具执行失败"会去改参数，而他真正要改的是路径或
+            # 请求本身（复审实证，2026-09-28）。
+            errors.append(
+                _error(
+                    state,
+                    stage="safety_gate",
+                    message=f"工具被安全策略拒绝：{name}",
+                    tool_call_id=call_id,
+                )
+            )
+        elif status != "ok":
             errors.append(
                 _error(
                     state,
@@ -1499,6 +1702,10 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
         # 收尾合成也是一次出站 Prompt：把它的估算写回，State 自报的预算才与真实请求一致
         update["token_usage"] = final_answer.usage
         update["context_budget"] = final_answer.budget
+        if final_answer.snapshot is not None:
+            # 收尾合成用的快照同样要落盘：否则"模型看到的动态上下文"在这一轮就没有持久来源，
+            # 重启后无法字节级重建同一请求（§15.7）。按 snapshot_id 去重，内容未变不重复追加。
+            update.update(_snapshot_update(state, final_answer.snapshot))
 
     # 同一轮的机械失败、解析失败与未确认副作用都要各留一条事件：**先收集、最后只 merge 一次**。
     # 逐次 merge 会互相覆盖——`_error` 的事件 ID 由 stage + loop_count 派生，三类同轮事件在同一个
@@ -1982,7 +2189,11 @@ class _FinalAnswer:
     failure: str | None = None
     #: 流式中途失败的异常类型（"已丢弃不完整投影 + 普通调用重试一次"）；调用方要记可见事件
     stream_failure: str | None = None
+    response: AIMessage | None = None
     bounded: bool = False
+    #: 本次合成所用的运行上下文快照（§15.7）。由调用方按 snapshot_id 去重追加进 State，
+    #: 保证"模型看到的动态上下文"可从持久状态重建；``None`` 表示合成路径没有动态上下文。
+    snapshot: RuntimeContextSnapshot | None = None
 
 
 def _ending(
@@ -2041,15 +2252,19 @@ def _synthesize_final_answer(
     而 State 里的 ``context_budget`` 还是工具执行前的旧快照；大输出或多工具调用会让收尾调用
     超上下文，也会让"State 自报预算"与真实出站 Prompt 对不上（复审实证）。因此：
 
-    1. 按 ``context_window_tokens - max_tokens`` 估算"系统提示 + 窗口 + 指令"（指令也要算）；
-    2. 超预算时退化为**有界的证据摘要**（见 :func:`_bounded_evidence`）：按"预算 − 系统提示
-       − 指令"的剩余额度逐步收敛，包在 ``<<<TOOL_OUTPUT>>>`` 里标注为不可信数据；
-    3. 连"系统提示 + 指令"本身都放不下时不调用模型，直接给确定性摘要——**绝不发出超预算请求**；
+    1. 按 ``context_window_tokens - max_tokens`` 估算"稳定系统前缀 + 运行上下文快照 + 窗口 + 指令"
+       （快照与指令也要算）；
+    2. 超预算时退化为**有界的证据摘要**（见 :func:`_bounded_evidence`）：按"预算 − 稳定前缀
+       − 快照 − 指令"的剩余额度逐步收敛，包在 ``<<<TOOL_OUTPUT>>>`` 里标注为不可信数据；
+    3. 连"稳定前缀 + 快照 + 指令"本身都放不下时不调用模型，直接给确定性摘要——**绝不发出超预算请求**；
     4. 无论走哪条路，都把这次调用的估算作为预算快照返回，由调用方写回 State。
     """
     config = context.app_config
-    prompt = _system_prompt(state, context)
+    prompt = _stable_prompt(state, context)
     window = _prompt_window(state, context)
+    snapshot = _runtime_snapshot(state, context)
+    snapshot_tokens = estimate_message_tokens(HumanMessage(content=snapshot.canonical_text))
+    _bind_snapshot(snapshot)
     budget_tokens = prompt_budget_tokens(
         context_window_tokens=config.llm.context_window_tokens,
         completion_reserve_tokens=config.llm.max_tokens,
@@ -2060,12 +2275,12 @@ def _synthesize_final_answer(
         SystemMessage(content=FINAL_ANSWER_INSTRUCTION)
     )
     window_tokens = estimate_messages_tokens(window.messages)
-    estimated = prompt.estimated_tokens + window_tokens + instruction_tokens
+    estimated = prompt.estimated_tokens + snapshot_tokens + window_tokens + instruction_tokens
     window_count = len(window.messages)
     bounded = estimated > budget_tokens
     messages: list[AnyMessage] = []
     if bounded:
-        allowance = budget_tokens - prompt.estimated_tokens - instruction_tokens
+        allowance = budget_tokens - prompt.estimated_tokens - snapshot_tokens - instruction_tokens
         evidence = (
             _bounded_evidence(state, allowance_tokens=allowance) if allowance > 0 else None
         )
@@ -2073,20 +2288,23 @@ def _synthesize_final_answer(
             # 固定部分就放不下：连证据都不发，走确定性摘要（空 messages 即"不调用模型"）
             window_tokens = 0
             window_count = 0
-            estimated = prompt.estimated_tokens + instruction_tokens
+            estimated = prompt.estimated_tokens + snapshot_tokens + instruction_tokens
         else:
             window_tokens = estimate_messages_tokens([HumanMessage(content=evidence)])
             window_count = 1
-            estimated = prompt.estimated_tokens + window_tokens + instruction_tokens
+            estimated = prompt.estimated_tokens + snapshot_tokens + window_tokens + instruction_tokens
+            # 收尾合成同样要看到记忆 / RAG / 计划（停止条件：这些信息不得变得不可见），
+            # 因此有界路径也带上快照块，只把窗口换成有界证据。
             messages = [
                 SystemMessage(content=prompt.system_prompt),
+                HumanMessage(content=snapshot.canonical_text),
                 HumanMessage(content=evidence),
                 SystemMessage(content=FINAL_ANSWER_INSTRUCTION),
             ]
     else:
         messages = [
             SystemMessage(content=prompt.system_prompt),
-            *window.messages,
+            *_with_snapshot(window.messages, snapshot, state),
             SystemMessage(content=FINAL_ANSWER_INSTRUCTION),
         ]
 
@@ -2094,8 +2312,8 @@ def _synthesize_final_answer(
     usage = TokenUsage(
         prompt_tokens=estimated,
         # 指令本身也是一条 SystemMessage：必须算进系统提示分项，否则分项之和比总量少指令那部分，
-        # 违反 "各分项之和 = prompt_tokens" 的不变量（复审实测少 95 token）。
-        system_prompt_tokens=prompt.estimated_tokens + instruction_tokens,
+        # 违反 "各分项之和 = prompt_tokens" 的不变量（复审实测少 95 token）。注入的快照块同理。
+        system_prompt_tokens=prompt.estimated_tokens + snapshot_tokens + instruction_tokens,
         window_messages_tokens=window_tokens,
         completion_reserve_tokens=config.llm.max_tokens,
         tool_definition_tokens=0,  # 收尾合成不绑定工具
@@ -2129,17 +2347,20 @@ def _synthesize_final_answer(
             budget=budget,
             failure=failure,
             bounded=True,
+            snapshot=snapshot,
         )
     stream_failure: str | None = None
     try:
         # 收尾合成是"最终回答"的另一个调用点：开了流式就增量展示（不逐块写 Checkpoint）；
         # 不支持 / 首块前失败自动退化，中途失败会丢弃不完整投影并普通重试一次（ui.streaming）。
-        streamed = stream_answer(
-            context.model_adapter,
-            messages,
-            capabilities=_model_capabilities(context),
-            enabled=bool(config.llm.streaming),
-        )
+        # 这里显式声明用途为最终回答（所在节点是 reflection，用途不能跟着节点名走）。
+        with use_model_purpose("final_answer"):
+            streamed = stream_answer(
+                context.model_adapter,
+                messages,
+                capabilities=_model_capabilities(context),
+                enabled=bool(config.llm.streaming),
+            )
         response = streamed.message
         stream_failure = streamed.failure
     except Exception as exc:  # noqa: BLE001 —— 合成失败也不能丢掉这一轮的结果
@@ -2156,12 +2377,13 @@ def _synthesize_final_answer(
             state, decision=decision, trust=trust, anomalies=anomalies
         )
     return _FinalAnswer(
-        message=AIMessage(content=text),
+        message=AIMessage(content=text, id=response.id if response is not None else None),
         usage=usage,
         budget=budget,
         failure=failure,
         stream_failure=stream_failure,
         bounded=bounded,
+        snapshot=snapshot,
     )
 
 
@@ -2494,7 +2716,10 @@ def _chat_memory_final_text(
     turn_reply = current_turn_ai_message(state.get("messages", []))
     previous = turn_reply.text if turn_reply is not None else ""
     key = message_id(turn_reply) if turn_reply is not None else ""
-    prompt = _system_prompt(state, context)
+    # 闲聊收尾重写只发"稳定前缀 + 记忆处理结果 + 指令"，**不注入快照块**：这条路径没有消息窗口，
+    # 也没有"当前真实用户输入"可作插入锚点，硬塞快照块会变成一条无锚点的第二消息（§15.7 的
+    # 插入规则要求落在真实用户输入之前）。因此这里保持与 T35 之前一致的行为，只换成稳定前缀。
+    prompt = _stable_prompt(state, context)
     budget_tokens = prompt_budget_tokens(
         context_window_tokens=config.llm.context_window_tokens,
         completion_reserve_tokens=config.llm.max_tokens,
@@ -2515,12 +2740,15 @@ def _chat_memory_final_text(
         )
     else:
         try:
-            response = context.model_adapter.invoke(
-                [
-                    SystemMessage(content=prompt.system_prompt),
-                    HumanMessage(content=facts_text),
-                    instruction,
-                ]
+            outbound = [
+                SystemMessage(content=prompt.system_prompt),
+                HumanMessage(content=facts_text),
+                instruction,
+            ]
+            response = record_model_call(
+                lambda: context.model_adapter.invoke(outbound),
+                estimated_prompt_tokens=estimated,
+                messages=outbound,
             )
         except Exception as exc:  # noqa: BLE001 —— 重写失败不能影响本轮回答
             degraded = f"收尾重写调用失败（{type(exc).__name__}: {exc}）"
@@ -2957,7 +3185,10 @@ def final_response_node(state: AgentState) -> AgentState:
     - 没有可用的 AI 文本 → ``failed``，由页面给出明确提示，而不是编造回答；
     - 已经是 ``failed``（例如超出循环上限）→ 保持 ``failed``，不改写成 ``completed``；
     - 反思结论存在但 ``goal_achieved=False``（未达成目标就结束，例如需要用户补充）→
-      保持 ``running``，不冒充 ``completed``；
+      ``blocked``：**本轮已经结束**、回答有效，但不冒充 ``completed``。这里**不能**写
+      ``running``——那是对外的"还在跑"，会让投影层丢掉这条回答（``project_final_result``
+      对 ``running`` 返回 ``None``）、终态事件也不发，页面永远停在"正在生成回答…"
+      （复审实证，2026-09-28：工具被安全策略拒绝 → 反思机械判 failed → 回答卡在页面上出不来）；
     - 其余（闲聊、模型直接回答、反思判定完成）→ ``completed``。
     """
     # 展示文本优先取 State 里已经确定的 ``final_response``：闲聊记忆路径在写入结果确定后写入它
@@ -2980,7 +3211,9 @@ def final_response_node(state: AgentState) -> AgentState:
     if state.get("task_status") == "failed":
         status: TaskStatus = "failed"
     elif unfinished:
-        status = "running"
+        # 未达成目标就结束：这是**终态**，不是"还在跑"。写 ``running`` 会让这条回答被投影层
+        # 丢掉、终态事件也不发，页面永远停在"正在生成回答…"（见上面的更新规则）。
+        status = "blocked"
     else:
         status = "completed"
     return {"final_response": text, "task_status": status}

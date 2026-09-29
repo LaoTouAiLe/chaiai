@@ -1,0 +1,224 @@
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-lg);
+  width: var(--law-sidebar-width);
+  flex: 0 0 var(--law-sidebar-width);
+  padding: var(--law-space-lg) var(--law-space-md) var(--law-space-md);
+  background: var(--law-surface-sidebar);
+  border-right: 1px solid var(--law-border-l1);
+  overflow-y: auto;
+}
+
+/* Narrow rail (matrix 24). Width is the measured value from T25. */
+.sidebarCollapsed {
+  width: var(--law-sidebar-width-collapsed);
+  flex: 0 0 var(--law-sidebar-width-collapsed);
+  align-items: center;
+  padding-left: var(--law-space-sm);
+  padding-right: var(--law-space-sm);
+}
+
+.sidebarCollapsed .brand {
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebarCollapsed .footerButton {
+  justify-content: center;
+  padding: 0;
+  font-size: var(--law-text-xs);
+}
+
+.railButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-md);
+}
+
+.railButton:hover {
+  background: var(--law-button-ghost-hover);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  padding: 0 var(--law-space-md);
+  height: 28px;
+}
+
+.brandMark {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--law-radius-sm);
+  background: var(--law-button-primary-fill);
+}
+
+.brandName {
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  font-weight: var(--law-weight-medium);
+}
+
+.newSession {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--law-space-sm);
+  height: 38px;
+  border-radius: var(--law-radius-lg);
+  border: 1px solid var(--law-border-l2);
+  background: var(--law-button-ghost-fill);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  font-weight: var(--law-weight-medium);
+  transition: background var(--law-duration-base) var(--law-ease);
+}
+
+.newSession:hover {
+  background: var(--law-button-ghost-hover);
+}
+
+.search {
+  display: block;
+  padding: 0 var(--law-space-md);
+}
+
+.search input {
+  width: 100%;
+  height: 30px;
+  padding: 0 var(--law-space-lg);
+  border-radius: var(--law-radius-md);
+  border: 1px solid var(--law-border-l2);
+  background: var(--law-bg-layer-1);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.search input::placeholder {
+  color: var(--law-text-caption);
+}
+
+.treeLabel {
+  padding: 0 var(--law-space-md);
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.workspace {
+  margin-top: var(--law-space-sm);
+}
+
+.workspaceTitle {
+  display: block;
+  width: 100%;
+  padding: var(--law-space-sm) var(--law-space-md);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  font-weight: var(--law-weight-medium);
+  /* Rows are <button> since T30 so they are reachable by keyboard: reset the
+     browser defaults so the pixels match the prototype's <div> exactly. */
+  border: 0;
+  background: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  height: var(--law-session-row-height);
+  padding: 0 var(--law-space-md);
+  border-radius: var(--law-radius-md);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  transition: background var(--law-duration-fast) var(--law-ease);
+  /* Same reset as `.workspaceTitle`: identical pixels, real button semantics. */
+  width: 100%;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.session:hover {
+  background: var(--law-hover-solid);
+}
+
+.sessionSelected {
+  background: var(--law-active);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--law-radius-pill);
+  flex: 0 0 6px;
+}
+
+.dotIdle {
+  background: var(--law-state-success);
+}
+
+.dotRunning {
+  background: var(--law-state-warn);
+}
+
+.dotWaiting {
+  background: var(--law-state-warn);
+}
+
+.dotDone {
+  background: var(--law-text-caption);
+}
+
+.sessionTitle {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionTime {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.footer {
+  margin-top: auto;
+  padding-top: var(--law-space-md);
+}
+
+.footerButton {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 42px;
+  padding: 0 var(--law-space-md);
+  border-radius: var(--law-radius-lg);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+}
+
+.footerButton:hover {
+  background: var(--law-hover-solid);
+  color: var(--law-text-primary);
+}

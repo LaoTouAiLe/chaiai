@@ -1,0 +1,137 @@
+.dock {
+  flex: 0 0 auto;
+  padding: 0 0 var(--law-space-2xl);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-lg);
+  width: 100%;
+  max-width: var(--law-conversation-max-width);
+  margin: 0 auto;
+  padding: 0 var(--law-space-2xl);
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-lg);
+  padding: 10px 10px var(--law-space-md);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-2xl);
+  background: var(--law-bg-layer-1);
+  box-shadow: var(--law-shadow-lv2);
+}
+
+/* Running phase, shown above the input while a turn is in flight. */
+.phase {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  padding: 0 var(--law-space-xs);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+/* Why the input is disabled. Not a placeholder: it must survive being greyed out. */
+.disabledNote {
+  margin: -8px 0 0;
+  padding: 0 var(--law-space-xl);
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.inputLabel {
+  display: block;
+}
+
+.input {
+  display: block;
+  width: 100%;
+  min-height: 24px;
+  padding: var(--law-space-xs) var(--law-space-lg) var(--law-space-xs) var(--law-space-xl);
+  border: 0;
+  background: transparent;
+  font-size: var(--law-text-base);
+  line-height: var(--law-leading-base);
+  resize: none;
+}
+
+.input::placeholder {
+  color: var(--law-text-caption);
+}
+
+.input:focus {
+  outline: none;
+}
+
+.controls {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  padding: 0 var(--law-space-xs);
+}
+
+.command {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--law-radius-pill);
+  border: 1px solid var(--law-border-l2);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-md);
+  line-height: 1;
+}
+
+.command:hover {
+  background: var(--law-button-ghost-hover);
+  color: var(--law-text-primary);
+}
+
+.chip {
+  height: 26px;
+  padding: 0 var(--law-space-lg);
+  border-radius: var(--law-radius-pill);
+  border: 1px solid var(--law-border-l2);
+  background: var(--law-surface-selector);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  white-space: nowrap;
+}
+
+.chip:hover {
+  color: var(--law-text-primary);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--law-radius-pill);
+  background: var(--law-button-primary-fill);
+  color: var(--law-text-on-brand);
+  transition: background var(--law-duration-base) var(--law-ease);
+}
+
+/* No `.stop` rule: v0.4 has no cancel semantics, so no stop control exists. */
+
+.send:hover {
+  background: var(--law-button-primary-hover);
+}
+
+.send:disabled {
+  background: var(--law-button-primary-disabled);
+  color: var(--law-text-tertiary);
+}

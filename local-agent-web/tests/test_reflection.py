@@ -806,12 +806,11 @@ def test_finish_branch_synthesizes_a_final_answer(
 def test_plan_and_adjustment_are_injected_into_the_prompt(
     tmp_path: Path, app_config: AppConfig, model_factory
 ) -> None:
-    """重规划必须真的影响下一轮：计划与反思写入的调整要出现在系统提示里。"""
-    from local_agent.context.prompt_context import build_system_prompt
+    """重规划必须真的影响下一轮：计划与反思写入的调整要出现在提示里（T35：已移入运行上下文快照）。"""
+    from local_agent.context.prompt_context import build_context_snapshot_text
 
     context = _context(tmp_path, app_config, model_factory())
-    prompt = build_system_prompt(
-        mode="tool",
+    prompt = build_context_snapshot_text(
         context=context,
         task_goal="修复登录失败",
         plan=[
@@ -824,10 +823,10 @@ def test_plan_and_adjustment_are_injected_into_the_prompt(
         ],
     )
 
-    assert "## 当前计划" in prompt.system_prompt
-    assert "定位问题" in prompt.system_prompt
-    assert "改为先看日志" in prompt.system_prompt
-    assert "修复登录失败" in prompt.system_prompt
+    assert "## 当前计划" in prompt
+    assert "定位问题" in prompt
+    assert "改为先看日志" in prompt
+    assert "修复登录失败" in prompt
 
 
 def test_unfinished_task_does_not_claim_completed() -> None:
@@ -842,7 +841,8 @@ def test_unfinished_task_does_not_claim_completed() -> None:
 
     update = nodes.final_response_node(state)  # type: ignore[arg-type]
 
-    assert update["task_status"] == "running"
+    # 本轮已结束、在等用户补充：既不是 completed，也不是"还在跑"（复审实证，2026-09-28）。
+    assert update["task_status"] == "blocked"
     assert update["final_response"] == "请确认目标是不是这个"
 
     finished = {

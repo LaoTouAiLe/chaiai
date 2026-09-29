@@ -1,102 +1,93 @@
-"""审批控件（架构 §5.3、§6.5）：批准 / 修改参数 / 拒绝。
+"""审批控件（架构 §5.3、§6.5）：批准 / 拒绝。
 
-职责边界：只负责把已算好的审批请求渲染成控件并返回人工决策，
-不做安全判断、不直接改图状态（由 ``web.py`` 用 ``Command(resume=...)`` 恢复）。
+职责边界：只把应用服务（T28）给出的 `ApprovalView` DTO 渲染成控件并返回人工决定，
+不做安全判断、也不直接改图状态（由 ``web.py`` 调 ``ApplicationService.resolve_approval`` 恢复）。
+因此本模块**不导入** LangGraph、`Command` 或 Graph 的 State。
 
-递归删除的二次确认在这里体现：第二阶段单独渲染，且必须有显式勾选才算确认。
+递归删除的二次确认：第一阶段只推进到第二阶段；第二阶段要求用户显式勾选，
+并把 ``confirm_recursive=True`` 交给服务。每阶段独立提交，由图判断授权。
+
+关于 `edit`：应用服务支持"改写参数后批准"，但 DTO 只带**已脱敏的展示字符串**
+（`redacted_arguments`），拿它当参数提交会把展示文本变成真实参数。因此页面不提供这一入口，
+与前端一致（该路径由 API 契约测试覆盖）。
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
 
 import streamlit as st
+
+from local_agent.application.models import ApprovalView
+
+#: `ApprovalState` → 展示文字。
+_STATE_LABELS = {
+    "pending": "等待决策",
+    "executing": "已批准，正在执行",
+    "approved": "已批准",
+    "rejected": "已拒绝",
+    "expired": "已失效",
+}
 
 
 @dataclass(frozen=True)
 class ApprovalInput:
-    """人工决策（会作为 ``Command(resume=...)`` 的载荷）。"""
+    """人工决定（交给 ``ApplicationService.resolve_approval`` 的字段）。"""
 
     decision: str
     confirm_recursive: bool = False
-    edited_arguments: dict[str, Any] | None = None
     reason: str = ""
 
-    def as_payload(self) -> dict[str, Any]:
-        """转成传给 ``Command(resume=...)`` 的字典。"""
-        return {
-            "decision": self.decision,
-            "confirm_recursive": self.confirm_recursive,
-            "edited_arguments": self.edited_arguments,
-            "reason": self.reason,
-        }
 
-
-def render_approval(
-    request: Mapping[str, Any], *, key_prefix: str = "approval"
-) -> ApprovalInput | None:
-    """渲染审批卡片；用户点击按钮时返回决策，否则返回 ``None``。
+def render_approval(approval: ApprovalView, *, key_prefix: str = "approval") -> ApprovalInput | None:
+    """渲染审批卡片；用户点击按钮时返回决定，否则返回 ``None``。
 
     Args:
-        request: 审批请求载荷（``interrupt()`` 的 value）。
+        approval: 快照里的审批视图（`SessionSnapshot.approval`）。
         key_prefix: 控件 key 前缀，避免同一页面内多个控件冲突。
 
     Returns:
-        人工决策，或 ``None`` 表示还没点。
+        人工决定，或 ``None`` 表示还没点、或该审批已经不可操作。
     """
-    stage = int(request.get("confirmation_stage") or 1)
-    tool_name = str(request.get("tool_name") or "")
-    summary = str(request.get("impact_summary") or "")
+    if approval.state != "pending":
+        # 已经不是待决状态：只如实展示结论，不给按钮（结论来自服务，页面不推断）。
+        label = _STATE_LABELS.get(approval.state, approval.state)
+        note = approval.note or ""
+        st.info(f"这次审批当前状态：{label}。{note}".strip())
+        return None
 
-    st.warning(f"需要你确认的动作（{tool_name}）：{summary}")
-    if stage == 2:
+    st.warning(f"需要你确认的动作（{approval.tool_name}）：{approval.impact_summary}")
+    if approval.outside_workspace:
+        st.error("目标位于工作区外：请核对完整路径。")
+    high_risk = approval.risk == "high"
+    second_stage = high_risk and approval.confirmation_stage == 2
+    if high_risk:
         st.error(
-            "这是**递归删除的二次确认**：第一次确认不构成授权，"
-            "只有在这里再次确认才会真正执行；刷新或取消都必须重新确认。"
+            "第二次确认：请再次核对目标和影响范围。"
+            if second_stage else "第一次确认只会进入二次确认，不会执行删除。"
         )
 
-    with st.expander("查看完整参数与指纹", expanded=stage == 1):
-        st.json(request.get("arguments") or {})
-        st.caption(f"动作指纹：{request.get('action_fingerprint')}")
+    with st.expander("查看动作参数与指纹", expanded=True):
+        if approval.target:
+            st.caption(f"目标：{approval.target}")
+        st.json(approval.redacted_arguments or {})
+        st.caption(f"动作指纹：{approval.action_fingerprint}")
 
-    edited_text = st.text_area(
-        "修改后的参数（JSON，仅“修改参数”时使用）",
-        value=json.dumps(request.get("arguments") or {}, ensure_ascii=False, indent=2),
-        key=f"{key_prefix}-args",
-        height=140,
-    )
-
-    approve_label = "确认删除" if stage == 2 else "批准执行"
     confirm_recursive = False
-    if stage == 2:
+    if second_stage:
         confirm_recursive = st.checkbox(
-            "我确认删除该目录及其全部内容", key=f"{key_prefix}-recursive"
+            "我确认删除该目录及其全部内容", key=f"{key_prefix}-{approval.approval_id}-stage-2-recursive"
         )
 
-    col_approve, col_edit, col_reject = st.columns(3)
+    col_approve, col_reject = st.columns(2)
+    approve_label = "确认删除" if second_stage else "进入二次确认" if high_risk else "允许一次"
+    approve_key = f"{key_prefix}-stage-{approval.confirmation_stage}-approve" if high_risk else f"{key_prefix}-approve"
     if col_approve.button(
-        approve_label, key=f"{key_prefix}-approve", disabled=stage == 2 and not confirm_recursive
+        approve_label, key=approve_key,
+        disabled=second_stage and not confirm_recursive,
     ):
         return ApprovalInput(decision="approve", confirm_recursive=confirm_recursive)
     if col_reject.button("拒绝", key=f"{key_prefix}-reject"):
         return ApprovalInput(decision="reject", reason="用户拒绝了该动作")
-    if col_edit.button("修改参数", key=f"{key_prefix}-edit"):
-        parsed = _parse_arguments(edited_text)
-        if parsed is None:
-            st.error("参数不是合法 JSON 对象，无法提交修改")
-            return None
-        return ApprovalInput(
-            decision="edit", edited_arguments=parsed, reason="用户修改了动作参数"
-        )
+    st.caption("批准只对本次调用生效；不会加入免审名单。")
     return None
-
-
-def _parse_arguments(text: str) -> dict[str, Any] | None:
-    try:
-        parsed = json.loads(text)
-    except (TypeError, ValueError):
-        return None
-    return parsed if isinstance(parsed, dict) else None

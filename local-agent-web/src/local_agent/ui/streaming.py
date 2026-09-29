@@ -26,44 +26,24 @@ sink 用 contextvar 传入：网页在提交/审批恢复那一次设置、图�
 
 from __future__ import annotations
 
-import contextlib
-from collections.abc import Iterator, Sequence
-from contextvars import ContextVar
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage
 
+from local_agent.context.token_budget import estimate_messages_tokens
 from local_agent.llm.compat import stream_placeholder_fields
 from local_agent.llm.models import ModelCapabilities
+from local_agent.llm.stream_context import AnswerSink, current_sink, use_sink
+from local_agent.llm.usage_recording import (
+    begin_model_call,
+    finish_model_call,
+    note_first_token,
+    record_model_call,
+)
 
-
-class AnswerSink(Protocol):
-    """最终回答的增量接收方（网页实现；命令行/测试可以不装）。"""
-
-    def push(self, text: str) -> None:
-        """收到一段增量文本（只包含正文，不含工具参数与隐藏推理）。"""
-
-    def discard(self) -> None:
-        """丢弃已经推送的**不完整**投影（中途失败时用）。"""
-
-
-_SINK: ContextVar[AnswerSink | None] = ContextVar("answer_sink", default=None)
-
-
-@contextlib.contextmanager
-def use_sink(sink: AnswerSink | None) -> Iterator[None]:
-    """在作用域内安装增量接收方；退出时恢复（嵌套调用互不影响）。"""
-    token = _SINK.set(sink)
-    try:
-        yield
-    finally:
-        _SINK.reset(token)
-
-
-def current_sink() -> AnswerSink | None:
-    """当前作用域里的接收方；没有安装时返回 ``None``（等价于不流式）。"""
-    return _SINK.get()
+__all__ = ["AnswerSink", "StreamedAnswer", "current_sink", "stream_answer", "use_sink"]
 
 
 @dataclass(frozen=True)
@@ -101,31 +81,68 @@ def stream_answer(
     sink = current_sink()
     supported = capabilities is None or capabilities.streaming
     streamer = getattr(model, "stream", None)
+    estimated = estimate_messages_tokens(list(messages))
     if not enabled or sink is None or not supported or not callable(streamer):
-        return StreamedAnswer(message=_invoke(model, messages), streamed=False)
+        message = record_model_call(
+            lambda: _invoke(model, messages), estimated_prompt_tokens=estimated, messages=messages
+        )
+        return StreamedAnswer(message=message, streamed=False)
 
     aggregated: Any = None
     chunks = 0
+    message_id: str | None = None
+    handle = begin_model_call(estimated_prompt_tokens=estimated, messages=messages)
     try:
         for chunk in streamer(list(messages)):
             text = _chunk_text(chunk)
             if text:
+                if message_id is None:
+                    begin = getattr(sink, "begin", None)
+                    if callable(begin):
+                        message_id = str(begin())
                 chunks += 1
+                note_first_token(handle)
                 sink.push(text)
             aggregated = chunk if aggregated is None else aggregated + chunk
     except Exception as exc:  # noqa: BLE001 —— 流式失败必须退化为普通调用，不中断本轮
+        if handle is not None:
+            handle.usage_from(aggregated)
+        finish_model_call(handle, status="error")
+        retry_of = handle.model_call_id if handle is not None else None
         sink.discard()
         if not chunks:
             # 首块前失败：页面上什么都没有，直接普通调用（不算降级，不记事件）
-            return StreamedAnswer(message=_invoke(model, messages), streamed=False)
+            message = record_model_call(
+                lambda: _invoke(model, messages),
+                estimated_prompt_tokens=estimated,
+                retry_of=retry_of,
+                messages=messages,
+            )
+            return StreamedAnswer(message=message, streamed=False)
         # 中途失败：丢掉不完整投影，普通调用重试一次，并让调用方记一条可见降级事件
+        fallback = record_model_call(
+            lambda: _invoke(model, messages),
+            estimated_prompt_tokens=estimated,
+            retry_of=retry_of,
+            messages=messages,
+        )
+        if message_id is not None:
+            fallback.id = message_id
         return StreamedAnswer(
-            message=_invoke(model, messages),
+            message=fallback,
             streamed=True,
             failure=type(exc).__name__,
             chunks=chunks,
         )
+    if handle is not None:
+        handle.usage_from(aggregated)
+    finish_model_call(handle, status="ok")
     message = _to_message(aggregated)
+    if message_id is not None:
+        message.id = message_id
+    flush = getattr(sink, "flush", None)
+    if callable(flush):
+        flush()
     # 供应商扩展字段：真增量流式会丢掉它们（框架只在非流式解析路径上提取）。只要这个供应商
     # "确实用过该字段"，就给流式回答补空值占位——否则下一轮请求会被 400 拒绝（T23 实测）。
     for key, value in stream_placeholder_fields(model).items():
@@ -171,6 +188,10 @@ def _to_message(aggregated: Any) -> AIMessage:
         content=text,
         additional_kwargs=dict(getattr(aggregated, "additional_kwargs", {}) or {}),
         response_metadata=dict(getattr(aggregated, "response_metadata", {}) or {}),
+        # 用量必须带过去：聚合块的 ``usage_metadata`` 是流式链路**唯一**的实际用量来源
+        # （流式分片的 ``response_metadata`` 里没有原始 ``token_usage``）。漏掉它就会
+        # 违反 §15.6 的停止条件"流式链路不得丢用量"。
+        usage_metadata=getattr(aggregated, "usage_metadata", None),
         id=getattr(aggregated, "id", None),
     )
 

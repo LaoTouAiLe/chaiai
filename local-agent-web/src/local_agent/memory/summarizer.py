@@ -21,7 +21,9 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
+from local_agent.context.token_budget import estimate_messages_tokens
 from local_agent.exceptions import LocalAgentError
+from local_agent.llm.usage_recording import record_model_call
 
 #: 摘要指令；要求模型只输出摘要正文，便于直接落库。
 SUMMARIZE_INSTRUCTION = (
@@ -66,8 +68,11 @@ def summarize_conversation(
     if not body and not previous:
         raise LocalAgentError("没有可摘要的对话内容")
     text = body if not previous else _PREVIOUS_SUMMARY_TEMPLATE.format(summary=previous) + body
-    response = model.invoke(
-        [SystemMessage(content=SUMMARIZE_INSTRUCTION), HumanMessage(content=text)]
+    outbound = [SystemMessage(content=SUMMARIZE_INSTRUCTION), HumanMessage(content=text)]
+    response = record_model_call(
+        lambda: model.invoke(outbound),
+        estimated_prompt_tokens=estimate_messages_tokens(outbound),
+        messages=outbound,
     )
     if not isinstance(response, AIMessage):
         raise LocalAgentError("摘要模型没有返回 AI 消息")

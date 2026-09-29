@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 import yaml
 from dotenv import load_dotenv
@@ -371,10 +371,77 @@ class AgentConfig(_StrictModel):
     require_evidence_for_completion: bool = True
 
 
+class WebConfig(_StrictModel):
+    """本机 HTTP 服务（T29；契约 §15.3、计划 §6.2）。
+
+    默认只绑定**回环地址**：v0.4 没有鉴权，把监听地址改成非回环必须显式 opt-in
+    （``allow_non_loopback``），否则启动就失败闭合，而不是"配了但没人发现"。
+    """
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8000, ge=1, le=65535)
+    #: 允许的 `Host` 头（防 DNS rebinding）。默认只有回环的三种写法。
+    allowed_hosts: list[str] = Field(default_factory=lambda: ["127.0.0.1", "localhost", "[::1]"])
+    #: 开发期允许的跨源来源；生产同源（FastAPI 托管前端产物），因此默认只有 Vite dev server。
+    dev_origins: list[str] = Field(
+        default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"]
+    )
+    #: 请求体上限（字节）。超限返回 413，不进入业务逻辑。
+    max_body_bytes: int = Field(default=1_000_000, gt=0)
+    #: 前端构建产物目录（相对配置文件所在目录，或绝对路径）；不存在时只提供 API。
+    static_dir: str = "frontend/dist"
+    #: SSE 心跳间隔与空闲上限：死连接不能一直占着订阅（§15.3）。
+    sse_heartbeat_seconds: float = Field(default=15.0, gt=0)
+    sse_idle_timeout_seconds: float = Field(default=300.0, gt=0)
+    #: 单次排空的待发事件上限：超过即判定客户端落后，结束这次订阅并要求重连（§6.2 的增量不持久）。
+    sse_max_pending_events: int = Field(default=200, gt=0)
+    #: HTTP keep-alive 超时（uvicorn 的 `timeout_keep_alive`）。
+    keepalive_seconds: int = Field(default=15, gt=0)
+    #: 允许把监听地址改成非回环（v0.4 无鉴权，默认禁止）。
+    allow_non_loopback: bool = False
+
+    @model_validator(mode="after")
+    def _loopback_requires_explicit_opt_in(self) -> WebConfig:
+        """非回环监听必须显式声明；顺手要求它出现在 `allowed_hosts` 里，避免自相矛盾。"""
+        if self.allow_non_loopback:
+            return self
+        if not is_loopback_host(self.host):
+            raise ValueError(
+                f"web.host={self.host} 不是回环地址：v0.4 没有鉴权，"
+                "改监听地址必须同时设置 web.allow_non_loopback=true"
+            )
+        return self
+
+
+def is_loopback_host(host: str) -> bool:
+    """``host`` 是否只在本机可达（回环 IPv4/IPv6 或 ``localhost``）。"""
+    text = host.strip().strip("[]").lower()
+    if text in {"localhost", "::1"}:
+        return True
+    return text == "127.0.0.1" or text.startswith("127.")
+
+
+class ModelSettingsConfig(_StrictModel):
+    """可视化模型连接设置（T29A；契约 §6.8）。
+
+    - ``path``：**独立**的设置库（非秘密设置：连接、默认与会话选择、能力检测结果）。与聊天库分开存，
+      免得"删会话"和"停用连接"互相牵连；
+    - ``credential_store``：``auto`` 在 Windows 用系统凭据存储、其它平台临时；``memory`` 强制临时模式
+      （不想把密钥交给系统凭据存储时用，代价是重启后要重新录入）。
+      **没有任何一档会把密钥写进文件**——这一点由设置库的表结构保证（没有能放密钥的列）。
+    """
+
+    path: str = Field(default="data/model_settings.sqlite", min_length=1)
+    credential_store: Literal["auto", "memory"] = "auto"
+
+
 class AppConfig(_StrictModel):
     """全部配置的根对象。"""
 
-    llm: LlmConfig
+    #: ``llm`` 段**可以缺省**（v0.4 起，§15.9）：Web/API 在缺少它时进入"初始设置模式"，
+    #: 用户在设置页里加连接即可，不需要伪造一份 YAML 模型段。CLI 与 Streamlit 仍然需要它，
+    #: 它们要显式调 :meth:`require_llm`。
+    llm: LlmConfig | None = None
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     workspace: WorkspaceConfig = Field(default_factory=WorkspaceConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
@@ -382,6 +449,32 @@ class AppConfig(_StrictModel):
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     rag: RagConfig = Field(default_factory=RagConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    web: WebConfig = Field(default_factory=WebConfig)
+    model_settings: ModelSettingsConfig = Field(default_factory=ModelSettingsConfig)
+
+    def as_run_config(self) -> RunConfig:
+        """收窄成运行期配置；``llm`` 缺省时抛可执行的 `ConfigError`。
+
+        Raises:
+            ConfigError: 没有 ``llm`` 段——说明提交边界还没解析出连接，那是调用方的顺序错了。
+        """
+        if self.llm is None:
+            raise ConfigError("运行期配置缺少 llm 段：提交边界应先解析出一条模型连接")
+        return cast(RunConfig, self)
+
+    def require_llm(self) -> LlmConfig:
+        """取出 ``llm`` 段；缺省时抛可执行的 `ConfigError`。
+
+        Raises:
+            ConfigError: 配置里没有 ``llm`` 段（只有 Web/API 允许缺省）。
+        """
+        if self.llm is None:
+            raise ConfigError(
+                "配置里没有 llm 段：Web/API 可以直接进设置页添加连接；"
+                f"CLI 与 Streamlit 需要 {DEFAULT_CONFIG_PATH.as_posix()} 里的 llm 段"
+                f"（可复制 {DEFAULT_CONFIG_PATH.name}.example 后修改）"
+            )
+        return self.llm
 
     @model_validator(mode="after")
     def _require_embedding_for_medium_term(self) -> AppConfig:
@@ -398,6 +491,17 @@ class AppConfig(_StrictModel):
         return self
 
 
+class RunConfig(AppConfig):
+    """**运行期**配置：``llm`` 必定存在（提交边界已经解析出这次要用哪条连接）。
+
+    Graph 与安全策略读的都是运行期配置——它们里面到处是 ``config.llm.context_window_tokens``
+    之类的访问，每次都要写"如果 llm 存在"的守卫会让真正的业务逻辑被噪声淹没。所以由
+    :meth:`AppConfig.as_run_config` 在这一个地方收窄，之后整条链路按"llm 一定有"来读。
+    """
+
+    llm: LlmConfig
+
+
 def load_dotenv_file(env_path: Path = DEFAULT_ENV_PATH) -> bool:
     """加载 ``.env``；已存在的环境变量优先，不被文件覆盖。
 
@@ -407,20 +511,25 @@ def load_dotenv_file(env_path: Path = DEFAULT_ENV_PATH) -> bool:
     return load_dotenv(dotenv_path=env_path, override=False)
 
 
-def load_config(config_path: Path = DEFAULT_CONFIG_PATH) -> AppConfig:
+def load_config(config_path: Path = DEFAULT_CONFIG_PATH, *, allow_missing: bool = False) -> AppConfig:
     """读取并校验配置文件。
 
     Args:
         config_path: 配置文件路径，默认 ``config.yaml``。
+        allow_missing: 文件不存在时是否返回一份**安全默认配置**（全字段走产品默认值、``llm`` 为空）。
+            Web/API 入口用它进入"初始设置模式"（§15.9）：全新安装没有任何 YAML 也要能打开设置页。
+            CLI 与 Streamlit 保持 ``False``——它们必须显式配置。
 
     Returns:
         校验通过的完整配置。
 
     Raises:
-        ConfigError: 文件缺失、YAML 语法错误或字段校验失败。
+        ConfigError: 文件缺失（且未允许缺省）、YAML 语法错误或字段校验失败。
     """
     display_path = config_path.as_posix()
     if not config_path.is_file():
+        if allow_missing:
+            return AppConfig()
         raise ConfigError(
             f"未找到配置文件 {display_path}（可复制 {config_path.name}.example 后按需修改）"
         )

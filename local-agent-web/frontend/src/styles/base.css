@@ -1,0 +1,127 @@
+/** Global reset and base typography. Every value comes from `tokens.css`. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--law-bg-base);
+  color: var(--law-text-primary);
+  font-family: var(--law-font-sans);
+  font-size: var(--law-text-base);
+  line-height: var(--law-leading-base);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+}
+
+input,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+p,
+figure {
+  margin: 0;
+}
+
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+code,
+pre {
+  font-family: var(--law-font-mono);
+}
+
+a {
+  color: var(--law-state-info);
+}
+
+:focus-visible {
+  outline: 2px solid var(--law-state-info);
+  outline-offset: 2px;
+}
+
+/* Scrollbars follow the reference's thin neutral treatment. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--law-scrollbar) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--law-scrollbar);
+  border: 3px solid transparent;
+  border-radius: var(--law-radius-pill);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--law-scrollbar-hover);
+  background-clip: padding-box;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+.visually-hidden {
+  /* `top`/`left` 必须显式归零：只写 `position: absolute` 时元素停在它的**静态位置**上，而在滚动
+     容器里（对话区 `.scroll`、侧栏）那个位置可能落在很靠下的内容中——它会把**文档**撑高，
+     页面多出一大片可滚动的空白（复审实证，2026-09-28：工具行那个"失败"标签被放到 y=2655，
+     文档高度变成 2656，而视口只有 588）。归零后它固定在包含块左上角，仍然只对读屏软件可见。 */
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}

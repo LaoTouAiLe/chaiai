@@ -27,6 +27,26 @@ class MemoryStoreError(LocalAgentError):
     """记忆操作被拒绝：作用域无法确定、记忆层未启用、可选依赖缺失等。"""
 
 
+class ModelSettingsError(LocalAgentError):
+    """模型连接设置被拒绝：连接不存在、版本冲突、字段非法、设置库不可用等。"""
+
+
+class ConnectionValidationError(ModelSettingsError):
+    """一条待保存的连接不合法；消息是给用户看的可执行说明。"""
+
+
+class ConnectionVersionConflict(ModelSettingsError):
+    """写入携带的版本号与当前版本不一致（两个页面同时编辑同一条连接）。"""
+
+
+class SelectionConflict(ModelSettingsError):
+    """写入选择时，库里的**当前选择**已不是调用方看到的那一个（两个页面互相覆盖，§6.1）。"""
+
+
+class CredentialStoreError(ModelSettingsError):
+    """系统凭据存储不可用或读写失败（调用方应降级为进程内临时模式并告知用户）。"""
+
+
 class MemoryDisabledError(MemoryStoreError):
     """配置里该层记忆为关闭状态，调用方应改走透传分支而不是打开存储。"""
 

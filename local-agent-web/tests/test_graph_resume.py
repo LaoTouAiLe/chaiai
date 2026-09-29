@@ -50,13 +50,26 @@ ModelFactory = Callable[..., object]
 
 
 class EchoHistoryModel(GenericFakeChatModel):
-    """把收到的人类消息条数写进回答，用来证明历史确实进入了模型输入。"""
+    """把收到的人类消息条数写进回答，用来证明历史确实进入了模型输入。
+
+    T35 起出站请求里多了一条**运行上下文快照**数据块（它也是 HumanMessage，只存在于出站请求、
+    不进 State）。它不是用户轮次，计数时必须排除，否则"模型看到几条用户消息"这条断言全部偏 1。
+    """
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[no-untyped-def]
-        human_count = sum(1 for message in messages if isinstance(message, HumanMessage))
+        human_count = sum(
+            1
+            for message in messages
+            if isinstance(message, HumanMessage) and not _is_context_snapshot(message)
+        )
         return ChatResult(
             generations=[ChatGeneration(message=AIMessage(content=f"human={human_count}"))]
         )
+
+
+def _is_context_snapshot(message: AnyMessage) -> bool:
+    """是否为注入的运行上下文快照块（§15.7）：按它的来源标记抬头识别（不是用户轮次）。"""
+    return message.text.startswith("[运行时上下文快照")
 
 
 def _model() -> EchoHistoryModel:
@@ -2001,12 +2014,14 @@ def test_long_tool_loop_window_omits_older_tool_steps(
 def test_chat_turn_records_context_budget(tmp_path: Path, model_factory: ModelFactory) -> None:
     """闲聊分支确实经过 compression_node：预算与用量写入 State，未达阈值时不压缩。"""
     graph = _graph(_database(tmp_path))
-    context = _context_for(tmp_path, model_factory(), _compression_config())
+    # 窗口按"稳定系统前缀的实际体量"给足：前缀加长后（方案 1）4K 窗口里单轮闲聊就会超过触发比，
+    # 那验证的就不是"未达阈值不压缩"了。这里只要窗口明显大于前缀，用例的原意就成立。
+    context = _context_for(tmp_path, model_factory(), _compression_config(context_window_tokens=8192))
 
     result = _run(graph, context, "你好")
 
     budget = result["context_budget"]
-    assert budget.prompt_budget_tokens == 4096 - 1024
+    assert budget.prompt_budget_tokens == 8192 - 1024
     assert budget.total_messages == 1
     assert budget.window_messages == 1
     assert budget.triggered is False

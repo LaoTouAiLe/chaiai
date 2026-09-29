@@ -1,250 +1,199 @@
-"""Streamlit 网页入口（开发文档 T03、T11）。
+"""Streamlit 调试入口（v0.4 T33）。
 
-范围：``.env`` + 配置 → 模型 → 会话索引与 Checkpoint → 闲聊分支与工具分支。
+范围：只经**应用服务**（T28）读 DTO / 事件并渲染。本入口不再直接解释 Graph 的 State、
+不导入 LangChain 消息类，也不自己拼 ``Command``——那是旧入口（T11 之前）的做法。
 
-- 会话事实来源是数据库，不是浏览器：``sessions`` 表决定当前会话及其 ``thread_id``，
-  LangGraph Checkpoint 按该 ``thread_id`` 恢复历史（架构 §1.4、§10.1、§10.6）；
-  ``st.session_state`` 只保存页面临时状态。
-- 调用方每次只提交本轮 ``user_input``；历史消息由 State 维护（T03 起）。
-- 工具调用由模型提出、安全门放行、执行后进入反思（T05）；写/改/删与 Shell 在 T06/T07。
-- 待审批的会话只能经 ``Command(resume=...)`` 恢复，不能用普通用户输入覆盖挂起状态。
+- 装配与 HTTP 入口共用 :func:`local_agent.api.container.open_runtime`：同一份配置、同一个聊天库、
+  同一个模型连接设置库（T29A 的共同设置服务），因此两个 UI 对同一事实不会各算一套。
+- **单实例锁**（架构 §15.1）：v0.4 固定单进程单 worker；HTTP 服务正在运行时本入口会明确报错，
+  而不是两个进程同时写同一个 SQLite 库。
+- 会话的事实来源是数据库：页面只保存"当前打开哪个会话"这一项页面临时状态，其余全部来自
+  ``service.get_session_snapshot``。刷新/重启按快照恢复，挂起的审批本来就在 Checkpoint 里，
+  不需要额外机制。
+- 提交与审批决定都带 ``client_request_id``：失败后重试复用同一个键（幂等），成功即换新键；
+  同样的内容再次发送因此是**新的一轮**，不是重放。
 
-交互约定（架构 §1.4）：一次用户提交只处理一次；页面普通重绘只读取状态，
-不重复调用模型或工具。
+页面只做展示与转发：安全判定、审批、幂等、每会话单飞都在服务里。
 """
 
 from __future__ import annotations
 
-import contextlib
-import os
 import sqlite3
-from collections.abc import Collection, Iterator, Mapping, Sequence
+import threading
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 from uuid import uuid4
 
 import streamlit as st
-from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
-from langgraph.types import Command
 
 from local_agent import config as config_module
+from local_agent.api.container import ApiRuntime, open_runtime, resolve_under
+from local_agent.application.errors import ApplicationError
+from local_agent.application.models import SessionSnapshot, SessionSummaryView
 from local_agent.config import AppConfig, ConfigError
 from local_agent.exceptions import MemoryStoreError, SessionStoreError
-from local_agent.graph import builder, nodes
-from local_agent.graph.projection import project_messages
-from local_agent.graph.state import AgentState
 from local_agent.llm import embedding as embedding_module
-from local_agent.llm import factory
-from local_agent.llm.models import ModelCapabilities, probe_capabilities
 from local_agent.memory import long_term, medium_term
 from local_agent.memory.forgetting import is_recallable_fact
-from local_agent.persistence import checkpoint as checkpoint_module
-from local_agent.persistence.session_store import Session, SessionStore
 from local_agent.scope import project_id_for, visible_scope_keys
 from local_agent.ui import approval_ui
 from local_agent.ui.renderer import (
-    ChatMessage,
     SessionAction,
     SessionOption,
     config_error_text,
-    render_error_events,
-    render_history,
+    render_conversation,
     render_memory_status,
-    render_message,
     render_model_status,
     render_session_sidebar,
-    render_workspace_picker,
+    render_status,
 )
-from local_agent.ui.streaming import use_sink
+from local_agent.workspaces import validate_workspace
 
 DEFAULT_CONFIG_PATH = config_module.DEFAULT_CONFIG_PATH
 DEFAULT_ENV_PATH = config_module.DEFAULT_ENV_PATH
-DEFAULT_THREAD_ID = checkpoint_module.DEFAULT_THREAD_ID
-SESSION_HISTORY_KEY = "history"
+
+#: 页面临时状态：当前打开哪个会话（应用服务按会话定位，没有全局"激活项"这回事）。
+OPEN_SESSION_KEY = "open_session_id"
+#: 幂等键台账：`scope → client_request_id`（成功即删除，见 :func:`_forget_request`）。
+_REQUEST_IDS_KEY = "request_ids"
 
 
 @dataclass(frozen=True)
-class ChatApp:
-    """页面上复用的配置、模型、图与会话索引；每次提交时新建 RuntimeContext。"""
+class DebugApp:
+    """页面复用的运行时：应用服务 + 已加载配置 + 配置相对路径解析出的工作区根。"""
 
+    runtime: ApiRuntime
     app_config: AppConfig
-    model: BaseChatModel
-    graph: builder.ChatGraph
-    model_name: str
     workspace_root: Path
-    secret_values: tuple[str, ...]  # 仅用于错误消息脱敏，不参与任何展示
-    checkpointer_enabled: bool
-    capabilities: ModelCapabilities
-    #: 会话索引；未启用短期记忆时为 ``None``（此时不保存会话）。
-    sessions: SessionStore | None = None
 
 
 @st.cache_resource(show_spinner=False)
-def load_chat_app(
+def load_debug_app(
     config_path: str,
     env_path: str,
     config_mtime: float,
     env_mtime: float,
-) -> ChatApp:
-    """加载 ``.env`` 与配置、构造模型、Checkpoint 和图。
+) -> DebugApp:
+    """加载 ``.env`` 与配置，并按**与 HTTP 入口相同的装配**打开运行时。
 
-    两个路径必须传**绝对路径**，且修改时间参与缓存键：这样不同工作目录不会互相命中，
-    改动配置或 ``.env`` 后会自动重建，而不是继续用旧客户端。
-
-    注意：Streamlit 会忽略下划线开头的参数，因此缓存键参数不能用 ``_`` 前缀，
-    否则每次重绘都会误命中同一个已构建的客户端。``config_mtime`` 与 ``env_mtime``
-    只参与缓存键，不在函数体内使用。
+    两个路径必须传**绝对路径**，且修改时间参与缓存键：不同工作目录不会互相命中，改动配置或
+    ``.env`` 后自动重建（Streamlit 会忽略下划线开头的参数，所以缓存键参数不能加 ``_`` 前缀，
+    ``config_mtime`` / ``env_mtime`` 只参与缓存键，不在函数体内使用）。
 
     Raises:
-        ConfigError: 配置缺失、校验失败或环境变量中没有 API Key。
+        ConfigError: 配置缺失、校验失败，或未启用短期记忆（会话与幂等台账都在那个库里）。
+        RuntimeError: 已有另一个服务进程占着同一个库。
     """
     config_module.load_dotenv_file(Path(env_path))
     app_config = config_module.load_config(Path(config_path))
-    api_key = config_module.resolve_api_key(app_config.llm)
-    model = factory.build_chat_model(app_config.llm, api_key)
-    workspace_root = Path(app_config.workspace.root).resolve()
-
-    checkpointer: Any = None
-    sessions: SessionStore | None = None
-    if app_config.memory.short_term.enabled:
-        # Checkpoint 与会话索引放在同一个库里、共用连接（架构 §10.6）
-        database = checkpoint_module.open_database(
-            Path(app_config.memory.short_term.path), workspace_root=workspace_root
-        )
-        checkpointer = database.checkpointer
-        sessions = database.sessions
-
-    return ChatApp(
+    base_dir = Path(config_path).resolve().parent
+    runtime = open_runtime(app_config, base_dir=base_dir)
+    return DebugApp(
+        runtime=runtime,
         app_config=app_config,
-        model=model,
-        graph=builder.build_chat_graph(checkpointer),
-        model_name=app_config.llm.model,
-        workspace_root=workspace_root,
-        secret_values=(api_key,),
-        checkpointer_enabled=checkpointer is not None,
-        # 架构 §11.7：启动时探测模型能力
-        capabilities=probe_capabilities(model, provider_name=app_config.llm.model),
-        sessions=sessions,
+        # 与 `open_runtime` 同一套相对路径规则（相对配置文件目录，而不是进程当前目录）。
+        workspace_root=resolve_under(base_dir, app_config.workspace.root),
     )
 
 
-class _PageSink:
-    """把增量回答写进页面的临时占位符（T23）。
-
-    只负责**显示**：最终回答仍由节点在结束时作为**一条** AI 消息写进 State（不逐块写 Checkpoint）。
-    占位符只在本轮调用期间存在，函数退出即清空——之后由 ``render_history`` 按 State 渲染那条回答，
-    因此不会重复显示；页面重绘/刷新也不会再调用模型（模型调用只发生在用户提交或审批恢复那一次）。
-    """
-
-    def __init__(self, placeholder: Any) -> None:
-        self._placeholder = placeholder
-        self._text = ""
-
-    def push(self, text: str) -> None:
-        self._text += text
-        self._placeholder.markdown(self._text)
-
-    def discard(self) -> None:
-        """丢弃不完整投影：清空占位符，改由退化的普通调用结果统一展示。"""
-        self._text = ""
-        self._placeholder.empty()
+def _file_mtime(path: Path) -> float:
+    return path.stat().st_mtime if path.is_file() else 0.0
 
 
-@contextlib.contextmanager
-def answer_sink(app: ChatApp) -> Iterator[None]:
-    """本轮是否给"最终回答"装增量接收方（``llm.streaming`` 且模型支持时才装）。"""
-    if not (app.app_config.llm.streaming and app.capabilities.streaming):
-        yield
-        return
-    placeholder = st.empty()
+def _load_app() -> tuple[DebugApp | None, str | None]:
+    """返回（可用页面运行时, 失败说明），两者必有其一。"""
+    config_path = DEFAULT_CONFIG_PATH.resolve()
+    env_path = DEFAULT_ENV_PATH.resolve()
     try:
-        with use_sink(_PageSink(placeholder)):
-            yield
-    finally:
-        # 占位符只做"直播"：结束后统一由历史渲染展示 State 里那条回答（避免重复显示）
-        placeholder.empty()
+        app = load_debug_app(
+            config_path.as_posix(),
+            env_path.as_posix(),
+            _file_mtime(config_path),
+            _file_mtime(env_path),
+        )
+    except (ConfigError, RuntimeError) as exc:
+        return None, str(exc)
+    return app, None
 
 
-def run_chat_turn(
-    app: ChatApp,
-    *,
-    thread_id: str,
-    user_text: str,
-    session_id: str | None = None,
-    prior_messages: list[AnyMessage] | None = None,
-) -> dict[str, Any]:
-    """调用一次图，返回本轮结束后的状态值。
+# --------------------------------------------------------------------------- 展示辅助
 
-    Args:
-        app: 已构建好的图与模型。
-        thread_id: Checkpoint 恢复键；开启 Checkpoint 时用于恢复历史。
-        user_text: 用户本次输入。
-        session_id: 面向用户的会话标识；缺省与 ``thread_id`` 相同（架构 §10.6）。
-        prior_messages: 未开启 Checkpoint 时由页面补上的历史消息。
 
-    Returns:
-        状态值字典（``messages``、``tool_results``、``final_response`` 等）。
+def _display_time(value: datetime) -> str:
+    """把服务给的 UTC 时间转成本机时区的短格式。"""
+    return value.astimezone().strftime("%m-%d %H:%M")
 
-    本轮工作区由 :func:`turn_workspace` 决定（会话绑定；关闭短期记忆时用页面临时选择），
-    调用方**不能**覆盖——否则 A 的 Checkpoint 可能跑在 B 的工作区上，污染 AGENTS、记忆作用域
-    与文件上下文（架构 §10.6）。
+
+def session_options(
+    sessions: Sequence[SessionSummaryView], *, open_session_id: str | None
+) -> list[SessionOption]:
+    """会话列表 → 侧栏展示数据（``is_active`` 表示页面**当前打开**的那条）。"""
+    return [
+        SessionOption(
+            session_id=session.session_id,
+            thread_id=session.thread_id,
+            title=session.title,
+            detail=f"最后活动 {_display_time(session.updated_at)}",
+            is_active=session.session_id == open_session_id,
+        )
+        for session in sessions
+    ]
+
+
+def memory_status_lines(app_config: AppConfig) -> tuple[list[str], bool]:
+    """侧栏要展示的记忆状态：（状态行, 是否有需要用户处理的问题）。
+
+    三层各自成行：短期（Checkpoint）、中期（Chroma + embedding）、长期（SQLite）。
+    Embedding **只做静态探测**（不加载模型、不联网），所以这一块不会让页面卡住。
     """
-    turn_root = turn_workspace(app, session_id=session_id, thread_id=thread_id)
-    context = builder.build_runtime_context(
-        app_config=app.app_config,
-        model_adapter=app.model,
-        workspace_root=turn_root,
-        current_cwd=turn_root,
-        model_capabilities=app.capabilities,
-        request_id=uuid4().hex,
+    memory = app_config.memory
+    lines = [
+        "短期：" + ("Checkpoint 已启用" if memory.short_term.enabled else "已关闭（重启即清空）")
+    ]
+    warn = False
+    if not memory.medium_term.enabled:
+        lines.append("中期：已关闭（不访问向量库、不加载模型）")
+    else:
+        embedding_config = app_config.embedding
+        # 只有远端 provider 才读 Key：本地模型不需要，读它反而会因为"Key 为空"报错。
+        # 这里**必须用非抛出式读取**：缺 Key 时抛 `ConfigError` 会让整个侧栏报错，
+        # 而不是展示一条可处理的警告。
+        api_key = (
+            config_module.optional_api_key(embedding_config)
+            if embedding_config.provider == "openai_compatible"
+            else None
+        )
+        state = embedding_module.readiness(embedding_config, api_key=api_key)
+        lines.append(f"中期：已启用（Embedding {state.provider}/{state.model}）")
+        lines.append(f"缓存目录：{state.cache_dir or '（远端接口，无本地缓存）'}")
+        lines.append(f"状态：{state.detail}")
+        if state.state in {"disabled", "unavailable", "not_ready"}:
+            warn = True
+        if not medium_term.chromadb_available():
+            lines.append("chromadb 未安装：执行 `uv sync --extra memory` 后再启用中期记忆")
+            warn = True
+    lines.append(
+        "长期："
+        + (f"已启用（{memory.long_term.path}）" if memory.long_term.enabled else "已关闭")
     )
-    payload: AgentState = {
-        "user_input": user_text,
-        "thread_id": thread_id,
-        "session_id": session_id or thread_id,
-    }
-    if not app.checkpointer_enabled:
-        # 没有 Checkpoint 时状态不跨轮保留，由页面把本会话已知消息一并提交。
-        payload["messages"] = list(prior_messages or [])
-
-    result = app.graph.invoke(
-        payload,
-        config={"configurable": {"thread_id": thread_id}},
-        context=context,
-    )
-    return dict(result)
+    lines.append("压缩：" + ("已启用" if memory.compression.enabled else "已关闭"))
+    return lines, warn
 
 
-def thread_state(app: ChatApp, thread_id: str) -> dict[str, Any]:
-    """读取当前会话的状态值：开启 Checkpoint 时以图为事实来源，否则退回页面临时历史。"""
-    if app.checkpointer_enabled:
-        return builder.read_thread_state(app.graph, thread_id)
-    return {"messages": _session_history(), "tool_results": []}
-
-
-def projected_history(state: Mapping[str, Any]) -> list[AnyMessage]:
-    """页面展示用的会话消息：对回答应用**按轮次投影**（:mod:`local_agent.graph.projection`）。
-
-    为什么不能只改 ``final_response``：那只覆盖"最后一条回答"，历史里上一条仍是原始措辞；也不能
-    为了好看去改 Checkpoint 里的 ``messages``（架构 §10.1：原始记录用于审计与恢复）。所以展示走投影：
-    原文留存、读时替换，页面不会再同时看到"我记住了"和"没有保存成功"两条互相矛盾的回答。
-    """
-    return project_messages(
-        list(state.get("messages") or []), state.get("reply_overrides") or {}
-    )
-
-
-def memory_management_lines(app: ChatApp) -> tuple[list[str], bool]:
+def memory_management_lines(
+    app_config: AppConfig, workspace_root: Path
+) -> tuple[list[str], bool]:
     """侧栏"记忆管理"区块：（展示行, 是否有需要处理的问题）。
 
     只读且**只打开长期库**（SQLite，微秒级）：中期库要加载 embedding 模型，在页面上做这件事会让
-    每次交互都变慢，因此中期内容统一走命令行查看。人工删除与遗忘任务也在命令行，页面只负责"看得见"
-    （复审要求的最小入口：库 API 之上有 CLI + 页面展示，不额外造第二套写路径）。
+    每次交互都变慢，因此中期内容统一走命令行查看。人工删除与遗忘任务也在命令行，页面只负责
+    "看得见"。作用域用**配置解析出的工作区根**（页面拿不到会话的真实路径——`WorkspaceRef`
+    刻意不含绝对路径，§15.8）。
     """
-    memory = app.app_config.memory
+    memory = app_config.memory
     if not memory.long_term.enabled:
         return (["长期：已关闭（没有可管理的长期记忆）"], False)
     path = Path(memory.long_term.path)
@@ -253,23 +202,19 @@ def memory_management_lines(app: ChatApp) -> tuple[list[str], bool]:
     except (MemoryStoreError, sqlite3.Error, OSError) as exc:
         return ([f"长期库打不开：{type(exc).__name__}: {exc}"], True)
     try:
-        workspace = Path(app.workspace_root)
+        workspace = Path(workspace_root)
         project = project_id_for(workspace)
-        moment = datetime.now(timezone.utc)
+        moment = datetime.now().astimezone()
         facts = [
             (entity, fact)
             for entity, fact in store.active_facts_with_entities(
-                visible_scope_keys(
-                    user_id=None, project_id=project, workspace_root=workspace
-                ),
+                visible_scope_keys(user_id=None, project_id=project, workspace_root=workspace),
                 now=moment,
             )
-            # 与召回同一口径的可见性过滤：过期与超龄的事实不该算进"可管理的条数"（复审实证）
+            # 与召回同一口径的可见性过滤：过期与超龄的事实不该算进"可管理的条数"。
             if is_recallable_fact(fact, config=memory.long_term, now=moment)
         ]
-        conclusions = (
-            store.list_task_conclusions(project_scope=project) if project else []
-        )
+        conclusions = store.list_task_conclusions(project_scope=project) if project else []
     except (MemoryStoreError, sqlite3.Error, OSError) as exc:
         return ([f"长期库读取失败：{type(exc).__name__}: {exc}"], True)
     finally:
@@ -285,543 +230,297 @@ def memory_management_lines(app: ChatApp) -> tuple[list[str], bool]:
     return (lines, False)
 
 
-def pending_error_lines(
-    state: Mapping[str, Any], *, shown: Collection[str], secrets: Sequence[str] = ()
-) -> tuple[list[str], list[str]]:
-    """本轮**尚未展示过**的错误/降级事件：（展示行, 事件 id）。
-
-    ``error_events`` 跨轮累积在 State 里，所以按 ``event_id`` 去重（调用方把已展示的 id 记在页面
-    会话里）；文本一律先脱敏，避免把 Key 之类的片段渲染到页面上。
-    """
-    lines: list[str] = []
-    fresh: list[str] = []
-    for event in state.get("error_events") or []:
-        event_id = str(event.get("event_id") or "")
-        if not event_id or event_id in shown:
-            continue
-        stage = str(event.get("stage") or "?")
-        message = config_module.redact_secrets(str(event.get("message") or ""), secrets)
-        lines.append(f"[{stage}] {message}")
-        fresh.append(event_id)
-    return lines, fresh
+# --------------------------------------------------------------------------- 幂等键
 
 
-#: 页面会话里"已经显示过"的错误事件 id：不按 id 去重的话，每次重绘都会重复渲染，让用户以为又出错了。
-#: 页面重启后历史事件会再显示一次——它们已脱敏、内容也只是降级说明，这个代价可以接受。
-_SHOWN_ERROR_IDS_KEY = "shown_error_event_ids"
+def _request_id(scope: str) -> str:
+    """同一操作（同一内容）的重试复用同一个键（§6.1）。"""
+    ids: dict[str, str] = st.session_state.setdefault(_REQUEST_IDS_KEY, {})
+    if scope not in ids:
+        ids[scope] = uuid4().hex
+    return ids[scope]
 
 
-def _shown_error_ids() -> set[str]:
-    return st.session_state.setdefault(_SHOWN_ERROR_IDS_KEY, set())
+def _forget_request(scope: str) -> None:
+    """操作成功后清掉这条键：同样的内容下次发送是**新的一轮**，不是重放。"""
+    st.session_state.setdefault(_REQUEST_IDS_KEY, {}).pop(scope, None)
 
 
-def render_pending_errors(app: ChatApp, state: Mapping[str, Any]) -> None:
-    """显示本轮新增的错误/降级事件（脱敏 + 按 id 去重），并记住已显示过的。"""
-    lines, fresh = pending_error_lines(
-        state, shown=_shown_error_ids(), secrets=app.secret_values
-    )
-    if not lines:
+# --------------------------------------------------------------------------- 交互
+
+
+def _report_error(exc: BaseException) -> None:
+    """页面边界统一渲染失败：应用错误用它的可执行文案，其它异常如实给出类型。"""
+    if isinstance(exc, ApplicationError):
+        view = exc.view
+        st.error(f"{view.title}\n\n{view.message}\n\n{view.hint}")
+        st.caption(f"错误码 {view.code}；诊断编号 {view.diagnostic_id}")
         return
-    render_error_events(lines=lines)
-    _shown_error_ids().update(fresh)
+    st.error(f"操作失败：{type(exc).__name__}: {exc}")
 
 
-def thread_interrupt(app: ChatApp, thread_id: str) -> dict[str, Any] | None:
-    """读取挂起中的人工审批请求（架构 §5.3）；没有则返回 ``None``。"""
-    if not app.checkpointer_enabled:
-        return None
-    snapshot = app.graph.get_state({"configurable": {"thread_id": thread_id}})
-    for task in snapshot.tasks:
-        for item in task.interrupts:
-            value = item.value
-            if isinstance(value, Mapping):
-                return dict(value)
-    return None
-
-
-def resume_turn(
-    app: ChatApp,
+def run_with_stream(
+    service: Any,
+    session_id: str,
+    call: Callable[[], Any],
     *,
-    thread_id: str,
-    resume_value: Mapping[str, Any],
-    session_id: str | None = None,
-) -> dict[str, Any]:
-    """按人工决策恢复图（``Command(resume=...)``）。
+    placeholder: Any,
+) -> Any:
+    """跑一次命令用例，同时把 ``message_delta`` 逐字渲染到 ``placeholder``。
 
-    只在存在挂起审批、且用户明确点击按钮时调用：按钮双击不会重复执行，
-    因为恢复之后图不再处于挂起状态。
+    为什么要在工作线程里跑：Streamlit 的 ``st.*`` 只能在脚本线程调用，而增量要在命令执行**期间**
+    就画出来。于是分成两个线程——脚本线程只负责渲染，工作线程只负责调服务；两者之间只通过
+    事件订阅的进程内队列传递数据（不共享 Streamlit 状态）。
 
-    恢复同样以**当前会话的工作区**构造 RuntimeContext，且同样不允许调用方覆盖：在工作区 A
-    挂起的审批，切到 B 再回 A 时，判定、指纹与执行仍以 A 为根目录（架构 §1.5、§10.6）。
+    订阅的是**与 React 相同的那批事件**（§15.4），因此两个 UI 的实时输出来自同一投影。
     """
-    turn_root = turn_workspace(app, session_id=session_id, thread_id=thread_id)
-    context = builder.build_runtime_context(
-        app_config=app.app_config,
-        model_adapter=app.model,
-        workspace_root=turn_root,
-        current_cwd=turn_root,
-        model_capabilities=app.capabilities,
-        request_id=uuid4().hex,
-    )
-    result = app.graph.invoke(
-        Command(resume=dict(resume_value)),
-        config={"configurable": {"thread_id": thread_id}},
-        context=context,
-    )
-    return dict(result)
+    subscription = service.subscribe_events(session_id)
+    outcome: list[Any] = []
+    live_text = ""
 
-
-def current_session(app: ChatApp | None) -> Session | None:
-    """取当前会话；未启用短期记忆或配置不可用时返回 ``None``。
-
-    首次运行时在这里创建会话：如果库里已经有 v0.1a 固定 ``thread_id`` 的 Checkpoint，
-    第一个会话就沿用它，旧历史不会因为升级而失联。
-    """
-    if app is None or app.sessions is None:
-        return None
-    return app.sessions.ensure_active(legacy_thread_id=DEFAULT_THREAD_ID)
-
-
-def thread_checkpoint_id(app: ChatApp, thread_id: str) -> str | None:
-    """读取该会话当前的 Checkpoint 编号；没有 Checkpoint 时返回 ``None``。"""
-    if not app.checkpointer_enabled:
-        return None
-    snapshot = app.graph.get_state({"configurable": {"thread_id": thread_id}})
-    config = snapshot.config or {}
-    value = config.get("configurable", {}).get("checkpoint_id")
-    return str(value) if value else None
-
-
-#: 关闭短期记忆时的页面临时工作区（``st.session_state`` 的键，架构 §10.6）。
-PAGE_WORKSPACE_KEY = "workspace"
-
-
-def verify_workspace(path: Path) -> Path:
-    """校验工作区目录**仍然**存在、是目录且可访问（架构 §1.5、§10.6）。
-
-    每一轮运行前都要过这里：页面只检查 ``is_dir()`` 挡不住直接调用 ``run_chat_turn`` /
-    ``resume_turn`` 的路径。POSIX 上目录还需要 ``X_OK``——没有执行位就进不去、也遍历不了。
-
-    Raises:
-        SessionStoreError: 目录不存在、不是目录或当前进程不可访问。
-    """
-    try:
-        resolved = Path(path).resolve(strict=True)
-    except OSError as exc:
-        raise SessionStoreError(f"当前工作区不存在或无法访问：{Path(path).as_posix()}") from exc
-    if not resolved.is_dir():
-        raise SessionStoreError(f"当前工作区不是目录：{resolved.as_posix()}")
-    required = os.R_OK | (os.X_OK if os.name != "nt" else 0)
-    if not os.access(resolved, required):
-        raise SessionStoreError(f"当前工作区不可访问（需要读取与进入权限）：{resolved.as_posix()}")
-    return resolved
-
-
-def _page_workspace_value() -> str | None:
-    """读取页面临时工作区；没有脚本上下文（直接函数调用/测试）时返回 ``None``。"""
-    try:
-        value = st.session_state.get(PAGE_WORKSPACE_KEY)
-    except Exception:  # noqa: BLE001 — 无 ScriptRunContext 时按"未选择"处理
-        return None
-    return value if isinstance(value, str) and value else None
-
-
-def temporary_workspace(default: Path) -> Path:
-    """关闭短期记忆时的页面临时工作区：只在本页面生命周期内有效（架构 §10.6）。
-
-    页面上选过的目录失效就回到配置默认值；**默认值同样要过校验**——配置目录被删或失去权限时
-    也不能带着失效工作区进 Graph（架构 §1.5 的"每轮校验工作区"）。两处都不可用时抛错，
-    由调用方（页面）提示用户换工作区。
-
-    Raises:
-        SessionStoreError: 页面临时选择与配置默认值都不可用。
-    """
-    value = _page_workspace_value()
-    if value:
+    def worker() -> None:
         try:
-            return verify_workspace(Path(value))
-        except SessionStoreError:
-            pass  # 选过的目录已失效 → 回退到默认值，下面一起校验
-    return verify_workspace(default)
+            outcome.append(call())
+        except BaseException as exc:  # noqa: BLE001 — 交给脚本线程重新抛出，页面边界统一处理
+            outcome.append(exc)
 
-
-def turn_workspace(app: ChatApp, *, session_id: str | None, thread_id: str) -> Path:
-    """本轮使用的工作区（架构 §10.6）。
-
-    - 启用会话索引：由会话绑定决定，**不接受调用方覆盖**；并且必须校验 ``session_id`` 存在、
-      且 ``record.thread_id == thread_id``。否则可以拿 A 会话的 Checkpoint 在 B 的工作区里跑，
-      污染 AGENTS、记忆作用域与文件上下文。
-    - 关闭短期记忆：用页面临时工作区（没有选过时是配置的启动默认值）。
-
-    Raises:
-        SessionStoreError: 会话不存在、会话与线程不匹配，或工作区目录不可用。
-    """
-    store = app.sessions
-    if store is None:
-        return temporary_workspace(app.workspace_root)
-    if not session_id:
-        raise SessionStoreError("启用会话索引时必须提供 session_id（工作区由会话绑定）")
-    record = store.get(session_id)
-    if record is None:
-        raise SessionStoreError(f"会话不存在：{session_id}")
-    if record.thread_id != thread_id:
-        raise SessionStoreError(
-            f"会话与线程不匹配：会话 {session_id} 绑定 {record.thread_id}，"
-            f"本次运行的是 {thread_id}；切换工作区必须切换或新建会话（架构 §10.6）"
-        )
-    return verify_workspace(Path(record.workspace_root))
-
-
-def workspace_options(store: SessionStore) -> list[str]:
-    """已使用的工作区（去重、最近使用在前；架构 §10.6 的两级展示）。"""
-    return store.list_workspaces()
-
-
-def validate_workspace(raw_path: str) -> Path:
-    """校验用户输入的工作区目录：必须是**原始输入即绝对路径**、存在、是目录、可访问。
-
-    判定绝对路径在展开 ``~`` 之前做，因此 ``~`` 与相对路径都会被拒（与文案一致）；
-    非法输入只提示，**不切换会话**——不能把当前会话弄丢（架构 §1.5）。
-
-    Raises:
-        SessionStoreError: 路径为空、非绝对路径，或 :func:`verify_workspace` 的任一条件不满足。
-    """
-    text = raw_path.strip().strip('"').strip("'")
-    if not text:
-        raise SessionStoreError("请填写工作区绝对路径，例如 E:/projects/demo")
-    if not Path(text).is_absolute():
-        raise SessionStoreError(f"工作区必须是绝对路径：{text}")
-    return verify_workspace(Path(text))
-
-
-def apply_temporary_workspace(app: ChatApp, action: SessionAction) -> None:
-    """关闭短期记忆时切换页面临时工作区：只写 ``session_state``，不落库（架构 §10.6）。"""
+    thread = threading.Thread(target=worker, daemon=True, name="streamlit-service-call")
+    thread.start()
     try:
-        resolved = validate_workspace(action.workspace_path or "")
-    except SessionStoreError as exc:
-        st.error(f"工作区不可用：{exc}")
+        while True:
+            live_text = _paint_deltas(subscription, placeholder, live_text)
+            if not thread.is_alive():
+                break
+            thread.join(timeout=0.05)
+        # 线程结束后队列里可能还剩最后几条增量，画完再收尾。
+        _paint_deltas(subscription, placeholder, live_text)
+    finally:
+        service.unsubscribe_events(subscription)
+        # 占位符只做"直播"：结束后统一按快照渲染，不会重复显示。
+        placeholder.empty()
+    result = outcome[0] if outcome else None
+    if isinstance(result, BaseException):
+        raise result
+    return result
+
+
+def _paint_deltas(subscription: Any, placeholder: Any, live_text: str) -> str:
+    """把队列里的增量事件拼进占位符，返回新的累计文本（其余事件由快照接管）。"""
+    appended = False
+    for event in subscription.poll():
+        if event.event_type == "message_delta":
+            live_text += str(event.payload.text_delta)
+            appended = True
+    if appended:
+        placeholder.markdown(live_text)
+    return live_text
+
+
+def _run_command(
+    service: Any, session_id: str, call: Callable[[], Any], *, placeholder: Any
+) -> bool:
+    """跑一次命令用例并处理结果：成功返回 ``True``，失败已渲染提示并返回 ``False``。"""
+    try:
+        run_with_stream(service, session_id, call, placeholder=placeholder)
+    except ApplicationError as exc:
+        _report_error(exc)
+        return False
+    except Exception as exc:  # noqa: BLE001 — 页面边界：任何调用失败都要变成提示，而不是 500
+        st.error(f"模型调用失败：{type(exc).__name__}: {exc}")
+        return False
+    return True
+
+
+def _submit(service: Any, session_id: str, text: str, *, placeholder: Any) -> None:
+    scope = f"submit:{session_id}:{text}"
+    request_id = _request_id(scope)
+    if not _run_command(
+        service,
+        session_id,
+        lambda: service.submit_message(session_id, text, request_id),
+        placeholder=placeholder,
+    ):
         return
-    st.session_state[PAGE_WORKSPACE_KEY] = resolved.as_posix()
+    _forget_request(scope)
     st.rerun()
 
 
-def session_options(store: SessionStore, active: Session) -> list[SessionOption]:
-    """把会话记录映射成侧栏展示数据（**只看当前工作区**，时间按本机时区显示）。
+def _resolve(service: Any, session_id: str, snapshot: SessionSnapshot, *, placeholder: Any) -> None:
+    approval = snapshot.approval
+    if approval is None:
+        return
+    decision = approval_ui.render_approval(approval)
+    if decision is None:
+        return
+    scope = (
+        f"approval:{session_id}:{approval.approval_id}:{decision.decision}"
+        f":{int(decision.confirm_recursive)}"
+    )
+    request_id = _request_id(scope)
+    ok = _run_command(
+        service,
+        session_id,
+        lambda: service.resolve_approval(
+            session_id,
+            approval.approval_id,
+            decision.decision,
+            request_id,
+            reason=decision.reason,
+            confirm_recursive=decision.confirm_recursive,
+        ),
+        placeholder=placeholder,
+    )
+    if not ok:
+        return
+    _forget_request(scope)
+    st.rerun()
 
-    两级展示的下半层：工作区选择器决定当前工作区，这里只列它的会话，避免把多个项目的同名会话
-    平铺混在一起（架构 §10.6）。全库查询能力仍保留在 :meth:`SessionStore.list_sessions`。
-    """
-    return [
-        SessionOption(
-            session_id=record.session_id,
-            thread_id=record.thread_id,
-            title=record.title,
-            detail=f"最后活动 {_display_time(record.updated_at)}",
-            is_active=record.session_id == active.session_id,
-        )
-        for record in store.list_sessions(workspace_root=Path(active.workspace_root))
-    ]
 
-
-def apply_session_action(store: SessionStore, action: SessionAction) -> None:
-    """把侧栏选择落到会话索引；成功后重跑脚本，让页面显示新会话。
-
-    会话索引写入失败（例如名字为空）或工作区目录非法时只提示，不改动当前会话。
-    切换工作区复用该工作区最近的会话，没有才新建（架构 §10.6）。
-    """
+def _apply_session_action(service: Any, action: SessionAction) -> None:
+    """把侧栏选择落到应用服务；成功后重跑脚本，让页面显示新会话。"""
     try:
         if action.kind == "create":
-            current = store.active()
-            store.create(
-                workspace_root=Path(current.workspace_root) if current is not None else None
-            )
-        elif action.kind == "switch" and action.session_id:
-            store.switch(action.session_id)
-        elif action.kind == "rename" and action.session_id:
-            store.rename(action.session_id, action.title or "")
+            summary = service.create_session()
+        elif action.kind == "open" and action.session_id:
+            st.session_state[OPEN_SESSION_KEY] = action.session_id
+            st.rerun()
+            return
+        elif action.kind == "select_workspace" and action.workspace_id:
+            summary = service.select_workspace_by_id(action.workspace_id)
         elif action.kind == "select_workspace":
-            store.switch_workspace(validate_workspace(action.workspace_path or ""))
-    except SessionStoreError as exc:
-        st.error(f"会话操作失败：{exc}")
+            summary = service.select_workspace(validate_workspace(action.workspace_path or ""))
+        else:  # pragma: no cover - 侧栏只会产出上面几种动作
+            return
+    except (ApplicationError, SessionStoreError) as exc:
+        _report_error(exc)
         return
+    st.session_state[OPEN_SESSION_KEY] = summary.session_id
     st.rerun()
 
 
-def record_session_activity(
-    app: ChatApp, session: Session, *, title_hint: str | None = None
-) -> None:
-    """一轮结束后更新会话索引：最后活动时间、Checkpoint 指针与首次自动命名。"""
-    if app.sessions is None:
-        return
-    app.sessions.touch(
-        session.session_id,
-        last_checkpoint_id=thread_checkpoint_id(app, session.thread_id),
-        title_hint=title_hint,
-    )
-
-
-def memory_status_lines(app: ChatApp) -> tuple[list[str], bool]:
-    """侧栏要展示的记忆状态：（状态行, 是否有需要用户处理的问题）。
-
-    三层各自成行：短期（Checkpoint）、中期（Chroma + embedding）、长期（SQLite）。
-    Embedding **只做静态探测**（不加载模型、不联网），所以这一块不会让页面卡住；真正的
-    下载/加载失败会以错误事件出现在对话里（架构 §1.4 要求准备状态可见、§11.6 要求失败可见）。
-    """
-    memory = app.app_config.memory
-    lines = [
-        "短期：" + ("Checkpoint 已启用" if memory.short_term.enabled else "已关闭（重启即清空）")
-    ]
-    warn = False
-    if not memory.medium_term.enabled:
-        lines.append("中期：已关闭（不访问向量库、不加载模型）")
-    else:
-        embedding_config = app.app_config.embedding
-        # 只有远端 provider 才读 Key：本地模型不需要，读它反而会因为"Key 为空"报错
-        # （与 nodes.medium_term_store 的口径一致）。
-        #
-        # 这里**必须用非抛出式读取**：`resolve_api_key()` 缺 Key 时抛 `ConfigError`，会让整个侧栏
-        # 直接报错，而不是展示一条可处理的警告（复审实证：readiness 的 not_ready 分支根本走不到）。
-        api_key = (
-            config_module.optional_api_key(embedding_config)
-            if embedding_config.provider == "openai_compatible"
-            else None
-        )
-        state = embedding_module.readiness(embedding_config, api_key=api_key)
-        lines.append(f"中期：已启用（Embedding {state.provider}/{state.model}）")
-        lines.append(f"缓存目录：{state.cache_dir or '（远端接口，无本地缓存）'}")
-        lines.append(f"状态：{state.detail}")
-        # 中期记忆已启用时，"embedding 被关掉"本身就是配置问题（没有向量就召回不了），
-        # 因此 disabled 也计入警告。
-        if state.state in {"disabled", "unavailable", "not_ready"}:
-            warn = True
-        if not medium_term.chromadb_available():
-            lines.append("chromadb 未安装：执行 `uv sync --extra memory` 后再启用中期记忆")
-            warn = True
-    lines.append(
-        "长期："
-        + (f"已启用（{memory.long_term.path}）" if memory.long_term.enabled else "已关闭")
-    )
-    lines.append("压缩：" + ("已启用" if memory.compression.enabled else "已关闭"))
-    return lines, warn
-
-
-def _display_time(iso_text: str) -> str:
-    """把库里的 UTC ISO 时间转成本机时区的短格式；解析失败时原样返回。"""
-    try:
-        return datetime.fromisoformat(iso_text).astimezone().strftime("%m-%d %H:%M")
-    except ValueError:
-        return iso_text
-
-
-def tool_results_of(state: Mapping[str, Any]) -> list[Any]:
-    """取状态里的工具结果记录；渲染层按出现顺序把它们配对到工具调用上。"""
-    records = state.get("tool_results") or []
-    return [record for record in records if isinstance(record, Mapping)]
-
-
-def _file_mtime(path: Path) -> float:
-    return path.stat().st_mtime if path.is_file() else 0.0
-
-
-def _load_app() -> tuple[ChatApp | None, str | None]:
-    """返回（可用应用, 配置错误说明），两者必有其一。"""
-    config_path = DEFAULT_CONFIG_PATH.resolve()
-    env_path = DEFAULT_ENV_PATH.resolve()
-    try:
-        app = load_chat_app(
-            config_path.as_posix(),
-            env_path.as_posix(),
-            _file_mtime(config_path),
-            _file_mtime(env_path),
-        )
-    except ConfigError as exc:
-        return None, str(exc)
-    return app, None
-
-
-def _session_history() -> list[AnyMessage]:
-    """页面临时消息列表；仅在配置不可用或未启用短期记忆时使用。"""
-    if SESSION_HISTORY_KEY not in st.session_state:
-        st.session_state[SESSION_HISTORY_KEY] = []
-    history: list[AnyMessage] = st.session_state[SESSION_HISTORY_KEY]
-    return history
+def _open_session_id(sessions: Sequence[SessionSummaryView]) -> str | None:
+    """当前打开的会话：页面记住的那条，失效时回落到最近活动的会话。"""
+    stored = st.session_state.get(OPEN_SESSION_KEY)
+    identifiers = {session.session_id for session in sessions}
+    if isinstance(stored, str) and stored in identifiers:
+        return stored
+    if not sessions:
+        return None
+    active = next((session for session in sessions if session.is_active), sessions[0])
+    return active.session_id
 
 
 def main() -> None:
-    """渲染页面并处理一次用户提交。"""
-    st.set_page_config(page_title="Local Agent Web")
+    """渲染页面并处理一次用户提交或审批决定。"""
+    st.set_page_config(page_title="Local Agent Web（调试入口）")
     st.title("Local Agent Web")
     st.caption(
-        "本机学习型 Agent（v0.1b / T11）。服务只监听 127.0.0.1；"
-        "会话索引与消息都保存在本机 SQLite，刷新与重启后按当前会话恢复。"
+        "v0.4 / T33 调试入口：与 Web 应用共用同一应用服务、同一设置库与同一会话库；"
+        "只监听本机，会话与消息都保存在本机 SQLite。"
     )
 
-    app, config_reason = _load_app()
-    if app is None:
-        render_model_status(configured=False, text=config_error_text(config_reason or "未知原因"))
-    else:
-        storage = "SQLite Checkpoint" if app.checkpointer_enabled else "页面临时状态（未启用短期记忆）"
-        tool_state = "支持" if app.capabilities.tool_calling else "不支持（工具模式会失败闭合）"
+    debug_app, reason = _load_app()
+    if debug_app is None:
+        render_model_status(configured=False, text=config_error_text(reason or "未知原因"))
+        return
+    service = debug_app.runtime.service
+    if service.model_configured():
+        credential, _note = service.credential_store_state()
         render_model_status(
             configured=True,
             text=(
-                f"模型已就绪：{app.model_name}；工具调用：{tool_state}；会话存储：{storage}"
+                f"模型已就绪：{service.current_model_name()}；"
+                f"可用连接 {len(service.list_model_connections())} 条；凭据存储：{credential}"
+            ),
+        )
+    else:
+        render_model_status(
+            configured=False,
+            text=config_error_text(
+                "还没有可用的模型连接",
+                hint="在 Web 应用的设置页添加并测试一条连接后，这里即可直接对话。",
             ),
         )
 
-    # 侧栏：启用短期记忆时是"工作区选择器 + 当前工作区的会话列表"；关闭短期记忆时也必须能选
-    # 工作区，只是选择只在本页面生命周期内有效（架构 §10.6）。
-    if app is not None:
-        with st.sidebar:
-            status_lines, status_warn = memory_status_lines(app)
-            render_memory_status(lines=status_lines, warn=status_warn)
-            # 记忆管理：只读展示 + 指到命令行（删除等写操作不在页面上做，避免误点）
-            manage_lines, manage_warn = memory_management_lines(app)
-            render_memory_status(lines=manage_lines, warn=manage_warn)
-    session = current_session(app)
-    store = app.sessions if app is not None else None
-    if store is not None and session is not None:
-        action = render_session_sidebar(
-            session_options(store, session),
-            workspaces=workspace_options(store),
-            current_workspace=session.workspace_root,
+    with st.sidebar:
+        status_lines, status_warn = memory_status_lines(debug_app.app_config)
+        render_memory_status(lines=status_lines, warn=status_warn)
+        manage_lines, manage_warn = memory_management_lines(
+            debug_app.app_config, debug_app.workspace_root
         )
-        if action is not None:
-            apply_session_action(store, action)
-            return
-    elif app is not None:
-        action = render_workspace_picker(
-            workspaces=(),
-            current_workspace=temporary_workspace(app.workspace_root).as_posix(),
-        )
-        if action is not None:
-            apply_temporary_workspace(app, action)
-            return
+        render_memory_status(lines=manage_lines, warn=manage_warn)
 
-    thread_id = session.thread_id if session is not None else DEFAULT_THREAD_ID
-    if app is not None:
-        # 本轮工作区统一在这里校验（页面调用与直接调用同一入口，架构 §1.5）：目录被删/被移走、
-        # 会话与线程不匹配都在跑图之前失败闭合。
-        try:
-            turn_workspace(
-                app,
-                session_id=session.session_id if session is not None else None,
-                thread_id=thread_id,
-            )
-        except SessionStoreError as exc:
-            st.error(f"当前工作区不可用：{exc}；请在上方选择其它工作区，或新建会话。")
-            return
+    try:
+        sessions = service.list_sessions()
+        workspaces = service.list_workspaces()
+    except ApplicationError as exc:
+        _report_error(exc)
+        return
 
-    state: dict[str, Any] = (
-        thread_state(app, thread_id)
-        if app is not None
-        else {"messages": _session_history()}
+    open_id = _open_session_id(sessions)
+    current = next((item for item in sessions if item.session_id == open_id), None)
+    workspace_id = current.workspace.workspace_id if current is not None else None
+    visible = (
+        [item for item in sessions if item.workspace.workspace_id == workspace_id]
+        if workspace_id is not None
+        else []
     )
-    history: list[AnyMessage] = projected_history(state)
-    render_history(history, tool_results=tool_results_of(state))
-
-    unconfirmed = (
-        nodes.unconfirmed_calls(cast(AgentState, state)) if app is not None else []
+    action = render_session_sidebar(
+        session_options(visible, open_session_id=open_id),
+        workspaces=[(item.workspace_id, item.display_name) for item in workspaces],
+        current_workspace_id=workspace_id,
+        current_workspace_name=current.workspace.display_name if current is not None else None,
     )
-    if unconfirmed:
-        # 架构 §4.2：未获 Checkpoint 确认的副作用视为不确定，不自动重放
-        st.warning(
-            "上次运行没有正常结束："
-            f"{'、'.join(unconfirmed)} 已放行但没有确认结果，可能留下了未完成的改动。"
-            "为避免重复执行，我不会自动重放这些调用；请先核对文件内容或命令影响，再继续对话。"
+    if action is not None:
+        _apply_session_action(service, action)
+        return
+
+    if open_id is None:
+        st.info("还没有会话：请在左侧「新建会话」，或选择/添加一个工作区开始。")
+        return
+
+    try:
+        snapshot = service.get_session_snapshot(open_id)
+    except ApplicationError as exc:
+        _report_error(exc)
+        st.session_state.pop(OPEN_SESSION_KEY, None)
+        return
+
+    render_status(snapshot)
+    render_conversation(snapshot)
+
+    approval = snapshot.approval
+    if approval is not None and approval.state == "pending":
+        st.info(
+            "有一个动作正在等待你确认。页面刷新不会自动执行，也不会沿用它之前的确认结果。"
         )
+        # 流式占位符建在按钮上方：审批通过后的增量回答出现在对话区底部。
+        live = st.empty()
+        _resolve(service, open_id, snapshot, placeholder=live)
+        return
 
-    if app is not None:
-        pending_approval = thread_interrupt(app, thread_id)
-        if pending_approval is not None:
-            st.info(
-                "有一个动作正在等待你确认。页面刷新不会自动执行，也不会沿用它之前的确认结果。"
-            )
-            decision = approval_ui.render_approval(pending_approval)
-            if decision is not None:
-                try:
-                    with answer_sink(app):
-                        result = resume_turn(
-                            app,
-                            thread_id=thread_id,
-                            resume_value=decision.as_payload(),
-                            session_id=session.session_id if session is not None else None,
-                        )
-                except Exception as exc:  # noqa: BLE001 — 页面边界：恢复失败也要给提示
-                    detail = config_module.redact_secrets(str(exc), app.secret_values)
-                    st.error(f"恢复审批失败：{detail}")
-                    return
-                render_history(
-                    projected_history(result),
-                    start_index=len(history),
-                    tool_results=tool_results_of(result),
-                )
-                render_pending_errors(app, result)
-                if session is not None:
-                    record_session_activity(app, session)
-                if result.get("final_response") is None and not result.get("__interrupt__"):
-                    st.error("模型没有返回文本内容，请重试或换个说法")
-                # 重新执行脚本，让下一个待确认阶段（例如递归删除的二次确认）立即出现
-                st.rerun()
-            return
-
+    # 流式占位符先建好再放输入框：增量出现在对话区底部，而不是输入框下面。
+    # 无提交时它保持为空（不可见），不影响渲染。
+    live = st.empty()
     prompt = st.chat_input("输入消息")
     if prompt is None:
         return
-
     user_text = prompt.strip()
     if not user_text:
         st.warning("输入为空，未提交任何内容")
         return
+    _submit(service, open_id, user_text, placeholder=live)
 
-    if app is None:
-        # 配置不可用时仍然回答，但只回答配置问题，不调用模型。
-        reply = config_error_text(config_reason or "未知原因")
-        _session_history().extend([HumanMessage(content=user_text), AIMessage(content=reply)])
-        render_message(ChatMessage(role="user", content=user_text))
-        render_message(ChatMessage(role="assistant", content=reply))
-        return
 
-    previous_count = len(history)
-    try:
-        with answer_sink(app):
-            result = run_chat_turn(
-                app,
-                thread_id=thread_id,
-                session_id=session.session_id if session is not None else None,
-                user_text=user_text,
-                prior_messages=history,
-            )
-    except Exception as exc:  # noqa: BLE001 — 页面边界要把任何调用失败变成提示，而不是 500
-        render_message(ChatMessage(role="user", content=user_text))
-        detail = config_module.redact_secrets(str(exc), app.secret_values)
-        st.error(
-            f"模型调用失败：{detail}"
-            "（配置检查已通过，问题可能出在网络、额度、Key 有效性或模型名）"
-        )
-        return
-
-    messages = projected_history(result)
-    if not app.checkpointer_enabled:
-        # 关闭短期记忆时页面自己存历史：存**投影后**的文本，刷新后仍与用户当时看到的一致
-        # （State 不跨轮，投影表不会留下来）。
-        _session_history()[:] = messages
-    if session is not None:
-        # 更新最后活动时间与 Checkpoint 指针；会话还是默认名时用首条消息命名
-        record_session_activity(app, session, title_hint=user_text)
-    # 只渲染本次新增的部分；历史已在上方渲染，普通重绘不会重复提交。
-    render_history(
-        messages, start_index=previous_count, tool_results=tool_results_of(result)
-    )
-    # 本轮的降级/错误（库打不开、Embedding 加载失败、摘要失败…）必须让用户看见
-    render_pending_errors(app, result)
-
-    if result.get("__interrupt__"):
-        # 本轮停在人工审批：审批卡片渲染在页面顶部，这里必须重跑脚本才会出现
-        st.rerun()
-
-    if result.get("final_response") is None:
-        st.error("模型没有返回文本内容，请重试或更换模型")
+__all__ = [
+    "DebugApp",
+    "load_debug_app",
+    "main",
+    "memory_management_lines",
+    "memory_status_lines",
+    "run_with_stream",
+    "session_options",
+]
 
 
 if __name__ == "__main__":

@@ -3,11 +3,13 @@
 - 会话索引与 LangGraph Checkpoint 共用同一个数据库文件：一个连接、一个事务边界，
   避免多连接互相加锁（``session_store`` 与 Checkpoint 由 ``checkpoint.open_database``
   一起装配）。
-- 长期记忆按架构 §10.3 使用**独立**的 SQLite 文件，所以这里有两套互不相干的迁移：
-  :func:`apply_migrations`（聊天库：Checkpoint + 会话索引）与
-  :func:`apply_long_term_migrations`（长期库：entities / facts / task_conclusions）。
-  两套迁移必须应用到**不同的数据库文件**，调用方由 ``checkpoint.open_database`` 与
-  ``memory.long_term.open_store`` 分别封装；同一个文件只会被其中一套应用。
+- 长期记忆按架构 §10.3 使用**独立**的 SQLite 文件，所以这里有多套互不相干的迁移：
+  :func:`apply_migrations`（聊天库：Checkpoint + 会话索引 + 请求台账）、
+  :func:`apply_long_term_migrations`（长期库：entities / facts / task_conclusions）与
+  :func:`apply_settings_migrations`（模型连接设置库，§6.8）。
+  各套迁移必须应用到**不同的数据库文件**，调用方由 ``checkpoint.open_database``、
+  ``memory.long_term.open_store`` 与 ``model_settings.store.open_settings_database`` 分别封装；
+  同一个文件只会被其中一套应用。
 - 迁移按版本号顺序执行，版本记录在 ``schema_migrations``（每个库文件各自持有）；重复调用
   幂等，已应用的版本会跳过。
 - 本模块只做结构变更，不写业务数据（首个会话的初始化在 ``session_store``）。
@@ -18,17 +20,28 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-#: 聊天库（Checkpoint + 会话索引）当前代码期望的结构版本（等于最后一个迁移的编号）。
-CHAT_SCHEMA_VERSION = 2
+#: 聊天库（Checkpoint + 会话索引 + 请求台账）当前代码期望的结构版本（等于最后一个迁移的编号）。
+CHAT_SCHEMA_VERSION = 3
 
 #: 长期记忆库当前代码期望的结构版本。
 LONG_TERM_SCHEMA_VERSION = 2
+
+#: 模型连接设置库当前代码期望的结构版本（T29A；契约 §6.8）。
+SETTINGS_SCHEMA_VERSION = 1
 
 #: 兼容既有调用：未加前缀的 ``SCHEMA_VERSION`` 指聊天库。
 SCHEMA_VERSION = CHAT_SCHEMA_VERSION
 
 #: 长期记忆库的表名（架构 §10.3）；初始化脚本与测试用它做结构自检。
 LONG_TERM_TABLES: tuple[str, ...] = ("entities", "facts", "task_conclusions")
+
+#: 模型连接设置库的表名（§6.8 的"非秘密设置"）；初始化脚本与测试用它做结构自检。
+SETTINGS_TABLES: tuple[str, ...] = (
+    "model_connections",
+    "model_connection_versions",
+    "model_selection",
+    "settings_meta",
+)
 
 _SESSIONS_SQL = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -122,10 +135,112 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_single_active
 CREATE INDEX IF NOT EXISTS idx_sessions_workspace ON sessions (workspace_root);
 """
 
+#: 聊天库 v3（T28）：**幂等请求台账**（架构 §15.2）。
+#:
+#: 只保护"命令执行"：记录请求 id、操作、规范化参数摘要、`run_id`、状态与结果引用，
+#: **不复制 Graph 业务状态**，也不成为第二套任务真源。必须跨服务重启保留到会话删除，
+#: 所以它进同一个聊天库而不是进程内存。
+_CHAT_V3_SQL = """
+CREATE TABLE IF NOT EXISTS request_ledger (
+    request_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    arguments_digest TEXT NOT NULL,
+    run_id TEXT,
+    status TEXT NOT NULL,
+    result_ref TEXT,
+    error_code TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_request_ledger_session ON request_ledger (session_id);
+CREATE INDEX IF NOT EXISTS idx_request_ledger_status ON request_ledger (status);
+"""
+
+#: 模型连接设置库 v1（T29A；契约 §6.8、§15.9）。
+#:
+#: 四张表分工：
+#: - ``model_connections``：**当前**连接（含能力检测结果）。删除是"停用"（``enabled=0``），不做物理删除，
+#:   否则历史模型标识与用量会失去解释；
+#: - ``model_connection_versions``：每次编辑产生一条**历史版本**，旧版本与凭据引用必须保留到引用它的
+#:   运行结束（挂起等审批的运行恢复时要按固定版本重取客户端）；
+#: - ``model_selection``：默认连接与会话选择（``scope`` + ``scope_id``，默认那条是 ``('default','default')``）；
+#: - ``settings_meta``：导入记账等元数据。
+#:
+#: **结构上就存不下明文密钥**：四张表没有任何一列可以放密钥值，密钥只在系统凭据存储或进程内存里，
+#: 表里留的是不含明文的 ``credential_ref``。这不是靠调用方自觉。
+_SETTINGS_V1_SQL = """
+CREATE TABLE IF NOT EXISTS model_connections (
+    connection_id TEXT PRIMARY KEY,
+    display_name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    model TEXT NOT NULL,
+    context_window_tokens INTEGER NOT NULL,
+    max_tokens INTEGER NOT NULL,
+    temperature REAL NOT NULL,
+    timeout_seconds INTEGER NOT NULL,
+    retry_count INTEGER NOT NULL,
+    streaming INTEGER NOT NULL,
+    auth_mode TEXT NOT NULL,
+    api_key_env TEXT,
+    credential_ref TEXT,
+    allow_plaintext_http INTEGER NOT NULL DEFAULT 0,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    capability_chat TEXT NOT NULL,
+    capability_tools TEXT NOT NULL,
+    capability_streaming TEXT NOT NULL,
+    capability_checked_at TEXT,
+    capability_message TEXT,
+    config_version INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_model_connections_enabled ON model_connections (enabled);
+
+CREATE TABLE IF NOT EXISTS model_connection_versions (
+    connection_id TEXT NOT NULL,
+    config_version INTEGER NOT NULL,
+    display_name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    base_url TEXT NOT NULL,
+    model TEXT NOT NULL,
+    context_window_tokens INTEGER NOT NULL,
+    max_tokens INTEGER NOT NULL,
+    temperature REAL NOT NULL,
+    timeout_seconds INTEGER NOT NULL,
+    retry_count INTEGER NOT NULL,
+    streaming INTEGER NOT NULL,
+    auth_mode TEXT NOT NULL,
+    credential_ref TEXT,
+    -- 旧配置导入的取 Key 路径也要按版本留下来：挂起等审批的运行恢复时按固定版本重取密钥，
+    -- 那时如果只能看到"最新一行"的 api_key_env，导入的连接一旦被编辑过就取不到密钥了。
+    api_key_env TEXT,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY (connection_id, config_version)
+);
+
+CREATE TABLE IF NOT EXISTS model_selection (
+    scope TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    connection_id TEXT NOT NULL,
+    config_version INTEGER NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (scope, scope_id)
+);
+
+CREATE TABLE IF NOT EXISTS settings_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
 #: 聊天库的迁移；(版本号, 该版本的结构变更 SQL)，只允许在末尾追加，不允许改写已发布的版本。
 _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SESSIONS_SQL),
     (2, _CHAT_V2_SQL),
+    (3, _CHAT_V3_SQL),
 )
 
 #: 长期记忆库的迁移；规则同上（独立文件、独立版本号）。
@@ -133,6 +248,9 @@ _LONG_TERM_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _LONG_TERM_SQL),
     (2, _LONG_TERM_V2_INDEXES_SQL),
 )
+
+#: 模型连接设置库的迁移；规则同上（独立文件、独立版本号）。
+_SETTINGS_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _SETTINGS_V1_SQL),)
 
 _SCHEMA_MIGRATIONS_SQL = (
     "CREATE TABLE IF NOT EXISTS schema_migrations ("
@@ -214,3 +332,21 @@ def apply_long_term_migrations(connection: sqlite3.Connection) -> int:
         sqlite3.Error: 结构变更失败（例如库文件只读）。
     """
     return _apply(connection, _LONG_TERM_MIGRATIONS)
+
+
+def apply_settings_migrations(connection: sqlite3.Connection) -> int:
+    """把**模型连接设置库**结构升到当前版本，返回升级后的版本号。
+
+    必须使用 :data:`SETTINGS_TABLES` 所在的独立数据库文件；调用方一般直接用
+    ``local_agent.model_settings.store.open_settings_database``，不需要自己开连接。
+
+    Args:
+        connection: 设置库的数据库连接。
+
+    Returns:
+        应用完成后的版本号；已是最新时直接返回原版本。
+
+    Raises:
+        sqlite3.Error: 结构变更失败（例如库文件只读）。
+    """
+    return _apply(connection, _SETTINGS_MIGRATIONS)

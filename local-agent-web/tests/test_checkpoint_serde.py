@@ -2,8 +2,10 @@
 
 背景（langgraph 1.2.11 实测）：``JsonPlusSerializer`` 默认对**未登记**类型只告警放行（serde 事件
 ``msgpack_unregistered_allowed``），并预告未来版本改为直接阻止；到了严格模式或显式白名单下，未登记
-类型不会被构造，而是退回原始 tuple/``dict``——状态字段就不再是它该有的类型。本项目 State 里有 7 个
-自定义 frozen dataclass 会落盘，必须在 :data:`checkpoint.CHECKPOINT_ALLOWED_TYPES` 里显式登记。
+类型不会被构造，而是退回原始 tuple/``dict``——状态字段就不再是它该有的类型。本项目 State 里有 10 个
+自定义 frozen dataclass 会落盘，必须在 :data:`checkpoint.CHECKPOINT_ALLOWED_TYPES` 里显式登记
+（T34 增加了用量记录 ``ModelCallRecord`` / ``TurnRecord``，T35 增加了运行上下文快照
+``RuntimeContextSnapshot``）。
 
 本文件提供三层证据：
 
@@ -40,6 +42,7 @@ from local_agent.graph.state import (
     RuntimeContext,
     ToolEvent,
 )
+from local_agent.llm.usage_recording import ModelCallRecorder
 from local_agent.persistence import checkpoint
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -55,7 +58,10 @@ EXPECTED_SERIALIZED_TYPES = frozenset(
         ("local_agent.graph.state", "MemoryCandidate"),
         ("local_agent.graph.state", "PlanStep"),
         ("local_agent.graph.state", "ReflectionResult"),
+        ("local_agent.graph.state", "RuntimeContextSnapshot"),
         ("local_agent.graph.state", "ToolEvent"),
+        ("local_agent.llm.usage_recording", "ModelCallRecord"),
+        ("local_agent.llm.usage_recording", "TurnRecord"),
     }
 )
 
@@ -102,6 +108,20 @@ def _context(workspace: Path, model: object, app_config: AppConfig) -> RuntimeCo
         model_adapter=model,  # type: ignore[arg-type]
         workspace_root=workspace,
         current_cwd=workspace,
+        # T34：挂上用量录音机，让这条"真实链路"也落盘 `model_call_records` / `turn_records`
+        # （与 §15.6 的实际运行同一条路径：不挂录音机就只有估算）。
+        usage_recorder=_usage_recorder(),
+    )
+
+
+def _usage_recorder() -> ModelCallRecorder:
+    return ModelCallRecorder(
+        connection_id="test-connection",
+        config_version="1",
+        provider="openai_compatible",
+        model_id="deepseek-chat",
+        endpoint_fingerprint="sha256:test-endpoint",
+        context_window_tokens=65_536,
     )
 
 

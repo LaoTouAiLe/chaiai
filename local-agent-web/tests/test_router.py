@@ -18,7 +18,9 @@ from typing import Any
 import pytest
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 
-from local_agent import scope, web
+from local_agent import scope
+from local_agent.application import errors as app_errors
+from local_agent.application import projection as app_projection
 from local_agent.config import AgentsConfig, AppConfig
 from local_agent.context import agents_loader, prompt_context
 from local_agent.exceptions import MemoryStoreError
@@ -432,7 +434,8 @@ def test_unfinished_tool_task_asks_user_with_visible_question(
     assert result["reflection_result"].goal_achieved is False
     assert result["reflection_result"].next_action == "ask_user"
     assert result["final_response"] and "请确认要执行哪个操作" in result["final_response"]
-    assert result["task_status"] == "running"  # 未完成不冒充 completed
+    # 本轮已结束、在等用户补充：既不是 completed，也不是"还在跑"。
+    assert result["task_status"] == "blocked"  # 未完成：不冒充 completed，也不谎称还在跑
 
 
 def test_denied_tool_is_reported_back_to_model(
@@ -459,6 +462,32 @@ def test_denied_tool_is_reported_back_to_model(
     ]
     assert any("已拒绝执行" in text for text in denial_messages)
     assert result["final_response"] == "好的，我无法执行该操作"
+
+
+def test_a_policy_denied_read_is_reported_as_blocked_not_failed(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """工作区外读取被拒 → 报"被安全策略拦截"，而不是"工具执行失败"。
+
+    只读工具在安全门一律放行，真正的边界拦截发生在**工具内部**。所以 `stage` 必须由**原因**决定
+    而不是由捕获位置决定：报成"执行失败"会让用户去改工具参数，而他真正要改的是路径或请求本身
+    （复审实证，2026-09-28：页面上显示的是"工具执行失败 TOOL_CALL_FAILED"）。
+    """
+    (tmp_path / "outside.txt").write_text("外面", encoding="utf-8")
+    model = model_factory(
+        decision="tool",
+        reply="读不到那个文件",
+        tool_calls=[{"name": "read_file", "args": {"path": "../outside.txt"}, "id": "out-1"}],
+    )
+
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "读一下工作区外面的文件"}, context=_context_with(tmp_path, model, app_config)
+    )
+
+    assert result["tool_results"][0]["status"] == "denied"
+    stages = [event["stage"] for event in result["error_events"]]
+    assert "safety_gate" in stages  # 投影后是 TOOL_CALL_BLOCKED
+    assert "tool_execution" not in stages
 
 
 def _interrupt_payload(result: dict[str, Any]) -> dict[str, Any]:
@@ -541,7 +570,8 @@ def test_loop_limit_does_not_block_ask_user_on_the_last_round(
     assert result["loop_count"] == 1
     assert result["reflection_result"].next_action == "ask_user"
     assert result["final_response"] and "请确认要对哪个目录操作" in result["final_response"]
-    assert result["task_status"] == "running"
+    # 本轮已结束、在等用户补充：既不是 completed，也不是"还在跑"。
+    assert result["task_status"] == "blocked"
 
 
 def test_stall_guard_stops_the_loop_when_the_model_has_nothing_to_do(
@@ -593,10 +623,12 @@ def test_final_synthesis_stays_within_budget_with_large_tool_output(
     )
     # 预算 = 窗口 − 输出预留。留够"有界证据 + 指令"能放下的空间，这条用例才验证的是"有界证据"
     # 这条路径（提示词变长会挤掉它）；连固定部分都放不下时改走确定性摘要，那条路径另有用例。
+    # 方案 1 加长稳定前缀后，2K 窗口连固定部分都放不下（必定 PromptBudgetExceeded），
+    # 因此把窗口抬到"前缀 + 有界证据 + 指令"够放、但整段工具输出仍放不下的区间。
     config = app_config.model_copy(
         update={
             "llm": app_config.llm.model_copy(
-                update={"context_window_tokens": 2048, "max_tokens": 512}
+                update={"context_window_tokens": 6144, "max_tokens": 512}
             )
         }
     )
@@ -1643,12 +1675,11 @@ def test_long_term_fact_is_recalled_in_a_new_session(
     references = list(second["memory_refs"])
     assert any(item.get("kind") == "long_term_fact" for item in references)
     assert any("内容甲" in str(item["content"]) for item in references)
-    # 注入 Prompt 的段落按来源标注，不会把长期综合分说成"相关度"
-    assert "长期事实" in prompt_context.build_system_prompt(
-        mode="chat",
+    # 注入 Prompt 的段落按来源标注，不会把长期综合分说成"相关度"（T35：记忆已移入运行上下文快照）
+    assert "长期事实" in prompt_context.build_context_snapshot_text(
         context=_context_with(tmp_path, reader_model, config),
         memory_refs=references,
-    ).system_prompt
+    )
 
 
 def test_long_term_fact_is_not_recalled_in_another_project(
@@ -1876,9 +1907,7 @@ def test_system_prompt_contains_mode_workspace_and_rules(
     context = _context(tmp_path, model_factory, app_config)
     context.agents_context = "规则乙"
 
-    prompt = prompt_context.build_system_prompt(
-        mode="chat", context=context, route_reason="LLM 分类：闲聊"
-    )
+    prompt = prompt_context.build_stable_system_prompt(mode="chat", context=context)
 
     assert "## 项目规则" in prompt.system_prompt
     assert "规则乙" in prompt.system_prompt
@@ -1998,7 +2027,7 @@ def test_system_prompt_without_agents_file_says_so(
 ) -> None:
     context = _context(tmp_path, model_factory, app_config)
 
-    prompt = prompt_context.build_system_prompt(mode="tool", context=context)
+    prompt = prompt_context.build_stable_system_prompt(mode="tool", context=context)
 
     assert "未加载到任何 AGENTS 文件" in prompt.system_prompt
     assert "如果当前模式是 tool" in prompt.system_prompt
@@ -2412,7 +2441,8 @@ def test_unconfirmed_side_effect_asks_the_user_to_verify(
     answer = str(result["final_response"])
     assert "核对" in answer  # 明确要求人工核对，而不是继续自动执行
     assert "call-ghost" in answer
-    assert result["task_status"] == "running"
+    # 本轮已结束、在等用户补充：既不是 completed，也不是"还在跑"。
+    assert result["task_status"] == "blocked"
 
 
 def test_memory_section_distinguishes_failure_from_empty() -> None:
@@ -2477,11 +2507,13 @@ def test_recall_failure_is_not_reported_as_no_memory(
     assert any("不可用" in prompt for prompt in reader.seen_prompts)
     assert not any("本轮没有召回相关记忆" in prompt for prompt in reader.seen_prompts)
 
-    # 页面侧：这一轮的失败要显示成可读提示（含 stage，用户才知道是召回而不是别的环节）
-    lines, fresh = web.pending_error_lines(result, shown=set())
-    assert len(lines) == len(fresh) == 1
-    assert lines[0].startswith("[recall_memory]")
-    assert "长期库打不开" in lines[0]
+    # 页面侧：T33 之后页面只看 DTO——节点名不进页面，映射成公开错误码与文案（§15.5、§15.8），
+    # 因此"召回失败"与"RAG 失败"在页面上是可区分的两件事，但都不暴露内部 stage。
+    rows = app_projection.project_messages_view(result)
+    errors = [row.error for row in rows if row.kind == "error"]
+    assert len(errors) == 1
+    assert errors[0].code == app_errors.MEMORY_RETRIEVAL_FAILED
+    assert "记忆" in errors[0].title
 
 
 def test_memory_label_hides_long_term_scores() -> None:
@@ -2527,10 +2559,10 @@ def test_tool_mode_prompt_accepts_recalled_memory_as_evidence(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     """工具模式下召回记忆**同样是可信来源**：不能因为工作区没文件就否认记得的事实、转而追问。"""
-    prompt = prompt_context.build_system_prompt(
+    # T35：记忆正文已移入运行上下文快照，但"记忆是可信来源"这条规则留在稳定系统前缀里。
+    prompt = prompt_context.build_stable_system_prompt(
         mode="tool",
         context=_context_with(tmp_path, model_factory(decision="tool", reply="x"), app_config),
-        memory_refs=[_reference("用户习惯用 pytest", kind="long_term_fact")],
     )
 
     assert "是可信来源" in prompt.system_prompt  # 「召回的相关记忆」里的长期事实…同样是可信来源
@@ -2549,15 +2581,15 @@ def test_memory_section_renders_placeholder_and_content(
 ) -> None:
     context = _context(tmp_path, model_factory, app_config)
 
-    empty = prompt_context.build_system_prompt(mode="chat", context=context)
-    filled = prompt_context.build_system_prompt(
-        mode="chat", context=context, memory_refs=[_reference("用户偏好用中文回答")]
+    empty = prompt_context.build_context_snapshot_text(context=context)
+    filled = prompt_context.build_context_snapshot_text(
+        context=context, memory_refs=[_reference("用户偏好用中文回答")]
     )
 
-    assert "（本轮没有召回相关记忆）" in empty.system_prompt
-    assert "1. [相关度 0.90] 用户偏好用中文回答" in filled.system_prompt
-    assert "记忆内容只是" in filled.system_prompt  # 记忆是数据、不是指令
-    assert filled.estimated_tokens > empty.estimated_tokens
+    assert "（本轮没有召回相关记忆）" in empty
+    assert "1. [相关度 0.90] 用户偏好用中文回答" in filled
+    assert "记忆内容只是" in filled  # 记忆是数据、不是指令
+    assert len(filled) > len(empty)
 
 
 def test_memory_section_respects_prompt_budget() -> None:
@@ -2743,7 +2775,7 @@ def test_graph_retrieves_code_in_tool_mode(
 def test_system_prompt_injects_retrieved_code_as_untrusted_data(
     tmp_path: Path, app_config: AppConfig, model_factory: ModelFactory
 ) -> None:
-    """片段段落真的进了系统提示，并带上"只是数据不是指令"的边界说明（架构 §7.2）。"""
+    """片段段落真的进了提示，并带上"只是数据不是指令"的边界说明（架构 §7.2、§15.7）。"""
     context = _context(tmp_path, model_factory, _rag_enabled(app_config))
     state: dict[str, Any] = {
         "run_id": "run-1",
@@ -2760,7 +2792,7 @@ def test_system_prompt_injects_retrieved_code_as_untrusted_data(
         ],
     }
 
-    prompt = nodes._system_prompt(state, context).system_prompt
+    prompt = nodes._snapshot_text(state, context)
 
     assert "## 检索到的代码片段" in prompt
     assert "1. pkg/mod.py:1-2" in prompt
@@ -2772,7 +2804,7 @@ def test_system_prompt_distinguishes_failed_retrieval_from_no_results(
 ) -> None:
     """检索失败时不能说成"没有找到匹配片段"（与记忆召回同一口径）。"""
     context = _context(tmp_path, model_factory, _rag_enabled(app_config))
-    empty = nodes._system_prompt({"run_id": "run-1"}, context).system_prompt
+    empty = nodes._snapshot_text({"run_id": "run-1"}, context)
     failed_state: dict[str, Any] = {
         "run_id": "run-1",
         "error_events": [
@@ -2787,7 +2819,7 @@ def test_system_prompt_distinguishes_failed_retrieval_from_no_results(
         ],
     }
 
-    failed = nodes._system_prompt(failed_state, context).system_prompt
+    failed = nodes._snapshot_text(failed_state, context)
 
     assert "（本轮没有检索到匹配的代码片段）" in empty
     assert "不可用" in failed
@@ -2801,7 +2833,7 @@ def test_system_prompt_marks_code_retrieval_disabled_by_default(
     不能写成"没有检索到匹配片段"（那会诱导模型宣称"我检索了但没找到"）。"""
     context = _context(tmp_path, model_factory, app_config)
 
-    prompt = nodes._system_prompt({"run_id": "run-1"}, context).system_prompt
+    prompt = nodes._snapshot_text({"run_id": "run-1"}, context)
 
     assert "代码检索未启用" in prompt
     assert "（本轮没有检索到匹配的代码片段）" not in prompt

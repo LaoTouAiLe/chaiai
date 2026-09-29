@@ -54,6 +54,7 @@ class ApprovalDecision(TypedDict):
     edited_arguments: dict[str, Any] | None
     reason: str
     created_at: datetime
+    requested_at: datetime
 
 
 def build_request(
@@ -97,6 +98,7 @@ def build_decision(
         edited_arguments=dict(edited_arguments) if edited_arguments else None,
         reason=reason,
         created_at=datetime.now(timezone.utc),
+        requested_at=request["created_at"],
     )
 
 

@@ -23,17 +23,26 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AnyMessage, ToolCall
 from langgraph.graph.message import add_messages
 
-from local_agent.config import AppConfig
+from local_agent.config import RunConfig
 from local_agent.context.token_budget import ContextBudget, TokenUsage
+from local_agent.graph.scope import tool_scope_key
 from local_agent.llm.models import ModelCapabilities
+from local_agent.llm.usage_recording import ModelCallRecord, ModelCallRecorder, TurnRecord
 from local_agent.memory.schemas import MemoryReference
+from local_agent.model_settings.models import ModelBinding
 from local_agent.security.approval import ApprovalDecision, ApprovalRequest
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.result_types import ToolResultRecord
 from local_agent.tools.tool_registry import ToolRegistry
 
 AgentMode = Literal["chat", "tool"]
-TaskStatus = Literal["pending", "running", "waiting_approval", "completed", "failed"]
+#: 任务状态。``blocked`` 表示**本轮已经结束、但在等用户补充信息**（反思给出 ``ask_user``，
+#: 计划步骤同时被写成 ``PlanStep.status="blocked"``）。
+#:
+#: 它与 ``running`` 必须分开：``running`` 对外的含义是"还在跑"，用它来表示"结束了但没达成目标"
+#: 会让回答被投影层丢掉（``project_final_result`` 对 ``running`` 返回 ``None``）、也不发终态事件，
+#: 页面于是永远停在"正在生成回答…"（复审实证，2026-09-28）。
+TaskStatus = Literal["pending", "running", "waiting_approval", "blocked", "completed", "failed"]
 EvidenceType = Literal["file_hash", "diff", "exit_code", "stdout", "test_result"]
 
 # 架构 §4.3 未给出具体字段的结构：仍为字典占位的部分由对应任务替换为具体类型
@@ -128,16 +137,6 @@ def merge_appended(existing: Sequence[T], incoming: Sequence[T], key: Callable[[
     return fresh
 
 
-def tool_scope_key(run_id: str, tool_call_id: str) -> str:
-    """工具调用的作用域键：``run_id`` + ``tool_call_id``（架构 §4.2、§4.3）。
-
-    同一次运行内重放同一个调用 → 同一个键，据此去重；不同轮次即使复用了同一个
-    ``tool_call_id``，也是不同的键：既不会被误判成"已执行"而跳过，也不会把新结果
-    当成重复项丢掉。
-    """
-    return f"{run_id}:{tool_call_id}"
-
-
 def tool_event_key(event: ToolEvent) -> str:
     """工具事件的去重键（按轮次作用域）。"""
     return tool_scope_key(event.run_id, event.tool_call_id)
@@ -165,6 +164,28 @@ def error_event_key(record: ErrorEvent) -> str:
 def approval_key(record: ApprovalDecision) -> str:
     """审批记录的去重键：同一次审批请求只记录一次决策。"""
     return record["approval_id"]
+
+
+def model_call_key(record: ModelCallRecord) -> str:
+    """模型调用记录的去重键：同一次调用只落一条（重试是新 id，因此不会被吞掉）。"""
+    return record.model_call_id
+
+
+def merge_turn_records(
+    existing: Mapping[str, TurnRecord] | None, incoming: Mapping[str, TurnRecord] | None
+) -> dict[str, TurnRecord]:
+    """整轮记录合并（架构 §15.6）：**终态一经写入不可改写**。
+
+    同一 ``run_id`` 在运行中会被多次写入（提交时、每个节点之后），一旦某条记录已经带了
+    ``final_at``（轮次已结束），后续写入一律忽略，避免"结束后又被改写"。
+    """
+    merged: dict[str, TurnRecord] = dict(existing or {})
+    for run_id, record in (incoming or {}).items():
+        current = merged.get(run_id)
+        if current is not None and current.final_at is not None:
+            continue
+        merged[run_id] = record
+    return merged
 
 
 def make_decision_record(
@@ -300,6 +321,55 @@ class ReflectionResult:
     evidence: tuple[EvidenceReference, ...] = ()
 
 
+#: 运行上下文快照的 schema 版本（架构 §15.7）。
+RUNTIME_CONTEXT_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class RuntimeContextSnapshot:
+    """一轮请求所用的**动态**运行上下文快照（架构 §15.7、开发文档 §6.6）。
+
+    记忆、RAG、摘要、任务、计划、模式理由与当前目录这些动态信息不再改写稳定系统前缀，
+    而是被搬进这条独立记录：请求组装器把**最新有效**快照当作带来源标记的数据块注入到
+    当前用户输入之前，`canonical_text` 就是实际注入模型的那段文本。
+
+    - ``canonical_text``：固定段落顺序、确定性序列化的正文（也是注入内容本身）；
+    - ``content_hash``：只对 ``canonical_text`` 取不可逆短指纹；
+    - ``snapshot_id``：由 ``run_id + context_version + content_hash`` 派生——**相同内容得到相同 id**，
+      因此"内容未变化"时写入会被 ``merge_appended`` 按 id 吃掉，不会追加重复记录；
+    - ``source_versions``：每个来源的短指纹（``(来源名, 版本指纹)``），只放安全引用，不放正文与密钥。
+    """
+
+    schema_version: int
+    snapshot_id: str
+    run_id: str
+    context_version: int
+    created_at: datetime
+    content_hash: str
+    canonical_text: str
+    source_versions: tuple[tuple[str, str], ...] = ()
+
+
+def snapshot_key(snapshot: RuntimeContextSnapshot) -> str:
+    """快照的去重键：``snapshot_id``（同内容 + 同轮次版本只落一条）。"""
+    return snapshot.snapshot_id
+
+
+def latest_runtime_snapshot(
+    snapshots: Sequence[RuntimeContextSnapshot] | None,
+) -> RuntimeContextSnapshot | None:
+    """最新有效快照：``context_version`` 最大的一条；并列时取**最后追加**的一条。
+
+    "新快照明确覆盖旧快照"就靠它实现：注入与投影都只认这一条，旧记录仅留给审计与重建。
+    没有快照（升级前的 Checkpoint）时返回 ``None``，调用方不得伪造。
+    """
+    best: RuntimeContextSnapshot | None = None
+    for snapshot in snapshots or ():
+        if best is None or snapshot.context_version >= best.context_version:
+            best = snapshot
+    return best
+
+
 class AgentState(TypedDict, total=False):
     """短期记忆 State（架构 §4.2）。``total=False`` 允许节点只提交局部更新。"""
 
@@ -307,6 +377,10 @@ class AgentState(TypedDict, total=False):
     thread_id: str
     session_id: str
     run_id: str
+
+    #: 本次运行固定的模型连接（§6.8）；由应用服务在提交边界写入，之后不因设置变更而变。
+    #: 类型来自领域层：绑定是"模型连接的固定引用"，不属于 Graph 自己发明的结构。
+    model_binding: ModelBinding
 
     # 本轮输入与路由（覆盖语义）
     user_input: str
@@ -337,6 +411,9 @@ class AgentState(TypedDict, total=False):
 
     # 人工审批
     pending_approval: ApprovalRequest | None
+    #: 本轮最近一次审批请求的提出时刻（§15.6 的 `approval_wait_ms` 从它算起）；
+    #: `pending_approval` 在决策后会被清空，所以等待时长必须靠这个独立字段留存。
+    approval_requested_at: datetime | None
     approval_history: Annotated[list[ApprovalDecision], operator.add]
 
     # 记忆与检索
@@ -354,6 +431,18 @@ class AgentState(TypedDict, total=False):
     token_usage: TokenUsage
     context_budget: ContextBudget
     compression_count: int
+
+    # 用量观测（架构 §15.6）：模型调用记录是刷新恢复与事件投影的**唯一用量真源**；
+    # 整轮记录只存身份与时间线，Token 汇总由投影层从调用记录加总。
+    model_call_records: Annotated[list[ModelCallRecord], operator.add]
+    turn_records: Annotated[dict[str, TurnRecord], merge_turn_records]
+    #: 运行上下文快照（架构 §15.7）：动态信息按版本追加到这里，不再改写稳定系统前缀。
+    #: 写入方按 ``snapshot_id`` 去重（内容未变不追加）；最新有效快照由
+    #: :func:`latest_runtime_snapshot` 选出，旧记录仅留给审计与重建。
+    runtime_context_snapshots: Annotated[list[RuntimeContextSnapshot], operator.add]
+    run_user_message_id: str
+    #: 本轮被应用服务接受的时刻（提交边界），整轮耗时从它算起。
+    run_submitted_at: datetime
 
     # 输出
     final_response: str | None
@@ -380,7 +469,8 @@ class RuntimeContext:
     current_cwd: Path
     model_adapter: BaseChatModel
     #: 本次运行的完整配置；节点按需读取（agents、安全策略、循环上限等）。
-    app_config: AppConfig
+    #: 本次运行的配置；`llm` **必定存在**（提交边界已解析出连接，见 `config.RunConfig`）。
+    app_config: RunConfig
     user_id: str | None = None
     config_profile: str = "default"
     #: 合并后的 AGENTS 规则文本，由 load_agents 节点写入（架构 §4.1、§7.2）。
@@ -392,3 +482,5 @@ class RuntimeContext:
     approval_channel: object | None = None
     current_time: datetime | None = None
     request_id: str = ""
+    #: 用量录音机（T34）。为 ``None`` 时不记录用量（CLI/测试的轻量路径照常工作）。
+    usage_recorder: ModelCallRecorder | None = None

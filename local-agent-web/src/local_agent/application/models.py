@@ -1,0 +1,729 @@
+"""UI/API 的唯一业务契约来源（ARCHITECTURE §15.4–§15.9）。
+
+本模块只放**纯数据契约**：不导入 LangChain 消息类、LangGraph、`local_agent.graph` 或 `local_agent.ui`，
+不做 I/O，不读 Checkpoint。把 State / Checkpoint 映射成这些 DTO 是 T28 的事。
+
+几条贯穿全模块的硬规则：
+
+- **不暴露内部类型**：DTO 里不出现 `AnyMessage`、`AgentState`、节点名或不可序列化对象；
+  参数一律是**已脱敏的展示字符串**（`dict[str, str]`），嵌套结构由投影层渲染成字符串。
+- **未知字段前向兼容**：所有 DTO `extra="ignore"`，旧/新版本多出来的字段既不会报错也不会被回显。
+- **不确定就不写确定值**：供应商没返回的缓存字段是 `None`，不是 `0`；窗口未确认时比例是 `None`。
+- **可见性矩阵（§15.8）**：`RuntimeContextSnapshotView` **不含** `canonical_text`——页面可以显示"存在哪个
+  版本的上下文快照及其来源"，但不能显示提示词正文。
+"""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+from collections.abc import Mapping
+from datetime import datetime, timezone
+from typing import Annotated, Final, Literal, get_args
+from urllib.parse import urlsplit
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from local_agent.application.errors import ErrorView
+
+#: 契约版本。任何破坏性改名都要提升它，并在 API 层显式声明。
+SCHEMA_VERSION: Final[int] = 1
+
+
+def _require_timezone(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        msg = "时间字段必须带时区（使用 timezone.utc）"
+        raise ValueError(msg)
+    return value.astimezone(timezone.utc)
+
+
+def canonical_json(model: BaseModel) -> str:
+    """确定性序列化：同一输入必须得到**逐字节相同**的结果。
+
+    排序键、无多余空白、`ensure_ascii=False`，因此中文正文不会因转义方式不同而产生两份"同一"快照。
+    """
+    payload = model.model_dump(mode="json")
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+class _Dto(BaseModel):
+    """所有公开 DTO 的公共配置。"""
+
+    model_config = ConfigDict(extra="ignore")
+
+
+# ---- 引用 ------------------------------------------------------------------
+
+
+class WorkspaceRef(_Dto):
+    """工作区引用。
+
+    **不含绝对路径**：`workspace_id` 是规范化工作区路径的稳定哈希，不是目录名；
+    页面可凭它选回列表中的工作区，新工作区仍通过 `select_workspace(path)` 添加。
+    路径本身可能暴露私人目录，不进入读 DTO（§15.8）。
+    """
+
+    workspace_id: str = Field(min_length=1)
+    display_name: str = Field(min_length=1)
+
+
+class TaskRef(_Dto):
+    """任务引用。v0.4 一次用户提交就是一个任务；`task_id` 与 `run_id` 复用同一底层标识。"""
+
+    task_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+
+
+# ---- 模型连接（§15.9）-----------------------------------------------------
+
+
+CapabilityResult = Literal["passed", "failed", "unknown"]
+CapabilityName = Literal["chat", "tool_calling", "streaming"]
+
+CAPABILITY_RESULTS: Final[tuple[CapabilityResult, ...]] = get_args(CapabilityResult)
+CAPABILITY_NAMES: Final[tuple[CapabilityName, ...]] = get_args(CapabilityName)
+
+ConnectionStatus = Literal["unverified", "testing", "verified", "failed", "unsupported"]
+ConnectionTransport = Literal["https", "loopback_http", "plaintext_http"]
+KeyStatus = Literal["configured", "missing", "session_only"]
+
+
+class CapabilityCheckView(_Dto):
+    """单项能力检测结果。未检测就是 `unknown`，不能写成 `passed`。"""
+
+    capability: CapabilityName
+    result: CapabilityResult
+
+
+class ModelConnectionView(_Dto):
+    """聊天模型连接的**读** DTO。
+
+    密钥只以 `key_status` 出现（已配置 / 未配置 / 仅本次进程内）：本 DTO **没有**任何承载密钥值的字段，
+    因此即使上游多传一个 `api_key`，它也会被 `extra="ignore"` 丢掉。公开 URL
+    还必须拒绝内嵌凭据，不能仅靠“没有 api_key 字段”断言安全（§15.9）。
+    """
+
+    connection_id: str = Field(min_length=1)
+    display_name: str = Field(min_length=1)
+    provider: Literal["openai_compatible"] = "openai_compatible"
+    base_url: str = Field(min_length=1)
+    transport: ConnectionTransport
+    model_id: str = Field(min_length=1)
+    context_window_tokens: int = Field(gt=0)
+    max_tokens: int = Field(gt=0)
+    temperature: float = Field(ge=0, le=2)
+    timeout_seconds: int = Field(gt=0)
+    retry_count: int = Field(ge=0)
+    streaming: bool
+    auth_mode: Literal["api_key", "none"]
+    key_status: KeyStatus
+    #: 不含明文的凭据引用；`None` 表示该连接不需要密钥或尚未绑定。
+    credential_ref: str | None = None
+    status: ConnectionStatus
+    capabilities: list[CapabilityCheckView] = Field(default_factory=list)
+    #: 配置版本；编辑产生新版本，旧版本保留到引用它的运行结束（§15.9）。
+    config_version: str = Field(min_length=1)
+    is_default: bool = False
+
+    @field_validator("base_url")
+    @classmethod
+    def _safe_base_url(cls, value: str) -> str:
+        # A base URL has no reason to carry a query or fragment. Rejecting both
+        # prevents credentials from hiding outside the dedicated secret store.
+        if "\\" in value or any(char.isspace() for char in value):
+            raise ValueError("模型端点 URL 不能包含反斜杠或空白字符")
+        try:
+            parsed = urlsplit(value)
+            hostname = parsed.hostname
+            _ = parsed.port  # Also reject malformed/out-of-range ports.
+        except ValueError as exc:
+            raise ValueError("模型端点 URL 格式无效") from exc
+        if parsed.scheme not in {"http", "https"} or not hostname:
+            raise ValueError("模型端点必须是带主机名的 HTTP(S) URL")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("模型端点 URL 不得内嵌凭据")
+        if parsed.query or parsed.fragment or "?" in value or "#" in value:
+            raise ValueError("模型端点 URL 不得包含查询参数或片段")
+        return value
+
+    @model_validator(mode="after")
+    def _transport_matches_url(self) -> ModelConnectionView:
+        parsed = urlsplit(self.base_url)
+        if parsed.scheme == "https":
+            expected: ConnectionTransport = "https"
+        else:
+            hostname = (parsed.hostname or "").rstrip(".").lower()
+            try:
+                loopback = ipaddress.ip_address(hostname).is_loopback
+            except ValueError:
+                loopback = hostname == "localhost"
+            expected = "loopback_http" if loopback else "plaintext_http"
+        if self.transport != expected:
+            raise ValueError("模型端点的 transport 与 URL 不一致")
+        return self
+
+
+# ---- 计划 / 工具 / 审批 ----------------------------------------------------
+
+
+PlanStepStatus = Literal["pending", "running", "completed", "failed", "skipped", "blocked"]
+
+
+class PlanStepView(_Dto):
+    """计划步骤。**完成一步不等于完成整个任务**，状态由 Graph 给出，页面不自算。"""
+
+    step_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    status: PlanStepStatus
+
+
+class PlanView(_Dto):
+    goal: str = Field(min_length=1)
+    steps: list[PlanStepView] = Field(default_factory=list)
+
+
+ToolStatus = Literal["pending", "running", "ok", "error", "denied"]
+
+ToolOutcomeKind = Literal["read", "list", "edit", "write", "delete", "shell"]
+
+FileDiffLineKind = Literal["context", "add", "del"]
+
+
+class FileDiffLineView(_Dto):
+    """unified diff 的一行（§15.8 工具行）。
+
+    `old_line`/`new_line` 是**解析出来的行号**：新增行在旧文件里没有行号（`None`），
+    删除行在新文件里没有行号。页面据此对齐两侧 gutter，不需要自己数行。
+    """
+
+    kind: FileDiffLineKind
+    old_line: int | None = Field(default=None, ge=1)
+    new_line: int | None = Field(default=None, ge=1)
+    text: str
+
+
+class FileDiffHunkView(_Dto):
+    """一个 hunk：`@@ -x,y +z,w @@` 头部加它覆盖的行。"""
+
+    header: str
+    lines: list[FileDiffLineView] = Field(default_factory=list)
+
+
+class FileDiffView(_Dto):
+    """结构化的文件改动（§15.8 工具行）。
+
+    这是"已解析"的 diff，不是一段文本：页面直接渲染 hunk 与行号，**不从自然语言或
+    unified diff 文本里重新解析**（架构 §6.1）。`additions`/`deletions` 如实计数
+    hunk 里的 `+`/`-` 行，供卡片折叠时显示。
+    """
+
+    #: 规范化目标（工作区相对路径或已脱敏路径）。
+    path: str
+    additions: int = Field(ge=0)
+    deletions: int = Field(ge=0)
+    hunks: list[FileDiffHunkView] = Field(default_factory=list)
+
+
+class ToolOutcomeView(_Dto):
+    """工具结果的**结构化、有界**展示分区（§15.8 工具行）。
+
+    页面用它把"输出详情"分成路径、结果摘要、正文与 stdout/stderr 几块，而不是从自然语言里
+    重新猜结构。所有正文都按展示上限截断：`truncated=True` 表示这里只是有界预览，完整内容仍
+    保存在本地工具事件中，不进入页面（§15.8）。
+
+    认不出的工具或解析不出的载荷**不产出**这个对象（`None`）：调用方必须退回安全的通用渲染器，
+    不能把一段任意文本当成已知工具的结构。
+    """
+
+    kind: ToolOutcomeKind
+    #: 规范化目标（工作区相对路径或命令 cwd）；投影层给不出时为空。
+    target: str | None = None
+    #: 一行结果摘要（变更行数、条目数、退出码、字节数……）。
+    summary: str | None = None
+    #: 有界正文：读取内容或 diff 文本。
+    text: str | None = None
+    #: 结构化文件改动；只有能解析出 unified diff 的工具（当前是 `edit_file`）才有。
+    diff: FileDiffView | None = None
+    #: 路径列表（目录清单等）；有界。
+    paths: list[str] = Field(default_factory=list)
+    #: 总条目数或文件总行数；未知为 `None`。
+    total: int | None = Field(default=None, ge=0)
+    stdout: str | None = None
+    stderr: str | None = None
+    exit_code: int | None = None
+    timed_out: bool | None = None
+    truncated: bool = False
+
+
+class ToolEvidenceView(_Dto):
+    """一次工具调用的机械校验证据（§4.3、§6.7）。
+
+    `summary` 是**已脱敏**的可读摘要；`verified` 来自反思层的机械校验，不是模型的自我评价。
+    """
+
+    evidence_type: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    verified: bool
+
+
+class ToolUseView(_Dto):
+    """一次工具调用的可见信息（§15.8 工具行）。
+
+    `redacted_arguments` 的值是**已脱敏的展示字符串**：布尔、数字与嵌套结构由投影层渲染成字符串，
+    因此 DTO 结构上不可能携带任意对象或未脱敏原文。
+
+    `outcome` 与 `evidence` 是可空的结构化分区：认不出的工具没有 `outcome`（页面走通用渲染器），
+    尚未结算的调用没有 `evidence`（那是本轮收尾后由工具事件重算的事实）。
+    """
+
+    tool_call_id: str = Field(min_length=1)
+    tool_name: str = Field(min_length=1)
+    status: ToolStatus
+    redacted_arguments: dict[str, str] = Field(default_factory=dict)
+    approval_id: str | None = None
+    output_preview: str | None = None
+    output_digest: str | None = None
+    truncated: bool = False
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    elapsed_ms: int | None = Field(default=None, ge=0)
+    outcome: ToolOutcomeView | None = None
+    evidence: ToolEvidenceView | None = None
+
+    @field_validator("started_at", "finished_at")
+    @classmethod
+    def _tz(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _require_timezone(value)
+
+
+ApprovalState = Literal["pending", "executing", "approved", "rejected", "expired"]
+
+
+class ApprovalView(_Dto):
+    """审批的**派生视图状态**。
+
+    底层只有 `pending_approval` 与 `approval_history`（决定值 `approve`/`edit`/`reject`），没有状态机字段。
+    映射规则（T28 实现）：运行活跃且存在待决请求 → `pending`；决定已被接受、工具仍在跑 → `executing`；
+    `approve` → `approved`；`reject` → `rejected`；运行在待决期间结束 → `expired`。
+    `edit` 目前归入 `approved`，被改写的参数通过 `edited_arguments` 携带，不新增页面状态。
+    """
+
+    approval_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    tool_call_id: str = Field(min_length=1)
+    tool_name: str = Field(min_length=1)
+    #: 动作指纹（已哈希）：用于说明"这次批准只对这一份参数有效"。
+    action_fingerprint: str = Field(min_length=1)
+    redacted_arguments: dict[str, str] = Field(default_factory=dict)
+    edited_arguments: dict[str, str] = Field(default_factory=dict)
+    #: 规范化展示目标：工作区相对路径或命令 cwd；投影层给不出时为空。
+    target: str | None = None
+    outside_workspace: bool = False
+    confirmation_stage: Literal[1, 2] = 1
+    impact_summary: str = Field(min_length=1)
+    risk: Literal["normal", "high"]
+    state: ApprovalState
+    created_at: datetime
+    #: 失效或被拒绝时的说明；正文由调用方给出，不含原始异常。
+    note: str | None = None
+
+    @field_validator("created_at")
+    @classmethod
+    def _tz(cls, value: datetime) -> datetime:
+        return _require_timezone(value)
+
+
+# ---- 记忆 / RAG（§15.8）---------------------------------------------------
+
+
+RetrievalOutcome = Literal["hit", "miss", "failed"]
+RetrievalSourceKind = Literal["workspace_file", "long_term_memory", "session_history"]
+
+
+class RetrievalSourceView(_Dto):
+    """安全引用：只给定位与用途，**不给正文、向量或内部评分**。"""
+
+    kind: RetrievalSourceKind
+    #: 形如 `path:line_start-line_end` 或记忆条目 id + 写入时间。
+    reference: str = Field(min_length=1)
+    usage: str = Field(min_length=1)
+
+
+class MemoryUseView(_Dto):
+    """一轮的检索与长期记忆结果。
+
+    `miss`（查了没有）与 `failed`（看不了）是两个不同事实，不得合并；写入失败不影响本轮回答。
+    """
+
+    retrieval_outcome: RetrievalOutcome
+    sources: list[RetrievalSourceView] = Field(default_factory=list)
+    retrieval_note: str = Field(min_length=1)
+    write_outcome: Literal["written", "failed"] | None = None
+    write_detail: str | None = None
+
+
+# ---- 消息 ------------------------------------------------------------------
+
+
+class UserMessageView(_Dto):
+    kind: Literal["user"] = "user"
+    message_id: str = Field(min_length=1)
+    text: str
+    #: **可空**：Checkpoint 里的 LangChain 消息不携带时间戳，投影层不伪造时间（T28 实测）。
+    #: 用量记录落地后（§15.6 的 `model_call_records`）可由调用记录补齐。
+    created_at: datetime | None = None
+
+    @field_validator("created_at")
+    @classmethod
+    def _tz(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _require_timezone(value)
+
+
+class AssistantMessageView(_Dto):
+    kind: Literal["assistant"] = "assistant"
+    message_id: str = Field(min_length=1)
+    text: str
+    #: 与 `UserMessageView.created_at` 同理：没有时间戳就是 `None`。
+    created_at: datetime | None = None
+    #: 产生这段回答的模型调用；流式未完成时 `complete=False`，由 Checkpoint 的稳定消息 id 接管终态。
+    model_call_id: str | None = None
+    complete: bool = True
+
+    @field_validator("created_at")
+    @classmethod
+    def _tz(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _require_timezone(value)
+
+
+class ToolMessageView(_Dto):
+    kind: Literal["tool"] = "tool"
+    message_id: str = Field(min_length=1)
+    tool: ToolUseView
+
+
+class MemoryMessageView(_Dto):
+    kind: Literal["memory"] = "memory"
+    message_id: str = Field(min_length=1)
+    memory: MemoryUseView
+
+
+class ErrorMessageView(_Dto):
+    kind: Literal["error"] = "error"
+    message_id: str = Field(min_length=1)
+    error: ErrorView
+
+
+MessageView = Annotated[
+    UserMessageView
+    | AssistantMessageView
+    | ToolMessageView
+    | MemoryMessageView
+    | ErrorMessageView,
+    Field(discriminator="kind"),
+]
+
+
+# ---- 用量（§15.6）---------------------------------------------------------
+
+
+def cache_hit_ratio(
+    uncached_input_tokens: int | None,
+    cache_read_tokens: int | None,
+    cache_write_tokens: int | None,
+) -> float | None:
+    """命中率 = 读缓存 /（未缓存输入 + 读缓存 + 写缓存）。
+
+    分母为零或任一字段未知时返回 `None`：**不显示百分比**，也不写成 0（§15.6）。
+    明确返回零才算 0.0。
+    """
+    if (
+        uncached_input_tokens is None
+        or cache_read_tokens is None
+        or cache_write_tokens is None
+    ):
+        return None
+    total = uncached_input_tokens + cache_read_tokens + cache_write_tokens
+    if total <= 0:
+        return None
+    return cache_read_tokens / total
+
+
+def context_usage_ratio(used_tokens: int | None, window_tokens: int | None) -> float | None:
+    """计量器比例：任一侧未知或窗口非正时返回 `None`（显示"未知"，不猜 0%）。"""
+    if used_tokens is None or window_tokens is None or window_tokens <= 0:
+        return None
+    return min(used_tokens / window_tokens, 1.0)
+
+
+class ModelCallRecordView(_Dto):
+    """一次模型调用的记录（§15.6）。
+
+    **重试使用新的 `model_call_id`**，用 `retry_of` 关联，不覆盖失败尝试。
+    """
+
+    model_call_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    purpose: str = Field(min_length=1)
+    connection_id: str = Field(min_length=1)
+    config_version: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    model_id: str = Field(min_length=1)
+    #: 端点安全指纹（不含密钥），用于确认"缓存基线可比"。
+    endpoint_fingerprint: str = Field(min_length=1)
+    retry_of: str | None = None
+    started_at: datetime
+    first_token_at: datetime | None = None
+    finished_at: datetime | None = None
+    status: Literal["running", "ok", "error", "aborted"]
+    estimated_prompt_tokens: int | None = Field(default=None, ge=0)
+    actual_uncached_input_tokens: int | None = Field(default=None, ge=0)
+    actual_cache_read_tokens: int | None = Field(default=None, ge=0)
+    actual_cache_write_tokens: int | None = Field(default=None, ge=0)
+    actual_output_tokens: int | None = Field(default=None, ge=0)
+    actual_reasoning_tokens: int | None = Field(default=None, ge=0)
+    #: 供应商是否上报了缓存字段。`False` 时页面显示"未上报"，而不是显示 0%。
+    cache_metrics_reported: bool = False
+    model_elapsed_ms: int | None = Field(default=None, ge=0)
+    time_to_first_token_ms: int | None = Field(default=None, ge=0)
+    context_window_tokens: int | None = Field(default=None, gt=0)
+    context_used_tokens: int | None = Field(default=None, ge=0)
+    tools_schema_fingerprint: str | None = None
+    system_prompt_fingerprint: str | None = None
+    history_prefix_fingerprint: str | None = None
+    dynamic_context_fingerprint: str | None = None
+
+    @field_validator("started_at", "first_token_at", "finished_at")
+    @classmethod
+    def _tz(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _require_timezone(value)
+
+
+#: 一轮的终态。``blocked``：本轮已结束，但目标未达成、在等用户补充信息（与 ``awaiting_approval``
+#: 并列的第二种"等待"——前者等用户做决定，后者等用户给信息）。
+TurnFinalState = Literal["running", "awaiting_approval", "blocked", "completed", "failed"]
+
+
+class TurnRecordView(_Dto):
+    """一轮（一次用户提交到终态）的汇总记录（§15.6）。
+
+    用途有二：刷新恢复的用量真源，以及页面统计行的确定性来源。聚合值必须由明细计算得出，
+    因此这里同时给出 `model_call_ids` / `tool_event_ids` 以便核对。
+    """
+
+    run_id: str = Field(min_length=1)
+    submitted_at: datetime
+    final_at: datetime | None = None
+    final_state: TurnFinalState
+    model_call_ids: list[str] = Field(default_factory=list)
+    tool_event_ids: list[str] = Field(default_factory=list)
+    approval_wait_ms: int | None = Field(default=None, ge=0)
+    turn_elapsed_ms: int | None = Field(default=None, ge=0)
+    model_elapsed_ms: int | None = Field(default=None, ge=0)
+    tool_elapsed_ms: int | None = Field(default=None, ge=0)
+    time_to_first_token_ms: int | None = Field(default=None, ge=0)
+    estimated_prompt_tokens: int | None = Field(default=None, ge=0)
+    actual_uncached_input_tokens: int | None = Field(default=None, ge=0)
+    actual_cache_read_tokens: int | None = Field(default=None, ge=0)
+    actual_cache_write_tokens: int | None = Field(default=None, ge=0)
+    actual_output_tokens: int | None = Field(default=None, ge=0)
+    actual_reasoning_tokens: int | None = Field(default=None, ge=0)
+    cache_metrics_reported: bool = False
+    cache_hit_ratio: float | None = Field(default=None, ge=0, le=1)
+    context_used_tokens: int | None = Field(default=None, ge=0)
+    context_window_tokens: int | None = Field(default=None, gt=0)
+    context_usage_ratio: float | None = Field(default=None, ge=0, le=1)
+    #: 老 Checkpoint 没有这些记录时必须显式说明，不能伪造估算或零值（§15.6）。
+    usage_recorded: bool = True
+
+    @field_validator("submitted_at", "final_at")
+    @classmethod
+    def _tz(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _require_timezone(value)
+
+
+class TurnUsageView(_Dto):
+    """持久轮次与其消息锚点；供刷新后把统计放回对应轮次。"""
+
+    user_message_id: str = Field(min_length=1)
+    usage: TurnRecordView
+    model_calls: list[ModelCallRecordView] = Field(default_factory=list)
+
+
+# ---- 上下文快照（§15.7）---------------------------------------------------
+
+
+class RuntimeSourceVersionView(_Dto):
+    """来源与其版本/安全引用；只记引用，不复制正文或密钥。"""
+
+    source: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+
+
+class RuntimeContextSnapshotView(_Dto):
+    """**公开**的运行上下文快照视图。
+
+    刻意**不含** `canonical_text`：提示词正文属于"明确不展示"的一类（§15.8）。页面可以显示上下文
+    快照的标识、版本、内容哈希与来源版本，用来解释"这一轮带了哪些上下文"，但不能显示其文本。
+    """
+
+    schema_version: int = SCHEMA_VERSION
+    snapshot_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    context_version: int = Field(ge=0)
+    created_at: datetime
+    content_hash: str = Field(min_length=1)
+    #: `canonical_text` 的字符数：用于判断快照是否变化，不泄露内容。
+    text_length: int = Field(ge=0)
+    source_versions: list[RuntimeSourceVersionView] = Field(default_factory=list)
+
+    @field_validator("created_at")
+    @classmethod
+    def _tz(cls, value: datetime) -> datetime:
+        return _require_timezone(value)
+
+
+# ---- 上下文计量器（§15.6）-------------------------------------------------
+
+
+ContextMeterScope = Literal["current", "previous", "unknown"]
+
+
+class ContextMeterView(_Dto):
+    """圆形计量器的口径。
+
+    `scope`：执行中为 `current`（正在组装的这一次请求），空闲为 `previous`（装配器上一次构造的请求），
+    从未组装或窗口未知为 `unknown`。
+    """
+
+    used_tokens: int | None = Field(default=None, ge=0)
+    window_tokens: int | None = Field(default=None, gt=0)
+    scope: ContextMeterScope = "unknown"
+    #: 输出预留单列，不重复计入已用输入。
+    completion_reserve_tokens: int | None = Field(default=None, ge=0)
+
+
+# ---- 会话快照（§15.4 / §6.6）---------------------------------------------
+
+
+SessionState = Literal["idle", "running", "awaiting_approval", "blocked", "completed", "failed"]
+
+#: 一轮最终结果的对外状态。``blocked``：本轮已结束、这条回答有效，但目标未达成（在等用户补充）。
+#: 它既不能冒充 ``completed``，也不该被当成 ``failed`` 丢掉——它带着一条真实生成的回答。
+FinalResultState = Literal["completed", "blocked", "failed"]
+
+
+class FinalResultView(_Dto):
+    """本轮最终结果的可读摘要与证据引用。"""
+
+    run_id: str = Field(min_length=1)
+    state: FinalResultState
+    summary: str
+    evidence_references: list[str] = Field(default_factory=list)
+
+
+class ModelSelectionView(_Dto):
+    """某个作用域**当前选中的连接**（默认或某个会话的下一轮模型）。
+
+    `connection_id` 与 `config_version` 与连接视图同源、也同义：页面把这两个值**原样回传**
+    做写入校验（§6.1 的"选择也必须按版本校验"）。因此它必须来自设置库的那一行，
+    不能由页面自己拼。
+    """
+
+    connection_id: str = Field(min_length=1)
+    config_version: str = Field(min_length=1)
+
+
+class SessionSnapshot(_Dto):
+    """`session_snapshot` 事件的载荷，也是刷新恢复的权威展示状态。
+
+    只读：生成快照不得写回 State、调用模型或执行工具（§15.4）。`schema_version` 与
+    `snapshot_id` 一起让恢复逻辑能判断"这份快照来自哪个契约版本"。
+    """
+
+    schema_version: int = SCHEMA_VERSION
+    snapshot_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    workspace: WorkspaceRef
+    title: str
+    session_state: SessionState
+    #: 空会话没有当前任务，这里就是 `None`——不得用随机占位值填充（§15.4）。
+    current_task: TaskRef | None = None
+    messages: list[MessageView] = Field(default_factory=list)
+    plan: PlanView | None = None
+    approval: ApprovalView | None = None
+    memory: MemoryUseView | None = None
+    #: 这个会话**自己的**下一轮模型选择；`None` = 跟随默认连接。
+    #: 页面据此把"我看到的选择"回传，写入才不会被另一个页面悄悄覆盖（§6.1）。
+    #: 只读展示，切换它不修改正在运行的那一轮（那一轮用提交时固定的连接）。
+    model_selection: ModelSelectionView | None = None
+    errors: list[ErrorView] = Field(default_factory=list)
+    usage: TurnRecordView | None = None
+    #: 本轮逐次模型调用明细（§15.6）：统计行的可展开部分用它，来源与 `usage` 同为 Checkpoint
+    #: 里的 `model_call_records`，所以刷新与重启后仍在（不是只有事件流里才看得到）。每次重试是
+    #: 独立一条，用 `retry_of` 关联；没有记录（旧 Checkpoint）时为空列表，页面据此不显示明细。
+    model_calls: list[ModelCallRecordView] = Field(default_factory=list)
+    turn_usages: list[TurnUsageView] = Field(default_factory=list)
+    context: ContextMeterView = Field(default_factory=ContextMeterView)
+    runtime_context: RuntimeContextSnapshotView | None = None
+    final_result: FinalResultView | None = None
+    created_at: datetime
+
+    @field_validator("created_at")
+    @classmethod
+    def _tz(cls, value: datetime) -> datetime:
+        return _require_timezone(value)
+
+
+class SessionSummaryView(_Dto):
+    """会话列表里的一行。
+
+    **不含运行状态**：运行中/等待审批/已完成要从该会话线程的 Checkpoint 推出来，逐行读所有线程的
+    Checkpoint 不属于列表用例。T30 的列表工作要么按需读、要么落一份会话级摘要；本节不伪造状态。
+    """
+
+    session_id: str = Field(min_length=1)
+    thread_id: str = Field(min_length=1)
+    title: str
+    workspace: WorkspaceRef
+    #: 是否是"当前打开的会话"（`sessions.status='active'` 全库唯一）。
+    is_active: bool = False
+    created_at: datetime
+    updated_at: datetime
+    last_checkpoint_id: str | None = None
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def _tz(cls, value: datetime) -> datetime:
+        return _require_timezone(value)
+
+
+Operation = Literal["submit_message", "resolve_approval"]
+
+
+class CommandResultView(_Dto):
+    """一次**执行状态修改**的命令结果引用（§6.2）。
+
+    POST 完成时必须能凭它确认结局，不需要 SSE 才能知道命令成没成。`replayed=True` 表示
+    这条结果是幂等台账给的（本次没有真的跑图）。
+    """
+
+    request_id: str = Field(min_length=1)
+    operation: Operation
+    session_id: str = Field(min_length=1)
+    run_id: str | None = None
+    #: 稳定结果引用：本次命令对应的 Checkpoint 快照标识。
+    snapshot_id: str = Field(min_length=1)
+    status: Literal["completed", "awaiting_approval", "failed"]
+    session_state: SessionState
+    replayed: bool = False
+    error: ErrorView | None = None
+
+
+def redact_values(values: Mapping[str, str], secrets: list[str]) -> dict[str, str]:
+    """把已知密钥值从展示字符串里抹掉（复用 v0.3 的脱敏入口，保持同一套规则）。
+
+    `local_agent.config.redact_secrets` 是既有实现；这里只做薄封装，避免应用层各处自己拼替换逻辑。
+    """
+    from local_agent.config import redact_secrets
+
+    return {key: redact_secrets(text, secrets) for key, text in values.items()}

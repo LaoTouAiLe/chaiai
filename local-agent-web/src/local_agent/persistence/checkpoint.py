@@ -25,8 +25,10 @@ from local_agent.graph.state import (
     MemoryCandidate,
     PlanStep,
     ReflectionResult,
+    RuntimeContextSnapshot,
     ToolEvent,
 )
+from local_agent.llm.usage_recording import ModelCallRecord, TurnRecord
 from local_agent.persistence import migrations
 from local_agent.persistence.session_store import SessionStore
 
@@ -50,10 +52,13 @@ CHECKPOINT_ALLOWED_TYPES: tuple[type, ...] = (
     ContextBudget,
     EvidenceReference,
     MemoryCandidate,
+    ModelCallRecord,
     PlanStep,
     ReflectionResult,
+    RuntimeContextSnapshot,
     TokenUsage,
     ToolEvent,
+    TurnRecord,
 )
 
 

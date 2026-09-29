@@ -1,0 +1,478 @@
+.overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--law-bg-mask);
+}
+
+/* Measured from the frozen reference: 800×800, radius 24px, elevation lv3. */
+.dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(800px, calc(100vw - 48px));
+  height: min(800px, calc(100vh - 48px));
+  border-radius: var(--law-radius-3xl);
+  background: var(--law-bg-layer-1);
+  box-shadow: var(--law-shadow-lv3);
+  overflow: hidden;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--law-space-xl);
+  padding: var(--law-space-2xl) var(--law-space-3xl) var(--law-space-xl);
+  border-bottom: 1px solid var(--law-border-l1);
+}
+
+.title {
+  font-size: var(--law-text-xl);
+  line-height: var(--law-leading-xl);
+  font-weight: var(--law-weight-semibold);
+}
+
+.subtitle {
+  margin-top: var(--law-space-xxs);
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: var(--law-radius-md);
+  color: var(--law-text-tertiary);
+}
+
+.close:hover {
+  background: var(--law-button-ghost-hover);
+  color: var(--law-text-primary);
+}
+
+.body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--law-space-2xl) var(--law-space-3xl) var(--law-space-3xl);
+}
+
+.sectionHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--law-space-xl);
+}
+
+.sectionTitle {
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  font-weight: var(--law-weight-medium);
+}
+
+.sectionNote {
+  margin-top: var(--law-space-xxs);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.primary {
+  height: 32px;
+  flex: 0 0 auto;
+  padding: 0 var(--law-space-2xl);
+  border-radius: var(--law-radius-md);
+  background: var(--law-button-primary-fill);
+  color: var(--law-text-on-brand);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  font-weight: var(--law-weight-medium);
+}
+
+.primary:hover {
+  background: var(--law-button-primary-hover);
+}
+
+.storeWarning {
+  margin-top: var(--law-space-lg);
+  padding: var(--law-space-md) var(--law-space-lg);
+  border: 1px solid var(--law-state-warn-secondary);
+  border-radius: var(--law-radius-md);
+  background: var(--law-state-warn-subtle);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+/* ---- empty state ------------------------------------------------------- */
+
+.empty {
+  margin-top: var(--law-space-xl);
+  padding: var(--law-space-4xl) var(--law-space-3xl);
+  border: 1px dashed var(--law-border-l3);
+  border-radius: var(--law-radius-lg);
+  text-align: center;
+}
+
+.emptyTitle {
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  font-weight: var(--law-weight-medium);
+}
+
+.emptyText {
+  margin: var(--law-space-sm) auto 0;
+  max-width: 460px;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-md);
+}
+
+/* ---- connection cards -------------------------------------------------- */
+
+.cards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-lg);
+  margin-top: var(--law-space-xl);
+}
+
+.card {
+  padding: var(--law-space-lg) var(--law-space-xl);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+  background: var(--law-bg-layer-1);
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  min-width: 0;
+}
+
+.cardName {
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  font-weight: var(--law-weight-medium);
+}
+
+.defaultTag {
+  flex: 0 0 auto;
+  padding: 0 var(--law-space-sm);
+  border-radius: var(--law-radius-xs);
+  background: var(--law-state-info-subtle);
+  color: var(--law-accent-700);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+  font-weight: var(--law-weight-medium);
+}
+
+.status {
+  flex: 0 0 auto;
+  padding: 0 var(--law-space-sm);
+  border-radius: var(--law-radius-xs);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+}
+
+.statusVerified {
+  background: var(--law-state-success-subtle);
+  color: var(--law-diff-add-text);
+}
+
+.statusUnverified {
+  background: var(--law-surface-selector);
+  color: var(--law-text-secondary);
+}
+
+.statusTesting {
+  background: var(--law-state-warn-subtle);
+  color: var(--law-state-warn-label);
+}
+
+.statusFailed {
+  background: var(--law-state-error-subtle);
+  color: var(--law-state-error);
+}
+
+.statusUnsupported {
+  background: var(--law-state-warn-subtle);
+  color: var(--law-state-warn-label);
+}
+
+.cardId {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--law-text-caption);
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+}
+
+.cardFacts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--law-space-xs) var(--law-space-2xl);
+  margin: var(--law-space-md) 0 0;
+}
+
+.fact {
+  display: flex;
+  gap: var(--law-space-md);
+  align-items: baseline;
+  min-width: 0;
+}
+
+.fact dt {
+  flex: 0 0 40px;
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.fact dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.mono {
+  font-family: var(--law-font-mono);
+  color: var(--law-text-primary);
+}
+
+/* Plaintext transport mark (plan §6.8). Kept on the card after saving. */
+.risk {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--law-space-sm);
+  margin-top: var(--law-space-md);
+  padding: var(--law-space-xs) var(--law-space-md);
+  border: 1px solid var(--law-state-error-secondary);
+  border-radius: var(--law-radius-sm);
+  background: var(--law-state-error-subtle);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.riskTag {
+  flex: 0 0 auto;
+  padding: 0 var(--law-space-xs);
+  border-radius: var(--law-radius-xs);
+  background: var(--law-state-error);
+  color: var(--law-text-on-brand);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+  font-weight: var(--law-weight-medium);
+}
+
+.capabilities {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm);
+  margin-top: var(--law-space-md);
+}
+
+.capability {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--law-space-xs);
+  padding: var(--law-space-xxs) var(--law-space-sm);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-xs);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+}
+
+.capPassed {
+  color: var(--law-diff-add-text);
+}
+
+.capFailed {
+  color: var(--law-state-error);
+}
+
+.capUnknown {
+  color: var(--law-text-tertiary);
+}
+
+.cardDetail {
+  margin-top: var(--law-space-md);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-md);
+}
+
+.pendingApply {
+  margin-top: var(--law-space-sm);
+  color: var(--law-state-warn-label);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.cardActions,
+.confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  margin-top: var(--law-space-lg);
+}
+
+.confirm {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.confirmText {
+  flex: 1 1 320px;
+  color: var(--law-state-error);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.action,
+.cancel {
+  height: 30px;
+  padding: 0 var(--law-space-xl);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-md);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.action:hover,
+.cancel:hover {
+  background: var(--law-button-ghost-hover);
+}
+
+.actionDanger {
+  height: 30px;
+  margin-left: auto;
+  padding: 0 var(--law-space-xl);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-md);
+  color: var(--law-state-error);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.actionDanger:hover {
+  background: var(--law-hover-danger);
+}
+
+.danger {
+  height: 30px;
+  padding: 0 var(--law-space-xl);
+  border-radius: var(--law-radius-md);
+  background: var(--law-state-error);
+  color: var(--law-text-on-brand);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  font-weight: var(--law-weight-medium);
+}
+
+/* 新增/编辑连接的表单（T29A）。与对话框共用同一套 token，避免另起一套尺度。 */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-lg);
+  padding: var(--law-space-xl);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+  background: var(--law-bg-layer-1);
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--law-space-lg);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xs);
+  min-width: 0;
+}
+
+.label {
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  color: var(--law-text-secondary);
+}
+
+.input {
+  height: 32px;
+  min-width: 0;
+  padding: 0 var(--law-space-md);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-md);
+  background: var(--law-bg-layer-1);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.input:disabled {
+  color: var(--law-text-tertiary);
+}
+
+.checkboxRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--law-space-sm);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-text-secondary);
+}
+
+.formError {
+  margin: 0;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-state-error);
+}
+
+.hint {
+  margin: 0;
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  color: var(--law-text-tertiary);
+}
+
+.formActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--law-space-md);
+}
+
+.ghost {
+  height: 32px;
+  padding: 0 var(--law-space-2xl);
+  border-radius: var(--law-radius-md);
+  background: transparent;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.ghost:hover {
+  background: var(--law-button-ghost-hover);
+}

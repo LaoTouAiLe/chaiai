@@ -1,0 +1,123 @@
+/**
+ * Inline monochrome icons.
+ *
+ * They inherit `currentColor` and carry no product marks: v0.4 must not reuse
+ * the reference's brand or proprietary icon assets
+ * (`local-agent-web/docs/ui-reference/README.md` §4).
+ */
+
+interface IconProps {
+  size?: number
+}
+
+export function ChevronRight({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <path
+        d="M4.5 2.5 8 6l-3.5 3.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+export function Check({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <path
+        d="M2.5 6.5 5 9l4.5-6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+export function Cross({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <path
+        d="M3 3l6 6M9 3l-6 6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+export function WarningTriangle({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" aria-hidden="true" focusable="false">
+      <path
+        d="M7 1.6 13 12.4H1L7 1.6Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <path d="M7 5.6v3.1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <circle cx="7" cy="10.6" r="0.8" fill="currentColor" />
+    </svg>
+  )
+}
+
+export function Copy({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <rect x="1.5" y="1.5" width="6" height="6" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M4.5 10.5h4.4a1.6 1.6 0 0 0 1.6-1.6V4.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </svg>
+  )
+}
+
+export function Pencil({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <path
+        d="M8.2 1.9 10.1 3.8 4.6 9.3 2 9.9l.6-2.6 5.6-5.4Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+export function Close({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <path d="M3 3l6 6M9 3l-6 6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+export function Doc({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <path
+        d="M3 1.5h4l2.5 2.5v6.5H3V1.5Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path d="M7 1.8V4h2.3" fill="none" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  )
+}

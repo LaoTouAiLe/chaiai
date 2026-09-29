@@ -571,7 +571,7 @@ def test_sidebar_management_lines_count_long_term_memory(tmp_path: Path) -> None
     _seed(database, project=project_id_for(tmp_path))
     app = SimpleNamespace(app_config=_config(database), workspace_root=tmp_path)
 
-    lines, warn = web.memory_management_lines(app)  # type: ignore[arg-type]
+    lines, warn = web.memory_management_lines(app.app_config, app.workspace_root)
 
     assert warn is False
     assert any("事实 1 条" in line for line in lines)
@@ -581,6 +581,6 @@ def test_sidebar_management_lines_count_long_term_memory(tmp_path: Path) -> None
     broken_path = tmp_path / "not-a-database"
     broken_path.mkdir()
     broken = SimpleNamespace(app_config=_config(broken_path), workspace_root=tmp_path)
-    lines, warn = web.memory_management_lines(broken)  # type: ignore[arg-type]
+    lines, warn = web.memory_management_lines(broken.app_config, broken.workspace_root)
     assert warn is True
     assert lines and "打不开" in lines[0]

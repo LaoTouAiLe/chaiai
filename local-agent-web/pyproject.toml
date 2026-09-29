@@ -20,6 +20,9 @@ dependencies = [
   "pyyaml",
   "python-dotenv",
   "filelock",
+  "fastapi>=0.141.1",
+  "uvicorn>=0.52.4",
+  "keyring>=25.7.0",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +36,13 @@ memory = ["chromadb>=1.5,<1.6", "tiktoken", "fastembed>=0.8,<0.9"]
 # 缺失时退化为有界 Python 扫描。局部 AST 若经实测加入，再单独开一个可选组。
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio", "ruff", "mypy"]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ruff",
+    "mypy",
+    "httpx>=0.28.1",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

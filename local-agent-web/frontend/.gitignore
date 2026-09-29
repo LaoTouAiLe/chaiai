@@ -1,0 +1,9 @@
+node_modules/
+dist/
+test-results/
+playwright-report/
+.artifacts/
+*.tsbuildinfo
+
+# Machine-local Playwright browser location (see playwright.config.ts).
+playwright.local.json

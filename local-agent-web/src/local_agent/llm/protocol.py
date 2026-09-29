@@ -17,14 +17,21 @@ import json
 import logging
 import re
 from collections.abc import Sequence
+from functools import partial
 from typing import Any, TypeVar
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, SystemMessage
 from pydantic import BaseModel, ValidationError
 
+from local_agent.context.token_budget import estimate_messages_tokens
 from local_agent.exceptions import LocalAgentError
 from local_agent.llm.models import ModelCapabilities
+from local_agent.llm.usage_recording import (
+    begin_model_call,
+    finish_model_call,
+    record_model_call,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +82,20 @@ def call_structured(
 
     if capabilities is not None and capabilities.structured_json_schema:
         try:
-            result = model.with_structured_output(schema, method="json_schema").invoke(
-                list(messages)
-            )
+            # ``include_raw=True`` 是为了拿到原始消息：结构化调用的返回值是解析后的对象，
+            # 用量只在 ``raw`` 上，必须借它记录实际用量（§15.6：所有调用路径都要有实际量）。
+            structured = model.with_structured_output(schema, method="json_schema", include_raw=True)
+            handle = begin_model_call(estimated_prompt_tokens=estimate_messages_tokens(messages), messages=messages)
+            try:
+                envelope: Any = structured.invoke(list(messages))
+            except BaseException:
+                finish_model_call(handle, status="error")
+                raise
+            raw = envelope.get("raw") if isinstance(envelope, dict) else None
+            if handle is not None and raw is not None:
+                handle.usage_from(raw)
+            finish_model_call(handle, status="ok")
+            result = envelope.get("parsed") if isinstance(envelope, dict) else envelope
             if isinstance(result, schema):
                 return result
             last_error = "原生 JSON Schema 返回类型不符"
@@ -94,7 +112,12 @@ def call_structured(
         payload = [instruction, *messages]
         if attempt > 0:
             payload = [*payload, SystemMessage(content=_RETRY_INSTRUCTION.format(error=last_error))]
-        response = model.invoke(payload)
+        # `partial` 把本次 payload 固定进可调用对象：不用闭包捕获循环变量（ruff B023）。
+        response = record_model_call(
+            partial(model.invoke, payload),
+            estimated_prompt_tokens=estimate_messages_tokens(payload),
+            messages=payload,
+        )
         try:
             return parse_structured(response, schema)
         except (ValueError, ValidationError) as exc:

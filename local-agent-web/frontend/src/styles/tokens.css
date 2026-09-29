@@ -1,0 +1,189 @@
+/**
+ * Design tokens for the local Agent web UI.
+ *
+ * Values follow the frozen reference baseline
+ * (`local-agent-web/docs/ui-reference/design-tokens.md`): colour, typography,
+ * shadow and motion mirror the reference's visual scale, while radii and
+ * spacing come from the measured values in that document's §7 because the
+ * reference has no tokens for them.
+ *
+ * Only the light theme is in scope for v0.4, so each token is declared once
+ * here instead of splitting into theme layers.
+ */
+
+:root {
+  /* ---- palette: neutral-bluish -------------------------------------- */
+  --law-blue-grey-00: #ffffff;
+  --law-blue-grey-50: #f9fafb;
+  --law-blue-grey-60: #f5f6f7;
+  --law-blue-grey-75: #f1f3f5;
+  --law-blue-grey-100: #ebeef2;
+  --law-blue-grey-150: #e9ecf2;
+  --law-blue-grey-200: #e1e5ee;
+  --law-blue-grey-300: #cfd3d6;
+  --law-blue-grey-400: #adb2b8;
+  --law-blue-grey-500: #979da6;
+  --law-blue-grey-600: #81858c;
+  --law-blue-grey-700: #61666b;
+  --law-blue-grey-750: #43454a;
+  --law-blue-grey-800: #353638;
+  --law-blue-grey-850: #2c2c2e;
+  --law-blue-grey-900: #1b1b1c;
+  --law-blue-grey-950: #151517;
+  --law-blue-grey-1000: #0f1115;
+
+  /* ---- palette: accents --------------------------------------------- */
+  --law-accent-50: #edf3fe;
+  --law-accent-100: #e4edfd;
+  --law-accent-200: #d3e2ff;
+  --law-accent-400: #679efe;
+  --law-accent-500: #4176e6;
+  --law-accent-700: #2f4c8f;
+  --law-red-50: #fef2f2;
+  --law-red-100: #fee2e2;
+  --law-red-400: #f25a5a;
+  --law-red-600: #ec1313;
+  --law-green-100: #e6faed;
+  --law-green-500: #22c55e;
+  --law-amber-100: #fef5e7;
+  --law-amber-400: #f7ad31;
+  --law-amber-500: #f59e0b;
+  --law-amber-600: #dd8629;
+
+  /* ---- surfaces ----------------------------------------------------- */
+  --law-bg-base: var(--law-blue-grey-00);
+  --law-bg-layer-1: var(--law-blue-grey-00);
+  --law-bg-layer-2: var(--law-blue-grey-00);
+  --law-bg-layer-3: var(--law-blue-grey-00);
+  --law-bg-overlay: var(--law-blue-grey-150);
+  --law-bg-skeleton: #0000000a;
+  --law-bg-mask: #0000003d;
+  --law-surface-sidebar: var(--law-blue-grey-50);
+  --law-surface-menu: var(--law-blue-grey-00);
+  --law-surface-bubble: var(--law-accent-50);
+  --law-surface-code: var(--law-blue-grey-50);
+  --law-surface-inline-code: var(--law-blue-grey-100);
+  --law-surface-selector: var(--law-blue-grey-60);
+  --law-surface-tip: var(--law-blue-grey-60);
+  --law-surface-sunken: var(--law-blue-grey-75);
+
+  /* ---- borders ------------------------------------------------------ */
+  --law-border-l1: #0000000a;
+  --law-border-l2: #0000001a;
+  --law-border-l3: #0000001f;
+  --law-border-l4: #00000029;
+
+  /* ---- text --------------------------------------------------------- */
+  --law-text-primary: var(--law-blue-grey-1000);
+  --law-text-secondary: var(--law-blue-grey-700);
+  --law-text-tertiary: var(--law-blue-grey-600);
+  --law-text-caption: var(--law-blue-grey-400);
+  --law-text-dimmed: var(--law-blue-grey-200);
+  --law-text-inverse: var(--law-blue-grey-00);
+  --law-text-on-brand: var(--law-blue-grey-00);
+
+  /* ---- interaction -------------------------------------------------- */
+  --law-hover: #2631480f;
+  --law-hover-solid: var(--law-blue-grey-75);
+  --law-active: #2631481a;
+  --law-active-accent: #26314824;
+  --law-hover-danger: #ec13130d;
+  --law-scrollbar: #e5e5e5;
+  --law-scrollbar-hover: #d4d4d4;
+
+  /* ---- buttons ------------------------------------------------------ */
+  --law-button-primary-fill: var(--law-blue-grey-1000);
+  --law-button-primary-hover: var(--law-blue-grey-750);
+  --law-button-primary-disabled: var(--law-blue-grey-100);
+  --law-button-ghost-fill: var(--law-blue-grey-00);
+  --law-button-ghost-hover: var(--law-blue-grey-75);
+  --law-button-ghost-active-fill: var(--law-blue-grey-100);
+  --law-button-ghost-active-hover: var(--law-blue-grey-150);
+  --law-button-ghost-active-border: var(--law-blue-grey-500);
+  --law-button-info-fill: var(--law-accent-500);
+  --law-button-info-hover: var(--law-accent-400);
+
+  /* ---- state -------------------------------------------------------- */
+  --law-state-success: var(--law-green-500);
+  --law-state-success-subtle: var(--law-green-100);
+  --law-state-warn: var(--law-amber-500);
+  --law-state-warn-secondary: var(--law-amber-400);
+  --law-state-warn-label: var(--law-amber-600);
+  --law-state-warn-subtle: var(--law-amber-100);
+  --law-state-error: var(--law-red-600);
+  --law-state-error-secondary: var(--law-red-400);
+  --law-state-error-subtle: var(--law-red-50);
+  --law-state-info: var(--law-accent-500);
+  --law-state-info-subtle: var(--law-accent-100);
+
+  /* ---- diff --------------------------------------------------------- */
+  --law-diff-add-bg: var(--law-green-100);
+  --law-diff-add-text: #16794a;
+  --law-diff-del-bg: var(--law-red-100);
+  --law-diff-del-text: #a81919;
+  --law-diff-gutter: var(--law-blue-grey-400);
+
+  /* ---- typography --------------------------------------------------- */
+  --law-font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --law-font-mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono', Menlo, Courier,
+    'PingFang SC', 'Microsoft YaHei';
+
+  --law-text-xxs: 11px;
+  --law-leading-xxs: 14px;
+  --law-text-xs: 12px;
+  --law-leading-xs: 18px;
+  --law-text-sm: 13px;
+  --law-leading-sm: 20px;
+  --law-text-md: 14px;
+  --law-leading-md: 22px;
+  --law-text-base: 16px;
+  --law-leading-base: 24px;
+  --law-text-lg: 16px;
+  --law-leading-lg: 28px;
+  --law-text-xl: 20px;
+  --law-leading-xl: 28px;
+  --law-weight-regular: 400;
+  --law-weight-medium: 500;
+  --law-weight-semibold: 600;
+  --law-weight-bold: 700;
+
+  /* ---- radii (measured, reference has no radius tokens) -------------- */
+  --law-radius-xs: 4px;
+  --law-radius-sm: 6px;
+  --law-radius-md: 8px;
+  --law-radius-lg: 12px;
+  --law-radius-xl: 16px;
+  --law-radius-2xl: 22px;
+  --law-radius-3xl: 24px;
+  --law-radius-pill: 999px;
+
+  /* ---- spacing ------------------------------------------------------ */
+  --law-space-xxs: 2px;
+  --law-space-xs: 4px;
+  --law-space-sm: 6px;
+  --law-space-md: 8px;
+  --law-space-lg: 12px;
+  --law-space-xl: 16px;
+  --law-space-2xl: 20px;
+  --law-space-3xl: 24px;
+  --law-space-4xl: 32px;
+
+  /* ---- layout (measured) -------------------------------------------- */
+  --law-sidebar-width: 268px;
+  --law-sidebar-width-collapsed: 56px;
+  --law-header-height: 63px;
+  --law-session-row-height: 34px;
+  --law-conversation-max-width: 760px;
+
+  /* ---- elevation ---------------------------------------------------- */
+  --law-shadow-lv1: 0 2px 4px 0 #0000000d;
+  --law-shadow-lv2: 0 4px 12px 0 #00000005, 0 2px 8px 0 #0000000a;
+  --law-shadow-lv3: 0 0 1px 0 #0003, 0 0 4px 0 #00000005, 0 12px 32px 0 #00000014;
+
+  /* ---- motion ------------------------------------------------------- */
+  --law-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --law-duration-fast: 0.1s;
+  --law-duration-base: 0.2s;
+  --law-duration-slow: 0.3s;
+}

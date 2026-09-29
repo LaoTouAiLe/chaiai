@@ -1,82 +1,381 @@
-"""T02/T03/T04 验收：配置加载、模型工厂、图与网页交互。
+"""T33 验收：Streamlit 调试入口只经应用服务（T28）读写，不再解释 State/Graph。
 
-自动测试不依赖网络、不依赖真实密钥：图与页面测试用假模型（见 conftest.py），
-配置测试用临时目录与注入的环境变量。真实模型的手动验收步骤见 README。
+两条硬口径：
+
+1. **页面层只认 DTO 与事件**：`web.py` / `ui/renderer.py` / `ui/approval_ui.py` 不导入 LangGraph、
+   LangChain 消息类、Graph 节点或 ``Command``。于是 Graph 内部节点改名、State 字段变化都不会
+   波及页面代码与这些测试（这正是 T33 要拿掉的那层耦合）。
+2. **两个 UI 同一份事实**：同一 fixture 经 HTTP（React 的通道）、直接应用服务与 Streamlit 页面
+   得到等价业务结果；两边读的是同一个模型设置库；刷新/重启按快照恢复；提交与审批都幂等。
+
+自动测试不联网、不依赖真实密钥：模型是 `conftest.py` 的确定性假模型，装配走
+:func:`local_agent.api.container.open_runtime`（与 HTTP 入口同一套）。
 """
 
 from __future__ import annotations
 
+import gc
 import hashlib
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from fastapi.testclient import TestClient
 
 from local_agent import web
-from local_agent.config import (
-    AppConfig,
-    ConfigError,
-    load_config,
-    redact_secrets,
-    resolve_api_key,
+from local_agent.api.app import create_app
+from local_agent.api.container import open_runtime
+from local_agent.application.errors import ErrorView
+from local_agent.application.models import (
+    AssistantMessageView,
+    ErrorMessageView,
+    FileDiffHunkView,
+    FileDiffLineView,
+    FileDiffView,
+    MemoryMessageView,
+    MemoryUseView,
+    SessionSnapshot,
+    SessionSummaryView,
+    ToolEvidenceView,
+    ToolMessageView,
+    ToolOutcomeView,
+    ToolUseView,
+    UserMessageView,
+    WorkspaceRef,
 )
-from local_agent.graph import builder, nodes
-from local_agent.graph.state import make_decision_record
+from local_agent.config import AppConfig, load_config
 from local_agent.llm import embedding as embedding_module
 from local_agent.llm import factory
+from local_agent.model_settings.models import ConnectionDraft
 from local_agent.persistence import checkpoint
-from local_agent.persistence.session_store import SessionStore
-from local_agent.ui.renderer import config_error_text, to_chat_messages
+from local_agent.ui import renderer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MINIMAL_CONFIG = """\
+FAKE_REPLY = "你好，我是测试模型"
+
+#: 页面用的完整配置：工作区与库都按**配置文件目录**的相对路径写，页面自己解析（与 HTTP 入口同规）。
+#: 长期记忆与压缩关掉——它们会多出模型调用与磁盘库，与"页面是否走应用服务"这件事无关。
+PAGE_CONFIG = """\
 llm:
   base_url: "https://api.deepseek.com"
   api_key_env: "DEEPSEEK_API_KEY"
   model: "deepseek-flash"
   context_window_tokens: 65536
+workspace:
+  root: "."
+memory:
+  short_term:
+    enabled: true
+    path: "data/checkpoints.sqlite"
+  long_term:
+    enabled: false
+  compression:
+    enabled: false
 """
-FAKE_REPLY = "你好，我是测试模型"
 
 
-def _write_config(tmp_path: Path, body: str, name: str = "config.yaml") -> Path:
-    path = tmp_path / name
+# --------------------------------------------------------------------------- 夹具与辅助
+
+
+def _write_config(directory: Path, body: str, name: str = "config.yaml") -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
     path.write_text(body, encoding="utf-8")
     return path
 
 
-def _context(tmp_path: Path, model: object, app_config: object) -> object:
-    return builder.build_runtime_context(
-        app_config=app_config,  # type: ignore[arg-type]
-        model_adapter=model,  # type: ignore[arg-type]
-        workspace_root=tmp_path,
-        current_cwd=tmp_path,
-    )
+def _run_page(directory: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """在临时目录里真实运行页面脚本。
 
-
-def _run_page(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> object:
-    """在临时工作目录里真实运行网页脚本。
-
-    先清空 Streamlit 的全局缓存，等价于重启服务：避免上一个用例缓存的
-    模型/数据库连接被复用。
+    一个目录只能跑一次：`open_runtime` 会占住单实例锁（§15.1），而页面进程按设计在退出前
+    不释放它——这正是"第二个进程必须失败"的语义。要再跑一次就换一个目录。
     """
     import streamlit as st
     from streamlit.testing.v1 import AppTest
 
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(directory)
     st.cache_resource.clear()
+    gc.collect()
     page = AppTest.from_file(str(Path(web.__file__)), default_timeout=60)
     page.run()
     return page
 
 
-# --------------------------------------------------------------------------- 配置层
+def _rendered_text(page: Any) -> str:
+    """页面上所有文本型元素的内容（含折叠区里的代码块）。"""
+    parts = [element.value for element in page.markdown]
+    parts += [element.value for element in page.code]
+    return "\n".join(parts)
 
 
-# 后半段断言的是"依赖已装、缓存目录合法 → 无警告"（`warn is False`）。没装可选组时
-# `readiness` 会如实给出 `unavailable`，那条断言测的东西就不存在了——跳过而不是放宽成
-# 两种结果都接受（否则真出问题时这条用例反而抓不住）。
+def _new_session(page: Any) -> Any:
+    """点侧栏「新建会话」——页面不自建会话，会话一律由应用服务创建。"""
+    return page.sidebar.button(key="session-new").click().run()
+
+
+def _sessions(directory: Path) -> Any:
+    """按页面的工作区重开会话索引，等价于重启服务后再读（只读，不占单实例锁）。"""
+    database = checkpoint.open_database(
+        directory / "data" / "checkpoints.sqlite", workspace_root=directory.resolve()
+    )
+    return database.sessions
+
+
+def _error(diagnostic_id: str, code: str, title: str) -> ErrorView:
+    return ErrorView(
+        code=code,
+        category="system",
+        title=title,
+        message="这一步失败了",
+        hint="稍后重新发送即可重试。",
+        retryable=False,
+        diagnostic_id=diagnostic_id,
+        occurred_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+def _snapshot(*, messages: list[Any], errors: list[Any]) -> SessionSnapshot:
+    return SessionSnapshot(
+        snapshot_id="snap-1",
+        session_id="s-1",
+        workspace=WorkspaceRef(workspace_id="w-1", display_name="demo"),
+        title="会话",
+        session_state="idle",
+        messages=messages,
+        errors=errors,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+def _summary(session_id: str, *, title: str = "会话") -> SessionSummaryView:
+    moment = datetime(2026, 3, 4, 6, 30, tzinfo=timezone.utc)
+    return SessionSummaryView(
+        session_id=session_id,
+        thread_id=f"thread-{session_id}",
+        title=title,
+        workspace=WorkspaceRef(workspace_id="w-1", display_name="demo"),
+        created_at=moment,
+        updated_at=moment,
+    )
+
+
+def _tool(**overrides: Any) -> ToolUseView:
+    fields: dict[str, Any] = {
+        "tool_call_id": "call-1",
+        "tool_name": "read_file",
+        "status": "ok",
+    }
+    fields.update(overrides)
+    return ToolUseView(**fields)
+
+
+# --------------------------------------------------------------------------- 渲染层：只看 DTO
+
+
+def test_to_chat_messages_takes_only_chat_text_from_dtos() -> None:
+    """只有用户/助手两种消息进气泡；空回答、工具行、记忆行、错误行各走自己的渲染器。"""
+    messages = [
+        UserMessageView(message_id="m1", text=" 你好 "),
+        AssistantMessageView(message_id="m2", text="回答"),
+        AssistantMessageView(message_id="m3", text="   "),  # 空回答不渲染成空气泡
+        ToolMessageView(message_id="m4", tool=_tool()),
+        MemoryMessageView(
+            message_id="m5",
+            memory=MemoryUseView(retrieval_outcome="miss", retrieval_note="本轮没有召回相关记忆"),
+        ),
+        ErrorMessageView(message_id="m6", error=_error("d1", "TOOL_CALL_FAILED", "工具执行失败")),
+    ]
+
+    assert [(item.role, item.content) for item in renderer.to_chat_messages(messages)] == [
+        ("user", "你好"),
+        ("assistant", "回答"),
+    ]
+
+
+def test_visible_errors_skips_rows_already_shown_in_the_conversation() -> None:
+    """同一件失败不能既作为消息行、又作为会话级错误再显示一次（与前端同一口径）。"""
+    shown = _error("d1", "TOOL_CALL_FAILED", "工具执行失败")
+    pending = _error("d2", "RUN_STAGE_FAILED", "本轮出现未分类的异常")
+    snapshot = _snapshot(
+        messages=[
+            UserMessageView(message_id="m1", text="你好"),
+            ErrorMessageView(message_id="m2", error=shown),
+        ],
+        errors=[shown, pending],
+    )
+
+    assert [item.diagnostic_id for item in renderer.visible_errors(snapshot)] == ["d2"]
+
+
+def test_diff_text_renders_the_structured_hunks_as_given() -> None:
+    """页面拼 diff 文本只是为了等宽显示：行号与类型都来自 DTO，不再解析一遍。"""
+    diff = FileDiffView(
+        path="note.py",
+        additions=1,
+        deletions=1,
+        hunks=[
+            FileDiffHunkView(
+                header="@@ -1 +1 @@",
+                lines=[
+                    FileDiffLineView(kind="del", old_line=1, text="value = 1"),
+                    FileDiffLineView(kind="add", new_line=1, text="value = 2"),
+                ],
+            )
+        ],
+    )
+
+    assert renderer.diff_text(diff).splitlines() == [
+        "--- note.py",
+        "+++ note.py",
+        "@@ -1 +1 @@",
+        "-value = 1",
+        "+value = 2",
+    ]
+
+
+def test_tool_row_describes_target_status_and_evidence() -> None:
+    tool = _tool(
+        tool_name="edit_file",
+        redacted_arguments={"path": "note.py"},
+        elapsed_ms=12,
+        outcome=ToolOutcomeView(kind="edit", target="note.py", summary="替换 1 处", total=1),
+        evidence=ToolEvidenceView(
+            evidence_type="sha256", summary="文件哈希已核对", verified=True
+        ),
+    )
+
+    assert renderer.tool_heading(tool) == "工具调用：edit_file（编辑）（成功）"
+    summary = renderer.tool_summary(tool)
+    assert "目标 note.py" in summary
+    assert "替换 1 处" in summary
+    assert "12 ms" in summary
+    assert "已核对" in summary
+
+
+def test_status_and_config_text_are_plain_language() -> None:
+    snapshot = _snapshot(messages=[], errors=[])
+
+    assert renderer.session_state_text(snapshot) == "空闲"
+    assert renderer.config_error_text("未找到配置文件").startswith("模型尚未配置：")
+    assert "请先创建配置" in renderer.config_error_text("未找到配置文件", "请先创建配置")
+
+
+# --------------------------------------------------------------------------- 审批卡：只消费 ApprovalView
+
+
+APPROVAL_SCRIPT = """
+import json
+
+import streamlit as st
+
+from local_agent.application.models import ApprovalView
+from local_agent.ui import approval_ui
+
+approval = ApprovalView(**PAYLOAD)
+decision = approval_ui.render_approval(approval)
+st.write(
+    "DECISION:"
+    + json.dumps(
+        None
+        if decision is None
+        else {
+            "decision": decision.decision,
+            "confirm_recursive": decision.confirm_recursive,
+            "reason": decision.reason,
+        },
+        ensure_ascii=False,
+    )
+)
+"""
+
+
+def _approval_payload(*, risk: str = "normal", state: str = "pending") -> dict[str, Any]:
+    return {
+        "approval_id": "ap-1",
+        "run_id": "run-1",
+        "tool_call_id": "call-1",
+        "tool_name": "delete_file",
+        "action_fingerprint": "sha256:abc",
+        "redacted_arguments": {"path": "aa.txt"},
+        "target": "aa.txt",
+        "impact_summary": "删除项目内文件 aa.txt",
+        "risk": risk,
+        "state": state,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "note": None,
+    }
+
+
+def _approval_page(payload: dict[str, Any]) -> Any:
+    from streamlit.testing.v1 import AppTest
+
+    page = AppTest.from_string(f"PAYLOAD = {payload!r}\n" + APPROVAL_SCRIPT, default_timeout=30).run()
+    assert not page.exception, page.exception
+    return page
+
+
+def _decision_text(page: Any) -> str:
+    return next(
+        (
+            element.value
+            for element in page.markdown
+            if str(element.value).startswith("DECISION:")
+        ),
+        "",
+    )
+
+
+def test_approval_card_offers_approve_and_reject_while_pending() -> None:
+    page = _approval_page(_approval_payload())
+
+    assert _decision_text(page) == "DECISION:null"
+    assert [element.label for element in page.button] == ["允许一次", "拒绝"]
+
+    page = page.button(key="approval-approve").click().run()
+
+    assert '"decision": "approve"' in _decision_text(page)
+    assert '"confirm_recursive": false' in _decision_text(page)
+
+
+def test_approval_card_reject_reports_the_reason() -> None:
+    page = _approval_page(_approval_payload())
+
+    page = page.button(key="approval-reject").click().run()
+
+    assert '"decision": "reject"' in _decision_text(page)
+    assert "用户拒绝" in _decision_text(page)
+
+
+def test_recursive_delete_needs_an_explicit_second_confirmation() -> None:
+    """第一阶段只推进；第二阶段必须重新勾选并提交显式确认。"""
+    first = _approval_page(_approval_payload(risk="high") | {"confirmation_stage": 1})
+    assert [element.label for element in first.button] == ["进入二次确认", "拒绝"]
+    assert len(first.checkbox) == 0
+    first = first.button(key="approval-stage-1-approve").click().run()
+    assert '"confirm_recursive": false' in _decision_text(first)
+
+    second = _approval_page(_approval_payload(risk="high") | {"confirmation_stage": 2})
+    assert [element.label for element in second.button] == ["确认删除", "拒绝"]
+    assert second.button(key="approval-stage-2-approve").disabled is True
+    second = second.checkbox(key="approval-ap-1-stage-2-recursive").set_value(True).run()
+    second = second.button(key="approval-stage-2-approve").click().run()
+    assert '"decision": "approve"' in _decision_text(second)
+    assert '"confirm_recursive": true' in _decision_text(second)
+
+
+def test_decided_approval_only_reports_the_state_without_buttons() -> None:
+    page = _approval_page(_approval_payload(state="rejected"))
+
+    assert not page.button
+    assert any("已拒绝" in element.value for element in page.info)
+    assert _decision_text(page) == "DECISION:null"
+
+
+# --------------------------------------------------------------------------- web.py 的纯函数
+
+
 @pytest.mark.skipif(
     not embedding_module.fastembed_available(),
     reason="需要可选依赖 memory（fastembed）：uv sync --extra memory",
@@ -85,9 +384,7 @@ def test_memory_status_lines_describe_each_layer(tmp_path: Path) -> None:
     """侧栏状态块：三层各一行；默认开关与配置问题都必须如实展示（架构 §1.4）。"""
     base = load_config(PROJECT_ROOT / "config.yaml.example")
 
-    default_lines, default_warn = web.memory_status_lines(
-        SimpleNamespace(app_config=base)  # type: ignore[arg-type]
-    )
+    default_lines, default_warn = web.memory_status_lines(base)
     default_text = "\n".join(default_lines)
     assert "短期" in default_text
     assert "中期：已关闭" in default_text
@@ -110,9 +407,8 @@ def test_memory_status_lines_describe_each_layer(tmp_path: Path) -> None:
         }
     )
     config = AppConfig.model_validate(data)
-    lines, warn = web.memory_status_lines(
-        SimpleNamespace(app_config=config)  # type: ignore[arg-type]
-    )
+
+    lines, warn = web.memory_status_lines(config)
 
     text = "\n".join(lines)
     assert "中期：已启用" in text
@@ -125,20 +421,14 @@ def test_memory_status_lines_describe_each_layer(tmp_path: Path) -> None:
     broken = config.model_copy(
         update={"embedding": config.embedding.model_copy(update={"enabled": False})}
     )
-    _, warn_broken = web.memory_status_lines(
-        SimpleNamespace(app_config=broken)  # type: ignore[arg-type]
-    )
+    _, warn_broken = web.memory_status_lines(broken)
     assert warn_broken is True
 
 
 def test_memory_status_lines_report_missing_api_key_instead_of_raising(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """远端 embedding 缺 Key：状态页展示可处理的警告，而不是整块抛 ``ConfigError``。
-
-    复审实证：状态块原来先调用会抛异常的 ``resolve_api_key()``，于是 ``readiness(..., api_key=None)``
-    的 ``not_ready`` 分支根本走不到，用户看到的是页面报错而不是"请补 Key"。
-    """
+    """远端 embedding 缺 Key：状态块展示可处理的警告，而不是整块抛 ``ConfigError``。"""
     base = load_config(PROJECT_ROOT / "config.yaml.example")
     data = base.model_dump()
     data["memory"]["medium_term"].update(
@@ -154,585 +444,138 @@ def test_memory_status_lines_report_missing_api_key_instead_of_raising(
     config = AppConfig.model_validate(data)
     monkeypatch.delenv("CHAT_EMBEDDING_KEY", raising=False)
 
-    lines, warn = web.memory_status_lines(
-        SimpleNamespace(app_config=config)  # type: ignore[arg-type]
-    )
+    lines, warn = web.memory_status_lines(config)
 
     assert warn is True
     assert any("API Key" in line for line in lines)
 
 
-def test_pending_error_lines_are_deduped_and_redacted() -> None:
-    """页面要显示本轮的降级/错误事件：按 ``event_id`` 去重，并且先脱敏。
+def test_session_options_mark_the_currently_open_session() -> None:
+    options = web.session_options([_summary("s-1"), _summary("s-2")], open_session_id="s-2")
 
-    复审实证：图产生了可读的 ``recall_memory`` 错误事件（Embedding 首次加载失败），页面却只渲染
-    消息与工具结果 —— 用户只看到一条正常的聊天回复，看不到失败原因，与侧栏"失败原因会出现在对话里"
-    的说法不符。
-    """
-    state = {
-        "error_events": [
-            {
-                "event_id": "e1",
-                "stage": "recall_memory",
-                "message": "Embedding 首次加载失败：连接超时（key=sk-secret）",
-            },
-            {"event_id": "e2", "stage": "memory_write_node", "message": "长期库打不开"},
-        ]
-    }
-
-    lines, fresh = web.pending_error_lines(state, shown={"e1"}, secrets=["sk-secret"])
-
-    assert lines == ["[memory_write_node] 长期库打不开"]  # 已展示过的不重复渲染
-    assert fresh == ["e2"]
-
-    lines, fresh = web.pending_error_lines(state, shown=set(), secrets=["sk-secret"])
-
-    assert len(lines) == 2 and len(fresh) == 2
-    assert "sk-secret" not in " ".join(lines)  # 先脱敏再上页面
-    assert lines[0].startswith("[recall_memory] Embedding 首次加载失败")
+    assert [item.session_id for item in options] == ["s-1", "s-2"]
+    assert [item.is_active for item in options] == [False, True]
+    assert all(item.detail.startswith("最后活动 ") for item in options)
 
 
-def test_projected_history_applies_reply_corrections() -> None:
-    """页面展示走投影：修正过的回答替换掉原文，条数与顺序不变。
+class _FakeSubscription:
+    """每次 `poll()` 只给一条事件，用来断言增量是**逐条**画上去的。"""
 
-    页面上不能出现"我记住了"与"没有保存成功"并排两条（复审实证）；也不能为好看去改 Checkpoint
-    里的原文（架构 §10.1）。
-    """
-    messages = [
-        HumanMessage(content="请记住", id="h1"),
-        AIMessage(content="好的，我记住了", id="a1"),
-    ]
+    def __init__(self, events: list[Any]) -> None:
+        self._queue = list(events)
 
-    projected = web.projected_history(
-        {"messages": messages, "reply_overrides": {"a1": "（这条记忆没有保存成功。）"}}
+    def poll(self) -> list[Any]:
+        return [self._queue.pop(0)] if self._queue else []
+
+
+class _FakeStreamService:
+    def __init__(self, events: list[Any]) -> None:
+        self._events = events
+        self.subscribed: list[str] = []
+        self.unsubscribed: list[Any] = []
+
+    def subscribe_events(self, session_id: str) -> _FakeSubscription:
+        self.subscribed.append(session_id)
+        return _FakeSubscription(self._events)
+
+    def unsubscribe_events(self, subscription: Any) -> None:
+        self.unsubscribed.append(subscription)
+
+
+class _FakePlaceholder:
+    def __init__(self) -> None:
+        self.rendered: list[str] = []
+        self.emptied = 0
+
+    def markdown(self, text: str) -> None:
+        self.rendered.append(text)
+
+    def empty(self) -> None:
+        self.emptied += 1
+
+
+def _delta(text: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        event_type="message_delta", payload=SimpleNamespace(text_delta=text)
     )
 
-    assert [item.content for item in projected] == ["请记住", "（这条记忆没有保存成功。）"]
-    assert [item.id for item in projected] == ["h1", "a1"]  # 没有新增或删除消息
-    assert messages[1].content == "好的，我记住了"  # 原对象未被修改
-    assert web.projected_history({"messages": messages}) == messages  # 没有投影时原样返回
 
-    # 本轮回答为空时：渲染本来会跳过这条空消息，投影后用户才看得到说明（复审实证）
-    empty_reply = [HumanMessage(content="请记住", id="h3"), AIMessage(content="", id="a3")]
-    assert [item.content for item in to_chat_messages(empty_reply)] == ["请记住"]
-    assert [
-        item.content
-        for item in to_chat_messages(
-            web.projected_history(
-                {"messages": empty_reply, "reply_overrides": {"a3": "（没有保存成功。）"}}
-            )
-        )
-    ] == ["请记住", "（没有保存成功。）"]
+def test_run_with_stream_accumulates_deltas_and_returns_the_result() -> None:
+    """增量逐条画进占位符、拼起来是完整文本；结束后清空占位符（快照接管最终渲染）。"""
+    service = _FakeStreamService([_delta("你"), _delta("好")])
+    placeholder = _FakePlaceholder()
 
+    result = web.run_with_stream(service, "s-1", lambda: "OK", placeholder=placeholder)
 
-def test_config_example_is_valid() -> None:
-    config = load_config(PROJECT_ROOT / "config.yaml.example")
+    assert result == "OK"
+    assert service.subscribed == ["s-1"]
+    assert placeholder.rendered == ["你", "你好"]
+    assert placeholder.emptied == 1
+    assert service.unsubscribed  # 无论成功失败都要退订
 
-    assert config.llm.model == "deepseek-flash"
-    assert config.llm.api_key_env == "DEEPSEEK_API_KEY"
-    assert config.memory.medium_term.enabled is False
-    assert config.memory.long_term.enabled is True
-    assert config.memory.compression.enabled is True
-    assert config.security.require_approval.delete_file is True
 
+def test_run_with_stream_reraises_failures_from_the_worker_thread() -> None:
+    """工作线程里的失败必须在脚本线程重新抛出，页面边界才能统一渲染提示。"""
+    service = _FakeStreamService([])
 
-def test_memory_features_default_on_when_section_is_omitted(tmp_path: Path) -> None:
-    config = load_config(_write_config(tmp_path, MINIMAL_CONFIG))
+    def _boom() -> Any:
+        raise ValueError("boom（测试故意触发）")
 
-    assert config.memory.long_term.enabled is True
-    assert config.memory.compression.enabled is True
+    with pytest.raises(ValueError, match="boom"):
+        web.run_with_stream(service, "s-1", _boom, placeholder=_FakePlaceholder())
 
+    assert service.unsubscribed
 
-def test_missing_config_file_is_reported(tmp_path: Path) -> None:
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(tmp_path / "config.yaml")
 
-    assert "未找到配置文件" in str(excinfo.value)
+# --------------------------------------------------------------------------- 页面：服务契约
 
 
-def test_invalid_yaml_is_reported(tmp_path: Path) -> None:
-    path = _write_config(tmp_path, "llm: [unclosed\n")
-
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
-
-    assert "不是合法 YAML" in str(excinfo.value)
-
-
-def test_non_mapping_top_level_is_reported(tmp_path: Path) -> None:
-    path = _write_config(tmp_path, "- a\n- b\n")
-
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
-
-    assert "顶层必须是" in str(excinfo.value)
-
-
-def test_empty_config_file_is_reported(tmp_path: Path) -> None:
-    path = _write_config(tmp_path, "\n")
-
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
-
-    assert "空文件" in str(excinfo.value)
-
-
-def test_missing_llm_section_is_reported(tmp_path: Path) -> None:
-    path = _write_config(tmp_path, 'workspace:\n  root: "."\n')
-
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
-
-    message = str(excinfo.value)
-    assert "配置校验失败" in message
-    assert "llm" in message
-
-
-def test_missing_required_llm_fields_are_listed(tmp_path: Path) -> None:
-    path = _write_config(tmp_path, 'llm:\n  base_url: "https://api.deepseek.com"\n')
-
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
-
-    message = str(excinfo.value)
-    assert "llm.model" in message
-    assert "llm.api_key_env" in message
-
-
-def test_missing_context_window_tokens_is_reported(tmp_path: Path) -> None:
-    """``llm.context_window_tokens`` 是必填键（没有默认值）：缺了必须直接失败，并说清怎么补。"""
-    body = 'llm:\n  base_url: "https://api.deepseek.com"\n  api_key_env: "K"\n  model: "m"\n'
-    path = _write_config(tmp_path, body)
-
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
-
-    message = str(excinfo.value)
-    assert "context_window_tokens" in message
-    # 新增必填键会让既有的 config.yaml 直接失效（升级后典型故障）：提示必须可操作，
-    # 不能只回一句 "Field required"。
-    assert "缺少必填键" in message
-    assert "config.yaml.example" in message
-
-
-def test_context_window_must_exceed_max_tokens(tmp_path: Path) -> None:
-    """上下文窗口必须大于输出预留，否则输入预算为负、压缩触发比失去意义。"""
-    path = _write_config(tmp_path, MINIMAL_CONFIG + "  max_tokens: 65536\n")
-
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
-
-    message = str(excinfo.value)
-    assert "context_window_tokens" in message
-    assert "max_tokens" in message
-
-
-def test_unknown_config_key_is_rejected(tmp_path: Path) -> None:
-    path = _write_config(tmp_path, MINIMAL_CONFIG + '  modell: "typo"\n')
-
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
-
-    assert "llm.modell" in str(excinfo.value)
-
-
-def test_require_approval_cannot_be_disabled(tmp_path: Path) -> None:
-    body = MINIMAL_CONFIG + "security:\n  require_approval:\n    delete_file: false\n"
-    path = _write_config(tmp_path, body)
-
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
-
-    message = str(excinfo.value)
-    assert "delete_file" in message
-    assert "不能关闭" in message
-
-
-def test_embedding_requires_fields_when_enabled(tmp_path: Path) -> None:
-    body = MINIMAL_CONFIG + 'embedding:\n  enabled: true\n  provider: "openai_compatible"\n'
-    path = _write_config(tmp_path, body)
-
-    with pytest.raises(ConfigError) as excinfo:
-        load_config(path)
-
-    message = str(excinfo.value)
-    assert "embedding" in message
-    assert "base_url" in message
-
-
-def test_resolve_api_key_reports_missing_variable_without_value(tmp_path: Path) -> None:
-    config = load_config(_write_config(tmp_path, MINIMAL_CONFIG))
-
-    with pytest.raises(ConfigError) as excinfo:
-        resolve_api_key(config.llm, environ={})
-
-    message = str(excinfo.value)
-    assert "DEEPSEEK_API_KEY" in message
-    assert ".env" in message
-
-
-def test_resolve_api_key_returns_value(tmp_path: Path) -> None:
-    config = load_config(_write_config(tmp_path, MINIMAL_CONFIG))
-
-    assert resolve_api_key(config.llm, environ={"DEEPSEEK_API_KEY": "sk-test"}) == "sk-test"
-
-
-def test_redact_secrets_replaces_key_values() -> None:
-    assert redact_secrets("boom sk-secret end", ["sk-secret"]) == "boom *** end"
-    assert redact_secrets("k=sk-a", {"DEEPSEEK_API_KEY": "sk-a"}) == "k=***"
-
-
-def test_redact_secrets_ignores_empty_values() -> None:
-    assert redact_secrets("没有密钥", [""]) == "没有密钥"
-
-
-def test_config_error_text_includes_reason_and_hint() -> None:
-    text = config_error_text("未找到配置文件 config.yaml", "请先创建配置")
-
-    assert text.startswith("模型尚未配置：")
-    assert "请先创建配置" in text
-
-
-# --------------------------------------------------------------------------- 模型工厂
-
-
-def test_build_chat_model_maps_config(tmp_path: Path) -> None:
-    config = load_config(_write_config(tmp_path, MINIMAL_CONFIG))
-
-    model = factory.build_chat_model(config.llm, "sk-test")
-
-    assert model.model_name == "deepseek-flash"
-    assert model.openai_api_base == "https://api.deepseek.com"
-    assert model.temperature == pytest.approx(0.2)
-    assert model.max_tokens == 4096
-    assert model.request_timeout == 120
-    assert model.max_retries == 2
-    # 架构 §11.7：Streaming 不是必须能力，统一按非流式输出保证正确性
-    assert model.streaming is False
-
-
-# --------------------------------------------------------------------------- 图
-
-
-def test_chat_graph_answers_without_tools(tmp_path: Path, model_factory, app_config) -> None:
-    graph = builder.build_chat_graph()
-    context = _context(tmp_path, model_factory(decision="chat", reply=FAKE_REPLY), app_config)
-
-    result = graph.invoke({"user_input": "  你好  "}, context=context)
-
-    assert result["final_response"] == FAKE_REPLY
-    assert result["normalized_request"] == "你好"
-    assert result["mode"] == "chat"
-    assert result["task_status"] == "completed"
-    assert result["thread_id"]
-    assert result["session_id"]
-    assert result["run_id"]
-    assert len(result["messages"]) == 2
-    # 闲聊路径不得产生任何工具事件或待执行调用
-    assert not result.get("tool_events")
-    assert not result.get("tool_results")
-    assert not result.get("pending_tool_calls")
-    # 闲聊也过 reflection_node（架构 §5.2），但没有任务证据、也不产生记忆候选
-    assert not result["reflection_result"].memory_candidates
-    assert result["reflection_result"].result_trust == "uncertain"
-
-
-def test_chat_graph_keeps_history_across_turns(tmp_path: Path, model_factory, app_config) -> None:
-    graph = builder.build_chat_graph()
-    context = _context(tmp_path, model_factory(decision="chat", reply=FAKE_REPLY), app_config)
-
-    first = graph.invoke({"user_input": "甲"}, context=context)
-    # 未启用 Checkpoint 时状态不跨轮保留，由调用方把上一轮消息一并提交
-    second = graph.invoke({"user_input": "乙", "messages": first["messages"]}, context=context)
-
-    assert [message.text for message in second["messages"]] == [
-        "甲",
-        FAKE_REPLY,
-        "乙",
-        FAKE_REPLY,
-    ]
-
-
-def test_final_response_node_marks_failed_without_ai_text() -> None:
-    result = nodes.final_response_node({"messages": [HumanMessage(content="没有回答")]})
-
-    assert result["final_response"] is None
-    assert result["task_status"] == "failed"
-
-
-def test_to_chat_messages_maps_roles_and_skips_empty() -> None:
-    messages = to_chat_messages(
-        [HumanMessage(content="问"), AIMessage(content="答"), AIMessage(content="")]
-    )
-
-    assert [(message.role, message.content) for message in messages] == [
-        ("user", "问"),
-        ("assistant", "答"),
-    ]
-
-
-def test_tool_activities_pair_each_occurrence_with_its_own_result() -> None:
-    """同一 ``tool_call_id`` 出现多次时，每次调用配自己的结果与状态（架构 §4.2）。"""
-    from streamlit.testing.v1 import AppTest
-
-    script = """
-from langchain_core.messages import AIMessage, ToolMessage
-
-from local_agent.ui.renderer import render_history
-
-call = {"name": "read_file", "args": {"path": "a"}, "id": "call-1", "type": "tool_call"}
-messages = [
-    AIMessage(content="", tool_calls=[call]),
-    ToolMessage(content="第一轮结果", tool_call_id="call-1"),
-    AIMessage(content="", tool_calls=[call]),
-    ToolMessage(content="第二轮结果", tool_call_id="call-1"),
-]
-render_history(
-    messages,
-    tool_results=[
-        {"tool_call_id": "call-1", "status": "denied"},
-        {"tool_call_id": "call-1", "status": "ok"},
-    ],
-)
-"""
-    page = AppTest.from_string(script, default_timeout=30).run()
-
-    assert not page.exception
-    codes = "\n".join(element.value for element in page.code)
-    assert "第一轮结果" in codes
-    assert "第二轮结果" in codes
-    labels = [getattr(element, "label", "") for element in page.expander]
-    assert any("被拒绝" in label for label in labels), labels
-    assert any("成功" in label for label in labels), labels
-
-
-# --------------------------------------------------------------------------- 页面
-
-
-def test_page_reports_missing_config(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
-    page = _run_page(tmp_path, monkeypatch)
-
-    assert not page.exception
-    assert any("模型尚未配置" in element.value for element in page.error)
-
-    page.chat_input[0].set_value("你好").run()
-
-    assert not page.exception
-    rendered = [element.value for element in page.markdown]
-    assert "你好" in rendered
-    assert any("未找到配置文件" in text for text in rendered)
-
-
-def test_page_reports_missing_api_key_without_leaking(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _write_config(tmp_path, MINIMAL_CONFIG)
+def test_page_reports_missing_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
     page = _run_page(tmp_path, monkeypatch)
 
     assert not page.exception
-    assert any("DEEPSEEK_API_KEY" in element.value for element in page.error)
+    errors = "\n".join(element.value for element in page.error)
+    assert "模型尚未配置" in errors
+    assert "未找到配置文件" in errors
+    assert not page.chat_input  # 没有可用服务时不给输入框（也不自建会话）
 
 
-def test_page_answers_with_model(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
+def test_page_drives_the_application_service_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory: Any
 ) -> None:
-    _write_config(tmp_path, MINIMAL_CONFIG)
+    """装配、会话、提交、渲染都经应用服务：页面自己不再碰图与 State。"""
+    _write_config(tmp_path, PAGE_CONFIG)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
     monkeypatch.setattr(
         factory,
         "build_chat_model",
         lambda _config, _api_key: model_factory(decision="chat", reply=FAKE_REPLY),
     )
-    page = _run_page(tmp_path, monkeypatch)
 
+    page = _run_page(tmp_path, monkeypatch)
     assert not page.exception
     assert any("模型已就绪" in element.value for element in page.success)
+
+    page = _new_session(page)
+    assert not page.exception
+    assert page.chat_input, "有会话之后必须给出输入框"
 
     page.chat_input[0].set_value("你好").run()
 
     assert not page.exception
-    rendered = [element.value for element in page.markdown]
+    rendered = _rendered_text(page)
     assert "你好" in rendered
     assert FAKE_REPLY in rendered
     assert not page.error
 
 
-def test_page_shows_approval_card_and_delete_needs_approval(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
+def test_page_shows_the_tool_activity_and_the_edit_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory: Any
 ) -> None:
-    """需要审批的动作必须弹出审批卡片，点批准后才真正删除（架构 §5.3、§6.5）。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(
-        factory,
-        "build_chat_model",
-        lambda _config, _api_key: model_factory(
-            decision="tool",
-            reply="好的",
-            tool_calls=[{"name": "delete_file", "args": {"path": "aa.txt"}, "id": "call-1"}],
-        ),
-    )
-    _run_page(tmp_path, monkeypatch)  # 先建立 Checkpoint 与工作区
-    target = tmp_path / "aa.txt"
-    target.write_text("别删我", encoding="utf-8", newline="")
-
-    page = _run_page(tmp_path, monkeypatch)
-    page.chat_input[0].set_value("删除 aa.txt").run()
-
-    assert not page.exception
-    assert target.is_file()  # 审批之前不会执行
-    notices = [element.value for element in page.warning]
-    assert any("需要你确认的动作" in text for text in notices)
-
-    # 批准执行（卡片里的第一个按钮）
-    page.button[0].click().run()
-
-    assert not page.exception
-    assert not target.exists()
-
-
-def test_page_approval_reject_keeps_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(
-        factory,
-        "build_chat_model",
-        lambda _config, _api_key: model_factory(
-            decision="tool",
-            reply="好的",
-            tool_calls=[{"name": "delete_file", "args": {"path": "bb.txt"}, "id": "call-1"}],
-        ),
-    )
-    _run_page(tmp_path, monkeypatch)
-    target = tmp_path / "bb.txt"
-    target.write_text("别删我", encoding="utf-8", newline="")
-
-    page = _run_page(tmp_path, monkeypatch)
-    page.chat_input[0].set_value("删除 bb.txt").run()
-    # 拒绝按钮在第二位
-    page.button[1].click().run()
-
-    assert not page.exception
-    assert target.is_file()
-    assert target.read_text(encoding="utf-8") == "别删我"
-
-
-def test_page_reports_capability_status(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(
-        factory,
-        "build_chat_model",
-        lambda _config, _api_key: model_factory(
-            decision="chat", reply=FAKE_REPLY, fail_bind_tools=True
-        ),
-    )
-
-    page = _run_page(tmp_path, monkeypatch)
-
-    assert any("工具调用：不支持" in element.value for element in page.success)
-
-
-def test_page_reports_tool_calling_unavailable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    """模型不支持 Tool Calling 时，工具请求必须给出明确提示（架构 §11.7）。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(
-        factory,
-        "build_chat_model",
-        lambda _config, _api_key: model_factory(
-            decision="tool", reply="不该走到这里", fail_bind_tools=True
-        ),
-    )
-    page = _run_page(tmp_path, monkeypatch)
-
-    page.chat_input[0].set_value("列出当前目录").run()
-
-    assert not page.exception
-    assert "不支持工具调用" in _rendered_text(page)
-
-
-def _rendered_text(page: object) -> str:
-    """页面上所有文本型元素的内容（含折叠区里的代码块）。"""
-    parts = [element.value for element in page.markdown]
-    parts += [element.value for element in page.code]
-    return "\n".join(parts)
-
-
-def test_page_shows_tool_activity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    """工具分支：模型调用 read_file，页面展示工具活动与最终回答。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    (tmp_path / "note.txt").write_text("文件内容甲", encoding="utf-8")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(
-        factory,
-        "build_chat_model",
-        lambda _config, _api_key: model_factory(
-            decision="tool",
-            reply="我读到的是：文件内容甲",
-            tool_calls=[{"name": "read_file", "args": {"path": "note.txt"}, "id": "call_1"}],
-        ),
-    )
-    page = _run_page(tmp_path, monkeypatch)
-
-    page.chat_input[0].set_value("读取 note.txt").run()
-
-    assert not page.exception
-    text = _rendered_text(page)
-    assert "我读到的是：文件内容甲" in text
-    assert "note.txt" in text
-
-
-def _saved_messages(tmp_path: Path, thread_id: str) -> list[AnyMessage]:
-    """从磁盘重开 Checkpoint 连接读取消息，等价于重启服务后再看历史。"""
-    database = tmp_path / "data" / "checkpoints.sqlite"
-    graph = builder.build_chat_graph(checkpoint.open_checkpointer(database))
-    return list(builder.read_thread_state(graph, thread_id).get("messages", []))
-
-
-def test_page_history_survives_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    """提交一轮后模拟刷新页面 + 重启服务：历史仍在，不需要重新调用模型。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(
-        factory,
-        "build_chat_model",
-        lambda _config, _api_key: model_factory(decision="chat", reply=FAKE_REPLY),
-    )
-
-    page = _run_page(tmp_path, monkeypatch)
-    page.chat_input[0].set_value("第一轮").run()
-    assert not page.exception
-
-    # _run_page 会清掉 cache_resource 并重新运行脚本，等价于刷新页面后再重启服务
-    restarted = _run_page(tmp_path, monkeypatch)
-
-    assert not restarted.exception
-    rendered = [element.value for element in restarted.markdown]
-    assert "第一轮" in rendered
-    assert FAKE_REPLY in rendered
-
-
-def test_page_shows_edit_diff(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    """编辑类工具结果必须在页面上展示 diff（架构 §6.3）。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
+    """工具行与结构化 diff 都来自 DTO：页面不解析工具原文。"""
+    _write_config(tmp_path, PAGE_CONFIG)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
     target = tmp_path / "note.py"
     target.write_text("value = 1\n", encoding="utf-8", newline="")
@@ -759,169 +602,22 @@ def test_page_shows_edit_diff(
     )
 
     page = _run_page(tmp_path, monkeypatch)
+    page = _new_session(page)
     page.chat_input[0].set_value("把 value 改成 2").run()
 
     assert not page.exception
     rendered = _rendered_text(page)
-    assert "--- a/note.py" in rendered  # diff 真的画出来了，而不是只显示 JSON
     assert "+value = 2" in rendered
+    labels = [getattr(element, "label", "") for element in page.expander]
+    assert any("edit_file" in label for label in labels)
     assert target.read_text(encoding="utf-8") == "value = 2\n"
 
 
-def test_page_shows_patch_edit_preview(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
+def test_page_surfaces_the_approval_card_and_executes_after_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory: Any
 ) -> None:
-    """patch 输入模式：预览照常展示，并标出应用的 hunk 数（架构 §6.3、T22）。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    target = tmp_path / "note.py"
-    target.write_text("value = 1\nother = 0\n", encoding="utf-8", newline="")
-    sha = hashlib.sha256(target.read_bytes()).hexdigest()
-    monkeypatch.setattr(
-        factory,
-        "build_chat_model",
-        lambda _config, _api_key: model_factory(
-            decision="tool",
-            reply="改好了",
-            tool_calls=[
-                {
-                    "name": "edit_file",
-                    "args": {
-                        "path": "note.py",
-                        "patch": "@@ -1,2 +1,2 @@\n-value = 1\n+value = 2\n other = 0\n",
-                        "expected_sha256": sha,
-                    },
-                    "id": "call-1",
-                }
-            ],
-        ),
-    )
-
-    page = _run_page(tmp_path, monkeypatch)
-    page.chat_input[0].set_value("把 value 改成 2").run()
-
-    assert not page.exception
-    rendered = _rendered_text(page)
-    assert "+value = 2" in rendered
-    captions = "\n".join(element.value for element in page.caption)
-    assert "hunk" in captions  # patch 模式的 replaced_count 语义在页面上可见
-    assert target.read_text(encoding="utf-8") == "value = 2\nother = 0\n"
-
-
-def test_page_warns_about_unconfirmed_side_effects(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    """上次运行异常结束时，页面必须提示人工核对，且不自动重放工具（架构 §4.2）。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(
-        factory,
-        "build_chat_model",
-        lambda _config, _api_key: model_factory(decision="chat", reply=FAKE_REPLY),
-    )
-    page = _run_page(tmp_path, monkeypatch)
-    page.chat_input[0].set_value("第一轮").run()
-    assert not page.exception
-
-    # 直接往 Checkpoint 里塞一条“已放行但没有结果”的记录，模拟进程在副作用后被杀
-    graph = builder.build_chat_graph(
-        checkpoint.open_checkpointer(tmp_path / "data" / "checkpoints.sqlite")
-    )
-    graph.update_state(
-        {"configurable": {"thread_id": web.DEFAULT_THREAD_ID}},
-        {
-            "run_id": "run-crashed",
-            "decision_trace": [
-                make_decision_record(
-                    "run-crashed", stage="tool_start", summary="放行", tool_call_id="call-crashed"
-                )
-            ],
-        },
-    )
-
-    reloaded = _run_page(tmp_path, monkeypatch)
-
-    assert not reloaded.exception
-    warnings = [element.value for element in reloaded.warning]
-    assert any("没有正常结束" in text for text in warnings)
-    assert any("call-crashed" in text for text in warnings)
-
-
-def test_plain_rerun_does_not_invoke_model_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    """页面普通重绘不得再写消息（架构 §1.4 的幂等要求）。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(
-        factory,
-        "build_chat_model",
-        lambda _config, _api_key: model_factory(decision="chat", reply=FAKE_REPLY),
-    )
-
-    page = _run_page(tmp_path, monkeypatch)
-    page.chat_input[0].set_value("第一轮").run()
-    before = _saved_messages(tmp_path, web.DEFAULT_THREAD_ID)
-
-    page.run()  # 普通重绘
-    after = _saved_messages(tmp_path, web.DEFAULT_THREAD_ID)
-
-    assert [message.text for message in before] == [message.text for message in after]
-    assert len(after) == 2
-
-
-# --------------------------------------------------------------------------- T11 会话侧栏
-
-
-def _session_store(tmp_path: Path) -> SessionStore:
-    """按页面的工作区重开会话索引，等价于重启服务后再读。"""
-    database = checkpoint.open_database(
-        tmp_path / "data" / "checkpoints.sqlite", workspace_root=tmp_path.resolve()
-    )
-    return database.sessions
-
-
-def _has_pending_approval(page: object) -> bool:
-    return any("需要你确认的动作" in element.value for element in page.warning)
-
-
-class _FakeGraph:
-    """记录 ``invoke`` 收到的上下文（测试替身，不做任何图逻辑）。"""
-
-    def __init__(self) -> None:
-        self.calls: list[object] = []
-
-    def invoke(self, payload: object, *, config: object = None, context: object = None) -> dict:
-        self.calls.append(context)
-        return {"messages": []}
-
-
-class _FakeChatApp:
-    """只满足 ``turn_workspace`` / ``run_chat_turn`` / ``resume_turn`` 需要的最小面。"""
-
-    def __init__(self, *, app_config, workspace_root: Path, sessions: SessionStore | None) -> None:
-        self.app_config = app_config
-        self.model = object()
-        self.workspace_root = workspace_root
-        self.capabilities = object()
-        self.graph = _FakeGraph()
-        self.checkpointer_enabled = False
-        self.sessions = sessions
-
-
-def _switch_workspace(page: object, path: Path) -> object:
-    """在页面上输入工作区绝对路径并点击"切换到此工作区"。"""
-    page = page.sidebar.text_input(key="session-workspace-path").set_value(str(path)).run()
-    return page.sidebar.button(key="session-workspace-apply").click().run()
-
-
-def test_page_workspace_switch_keeps_pending_approval_isolated(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    """验收 4：A 中挂起的审批在 B 不展示，切回 A 后仍可继续恢复（架构 §1.5、§10.6）。"""
-    workspace_b = tmp_path / "b"
-    workspace_b.mkdir()
-    _write_config(tmp_path, MINIMAL_CONFIG)
+    """挂起 → 卡片 → 批准后才真正执行（架构 §5.3、§6.5）。"""
+    _write_config(tmp_path, PAGE_CONFIG)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
     monkeypatch.setattr(
         factory,
@@ -932,190 +628,144 @@ def test_page_workspace_switch_keeps_pending_approval_isolated(
             tool_calls=[{"name": "delete_file", "args": {"path": "aa.txt"}, "id": "call-1"}],
         ),
     )
-    _run_page(tmp_path, monkeypatch)  # 建立工作区 A 的会话
     target = tmp_path / "aa.txt"
     target.write_text("别删我", encoding="utf-8", newline="")
 
     page = _run_page(tmp_path, monkeypatch)
+    page = _new_session(page)
     page.chat_input[0].set_value("删除 aa.txt").run()
-    assert _has_pending_approval(page)
-    assert target.is_file()  # 挂起期间不执行
 
-    # 切到 B：新工作区、新会话，A 的挂起审批不在这里出现
-    page = _switch_workspace(page, workspace_b)
     assert not page.exception
-    assert not _has_pending_approval(page)
-    active = _session_store(tmp_path).active()
-    assert active is not None
-    assert Path(active.workspace_root) == workspace_b.resolve()
-    assert target.is_file()
+    assert target.is_file()  # 审批之前不会执行
+    warnings = "\n".join(element.value for element in page.warning)
+    assert "需要你确认的动作" in warnings
+    assert not page.chat_input  # 审批接管输入区，不能再提交新消息
 
-    # 切回 A：恢复 A 的最近会话，审批重新可见，并且可以继续执行
-    page = _switch_workspace(page, tmp_path)
-    assert not page.exception
-    assert _has_pending_approval(page)
-
-    page.button[0].click().run()  # 批准删除
+    page = page.button(key="approval-approve").click().run()
 
     assert not page.exception
     assert not target.exists()
 
 
-def test_page_invalid_workspace_keeps_current_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_page_rejecting_an_approval_keeps_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory: Any
 ) -> None:
-    """验收 5：非法工作区只提示，不改变当前 active 会话（架构 §1.5）。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    page = _run_page(tmp_path, monkeypatch)
-    before = _session_store(tmp_path).active()
-    assert before is not None
-
-    page = _switch_workspace(page, tmp_path / "missing-dir")
-
-    assert not page.exception
-    assert any("会话操作失败" in element.value for element in page.error)
-    store = _session_store(tmp_path)
-    active = store.active()
-    assert active is not None and active.session_id == before.session_id
-    assert len(store.list_sessions()) == 1
-
-
-def test_turns_use_the_session_workspace(tmp_path: Path, monkeypatch, app_config) -> None:
-    """验收 6：``run_chat_turn`` 与 ``resume_turn`` 都用会话绑定的工作区构造上下文。"""
-    workspace_a = tmp_path / "a"
-    workspace_b = tmp_path / "b"
-    workspace_a.mkdir()
-    workspace_b.mkdir()
-    database = checkpoint.open_database(
-        tmp_path / "data" / "checkpoints.sqlite", workspace_root=workspace_a
-    )
-    try:
-        store = database.sessions
-        store.ensure_active(legacy_thread_id=checkpoint.DEFAULT_THREAD_ID)
-        session_b = store.switch_workspace(workspace_b)
-
-        captured: list[tuple[Path, Path]] = []
-        monkeypatch.setattr(
-            web.builder,
-            "build_runtime_context",
-            lambda **kwargs: captured.append(
-                (kwargs["workspace_root"], kwargs["current_cwd"])
-            )
-            or object(),
-        )
-        app = _FakeChatApp(
-            app_config=app_config, workspace_root=workspace_a.resolve(), sessions=store
-        )
-
-        web.run_chat_turn(
-            app,
-            thread_id=session_b.thread_id,
-            user_text="你好",
-            session_id=session_b.session_id,
-        )
-        web.resume_turn(
-            app,
-            thread_id=session_b.thread_id,
-            resume_value={"decision": "approve"},
-            session_id=session_b.session_id,
-        )
-    finally:
-        database.connection.close()
-
-    expected = workspace_b.resolve()
-    assert captured == [(expected, expected), (expected, expected)]
-
-
-def test_turn_workspace_falls_back_to_config_without_short_term(tmp_path: Path) -> None:
-    """验收 7：关闭短期记忆时没有会话索引，工作区回到配置的启动默认值（架构 §10.6）。"""
-    app = _FakeChatApp(
-        app_config=None, workspace_root=tmp_path.resolve(), sessions=None
-    )
-
-    assert web.current_session(app) is None
-    assert (
-        web.turn_workspace(app, session_id=None, thread_id=web.DEFAULT_THREAD_ID)
-        == tmp_path.resolve()
-    )
-
-
-def test_turn_workspace_rejects_unusable_default_without_short_term(tmp_path: Path) -> None:
-    """T14C 复审：关闭短期记忆时，配置默认工作区失效也要失败闭合（每轮都校验）。"""
-    missing = tmp_path / "gone"
-    app = _FakeChatApp(app_config=None, workspace_root=missing, sessions=None)
-
-    with pytest.raises(web.SessionStoreError):
-        web.turn_workspace(app, session_id=None, thread_id=web.DEFAULT_THREAD_ID)
-
-
-def test_page_temporary_workspace_without_short_term(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """关闭短期记忆时仍可选工作区，但只在本页面生命周期内有效（架构 §10.6）。"""
-    workspace_b = tmp_path / "b"
-    workspace_b.mkdir()
-    _write_config(tmp_path, MINIMAL_CONFIG + "memory:\n  short_term:\n    enabled: false\n")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-
-    page = _run_page(tmp_path, monkeypatch)
-    assert not page.exception
-    assert not page.error, [element.value for element in page.error]
-    assert page.sidebar.text_input, "关闭短期记忆时也必须在侧栏渲染工作区选择器"
-    assert not (tmp_path / "data" / "checkpoints.sqlite").exists()  # 没有持久会话索引
-
-    page = _switch_workspace(page, workspace_b)
-    assert not page.exception
-    captions = [element.value for element in page.sidebar.caption]
-    assert any(workspace_b.as_posix() in text for text in captions)
-
-    page.run()  # 普通重绘：页面临时选择保留
-    captions = [element.value for element in page.sidebar.caption]
-    assert any(workspace_b.as_posix() in text for text in captions)
-
-    # 重新启动服务（新的页面会话）→ 回到配置的默认工作区
-    restarted = _run_page(tmp_path, monkeypatch)
-    captions = [element.value for element in restarted.sidebar.caption]
-    assert not any(workspace_b.as_posix() in text for text in captions)
-
-
-def test_page_keeps_one_session_across_rerun_and_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """刷新与重启都不新建重复会话，当前会话跨重启恢复（架构 §10.6）。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-
-    page = _run_page(tmp_path, monkeypatch)
-    page.run()  # 普通重绘
-    page = _run_page(tmp_path, monkeypatch)  # 等价重启服务
-
-    assert not page.exception
-    sessions = _session_store(tmp_path).list_sessions()
-    assert len(sessions) == 1
-    assert sessions[0].is_active
-    assert sessions[0].thread_id == web.DEFAULT_THREAD_ID
-
-
-def test_page_new_session_isolates_history(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    """两个会话各自的消息互相隔离；切回旧会话后历史与重启恢复都要成立。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
+    _write_config(tmp_path, PAGE_CONFIG)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
     monkeypatch.setattr(
         factory,
         "build_chat_model",
-        lambda _config, _api_key: model_factory(decision="chat", reply=FAKE_REPLY),
+        lambda _config, _api_key: model_factory(
+            decision="tool",
+            reply="好的",
+            tool_calls=[{"name": "delete_file", "args": {"path": "bb.txt"}, "id": "call-1"}],
+        ),
+    )
+    target = tmp_path / "bb.txt"
+    target.write_text("别删我", encoding="utf-8", newline="")
+
+    page = _run_page(tmp_path, monkeypatch)
+    page = _new_session(page)
+    page.chat_input[0].set_value("删除 bb.txt").run()
+    page = page.button(key="approval-reject").click().run()
+
+    assert not page.exception
+    assert target.read_text(encoding="utf-8") == "别删我"
+
+
+def test_pending_approval_survives_a_refresh_and_a_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory: Any
+) -> None:
+    """刷新从快照恢复，重启也一样：挂起的审批在 Checkpoint 里，页面上没有任何"已决策"状态。
+
+    页面进程按设计一直占着单实例锁（§15.1），所以"重启"用一个 `instance_lock=False` 的只读
+    运行时来读同一份库表示——那正是新进程启动后会看到的东西。
+    """
+    _write_config(tmp_path, PAGE_CONFIG)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
+    monkeypatch.setattr(
+        factory,
+        "build_chat_model",
+        lambda _config, _api_key: model_factory(
+            decision="tool",
+            reply="好的",
+            tool_calls=[{"name": "delete_file", "args": {"path": "cc.txt"}, "id": "call-1"}],
+        ),
+    )
+    target = tmp_path / "cc.txt"
+    target.write_text("别删我", encoding="utf-8", newline="")
+
+    page = _run_page(tmp_path, monkeypatch)
+    page = _new_session(page)
+    page.chat_input[0].set_value("删除 cc.txt").run()
+
+    assert not page.exception
+    assert "需要你确认的动作" in "\n".join(element.value for element in page.warning)
+
+    # 刷新：重跑脚本（不点任何按钮），审批卡必须重新出现，且不自动执行
+    refreshed = page.run()
+
+    assert not refreshed.exception
+    assert "需要你确认的动作" in "\n".join(element.value for element in refreshed.warning)
+    assert target.is_file()
+
+    # 重启：新进程按同一份配置读同一个库，看到的仍是"等待决策"
+    session = _sessions(tmp_path).active()
+    assert session is not None
+    config = load_config(tmp_path / "config.yaml")
+    restarted = open_runtime(config, base_dir=tmp_path, instance_lock=False)
+    try:
+        snapshot = restarted.service.get_session_snapshot(session.session_id)
+        assert snapshot.approval is not None
+        assert snapshot.approval.state == "pending"
+    finally:
+        restarted.close()
+    assert target.is_file()  # 重启不会自动执行，也不会沿用之前的确认结果
+
+
+def test_plain_rerun_does_not_submit_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory: Any
+) -> None:
+    """普通重绘只读快照：不重新调用模型，也不重复显示答案（架构 §1.4）。"""
+    _write_config(tmp_path, PAGE_CONFIG)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
+    model = model_factory(decision="chat", reply=FAKE_REPLY)
+    monkeypatch.setattr(factory, "build_chat_model", lambda _config, _api_key: model)
+
+    page = _run_page(tmp_path, monkeypatch)
+    page = _new_session(page)
+    page.chat_input[0].set_value("你好").run()
+    calls = model.decision_calls
+
+    page.run()
+
+    assert model.decision_calls == calls
+    assert _rendered_text(page).count(FAKE_REPLY) == 1
+
+
+def test_new_session_isolates_history_and_switching_back_restores_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory: Any
+) -> None:
+    _write_config(tmp_path, PAGE_CONFIG)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
+    monkeypatch.setattr(
+        factory,
+        "build_chat_model",
+        lambda _config, _api_key: model_factory(
+            decision="chat",
+            reply=FAKE_REPLY,
+            response_by_input={"问题甲": "回答甲", "问题乙": "回答乙"},
+        ),
     )
 
     page = _run_page(tmp_path, monkeypatch)
+    page = _new_session(page)
     page.chat_input[0].set_value("问题甲").run()
     assert "问题甲" in _rendered_text(page)
-    first = _session_store(tmp_path).active()
+    first = _sessions(tmp_path).active()
     assert first is not None
 
-    page = page.sidebar.button(key="session-new").click().run()
+    page = _new_session(page)
 
     assert not page.exception
     assert "问题甲" not in _rendered_text(page)  # 新会话不继承旧会话的消息
@@ -1124,152 +774,201 @@ def test_page_new_session_isolates_history(
     rendered = _rendered_text(page)
     assert "问题乙" in rendered
     assert "问题甲" not in rendered
-    assert len(_session_store(tmp_path).list_sessions()) == 2
+    assert len(_sessions(tmp_path).list_sessions()) == 2
 
-    # 切回第一个会话：历史恢复；再重启一次仍然停在它上面
-    page = page.sidebar.radio[0].set_value(first.session_id).run()
+    # 切回第一个会话：历史恢复（页面记的只是"当前打开哪个会话"）
+    page = page.sidebar.button(key=f"session-open-{first.session_id}").click().run()
+
     rendered = _rendered_text(page)
     assert "问题甲" in rendered
     assert "问题乙" not in rendered
 
-    restarted = _run_page(tmp_path, monkeypatch)
-    assert "问题甲" in _rendered_text(restarted)
-    assert "问题乙" not in _rendered_text(restarted)
-    active = _session_store(tmp_path).active()
-    assert active is not None and active.session_id == first.session_id
 
-
-def test_page_pending_approval_is_isolated_per_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    """挂起的审批属于产生它的会话：新会话不弹卡片，切回去才重新出现（架构 §10.6）。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(
-        factory,
-        "build_chat_model",
-        lambda _config, _api_key: model_factory(
-            decision="tool",
-            reply="好的",
-            tool_calls=[{"name": "delete_file", "args": {"path": "aa.txt"}, "id": "call-1"}],
-        ),
-    )
-    _run_page(tmp_path, monkeypatch)
-    target = tmp_path / "aa.txt"
-    target.write_text("别删我", encoding="utf-8", newline="")
-
-    page = _run_page(tmp_path, monkeypatch)
-    page.chat_input[0].set_value("删除 aa.txt").run()
-    assert _has_pending_approval(page)
-    first = _session_store(tmp_path).active()
-    assert first is not None
-
-    page = page.sidebar.button(key="session-new").click().run()
-
-    assert not page.exception
-    assert not _has_pending_approval(page)  # 新会话没有挂起动作
-    assert target.is_file()  # 也没有任何文件被改动
-
-    page = page.sidebar.radio[0].set_value(first.session_id).run()
-
-    assert not page.exception
-    assert _has_pending_approval(page)  # 切回原会话，挂起状态还在，仍需人工确认
-
-
-def test_page_renames_current_session(
+def test_session_sidebar_has_no_rename_because_the_service_has_no_such_use_case(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_config(tmp_path, MINIMAL_CONFIG)
+    """页面只提供应用服务确实有的用例：v0.4 没有"改名/切换"用例，侧栏就不放这些控件。"""
+    _write_config(tmp_path, PAGE_CONFIG)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
 
     page = _run_page(tmp_path, monkeypatch)
-    # 侧栏现在有两个输入框（工作区绝对路径 + 会话重命名），按 key 定位，不依赖顺序
-    session_before = _session_store(tmp_path).active()
-    assert session_before is not None
-    page = (
-        page.sidebar.text_input(key=f"session-title-{session_before.session_id}")
-        .set_value("我的调研会话")
-        .run()
+
+    keys = [element.key for element in page.sidebar.button]
+    assert "session-new" in keys
+    assert "session-rename" not in keys
+    assert [element.key for element in page.sidebar.text_input] == ["session-workspace-path"]
+
+
+# --------------------------------------------------------------------------- 两个 UI 同一份事实
+
+
+def _config(directory: Path, app_config: AppConfig) -> AppConfig:
+    """把示例配置改成本用例目录下的路径（工作区 + 聊天库），与 `test_api.py` 同一套改法。"""
+    workspace = directory / "ws"
+    workspace.mkdir(parents=True, exist_ok=True)
+    return app_config.model_copy(
+        update={
+            "workspace": app_config.workspace.model_copy(update={"root": str(workspace)}),
+            "memory": app_config.memory.model_copy(
+                update={
+                    "short_term": app_config.memory.short_term.model_copy(
+                        update={
+                            "enabled": True,
+                            "path": str(directory / "data" / "checkpoints.sqlite"),
+                        }
+                    )
+                }
+            ),
+        }
     )
-    page = page.sidebar.button(key="session-rename").click().run()
-
-    assert not page.exception
-    active = _session_store(tmp_path).active()
-    assert active is not None and active.title == "我的调研会话"
 
 
-def test_page_names_session_from_first_message(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
+def test_same_fixture_gives_the_same_business_result_on_every_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, app_config: AppConfig, model_factory: Any
 ) -> None:
-    """首条用户消息自动命名会话，避免侧栏里全是“新会话”。"""
-    _write_config(tmp_path, MINIMAL_CONFIG)
+    """同一份输入经 HTTP（React 的通道）、直接应用服务与 Streamlit 页面得到等价结论。
+
+    三个通道各用一份库（真实运行不允许两个进程共用一把锁，§15.1），但**同一份配置、
+    同一套装配、同一个假模型脚本**——因此业务结论必须一致。
+    """
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
+
+    api_dir = tmp_path / "api"
+    api_runtime = open_runtime(
+        _config(api_dir, app_config),
+        base_dir=api_dir,
+        model=model_factory(decision="chat", reply=FAKE_REPLY),
+    )
+    try:
+        client = TestClient(create_app(api_runtime), base_url="http://127.0.0.1")
+        session_id = client.post("/api/sessions", json={"title": "会话"}).json()["session_id"]
+        client.post(
+            f"/api/sessions/{session_id}/messages",
+            json={"text": "你好", "client_request_id": "req-1"},
+        )
+        snapshot = client.get(f"/api/sessions/{session_id}").json()
+        api_messages = [
+            (item["kind"], item["text"])
+            for item in snapshot["messages"]
+            if item["kind"] in {"user", "assistant"}
+        ]
+        api_state = snapshot["session_state"]
+    finally:
+        api_runtime.close()
+
+    service_dir = tmp_path / "service"
+    service_runtime = open_runtime(
+        _config(service_dir, app_config),
+        base_dir=service_dir,
+        model=model_factory(decision="chat", reply=FAKE_REPLY),
+    )
+    try:
+        session = service_runtime.service.create_session(title="会话")
+        service_runtime.service.submit_message(session.session_id, "你好", "req-1")
+        service_snapshot = service_runtime.service.get_session_snapshot(session.session_id)
+        service_messages = [
+            (item.kind, item.text)
+            for item in service_snapshot.messages
+            if item.kind in {"user", "assistant"}
+        ]
+        service_state = service_snapshot.session_state
+    finally:
+        service_runtime.close()
+
+    page_dir = tmp_path / "page"
+    _write_config(page_dir, PAGE_CONFIG)
     monkeypatch.setattr(
         factory,
         "build_chat_model",
         lambda _config, _api_key: model_factory(decision="chat", reply=FAKE_REPLY),
     )
-
-    page = _run_page(tmp_path, monkeypatch)
-    page.chat_input[0].set_value("帮我看看项目结构").run()
+    page = _run_page(page_dir, monkeypatch)
+    page = _new_session(page)
+    page.chat_input[0].set_value("你好").run()
 
     assert not page.exception
-    active = _session_store(tmp_path).active()
-    assert active is not None
-    assert active.title == "帮我看看项目结构"
-    assert active.last_checkpoint_id is not None  # 会话索引记录了本轮 Checkpoint
+    assert not page.error
+    rendered = _rendered_text(page)
+
+    assert api_messages == service_messages == [("user", "你好"), ("assistant", FAKE_REPLY)]
+    # 一轮跑完后的会话状态：两个通道读到同一个结论（这里是 "completed"，不是 "idle"）。
+    assert api_state == service_state == "completed"
+    assert "你好" in rendered and FAKE_REPLY in rendered
 
 
-# --------------------------------------------------------------------------- T23 流式展示
-
-STREAMING_CONFIG = MINIMAL_CONFIG + "  streaming: true\n"
-
-
-def test_page_streams_the_final_answer_exactly_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
+def test_both_uis_read_one_model_settings_store(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, app_config: AppConfig
 ) -> None:
-    """T23：流式的增量只进临时占位符，最终回答在页面上**只出现一次**；重绘不再调用模型。
+    """两个 UI 读的是**同一个设置库**：一边换默认连接，另一边立刻看到同一版本（§6.8）。
 
-    "不重复显示"是这套实现的直接结果：占位符在本轮调用结束时清空，随后由 ``render_history``
-    按 State 里的那一条回答渲染；因此"增量块"既不会留在页面上，也不会进 Checkpoint。
+    `instance_lock=False` 只是为了让本用例在同一进程里打开两套运行时来代表两个通道；
+    单实例锁本身在 `test_api.py` 里单独覆盖。
     """
-    _write_config(tmp_path, STREAMING_CONFIG)
+    base = tmp_path / "shared"
+    base.mkdir()
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    model = model_factory(decision="chat", reply="流式回答内容在这里")
-    monkeypatch.setattr(factory, "build_chat_model", lambda _config, _api_key: model)
+    config = _config(base, app_config)
 
-    page = _run_page(tmp_path, monkeypatch)
-    page.chat_input[0].set_value("你好").run()
+    left = open_runtime(config, base_dir=base, instance_lock=False)
+    right = open_runtime(config, base_dir=base, instance_lock=False)
+    try:
+        # 两边读同一个库：初始看到的是同一份默认（含检查是否已同步过的重试）
+        for _ in range(3):
+            if left.service.current_model_name() == right.service.current_model_name():
+                break
+            left.service.list_model_connections()
+        assert left.service.current_model_name() == "deepseek-flash"
 
-    assert not page.exception
-    assert _rendered_text(page).count("流式回答内容在这里") == 1
-    calls = model.decision_calls
-    assert calls == 1
+        created = left.service.save_model_connection(
+            ConnectionDraft(
+                display_name="备用连接",
+                base_url="https://api.deepseek.com",
+                model="deepseek-reasoner",
+                context_window_tokens=65536,
+                api_key_env="DEEPSEEK_API_KEY",
+            ),
+            api_key="sk-test-fake",
+        )
+        left.service.select_default_model(created.connection_id)
 
-    # 普通重绘只读状态：不重新调用模型（架构 §1.4）
-    page.run()
-    assert model.decision_calls == calls
-    assert _rendered_text(page).count("流式回答内容在这里") == 1
+        assert right.service.current_model_name() == "deepseek-reasoner"
+    finally:
+        left.close()
+        right.close()
 
 
-def test_page_shows_stream_degradation_but_keeps_the_full_answer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory
-) -> None:
-    """T23：流式中途失败 → 不完整投影被丢弃、回答仍是完整的，并留下可见降级事件。"""
-    _write_config(tmp_path, STREAMING_CONFIG)
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
-    monkeypatch.setattr(
-        factory,
-        "build_chat_model",
-        lambda _config, _api_key: model_factory(
-            decision="chat", reply="完整回答内容在这里", fail_stream_after_chunks=1
-        ),
-    )
+# --------------------------------------------------------------------------- 依赖方向
 
-    page = _run_page(tmp_path, monkeypatch)
-    page.chat_input[0].set_value("你好").run()
 
-    assert not page.exception
-    assert "完整回答内容在这里" in _rendered_text(page)
-    notices = [element.value for element in page.warning]
-    assert any("流式回答降级" in text for text in notices)
+PAGE_MODULES = ("web.py", "ui/renderer.py", "ui/approval_ui.py")
+#: 页面层不该出现的导入：Graph / State / LangChain 消息 / LangGraph 的 `Command`。
+FORBIDDEN_IMPORTS = ("langgraph", "langchain_core", "local_agent.graph")
+
+
+def test_page_layer_does_not_import_the_graph_or_langchain_messages() -> None:
+    """T33 的停止条件：页面层不导入 Graph 节点、State、LangChain 消息类或 LangGraph。
+
+    因此 Graph 内部节点改名、State 字段调整都不会波及页面代码与 UI 测试（T33 拿掉的就是这层耦合）。
+    """
+    package = Path(web.__file__).resolve().parent
+    offenders: list[str] = []
+    for relative in PAGE_MODULES:
+        source = (package / relative).read_text(encoding="utf-8")
+        for raw in source.splitlines():
+            line = raw.strip()
+            if not line.startswith(("import ", "from ")):
+                continue
+            if any(token in line for token in FORBIDDEN_IMPORTS):
+                offenders.append(f"{relative}: {line}")
+            if line == "from langgraph.types import Command" or line.endswith("Command"):
+                offenders.append(f"{relative}: {line}")
+
+    assert offenders == []
+
+
+def test_page_modules_import_streamlit_so_they_cannot_be_used_by_the_api() -> None:
+    """反向也是硬约束：API 层不得依赖页面模块（架构 §15.1 的依赖方向）。"""
+    package = Path(web.__file__).resolve().parent
+    for relative in PAGE_MODULES:
+        source = (package / relative).read_text(encoding="utf-8")
+        assert "import streamlit" in source, relative
