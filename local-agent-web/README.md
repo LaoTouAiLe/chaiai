@@ -178,6 +178,34 @@ python -m streamlit run src/local_agent/web.py --server.address=127.0.0.1 --serv
 
 必须**在项目根目录启动**：`config.yaml`、`.env` 与 `workspace.root` 都按进程当前目录解析。
 
+## 启动（v0.4 本机 HTTP/SSE 服务）
+
+v0.4 增加了一条独立的 HTTP 服务（T29 起），与上面的 Streamlit 入口**并存**：
+
+```powershell
+uv run python -m local_agent.api          # 默认 http://127.0.0.1:8000
+```
+
+- **只绑定回环地址**：改 `web.host` 必须同时设 `web.allow_non_loopback: true`，否则启动直接拒绝
+  （v0.4 没有鉴权，不提供"改了才发现暴露到局域网"的路径）。
+- **单进程、单 worker**：官方入口硬编 `workers=1`，并用排他文件锁（`data/checkpoints.sqlite.api.lock`）
+  拒绝第二个进程——进程内广播、每会话互斥与幂等台账都以"只有一个进程在写这个库"为前提（架构 §15.1）。
+- **生产同源**：`frontend/` 构建过（`npm run build`）就由本服务托管静态产物；没有产物时只提供 API，
+  根路径会给出可执行提示。开发时用 Vite（`npm run dev`，`/api` 代理到本服务）。
+- **事件流（SSE）**：`GET /api/sessions/{session_id}/events`。连接建立时先发一条由当前 Checkpoint 投影的
+  `session_snapshot`，其后是**这条连接期间**的实时增量（计划、工具、审批、消息、任务终态）；`:` 开头是心跳
+  注释行。**没有持久游标**：不发 `id:`，重连靠新快照，不靠 `Last-Event-ID`。长时间没有事件、或客户端读得
+  太慢，服务端会主动结束这条连接并说明原因（`stream_idle_timeout` / `stream_overrun`），重连即可；
+  **任务不会因此被取消**。
+- **契约**：参数/响应形状见 `ARCHITECTURE.md` §15、路由形态见 `V0_4_DEVELOPMENT_PLAN.md` §6.2；
+  运行中的服务在 `/api/openapi.json` 给出 OpenAPI（交互文档不挂在本服务上）。
+- **受控 OpenAPI 与前端类型**：入库的契约文件是 `docs/api/openapi.json`，由
+  `uv run python scripts/export_openapi.py` 从代码导出（`--check` 做漂移检查，导出不需要数据库或密钥）；
+  前端的只读传输类型从它生成：`cd frontend` → `npm run generate:api`（生成物不得手改）、
+  `npm run check:api`（重新生成后逐字节比对）。
+- **注意**：`frontend/` 目前仍是**静态原型**（只渲染 fixture，按钮无行为），接线属 T30。
+  日常对话仍请走 Streamlit 入口；v0.4 前端要到 T30 才能用，T33 才把 Streamlit 从正式入口换下来。
+
 ### 本机环境备忘（Windows）
 
 - `uv` 装在 `E:\tools\uv\uv.exe`；若终端 PATH 还没生效，用全路径调用 `E:\tools\uv\uv.exe`。

@@ -112,6 +112,9 @@ flowchart TD
 - Streamlit 交互会触发脚本重新运行；Graph 调用仅由一次新的用户提交或审批按钮事件触发，普通重绘只读取当前状态，不能重复执行工具。
 - 启动入口为 `python -m streamlit run src/local_agent/web.py --server.address=127.0.0.1 --server.port=8501`；仅支持本机访问，不在此版本提供账号、多人并发或公网部署。
 - `run_shell` 是用户从网页触发的受控 Agent 工具；终端只用于开发者启动 Streamlit 服务，不提供独立的 Agent 命令行交互、会话命令或终端审批界面。
+- **v0.4 起的界面边界（T25 冻结，契约见 §15）**：独立 Web（FastAPI + React）成为朋友试用与后续演进的主界面，Streamlit 在过渡期只保留为内核调试、故障定位和回归对照入口，不再作为新交互能力的首选实现。两个界面必须调用同一个应用服务（`src/local_agent/application/`），不得各自解释 Graph State、节点名、LangChain 消息类或 LangGraph `Command`，也不得复制审批、错误和恢复逻辑。
+- 事件流只服务页面增量展示与审计：它不取代 Checkpoint，不构成第二套执行状态，也不能恢复 Graph 或触发工具。刷新和重连后的最终事实必须由 Checkpoint 投影重建。
+- 参考视觉基线冻结在 `local-agent-web/docs/ui-reference/`（参考来源、页面状态矩阵、设计 Token、截图资产）。它只约束"长什么样、交互如何反馈"，不改变本节的职责边界，也不授权复制参考产品的源码、品牌资产或插件运行时。
 
 ### 1.5 工作区模型与外部路径边界
 
@@ -1237,8 +1240,9 @@ Streaming 不可用时回退为非流式输出，不影响任务正确性。
 - **v0.1b**：三出口审批、完整机械证据、模型能力协商、会话索引与切换、跨平台 Shell 边界。
 - **v0.2**：本地 ONNX Embedding 适配器、Chroma 中期记忆、网页工作区选择与受控外部路径、SQLite 长期记忆、召回/写入/遗忘、Prompt 窗口压缩、LLM 反思。
 - **v0.3**：多步骤规划与重规划、可选代码 RAG（按需搜索与有界片段读取，局部 AST 可选）、可观测性与评测。
+- **v0.4**（规划中，契约已冻结）：可试用独立 Web、应用服务与结构化事件边界、可视化聊天模型连接与免重启切换、供应商实际 Token / 缓存观测、稳定系统前缀与追加式动态上下文快照。方向见 [产品演进路线图 §7](PRODUCT_EVOLUTION_ROADMAP.md)，实施顺序与退出门槛见 [V0_4_DEVELOPMENT_PLAN.md](V0_4_DEVELOPMENT_PLAN.md)；本节 §15 为其稳定契约。**当前状态：T25 已冻结契约与视觉基线，运行代码尚未改动。**
 
-每阶段的任务、前置条件、命令和验收证据见 [开发文档 §4–§7](DEVELOPMENT_PLAN.md#4-v01a图跑通)，其中工作区能力由 v0.2 的 T14C 交付。§14 为预留能力，不属于上述交付范围。
+每阶段的任务、前置条件、命令和验收证据见 [开发文档 §4–§7](DEVELOPMENT_PLAN.md#4-v01a图跑通)，其中工作区能力由 v0.2 的 T14C 交付。v0.4 的任务、测试与门槛见 [V0_4_DEVELOPMENT_PLAN.md](V0_4_DEVELOPMENT_PLAN.md)。§14 为预留能力，不属于上述交付范围。
 
 ## 13. 学习目标
 
@@ -1253,5 +1257,240 @@ Streaming 不可用时回退为非流式输出，不影响任务正确性。
 3. 知识蒸馏：将 Agent 能力蒸馏到本地小模型。
 4. 符号服务与语义索引：LSP、全库符号图或持久语义索引；T21 只做按需检索与可选的局部 AST 解析。
 5. 可选子 Agent：在基础任务评测达标后再决定是否引入并行规划与隔离执行。
+
+## 15. v0.4 应用服务、事件与模型请求契约（T25 冻结）
+
+本节是 v0.4 的**实现权威**：`src/local_agent/application/`、`model_settings/`、`api/` 与独立前端必须遵守。
+上游依据是 [V0_4_DEVELOPMENT_PLAN.md §5–§6](V0_4_DEVELOPMENT_PLAN.md)；若本节与该计划冲突，先修订文档再编码，
+不允许由代码自行选择一种解释。
+
+### 15.1 目标目录与依赖方向
+
+```text
+local-agent-web/
+├── frontend/                       # React + TypeScript + Vite，单包，不建 Monorepo
+│   └── src/{api,app,components,features,stores,styles,test}/
+├── src/local_agent/
+│   ├── application/{models,events,projection,errors,service}.py
+│   ├── model_settings/             # 聊天模型连接、密钥引用、配置版本、能力检测
+│   ├── api/{app,routes,sse}.py     # FastAPI 构造、HTTP 路由、会话级 SSE
+│   └── ...                         # 既有 graph/memory/tools/security/persistence/rag/ui
+└── tests/{test_application,test_api,test_events,test_model_usage,test_model_settings}.py
+```
+
+依赖方向固定，且是**单向**的：
+
+```text
+React → HTTP/SSE → application → LangGraph / Checkpoint / Session Store
+LangGraph 不导入 api、frontend 或应用层 DTO
+application 不导入 Streamlit
+frontend 不知道 AgentState、节点名、LangChain 消息类或 LangGraph Command
+```
+
+`application/models.py` 是 UI/API 的唯一业务契约来源（后续 OpenAPI 由它生成）；前端不得手写第二套同名枚举。
+v0.4 的部署拓扑固定为单进程、单 Uvicorn worker（`workers=1`）：进程内广播、会话互斥与幂等台账都以此为边界，
+多 worker 属于不受支持配置。
+
+### 15.2 应用服务用例与每会话单飞
+
+应用服务至少提供（不以 Graph 节点名作为公开接口）：
+
+```text
+list_workspaces()                select_workspace(path)
+select_workspace_by_id(workspace_id)  # 仅选择已列出的工作区；新路径仍走 select_workspace(path)
+list_sessions(workspace_id)      create_session(workspace_id)
+get_session_snapshot(session_id) subscribe_events(session_id)
+list_model_connections()         save_model_connection(connection, optional_api_key)
+test_model_connection(id)        select_default_model(id)
+select_session_model(session_id, id)
+submit_message(session_id, text, client_request_id)
+resolve_approval(session_id, approval_id, decision, client_request_id)
+```
+
+`workspace_id` 是由规范化工作区路径派生的稳定、不含原路径的标识；同名目录也必须可区分、可按 id 选回。
+
+v0.4 **不公开** `cancel_task()`；DTO 可以让 `can_cancel=false`，但页面不得渲染一个没有后端语义的停止按钮。
+
+所有会话**执行状态修改**共用同一条互斥边界（每会话单飞）：
+
+- 已有执行在运行时，不同 `client_request_id` 的第二个执行请求返回稳定错误 `SESSION_BUSY`，**不进入队列**。
+- 相同 id、相同操作、相同规范化参数的重试返回原请求关联结果，不再次调用模型或工具。
+- 相同 id 但参数不同返回 `IDEMPOTENCY_CONFLICT`。
+- 幂等台账必须跨服务重启保留到会话删除，记录请求 id、操作、参数摘要、`run_id`、状态与结果引用；它只保护
+  命令执行，**不复制 Graph 业务状态，也不成为第二套任务真源**。
+- 服务重启后台账仍为"执行中"时，先只读核对 Checkpoint：能证明终态则补齐结果引用；无法证明工具副作用与终态
+  则返回 `RECOVERY_REQUIRED` 并要求人工核对，**绝不自动重提同一 Graph 输入或再次执行工具**。
+- 模型选择只写"下一轮"的设置，不修改正在运行的 Graph State；它按版本校验，避免两个页面互相覆盖。
+
+### 15.3 HTTP 与 SSE
+
+默认资源形态（T25 冻结命名；具体 OpenAPI 由 T29 落地）：
+
+```text
+GET  /api/health
+GET  /api/workspaces                    POST /api/workspaces/select
+GET  /api/sessions                      POST /api/sessions
+GET  /api/sessions/{session_id}         GET  /api/sessions/{session_id}/events
+GET  /api/model-connections             POST /api/model-connections
+PATCH/DELETE /api/model-connections/{id}
+POST /api/model-connections/{id}/test
+PUT  /api/model-connections/default     PUT /api/sessions/{session_id}/model
+POST /api/sessions/{session_id}/messages
+POST /api/sessions/{session_id}/approvals/{approval_id}
+```
+
+- 提交消息、审批和查询走普通 HTTP：POST 可在服务端同步运行 Graph，SSE 只投影进度，**不成为任务真源**。
+  POST 完成时必须返回稳定的命令结果引用，页面不能只靠 SSE 才知道命令结局。
+- 浏览器先建立会话级 SSE，再提交消息。首次连接与重连都先发送由当前 Checkpoint 投影的 `session_snapshot`，
+  再发送连接建立后的实时增量。v0.4 **不提供持久游标**（无 `after_cursor`）：临时 `message_delta` 不永久保存，
+  最终消息、审批、工具结果与任务状态必须能从后续快照恢复；持久游标、长时间断线补发与分页留到 v0.8。
+- 服务默认只绑定 `127.0.0.1`；改变监听地址必须显式配置并被启动检查拒绝或警告。状态修改接口校验
+  `Host`/`Origin`；开发期跨源只允许 Vite 地址，生产同源由 FastAPI 托管前端静态产物。
+- SSE 断开**不等于**取消任务，也不得触发重启 Graph。
+
+### 15.4 事件契约
+
+最小事件集合：
+
+```text
+session_snapshot
+message_started / message_delta / message_completed
+plan_updated / step_started / step_completed
+tool_started / tool_output / tool_completed
+approval_required / approval_resolved
+memory_recalled / memory_written
+model_call_started / model_usage_reported / model_call_completed
+task_completed / task_failed
+```
+
+每个事件至少包含 `schema_version`、`event_id`、`event_type`、`session_id`、`task_id`、`run_id`、
+`occurred_at`、`stream_sequence`、`payload`。
+
+- v0.4 中一次用户提交就是一个任务；允许 `task_id` 与现有 `run_id` 复用同一底层标识，但两个字段都必须出现在
+  DTO 中，并在 v0.6 分离前保持该映射有文档和测试。
+- 除空会话或没有当前任务的 `session_snapshot` 外，任务级事件的 `task_id`、`run_id` 必须非空；**禁止**用随机
+  占位值填充会话级快照。
+- Checkpoint/State 是真源，事件是**单向投影**：生成快照和事件不得写回 State、调用模型、恢复 Graph 或执行工具。
+- `event_id` 必须由稳定来源标识与事件类型确定，同一 Checkpoint 重放得到相同事件 id；不得使用每次渲染随机 UUID。
+- `stream_sequence` 只保证当前进程、当前会话实时流内的顺序，不是持久游标，服务重启后允许重新计数。
+  进程内流式增量用 `model_call_id + chunk_sequence` 形成稳定 `event_id` 并去重；最终消息由 Checkpoint 中稳定
+  消息 id 接管。
+- 连接建立时先登记订阅者，再取边界快照并发送该事件，边界之后的实时事件按 `stream_sequence` 投递，避免
+  "先读快照、后建连接"之间丢失最终状态。
+- `job_queued / job_progress / job_waiting / job_completed / task_cancelled` 属于 v0.6，v0.4 不得预留它们的实现。
+
+### 15.5 错误模型
+
+公开错误分类固定为 `configuration / model / tool / security / approval / recovery / system`。
+错误 DTO 必须区分用户可执行提示、稳定错误码、是否可重试和安全的诊断关联 id。
+
+会话互斥与幂等至少固定 `SESSION_BUSY`、`IDEMPOTENCY_CONFLICT`、`RECOVERY_REQUIRED` 三个错误码：
+第一个可在当前请求结束后重试；第二个要求客户端生成新 id 或修正请求；第三个禁止自动重试副作用并给出人工核对入口。
+异常原文默认只进本地受控日志；API 不返回密钥、绝对私人路径、隐藏推理或未经脱敏的供应商响应。
+
+### 15.6 模型用量记录
+
+估算量与供应商实际量是**两个不同对象**，不得共用一个含糊的 `token_usage` 名称：
+
+```text
+estimated_prompt_tokens / actual_uncached_input_tokens / actual_cache_read_tokens
+actual_cache_write_tokens / actual_output_tokens / actual_reasoning_tokens
+cache_metrics_reported / cache_hit_ratio
+turn_elapsed_ms / model_elapsed_ms / tool_elapsed_ms / time_to_first_token_ms / approval_wait_ms
+context_used_tokens / context_window_tokens / context_usage_ratio
+```
+
+- DeepSeek 的 `prompt_tokens` 含缓存命中：归一化用 `uncached = prompt_tokens - cache_read`；优先识别
+  `prompt_tokens_details.cached_tokens`，兼容 `prompt_cache_hit_tokens`。
+- 供应商未返回某缓存字段时写 `null`/未知，**不得写 0**；只有明确返回零才显示 0%。
+- 命中率 = `cache_read / (uncached_input + cache_read + cache_write)`；分母为零或字段未知时不显示百分比。
+- Checkpoint 持久状态新增规范化的 `model_call_records` 与 `turn_records`，它们是刷新恢复与事件投影的
+  **唯一用量真源**。`ModelCallRecord` 至少含稳定 `model_call_id`、`run_id`、调用用途、连接 ID/版本、
+  供应商/模型、端点安全指纹、重试关联、开始/首 Token/结束时间、状态、估算与实际 Token、缓存字段、
+  上下文窗口与安全指纹；**每次重试使用新的调用 id**，不覆盖失败尝试。
+- `TurnRecord` 以 `run_id` 为稳定标识，含提交接受时间、最终状态时间、审批等待区间、关联模型调用 id 与工具
+  事件 id；运行中允许按同一 id 更新，进入终态后不可改写。页面汇总必须由这些记录确定性计算。
+- 聊天、规划、工具决策、最终回答、反思、摘要等**所有**调用模型的路径都必须经过同一记录入口；旧 Checkpoint
+  没有这些记录时显示"历史版本未记录"，不得伪造估算或零值。
+- "本轮"指一次用户提交到最终完成或失败；等待审批只是同一轮的中间状态，审批恢复后继续累计同一轮，不新建统计。
+- 端到端耗时从应用服务接受提交开始，到本轮最终状态确定为止；审批等待记录为 `approval_wait_ms` 并在明细中
+  明确标记，不得伪装为纯模型耗时。
+- 圆形上下文计量器使用**已组装模型请求的估算输入占用**作为 `context_used_tokens`、配置/能力探测确认的窗口
+  作为 `context_window_tokens`；执行中标记"当前请求"，空闲时标记"上一请求"，从未组装或窗口未知时显示未知。
+  输出预留单列，不重复计入已使用输入。
+
+### 15.7 运行上下文快照
+
+动态运行信息不再伪装成聊天消息。Checkpoint 持久状态新增独立的 `RuntimeContextSnapshot`：
+
+```text
+schema_version / snapshot_id / run_id / context_version / created_at
+content_hash / canonical_text / source_versions
+```
+
+- `canonical_text` 以固定段落顺序和确定性序列化生成；`source_versions` 只记录记忆、RAG、摘要、任务、计划、
+  模式理由、当前目录等来源的版本或安全引用，不复制密钥或未经脱敏的外部正文。
+- 快照与 `messages` **分开持久化**。请求组装器只把最新有效快照作为带明确来源标记的上下文块放在当前真实用户
+  输入之前；具体供应商消息角色由兼容层统一映射，UI 与 Graph 节点不能各自选择。
+- 快照不显示为用户气泡，不建立新轮次，不参与用户消息计数，不触发记忆写入，也不被摘要器或 RAG 索引当作
+  用户陈述。内容未变化时不得追加新记录；新快照通过版本明确覆盖旧快照，旧记录保留审计与重建能力。
+- 稳定系统前缀（系统提示与工具 Schema）不得再被记忆、RAG、摘要、任务、计划、模式理由和当前目录改写；
+  工具 Schema 顺序必须确定，使请求能从 Checkpoint 的版本与来源**字节级重建**。
+
+### 15.8 页面可见性矩阵
+
+页面展示**可验证的执行过程**，不展示模型隐藏思维链：
+
+| 类别 | v0.4 展示 | 明确不展示 |
+|---|---|---|
+| 模型 | 回答增量、当前阶段、安全决策摘要、模型/用量/推理 Token 数值 | `reasoning_content`、原始 Chain-of-Thought、完整 Prompt、系统/开发提示 |
+| 计划 | 目标、步骤、当前状态、完成/失败依据 | 节点私有临时变量、未脱敏内部异常 |
+| 工具 | 工具名、等待/执行/成功/失败、脱敏参数、耗时、输出摘要与证据 | 密钥、私人绝对路径、无界 stdout/stderr、未经审批的危险操作入口 |
+| 记忆/RAG | 是否命中、来源类型、安全引用、写入成功/失败 | 未经脱敏的长期记忆正文、向量或内部评分细节 |
+| 审批 | 动作、参数、影响、风险、批准/拒绝结果 | 把前端按钮当成授权真源 |
+| Web 查询 | v0.5 实现后复用同一工具时间线 | v0.4 伪造联网、搜索结果或进度 |
+
+事件轨迹、日志与导出使用同一脱敏规则。前端可以用"正在分析""正在调用工具"等产品状态表达阶段，但不能把
+生成的解释文本标成模型逐字思考过程。图内产生的 `error_events` 必须先脱敏、再按 `event_id` 去重，然后才可由
+页面展示。
+
+### 15.9 可视化模型连接与免重启切换
+
+v0.4 管理的是**聊天模型连接**（`provider=openai_compatible`）。连接记录至少含稳定 `connection_id`、显示名称、
+`base_url`、模型 ID、上下文窗口、输出上限、temperature、超时、重试、流式选项、鉴权模式、能力检测状态、
+配置版本与可空密钥引用。
+
+- 现有 `config.yaml` 存在时，首次启动从其 `llm` 与 `api_key_env` **幂等导入**一个默认连接，保留旧环境变量
+  取密钥路径；非秘密设置保存在应用自己的本地设置库，**不重写 `config.yaml` 或进程环境变量**。旧会话不因迁移
+  失去模型或历史；没有可用设置库时继续使用原配置并在页面说明降级原因。
+- 全新安装缺少 `config.yaml` 或缺少模型 Key 时，Web/API 先以安全的非模型默认配置进入**初始设置模式**：
+  健康检查、设置页与模型连接 API 可用，Graph/模型调用在就绪前拒绝执行并给出明确提示；完成首个有效连接后
+  无需重启即可对话，CLI 仍沿用原有显式配置要求。
+- 密钥只存操作系统凭据存储并通过不含明文的 `credential_ref` 引用；设置库、Checkpoint、请求台账、事件、日志、
+  浏览器本地存储、导出与截图都不得保存明文。读取接口只返回"已配置/未配置"，更新只能覆盖写入。凭据存储不可用
+  时允许进程内临时使用并明确提示"重启后需重新录入"，**不得**悄悄写入明文文件；POSIX 持久凭据须真机验证。
+- 可保存但未通过检测的连接标记为"未验证"；"测试连接"由用户主动触发，只验证该连接的鉴权、聊天、工具调用与
+  流式能力并分项报告通过/失败/未知。测试失败保留输入与原选中模型；能力缺失时允许普通聊天，但进入需要工具的
+  任务前明确拒绝，**不得静默切回其他模型或降低安全策略**。
+- 非回环端点默认要求 HTTPS；用户明确确认的局域网 HTTP 端点可保存并标出明文传输风险。拒绝 URL 内嵌凭据、
+  非 HTTP(S) scheme 与跨主机重定向；不在页面加载时自动探测端点。
+- 新会话继承当前默认连接，旧会话保留自己的选择。切换只影响**下一次新用户提交**；已开始、等待审批或恢复中的
+  运行固定提交时的连接 ID、配置版本、模型参数与密钥引用。编辑产生新版本，旧版本与其凭据引用保留到所有引用它
+  的运行结束；删除是停用，历史模型标识与用量不删除。
+- 每次模型调用记录连接 ID/版本、模型 ID 与端点安全指纹；缓存基线只在相同连接版本与工具 Schema 下比较。
+  模型切换后圆形上下文计量器按新窗口重新标记，旧轮次仍显示当时窗口。
+
+### 15.10 本节效力与停止条件
+
+- 本节是 v0.4 的唯一实现权威；改变本节任一条都必须先修订本节与 `V0_4_DEVELOPMENT_PLAN.md`。
+- **v0.4 不得删减 v0.1–v0.3 已完成能力**：聊天、工作区、会话、工具、安全审批、三层记忆、压缩、反思、
+  RAG、恢复与评测全部保留；迁移入口必须先通过等价回归，功能关闭仍由既有显式配置控制。
+- 命中任一停止条件时先改契约、不继续堆功能：页面原型无法覆盖一次完整安全任务；应用服务需要复制一份可写
+  Graph 状态；快照/事件投影会触发副作用；缓存优化降低现有正确性；为页面效果引入当前没有真实消费者的
+  平台化抽象。
+- 视觉基线（"长什么样、交互如何反馈"）以 `local-agent-web/docs/ui-reference/` 为准；§15.1–§15.9 只管职责边界与
+  接口契约，不规定视觉细节。该目录的缺口清单必须如实保留，不得用文字描述替代高保真视觉验收。
+
+---
 
 方案已完成，等待架构审查。
