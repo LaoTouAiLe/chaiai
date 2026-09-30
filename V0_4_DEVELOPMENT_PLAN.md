@@ -2391,6 +2391,46 @@ T30 交接的缺口在此关闭：T30 收尾记录写明"记忆行不渲染（T3
 - **人工验收**：切到「放行」→ 让 Agent 读写一个工作区外的目录并成功 → 再让它删除该目录里的文件，**必须出现审批卡**；切回「手动审批」→ 同样的请求被拒，且提示指向「设置 → 权限」里真实存在的位置。
 - **停止条件**：任何模式下能绕过那四项硬约束；`read_write` 授权后删除/覆盖不再请求批准；出厂默认（空白名单）就能访问工作区外；同一份配置存在第二处真源（yaml 与库各存一份授权）；为兼容旧键而保留两套并行写法且没有冲突校验。
 
+#### T38 执行记录（2026-09-30）
+
+**状态**：**自动门槛全绿，改动未提交**；范围与停止条件逐条对照无违反。**人工验收未执行**（见第四节）。
+
+**一、本轮范围与改动（未提交）**
+
+用户裁定两件事：① 界面上三档**一一对应**底层 mode（手动审批 = `deny`、自定义 = `whitelist`、放行 = `allow`）；② 「出厂默认」一行用 `default_mode` 说明，不声称哪一档是默认。
+
+- **配置层**（`config.py`）：新增 `ExternalPathsConfig.mode`（`deny` / `whitelist` / `allow`，默认 `whitelist`）。`WorkspaceConfig._resolve_external_paths` 把旧键 `allow_external_paths` 归一为快捷方式（`true` ≡ `mode: allow`），**仅当**旧键 `true` 且新键显式写了非 `allow` 档位时报错——沿用 T29A `_provider_conflicts`「显式出现**且有值**、且会给出不同结果才拦」的口径，避免 `model_dump() → model_validate()` 往返（必然同时写出两个键）被误判成冲突。
+- **判定层**（`security/path_guard.py`）：新增 `ExternalPathPolicy{mode, grants}.access_for()` / `.reaches()`；`ResolvedTarget` 带上 `access: AccessLevel`（`inside` / `read` / `read_write`）与 `writable` 属性（`read_write` 与工作区内同为真）；新增 `normalize_grant_path`（展开 `~` 与符号链接、`normcase` 统一大小写与分隔符）；越界未授权的提示改为「该路径在工作区外且未被授权：… 请在「设置 → 权限」中添加授权，或改到工作区内操作。」；`~` / 相对路径逃逸 / 盘符相对路径三类输入改由**单独分支**拒绝（授权也救不了）。
+- **判定层**（`security/policy.py`）：`SecurityPolicy` 增加 `external_policy` 入参（缺省取 `config.yaml` 出厂默认）；`resolve_path` 拆出 `resolve_target`（判定与执行共用）；`_external_side_effect_decision` 分级——受保护目标硬拒绝不变，**`read` 授权拒绝写操作**并说明「只有只读授权…请在「设置 → 权限」中把该目录改为「可读写」」，**`read_write` 授权返回 `None`**（视同工作区内，走常规规则），越界未授权硬拒绝。
+- **存储层**（`model_settings/store.py` + `persistence/migrations.py`）：设置库升到 **v2**，新增 `external_path_grants(path PK, access, created_at, updated_at)` 表；新增 `PermissionStore`——档位存 `settings_meta` 的 `permissions.external_paths.mode`，授权存专表；`grant` 按**规范化键** upsert（同目录写 `E:/data` 与 `e:\data` 落到同一行），`revoke` 幂等。**失败闭合**：库里出现非法档位文本按出厂默认处理，非法访问级别按**只读**处理。
+- **应用层**（`application/service.py` / `models.py` / `errors.py` / `projection.py` / `api/container.py`）：`PermissionsView` / `ExternalPathGrantView` 投影；四个用例 `permissions` / `set_external_paths_mode` / `grant_external_path` / `revoke_external_path`；新增授权先用 `protected_target_reason` **拒绝受保护目标**（授权它只会让用户误以为放开了）；档位与授权**每一轮现取**（`external_paths_policy()`，不缓存）；投影层审批卡的目标归一**固定用最宽档位**（只用于展示完整目标，判定不在这里）；授权被拒复用 `MODEL_SETTINGS_INVALID`（不新增稳定错误码），`detail` 说明不含路径（`ErrorView` 会挡下展示文本里的私人绝对路径）。
+- **API 层**（`api/schemas.py` / `api/routes.py`）：`PermissionsModeRequest` / `ExternalPathGrantRequest`；四条路由 `GET/PUT /api/permissions`、`POST/DELETE /api/permissions/grants`（删除的路径走查询参数），均返回**完整视图**（200）；无设置库时**读不报错**（返回出厂默认 + `store_unavailable=true`），**写返回 503**；这组接口没有「关闭审批」一类入口。
+- **消费方同步**：`security/approval.py`、`security/shell_guard.py`（`allow_external_cwd` → `external_policy`）、`tools/shell_tools.py`、`graph/builder.py`。
+- **契约**：`docs/api/openapi.json`（+300 行）与 `frontend/src/api/schema.gen.ts`（+281 行）重新生成。
+- **前端**（`frontend/src/features/settings/`）：新增 `PermissionSection.tsx` 与 `usePermissions.ts`（骨架同 `useModelSettings`：读失败不清空、写失败不改视图、忙态防双击）；`SettingsDialog.tsx` 增加**分节切换器**（模型连接 / 权限，`role="tablist"` + `tabpanel`），并**改写**「There is deliberately no section switcher」注释与 `SettingsDialog.test.tsx` 那条同名断言；`client.ts`（四个权限请求）/ `viewModels.ts` / `fixtures/types.ts` / `fixtures/scenarios.ts` / `SettingsDialog.module.css` 同步。
+
+**二、停止条件逐条对照**
+
+1. **任何模式下能绕过四项硬约束** → **否**：`RequireApprovalConfig` 与 `_external_side_effect_decision` 均未放宽；`read_write` 只是把外部目标视同工作区内，删除/覆盖/破坏性 Shell/大范围编辑仍走各工具自身风险规则。
+2. **`read_write` 授权后删除/覆盖不再请求批准** → **否**：同上，删除与覆盖由工具自身的硬约束拦截，与档位无关。
+3. **出厂默认（空白名单）就能访问工作区外** → **否**：`whitelist` + 空 `grants` 时 `access_for` 恒为 `None`；`mode: deny` 与 `mode: whitelist` + `grants: {}` 等价。
+4. **同一份配置存在第二处真源 / 两套并行写法且无冲突校验** → **否**：档位与授权唯一真源在设置库，`config.yaml` 只是出厂默认；旧键只作快捷方式且带冲突校验。
+
+**三、各门槛实测数字**
+
+- **后端**：ruff `All checks passed!`；mypy `Success: no issues found in 90 source files`；全量 `uv run pytest -q` → **891 passed, 6 skipped** in 125.47s（T37 基线为 854 passed / 6 skipped / 1 flaky-failed，本轮连那条 flaky 也过了）。
+- **后端新增测试 22 个函数**：`test_security.py` 10、`test_model_settings.py` 7、`test_api.py` 3、`test_tools.py` 1、`test_graph_resume.py` 1（参数化展开后计入上面的总数）。
+- **契约同步**：`npm run check:api` → 「生成类型与受控 OpenAPI 一致（重新生成无差异）」。
+- **前端**：`npm run typecheck` 通过（无输出）；`npm run lint` → `1 problem (0 errors, 1 warning)`（即 T37 已有的 `react-refresh/only-export-components`，非本轮引入）；`npm test` → **234 passed (26 files)**；`npm run build` → `dist/assets/index-uJRlrWhd.js 504.33 kB (gzip 155.01 kB)` + `index-DUJ24bGX.css 63.02 kB (gzip 9.83 kB)`（>500 kB 的 chunk 提示为既有）。
+- **前端新增测试 22 例**：新建 `usePermissions.test.ts` 7 例；`SettingsDialog.test.tsx` 权限分区 11 例 + 分节切换器 1 例（替换原「不提供分节切换」那条）；`api.test.ts` 3 例。
+
+**四、未验证项与遗留（如实记录）**
+
+1. **人工验收未执行**：计划里的「切到放行 → 读写工作区外目录成功 → 删除该目录文件必须仍出审批卡 → 切回手动审批被拒且提示指向「设置 → 权限」」需要真实模型与运行中的服务，本轮未走。自动门槛已覆盖判定矩阵（三档 × 命中/未命中 × `read`/`read_write` × 三类输入）与投影，但**页面档位切换 + 真实工具往返**尚未手工验证。
+2. **`ARCHITECTURE.md` 文档漂移，未改**：§1.5 仍写旧布尔 `allow_external_paths`，§15 路由表（L1334-1337）尚无 `/api/permissions`。不在本任务改动边界内，如实记录。
+3. **`local-agent-web/README.md` L389 仍描述旧布尔行为**：该文件本轮带的是 T37 尾巴的未提交改动（「快速开始」「调试入口」两节），与 T38 档位口径尚未对齐。
+4. **`OPTIMIZATION_BACKLOG.md` 为未跟踪文件**：按用户裁定一并提交。
+
 ### T39｜朋友试用前的展示与浏览器数据收口（T38 后执行）
 
 - **目标**：普通对话先呈现回答、当前进度、需要用户决定的动作、修改结果和失败后的下一步；工具调用以用户能理解的动作与状态表达。技术轨迹保留可复核证据，但不让原始工具名、线程/会话/运行 ID、协议字段名和长工具输出占据默认页面。

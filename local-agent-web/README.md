@@ -8,6 +8,38 @@
 
 > 这是学习项目，不是商用成品。默认只监听本机回环地址，不包含账号体系、多人并发或公网部署。
 
+## 快速开始
+
+```powershell
+uv sync                                     # 装依赖（首次）
+Copy-Item config.yaml.example config.yaml   # 首次：复制一份配置（config.yaml 已被 .gitignore 排除）
+# 编辑 config.yaml 的 llm 段：base_url / model / context_window_tokens
+#   context_window_tokens 是必填项，且必须大于 max_tokens
+uv run python -m local_agent.api            # 正式入口 → http://127.0.0.1:8000
+```
+
+页面还需要前端产物（首次，或前端代码改动之后）：
+
+```powershell
+cd frontend
+npm ci         # 严格按 package-lock.json 安装；换机器复现用这个，不要用 npm install
+npm run build  # 先 typecheck，再产出 frontend/dist
+```
+
+然后刷新 <http://127.0.0.1:8000>。没有产物时根路径只给一段可执行提示，API 仍然可用。
+
+开发时前端走 Vite 热更新（**另开一个终端，两个进程一起跑**）：
+
+```powershell
+cd frontend
+npm run dev                                 # http://127.0.0.1:5173，/api 代理到 127.0.0.1:8000
+```
+
+**必须在项目根目录启动**（也就是本 README 所在的 `local-agent-web/`）：`config.yaml`、`.env` 与
+`workspace.root` 都按进程当前目录解析。
+
+配置字段、质量命令、端到端测试与故障排查见下面各节；Streamlit 是**可选的调试入口**，朋友试用不需要。
+
 ## 当前进度
 
 | 阶段 | 内容 | 状态 |
@@ -168,7 +200,9 @@ security:
 - **不伪造证据**：`final_evidence` 只来自真实执行的工具，`verified` 由机械校验决定；
   编辑类还要额外通过"Hash 确实变了""diff 非空"两项检查才算 `verified`。
 
-## 启动
+## 调试入口（Streamlit，可选）
+
+正式入口是下面的 HTTP/SSE 服务；这一条**只在需要与旧界面做回归对照时**才用。
 
 ```powershell
 python -m streamlit run src/local_agent/web.py --server.address=127.0.0.1 --server.port=8501
@@ -179,9 +213,9 @@ python -m streamlit run src/local_agent/web.py --server.address=127.0.0.1 --serv
 
 必须**在项目根目录启动**：`config.yaml`、`.env` 与 `workspace.root` 都按进程当前目录解析。
 
-## 启动（v0.4 本机 HTTP/SSE 服务）
+## 启动（正式入口：本机 HTTP/SSE 服务）
 
-v0.4 增加了一条独立的 HTTP 服务（T29 起），与上面的 Streamlit 入口**并存**：
+v0.4 的正式入口（T29 起的 HTTP 服务），与上面的 Streamlit 调试入口**并存**：
 
 ```powershell
 uv run python -m local_agent.api          # 默认 http://127.0.0.1:8000
