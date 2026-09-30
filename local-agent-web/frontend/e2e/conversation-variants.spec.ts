@@ -30,5 +30,7 @@ test('长回答可滚到末尾、空回答与模型异常有可见状态', async
   await input.fill('T30_ERROR')
   await send.click()
   await expect(page.getByRole('alert')).toContainText('执行结果尚不能确认')
-  await expect(page.getByText('T30_ERROR')).toHaveCount(1)
+  // 只数对话里的那一条：提交失败后草稿按设计退回输入区（`LiveApp` 的 `onError`），
+  // 输入区里的同一串文字不是"回答重复了一次"。
+  await expect(log.getByText('T30_ERROR')).toHaveCount(1)
 })

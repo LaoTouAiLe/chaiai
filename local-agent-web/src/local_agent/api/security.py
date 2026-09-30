@@ -58,6 +58,25 @@ def _authority(raw: str) -> str:
     return text
 
 
+def is_allowed_origin(origin: str, host_header: str, allowed_origins: Iterable[str]) -> bool:
+    """`origin` 可否接受：命中允许列表，或与本次请求的 `Host` **同源**。
+
+    中间件与需要单独加严的路由共用这一份判定（例：会弹系统窗口的目录选择器，它只有本机页面
+    该调）。允许列表按每次调用归一化——条目是个位数，这点开销换调用方不必自己预处理。
+
+    同源之所以可以直接放行：CSRF 的前提是**跨站**发起，而同源请求本来就带着本站的凭据与
+    `Host`，没有任何"被别的站点驱动"的成分。
+
+    Args:
+        origin: 请求的 `Origin` 头。`"null"`（沙箱 / `file://`）按普通字符串比对，因此不可能同源。
+        host_header: 本次请求的 `Host` 头，仅用于同源判定。
+        allowed_origins: 允许的跨源来源；大小写与尾部斜杠不敏感。
+    """
+    if origin.lower() in {item.strip().lower() for item in allowed_origins}:
+        return True
+    return _authority(origin) == _authority(host_header)
+
+
 class LocalBoundaryMiddleware:
     """Host / Origin / 正文大小的纯 ASGI 中间件。"""
 
@@ -152,14 +171,8 @@ class LocalBoundaryMiddleware:
         await self.app(scope, replay, send)
 
     def _origin_allowed(self, origin: str, host_header: str) -> bool:
-        """同源放行；跨源必须命中白名单。
-
-        同源之所以可以直接放行：CSRF 的前提是**跨站**发起，而同源请求本来就带着本站的凭据与
-        Host，没有任何"被别的站点驱动"的成分。
-        """
-        if origin.lower() in self.allowed_origins:
-            return True
-        return _authority(origin) == _authority(host_header)
+        """同源放行；跨源必须命中白名单（见 :func:`is_allowed_origin`）。"""
+        return is_allowed_origin(origin, host_header, self.allowed_origins)
 
     async def _too_large(self, send: Send) -> None:
         await self._reject(

@@ -13,6 +13,7 @@ const ALL_SCENARIOS = [
   'diff',
   'errors',
   'tools',
+  'trace',
   'approval',
   'approval-expired',
   'settings-models',
@@ -151,7 +152,14 @@ test('an approval takes over the composer and a stale one offers no decision', a
   await page.goto('/?state=approval-expired')
   await expect(page.getByText('审批已失效')).toBeVisible()
   await expect(page.getByRole('button', { name: '进入二次确认' })).toHaveCount(0)
+  // A finished decision collapses to one line by default: the outcome stays on
+  // screen without holding the whole space above the composer, and the detail is
+  // one click away.
+  await expect(page.getByText(/该审批已超时失效，未执行任何操作/)).toHaveCount(0)
+  await page.getByRole('button', { name: '展开详情' }).click()
   await expect(page.getByText(/该审批已超时失效，未执行任何操作/)).toBeVisible()
+  // `exact`：侧栏那枚"收起侧边栏"也含"收起"，子串匹配会撞上它。
+  await expect(page.getByRole('button', { name: '收起', exact: true })).toBeVisible()
   // A card telling the user to re-issue a request must not be the reason they
   // cannot: the composer comes back while the outcome stays on screen.
   await expect(page.getByRole('textbox', { name: '给智能体发消息' })).toBeVisible()
@@ -358,6 +366,55 @@ test('the recovery card is fully readable after scrolling to the end', async ({ 
   await expect(card.getByText(/应用不会自动补执行未完成的步骤/)).toBeInViewport({ ratio: 1 })
   await settle(page)
   await expect(page).toHaveScreenshot('error-codes-bottom.png')
+})
+
+/**
+ * Matrix 20 / 21 — the trace tab: the table state and the row inspector.
+ *
+ * `?state=trace` opens on the trace tab of the same session as `tools`, so the two
+ * tabs are two views of one data set rather than two fixtures that could disagree.
+ */
+test('the trace table lists every tool call and opens an inspector on a row', async ({ page }) => {
+  await page.goto('/?state=trace')
+  await expect(page.getByRole('tab', { name: '轨迹' })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.locator('[data-trace-row]')).toHaveCount(7)
+  // The three columns matrix 20 asks for, plus the timeline order.
+  await expect(page.getByRole('columnheader', { name: '类型' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: '参数' })).toBeVisible()
+  await expect(page.getByRole('columnheader', { name: '结果摘要' })).toBeVisible()
+  await expect(page.getByText(/command=pnpm run check/)).toBeVisible()
+
+  await page.getByRole('button', { name: '查看 run_shell（失败）的检查器详情' }).click()
+  const inspector = page.getByRole('region', { name: '轨迹检查器' })
+  await expect(inspector).toBeVisible()
+  for (const section of ['Summary', 'Payload', 'Result', 'Schema', 'Timing']) {
+    await expect(inspector.getByRole('heading', { name: section })).toBeAttached()
+  }
+  // Fields the contract does not carry stay unknown: no zero, no invented hash.
+  await expect(inspector.getByText('所属轮次')).toBeVisible()
+  await settle(page)
+  await expect(page).toHaveScreenshot('trace-inspector.png')
+
+  // At 1280×800 the last two sections sit below the fold, so "all five sections
+  // exist" needs a scrolled capture rather than only the first screenshot.
+  await inspector.getByRole('heading', { name: 'Timing' }).scrollIntoViewIfNeeded()
+  await expect(inspector.getByText(/耗时由服务端按调用开始与结束时刻计算/)).toBeInViewport()
+  await settle(page)
+  await expect(page).toHaveScreenshot('trace-inspector-bottom.png')
+})
+
+test('the trace tab is reachable from a conversation and back again', async ({ page }) => {
+  await page.goto('/?state=shell')
+  await expect(page.getByRole('log', { name: '对话' })).toBeVisible()
+
+  await page.getByRole('tab', { name: '轨迹' }).click()
+  await expect(page.getByRole('table')).toBeVisible()
+  // The two tabs are alternatives: the conversation is replaced, not stacked under.
+  await expect(page.getByRole('log', { name: '对话' })).toHaveCount(0)
+
+  await page.getByRole('tab', { name: '对话' }).click()
+  await expect(page.getByRole('log', { name: '对话' })).toBeVisible()
+  await expect(page.getByRole('table')).toHaveCount(0)
 })
 
 test('a running turn blocks sending without promising a stop control', async ({ page }) => {

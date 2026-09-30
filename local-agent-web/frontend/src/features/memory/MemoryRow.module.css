@@ -84,12 +84,12 @@
   line-height: var(--law-leading-sm);
 }
 
+/* 来源引用是长路径（`local-agent-web/ARCHITECTURE.md:15.6` 之类）：省略号会直接
+   抹掉定位信息，窄窗（640 裁 95px）改为折行。宽窗放得下时无变化。 */
 .sourceRef {
   flex: 0 1 auto;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
   color: var(--law-text-primary);
   font-family: var(--law-font-mono);
   font-size: var(--law-text-xs);

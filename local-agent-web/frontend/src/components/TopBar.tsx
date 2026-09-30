@@ -5,14 +5,21 @@ interface TopBarProps {
   /** Null while no workspace is selected: no breadcrumb is shown. */
   workspace: string | null
   activeTab: 'conversation' | 'trace'
+  /**
+   * 切换页签。
+   *
+   * 省略即原型行为：页签只显示当前态、不产生跳转（原型里"当前页签"由 `?state=` 决定）。
+   */
+  onSelectTab?: (tab: 'conversation' | 'trace') => void
 }
 
 /**
  * Session header: title, the conversation/trace switch and the session-log entry.
  *
- * Tabs are rendered but inert — they become real views in T31.
+ * 「轨迹」自 T31 起接上了真实视图（表格 + 检查器）。`Session log` 仍是惰性按钮：v0.4 没有
+ * 事件日志页，也没有它的接口，留着是为了不隐藏这个入口（缺口记在 T37 验收记录里）。
  */
-export function TopBar({ title, workspace, activeTab }: TopBarProps) {
+export function TopBar({ title, workspace, activeTab, onSelectTab }: TopBarProps) {
   return (
     <header className={styles.bar}>
       <div className={styles.left}>
@@ -26,6 +33,9 @@ export function TopBar({ title, workspace, activeTab }: TopBarProps) {
             role="tab"
             aria-selected={activeTab === 'conversation'}
             className={activeTab === 'conversation' ? `${styles.tab} ${styles.tabActive}` : styles.tab}
+            onClick={onSelectTab === undefined ? undefined : () => {
+              onSelectTab('conversation')
+            }}
           >
             对话
           </button>
@@ -34,6 +44,9 @@ export function TopBar({ title, workspace, activeTab }: TopBarProps) {
             role="tab"
             aria-selected={activeTab === 'trace'}
             className={activeTab === 'trace' ? `${styles.tab} ${styles.tabActive}` : styles.tab}
+            onClick={onSelectTab === undefined ? undefined : () => {
+              onSelectTab('trace')
+            }}
           >
             轨迹
           </button>

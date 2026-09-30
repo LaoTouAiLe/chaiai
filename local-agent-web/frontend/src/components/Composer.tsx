@@ -77,7 +77,7 @@ export function Composer({ session, plan, meter, takeover, modelMenu, state, act
         {plan === null ? null : <PlanStrip plan={plan} />}
 
         {approval !== null && !awaitingDecision ? (
-          <ApprovalCard approval={approval} actions={approvalActions} />
+          <ApprovalCard key={approval.approvalId} approval={approval} actions={approvalActions} />
         ) : null}
 
         {modelMenu === null || awaitingDecision ? null : <ModelMenu menu={modelMenu} actions={modelMenuActions} />}
@@ -85,7 +85,7 @@ export function Composer({ session, plan, meter, takeover, modelMenu, state, act
         {meterOpen && !awaitingDecision ? <MeterPanel meter={meter} /> : null}
 
         {awaitingDecision ? (
-          <ApprovalCard approval={approval} actions={approvalActions} />
+          <ApprovalCard key={approval.approvalId} approval={approval} actions={approvalActions} />
         ) : (
           <>
             {phase === null ? null : (
@@ -154,31 +154,34 @@ export function Composer({ session, plan, meter, takeover, modelMenu, state, act
                   {actions !== undefined && session.modelLabel === '' ? '选择模型' : session.modelLabel}
                 </button>
                 <div className={styles.spacer} />
-                <ContextMeter meter={meter} open={meterOpen} />
-                {/* v0.4 exposes no `cancel_task()`, so the primary action is never a
-                    stop button: sending is simply unavailable until the turn ends
-                    (ARCHITECTURE §15.2, plan §T30). */}
-                <button
-                  type="button"
-                  className={styles.send}
-                  // Prototype mode keeps it permanently disabled (the fixture snapshot);
-                  // real mode enables it once there is something to send.
-                  disabled={actions === undefined || !actions.canSend}
-                  onClick={actions === undefined ? undefined : () => actions.onSend()}
-                  aria-label="发送消息"
-                  aria-describedby={sendBlockedReason === null ? undefined : 'composer-send-blocked'}
-                >
-                  <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" focusable="false">
-                    <path
-                      d="M7 11.5V3M7 3 3.4 6.6M7 3l3.6 3.6"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="1.7"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
+                {/* 计量器与发送是一个整体：窄窗整组折到第二行，而不是把发送挤出视口。 */}
+                <div className={styles.right}>
+                  <ContextMeter meter={meter} open={meterOpen} />
+                  {/* v0.4 exposes no `cancel_task()`, so the primary action is never a
+                      stop button: sending is simply unavailable until the turn ends
+                      (ARCHITECTURE §15.2, plan §T30). */}
+                  <button
+                    type="button"
+                    className={styles.send}
+                    // Prototype mode keeps it permanently disabled (the fixture snapshot);
+                    // real mode enables it once there is something to send.
+                    disabled={actions === undefined || !actions.canSend}
+                    onClick={actions === undefined ? undefined : () => actions.onSend()}
+                    aria-label="发送消息"
+                    aria-describedby={sendBlockedReason === null ? undefined : 'composer-send-blocked'}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" focusable="false">
+                      <path
+                        d="M7 11.5V3M7 3 3.4 6.6M7 3l3.6 3.6"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.7"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  </button>
+                </div>
               </div>
             </div>
           </>

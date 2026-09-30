@@ -15,6 +15,7 @@ import {
   listSessions,
   listWorkspaces,
   newRequestId,
+  pickWorkspaceDirectory,
   resolveApproval,
   selectSessionModel,
   selectWorkspace,
@@ -77,6 +78,16 @@ export function useSnapshot(sessionId: string | null) {
     queryFn: () => getSessionSnapshot(sessionId ?? ''),
     enabled: sessionId !== null,
   })
+}
+
+/**
+ * 弹出本机原生目录选择器。
+ *
+ * **刻意不改任何缓存**：这个接口不改变状态（取消也是零副作用），拿到路径之后要不要登记由调用方
+ * 决定——登记走 `useSelectWorkspace`，缓存失效规则只留在那一处。
+ */
+export function usePickWorkspaceDirectory() {
+  return useMutation({ mutationFn: pickWorkspaceDirectory })
 }
 
 /** 选工作区（或新建）：返回切过去的会话，调用方据此打开它。 */

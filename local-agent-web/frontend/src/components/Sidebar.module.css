@@ -62,6 +62,23 @@
   background: var(--law-button-primary-fill);
 }
 
+/* 收起入口（矩阵 24）：参考里的「收起侧边栏」在品牌行右侧。 */
+.brandToggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-left: auto;
+  border-radius: var(--law-radius-sm);
+  color: var(--law-text-tertiary);
+}
+
+.brandToggle:hover {
+  background: var(--law-button-ghost-hover);
+  color: var(--law-text-primary);
+}
+
 .brandName {
   font-size: var(--law-text-md);
   line-height: var(--law-leading-md);
@@ -109,8 +126,48 @@
   color: var(--law-text-caption);
 }
 
-.treeLabel {
+.treeHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--law-space-sm);
   padding: 0 var(--law-space-md);
+}
+
+.treeLabel {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.addWorkspace {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: var(--law-radius-md);
+  background: transparent;
+  color: var(--law-text-caption);
+  font-size: var(--law-text-sm);
+  line-height: 1;
+  cursor: pointer;
+  transition: background var(--law-duration-base) var(--law-ease);
+}
+
+.addWorkspace:hover:not(:disabled) {
+  background: var(--law-button-ghost-hover);
+  color: var(--law-text-primary);
+}
+
+.addWorkspace:disabled {
+  cursor: progress;
+  opacity: 0.5;
+}
+
+.treeError {
+  margin: var(--law-space-sm) var(--law-space-md) 0;
   color: var(--law-text-caption);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);

@@ -8,7 +8,7 @@
 // 3. **快照是权威**：任何一处对不上（缺块、解析失败、重新订阅），一律以快照为准，
 //    临时尾部只负责"还没进快照的那一段"（见 `streamTail.ts`）。
 
-import { useQueryClient } from '@tanstack/react-query'
+import { CancelledError, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
 
 import { ApiError, getSessionSnapshot } from './client'
@@ -56,7 +56,11 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
       void refreshSnapshot().then((snapshot) => {
         const store = useStreamStore.getState()
         store.setTail(sessionId, reconcile(tailOf(store.tails, sessionId), snapshot))
-      }).catch(() => {
+      }).catch((error: unknown) => {
+        // 取消不是故障：切会话/卸载会让这个查询的最后一个观察者消失，React Query 据此取消在飞的
+        // 对账请求（query-core 的既定行为）。把它当失败提示出来，用户会在**看不清来源**的新会话上
+        // 看到一条英文错误码，而实际什么都没坏。
+        if (error instanceof CancelledError || stopped) return
         setNotices((current) => [...current, 'snapshot_refresh_failed'])
       })
     }

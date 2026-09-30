@@ -3339,8 +3339,20 @@ def approval_interrupt_node(state: AgentState, runtime: Runtime[RuntimeContext])
             HumanMessage(content=_edit_message(request, edited, str(decision_input.get("reason") or "")))
         ]
     else:
+        # 被拒的调用**也必须**有一条 ToolMessage 应答：``agent_decision_node`` 的助手消息带着
+        # 这些 ``tool_calls``，缺一条应答就在历史里留下"有调用、无结果"的残缺序列。下一轮把
+        # 它原样发给 OpenAI 兼容端点会被 400 拒绝（`insufficient tool messages following
+        # tool_calls message`）——异常从 SSE 端点逃逸后页面永远停在"正在生成回答…"、会话状态
+        # 卡在 ``running``（T37 真实验收实证，2026-09-29）。硬拒绝路径同样补了 ToolMessage。
         update["pending_tool_calls"] = []
-        update["messages"] = [AIMessage(content=REJECTED_REPLY)]
+        update["messages"] = [
+            ToolMessage(
+                content=f"已拒绝执行 {approved_name}：该动作未执行，也不会自动重试。",
+                tool_call_id=approved_id,
+                name=approved_name,
+            ),
+            AIMessage(content=REJECTED_REPLY),
+        ]
     return update
 
 

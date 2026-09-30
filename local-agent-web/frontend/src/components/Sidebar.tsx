@@ -1,5 +1,5 @@
 import type { SessionSummaryView } from '../fixtures/types'
-import { ChevronRight } from './icons'
+import { ChevronLeft, ChevronRight } from './icons'
 import styles from './Sidebar.module.css'
 
 interface SidebarSession {
@@ -17,9 +17,18 @@ interface SidebarSession {
  */
 export interface SidebarActions {
   onSelectWorkspace: (workspaceId: string) => void
+  /**
+   * 拉起宿主的原生目录选择器去**新增**一个工作区。
+   *
+   * 刻意只有这一条"添加"路径：系统对话框自带"新建文件夹"，所以不必再来一个"按名称创建"的
+   * 入口——同一结果两套词汇是本项目明确要避免的。
+   */
+  onAddWorkspace: () => void
   onSelectSession: (sessionId: string) => void
   onNewSession: () => void
   onOpenSettings: () => void
+  /** 展开态与窄轨态共用的同一个动作：收起 / 展开是同一枚开关。 */
+  onToggleCollapse: () => void
 }
 
 interface SidebarProps {
@@ -30,6 +39,13 @@ interface SidebarProps {
    */
   collapsed?: boolean
   actions?: SidebarActions
+  /**
+   * 「添加工作区」的原生选择器状态。
+   *
+   * 进行中要禁用入口（原生对话框可以被重复点击拉起第二次），失败要**就地**说清楚并让人能
+   * 再点一次——失败信息离开操作位置就没有用了。
+   */
+  addWorkspace?: { pending: boolean; error: string | null }
 }
 
 /**
@@ -65,7 +81,7 @@ function statusClass(status: SessionSummaryView['status']): string {
  *
  * Static prototype data only — selection and search become real in T30.
  */
-export function Sidebar({ workspaces, collapsed = false, actions }: SidebarProps) {
+export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace }: SidebarProps) {
   return (
     <aside
       className={collapsed ? `${styles.sidebar} ${styles.sidebarCollapsed}` : styles.sidebar}
@@ -75,6 +91,17 @@ export function Sidebar({ workspaces, collapsed = false, actions }: SidebarProps
       <div className={styles.brand}>
         <span className={styles.brandMark} aria-hidden="true" />
         {collapsed ? null : <span className={styles.brandName}>本地 Agent</span>}
+        {collapsed ? null : (
+          <button
+            type="button"
+            className={styles.brandToggle}
+            aria-label="收起侧边栏"
+            aria-expanded={true}
+            onClick={() => actions?.onToggleCollapse()}
+          >
+            <ChevronLeft />
+          </button>
+        )}
       </div>
 
       {collapsed ? (
@@ -87,7 +114,13 @@ export function Sidebar({ workspaces, collapsed = false, actions }: SidebarProps
           >
             <span aria-hidden="true">＋</span>
           </button>
-          <button type="button" className={styles.railButton} aria-label="展开侧边栏" aria-expanded={false}>
+          <button
+            type="button"
+            className={styles.railButton}
+            aria-label="展开侧边栏"
+            aria-expanded={false}
+            onClick={() => actions?.onToggleCollapse()}
+          >
             <ChevronRight />
           </button>
         </>
@@ -103,7 +136,22 @@ export function Sidebar({ workspaces, collapsed = false, actions }: SidebarProps
             <input placeholder="搜索会话…" type="search" />
           </label>
 
-          <div className={styles.treeLabel}>工作区</div>
+          <div className={styles.treeHeader}>
+            <span className={styles.treeLabel}>工作区</span>
+            <button
+              type="button"
+              className={styles.addWorkspace}
+              aria-label="添加工作区"
+              title="添加工作区"
+              disabled={addWorkspace?.pending === true}
+              onClick={() => actions?.onAddWorkspace()}
+            >
+              <span aria-hidden="true">＋</span>
+            </button>
+          </div>
+          {addWorkspace?.error == null ? null : (
+            <p className={styles.treeError} role="status">{addWorkspace.error}</p>
+          )}
           <nav aria-label="会话">
             {workspaces.map((workspace) => (
               <div key={workspace.id} className={styles.workspace}>

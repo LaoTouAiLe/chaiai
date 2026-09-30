@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -14,6 +14,8 @@ const mock = vi.hoisted(() => ({
   mutate: vi.fn(),
   modelMutate: vi.fn(),
   resolve: vi.fn(),
+  pickMutate: vi.fn(),
+  workspaceMutate: vi.fn(),
   resolvePending: false,
   resolveError: null as null | Error,
 }))
@@ -114,7 +116,8 @@ vi.mock('../api/queries', () => ({
     ]
   }),
   useCreateSession: () => ({ mutate: vi.fn() }),
-  useSelectWorkspace: () => ({ mutate: vi.fn() }),
+  useSelectWorkspace: () => ({ mutate: mock.workspaceMutate }),
+  usePickWorkspaceDirectory: () => ({ mutate: mock.pickMutate, isPending: false, error: null }),
   useSubmitMessage: () => ({ mutate: mock.mutate, isPending: false, isError: false }),
   useSelectSessionModel: () => ({ mutate: mock.modelMutate, isPending: false }),
   useResolveApproval: () => ({
@@ -142,6 +145,8 @@ beforeEach(() => {
   mock.mutate.mockReset()
   mock.modelMutate.mockReset()
   mock.resolve.mockReset()
+  mock.pickMutate.mockReset()
+  mock.workspaceMutate.mockReset()
   mock.selection = null
   useUiStore.setState({ workspaceId: 'w1', activeSessionId: 's1', drafts: { s1: '保留这段草稿' } })
 })
@@ -150,6 +155,52 @@ describe('LiveApp pending approval', () => {
   const renderApp = () => render(
     <QueryClientProvider client={new QueryClient()}><LiveApp /></QueryClientProvider>,
   )
+
+  it('reports a failed workspace registration after a directory was chosen', () => {
+    mock.sessionState = 'idle'
+    mock.pickMutate.mockImplementation((_input, options) => options.onSuccess({ path: 'C:\\missing' }))
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: '添加工作区' }))
+    const [, options] = mock.workspaceMutate.mock.calls[0]
+    expect(options?.onError).toBeTypeOf('function')
+    act(() => options.onError(
+      new ApiError({ status: 404, code: 'WORKSPACE_NOT_FOUND', message: '目录不存在', hint: '重新选择目录。' }),
+    ))
+
+    expect(screen.getByText(/目录不存在.*重新选择目录/)).toBeInTheDocument()
+  })
+
+  it('shows a picker failure and clears it before the next workspace action', () => {
+    mock.sessionState = 'idle'
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: '添加工作区' }))
+    const [, options] = mock.pickMutate.mock.calls[0]
+    expect(options?.onError).toBeTypeOf('function')
+    act(() => options.onError(new ApiError({
+      status: 503, code: 'DIRECTORY_PICKER_UNAVAILABLE', message: '打不开目录选择器',
+    })))
+    expect(screen.getByText('打不开目录选择器')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '工作区' }))
+    expect(screen.queryByText('打不开目录选择器')).not.toBeInTheDocument()
+  })
+
+  it('opens the session returned by the server when an existing workspace is selected', () => {
+    mock.sessionState = 'idle'
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: '工作区' }))
+    const [, options] = mock.workspaceMutate.mock.calls[0]
+    expect(options?.onSuccess).toBeTypeOf('function')
+    act(() => options.onSuccess({
+      session_id: 's2',
+      workspace: { workspace_id: 'w1', display_name: '工作区' },
+    }))
+
+    expect(useUiStore.getState().activeSessionId).toBe('s2')
+  })
 
   it('lets the real approval take over the composer and keeps the draft untouched', () => {
     mock.approval = { ...pendingApproval }

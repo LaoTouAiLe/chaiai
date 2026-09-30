@@ -97,11 +97,15 @@ export function durationLabel(elapsedMs: number | null | undefined): string {
   return `${(elapsedMs / 1000).toFixed(1)}s`
 }
 
-/** 参数摘要：只搬**已脱敏**的键值对（契约保证这些值不含密钥）。 */
-function argumentSummary(tool: ToolUse): string {
-  const entries = Object.entries(tool.redacted_arguments ?? {})
-  if (entries.length === 0) return ''
-  return entries.map(([key, value]) => `${key}=${value}`).join(' · ')
+/** 参数：只搬**已脱敏**的键值对（契约保证这些值不含密钥），保持契约顺序。 */
+function parameterPairs(tool: ToolUse): readonly { name: string; value: string }[] {
+  return Object.entries(tool.redacted_arguments ?? {}).map(([name, value]) => ({ name, value }))
+}
+
+/** 参数摘要：把上面那对键值压成一行（对话行用），结构化的那份留给轨迹检查器。 */
+function argumentSummary(pairs: readonly { name: string; value: string }[]): string {
+  if (pairs.length === 0) return ''
+  return pairs.map(({ name, value }) => `${name}=${value}`).join(' · ')
 }
 
 /**
@@ -214,15 +218,25 @@ export function mapApproval(approval: TransportApproval): ApprovalView {
 export function mapTool(tool: ToolUse): ToolRowView {
   const preview = tool.output_preview ?? ''
   const outcome = tool.outcome ?? null
+  const parameters = parameterPairs(tool)
   return {
     name: tool.tool_name,
-    summary: argumentSummary(tool),
+    summary: argumentSummary(parameters),
     status: TOOL_STATUS[tool.status],
     durationLabel: durationLabel(tool.elapsed_ms),
     // 归一化目标来自结构化结果；没有结果时保持 `null`，不从参数里猜它是哪个字段。
     target: outcome?.target ?? null,
     // 展开态是**界面状态**，由容器注入；适配层给"折叠"（默认紧凑）。
     expanded: false,
+    // 轨迹视图与对话行看的是同一次调用：这里把契约里有、卡片用不到的字段如实带上，
+    // 免得轨迹再去别处拼一份可能对不上的数据。
+    toolCallId: tool.tool_call_id,
+    parameters,
+    resultPreview: preview,
+    resultTruncated: tool.truncated === true,
+    resultDigest: tool.output_digest ?? null,
+    startedLabel: timeLabel(tool.started_at),
+    finishedLabel: timeLabel(tool.finished_at),
     evidence:
       tool.evidence === null || tool.evidence === undefined
         ? null
@@ -395,7 +409,13 @@ const PURPOSE_LABEL: Record<string, string> = {
   routing: '意图路由',
 }
 
-function mapCall(call: TransportCall): ModelCallView {
+/**
+ * 一次模型调用 → 展示形状。
+ *
+ * 导出的原因：轨迹页签的 Schema 段要按**会话级**列出模型调用（契约没有"工具调用属于哪次模型调用"
+ * 的绑定字段），它用的是同一份映射，不能另起一套。
+ */
+export function mapCall(call: TransportCall): ModelCallView {
   return {
     id: call.model_call_id,
     purpose: PURPOSE_LABEL[call.purpose] ?? call.purpose,
@@ -403,6 +423,8 @@ function mapCall(call: TransportCall): ModelCallView {
     inputTokens: call.actual_uncached_input_tokens ?? null,
     outputTokens: call.actual_output_tokens ?? null,
     elapsedLabel: durationLabel(call.model_elapsed_ms),
+    // 供应商/服务端没记录就是 `null`（页面写"未知"），不编一个指纹出来。
+    schemaFingerprint: call.tools_schema_fingerprint ?? null,
   }
 }
 

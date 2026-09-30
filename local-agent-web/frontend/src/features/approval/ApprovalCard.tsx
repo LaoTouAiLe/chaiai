@@ -43,7 +43,19 @@ const STATE_LABEL: Record<ApprovalView['state'], string> = {
  */
 export function ApprovalCard({ approval, actions }: ApprovalCardProps) {
   const [confirmedFor, setConfirmedFor] = useState<string | null>(null)
+  /**
+   * 终态（已批准 / 已拒绝 / 已失效）**默认收起成一行**，用户可展开回看，也可整条关掉。
+   *
+   * 结果该留在屏幕上——"我确实拒绝过"是有用的记录，刷新之后也仍然在（它由服务端快照派生）。
+   * 但它住在**接管位**：一直展开就等于永久霸占输入区上方，用户实测反馈"页面非常不友好"。
+   *
+   * 收起是**界面状态**，不回写服务端：它不改变任何决定，也不影响刷新恢复。
+   * `null` = 用户还没表态过，此时跟随状态——待决必展开（要你做决定），终态必收起。
+   */
+  const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null)
+  const [dismissed, setDismissed] = useState(false)
   const actionable = approval.state === 'pending'
+  const expanded = expandedOverride ?? actionable
   const secondStage = approval.risk === 'high' && approval.confirmationStage === 2
   const confirmationKey = `${approval.approvalId}:${String(approval.confirmationStage)}:${approval.target}`
   const confirmed = confirmedFor === confirmationKey
@@ -52,6 +64,41 @@ export function ApprovalCard({ approval, actions }: ApprovalCardProps) {
   // never rendered there and the static baseline cannot drift.
   const busy = actions?.busy === true
   const parameters = approval.parameters ?? []
+
+  if (dismissed) return null
+
+  if (!expanded) {
+    return (
+      <section className={`${styles.card} ${styles.collapsed} ${tone}`} aria-label="审批">
+        <div className={styles.head}>
+          <span className={styles.icon} aria-hidden="true">
+            <WarningTriangle />
+          </span>
+          <span className={styles.state}>{STATE_LABEL[approval.state]}</span>
+          <span className={styles.action}>{approval.action}</span>
+          {approval.target === '' ? null : (
+            <span className={styles.collapsedTarget}>{approval.target}</span>
+          )}
+          <button
+            type="button"
+            className={styles.toggle}
+            aria-expanded={false}
+            onClick={() => setExpandedOverride(true)}
+          >
+            展开详情
+          </button>
+          <button
+            type="button"
+            className={styles.dismiss}
+            aria-label="关闭审批结果"
+            onClick={() => setDismissed(true)}
+          >
+            ×
+          </button>
+        </div>
+      </section>
+    )
+  }
 
   return (
     <section className={`${styles.card} ${tone}`} aria-label="审批">
@@ -63,6 +110,26 @@ export function ApprovalCard({ approval, actions }: ApprovalCardProps) {
         <span className={styles.action}>{approval.action}</span>
         {approval.risk === 'high' ? <span className={styles.risk}>高风险</span> : null}
         <span className={styles.id}>{approval.approvalId}</span>
+        {actionable ? null : (
+          <button
+            type="button"
+            className={styles.toggle}
+            aria-expanded={true}
+            onClick={() => setExpandedOverride(false)}
+          >
+            收起
+          </button>
+        )}
+        {actionable ? null : (
+          <button
+            type="button"
+            className={styles.dismiss}
+            aria-label="关闭审批结果"
+            onClick={() => setDismissed(true)}
+          >
+            ×
+          </button>
+        )}
       </div>
 
       <p className={styles.summary}>{approval.summary}</p>

@@ -34,18 +34,51 @@ describe('ApprovalCard', () => {
   it('drops the buttons once the request is no longer actionable', () => {
     const expired = approvalOf(approvalExpiredScenario)
     render(<ApprovalCard approval={expired} />)
+    // 终态默认收起：状态本身还在屏幕上，详情要用户点开才看（见下面的展开用例）。
     expect(screen.getByText('审批已失效')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '允许一次' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '拒绝' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/该审批已超时失效，未执行任何操作/)).not.toBeInTheDocument()
+  })
+
+  it('expands a finished decision back to the full card on demand', async () => {
+    const user = userEvent.setup()
+    render(<ApprovalCard approval={approvalOf(approvalExpiredScenario)} />)
+
+    await user.click(screen.getByRole('button', { name: '展开详情' }))
+
     expect(screen.getByText(/该审批已超时失效，未执行任何操作/)).toBeInTheDocument()
+    // 展开态能收回，不会把自己锁死。
+    await user.click(screen.getByRole('button', { name: '收起' }))
+    expect(screen.queryByText(/该审批已超时失效，未执行任何操作/)).not.toBeInTheDocument()
+  })
+
+  it('lets the user dismiss a finished decision entirely', async () => {
+    const user = userEvent.setup()
+    const { container } = render(<ApprovalCard approval={approvalOf(approvalExpiredScenario)} />)
+
+    await user.click(screen.getByRole('button', { name: '关闭审批结果' }))
+
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it('never offers collapse or dismiss while a decision is still pending', () => {
+    // 待决卡片是页面上唯一需要用户动作的东西：收起或关掉它，会让人以为"不做决定也行"。
+    render(<ApprovalCard approval={approvalOf(approvalScenario)} />)
+
+    expect(screen.queryByRole('button', { name: '展开详情' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '收起' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '关闭审批结果' })).not.toBeInTheDocument()
   })
 
   it('reports a taken decision instead of asking again', () => {
     const base = approvalOf(approvalScenario)
+    const label = { executing: '执行中', approved: '已批准', rejected: '已拒绝' } as const
     for (const state of ['executing', 'approved', 'rejected'] as const) {
       const { unmount } = render(<ApprovalCard approval={{ ...base, state, note: null }} />)
       expect(screen.queryByRole('button', { name: '允许一次' })).not.toBeInTheDocument()
-      expect(screen.getByText(/当前状态：/)).toBeInTheDocument()
+      // 收起态只报告结果，而"结果"正是这一行要说的东西。
+      expect(screen.getByText(label[state])).toBeInTheDocument()
       unmount()
     }
   })

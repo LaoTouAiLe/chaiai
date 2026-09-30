@@ -141,6 +141,30 @@ export interface ToolRowView {
   card: ToolCardView
   /** Null/omitted while the call has not been settled by the reflection layer. */
   evidence?: ToolEvidenceView | null
+  /**
+   * Stable id of this call in the contract (`tool_call_id`).
+   *
+   * Optional so the prototype fixtures keep working; the trace view keys rows by
+   * it and the real adapter always fills it.
+   */
+  toolCallId?: string
+  /**
+   * The redacted arguments as name/value pairs, in contract order.
+   *
+   * `summary` flattens the same data into one display string; the trace inspector
+   * needs the structured pairs ("Payload"), so both are carried rather than one
+   * being re-parsed out of the other.
+   */
+  parameters?: readonly { name: string; value: string }[]
+  /** Bounded result preview as reported by the server; dropped from the card when an outcome exists. */
+  resultPreview?: string
+  /** Whether `resultPreview` was capped for transport. */
+  resultTruncated?: boolean
+  /** Stable digest of the full result, when the server computed one. */
+  resultDigest?: string | null
+  /** Local wall-clock labels; empty when the contract has no parsable timestamp. */
+  startedLabel?: string
+  finishedLabel?: string
 }
 
 export type ErrorCategory =
@@ -206,6 +230,57 @@ export interface ModelCallView {
   inputTokens: number | null
   outputTokens: number | null
   elapsedLabel: string
+  /**
+   * Fingerprint of the tool schema sent with this call (`tools_schema_fingerprint`).
+   *
+   * The trace inspector's "Schema" section is the only reader. Optional because the
+   * prototype fixtures predate it and the provider may not have reported one; the
+   * page then prints 未知 rather than inventing a hash.
+   */
+  schemaFingerprint?: string | null
+}
+
+/**
+ * One row of the trace table (matrix 20/21): a single tool call, flattened.
+ *
+ * Separate from `ToolRowView` on purpose: the conversation row renders a `card`
+ * (a discriminated union), while a table row and its inspector need flat,
+ * independently print-or-say-unknown fields. Both views are built from the same
+ * tool call so the two tabs of one session can never disagree.
+ */
+export interface TraceRowView {
+  /** Row key: the contract's `tool_call_id`. */
+  id: string
+  /** Type column: the tool name as the user sees it. */
+  toolName: string
+  status: 'running' | 'succeeded' | 'failed'
+  /** Pre-formatted duration; empty when the contract did not report one. */
+  durationLabel: string
+  target: string | null
+  /** Parameters column/Payload section: redacted name/value pairs, contract order. */
+  parameters: readonly { name: string; value: string }[]
+  /** Result column/Result section: bounded preview, empty when none was recorded. */
+  resultPreview: string
+  resultTruncated: boolean
+  resultDigest: string | null
+  /** Local wall-clock labels; empty when unparsable — the page then says 未知. */
+  startedLabel: string
+  finishedLabel: string
+  /** Mechanical evidence, when the reflection layer settled this call. */
+  evidence: ToolEvidenceView | null
+}
+
+/**
+ * The trace tab's data: tool calls in timeline order plus the session-level model
+ * calls.
+ *
+ * The model calls are session-level because the contract has **no field binding a
+ * tool call to the model call that produced it**; the inspector's Schema section
+ * therefore lists them per session and says so instead of guessing an attribution.
+ */
+export interface TraceView {
+  rows: readonly TraceRowView[]
+  calls: readonly ModelCallView[]
 }
 
 export interface SessionSummaryView {
@@ -426,4 +501,6 @@ export interface ConversationScenario {
   composer?: ComposerStateView
   /** Renders the sidebar as a narrow rail (matrix 24). */
   sidebarCollapsed?: boolean
+  /** Which top-bar tab this scenario opens on. Omitted means `conversation`. */
+  tab?: 'conversation' | 'trace'
 }

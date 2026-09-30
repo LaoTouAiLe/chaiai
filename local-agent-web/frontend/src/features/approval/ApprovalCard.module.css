@@ -17,9 +17,12 @@
   border-color: var(--law-state-error-secondary);
 }
 
+/* `min-width: 0` 只有在子项也可收缩时才有意义：下面四项全部 `0 0 auto` 时，
+   窄窗会把审批号挤出视口（640 下越界 18px），所以头部允许换行。 */
 .head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--law-space-md);
   min-width: 0;
 }
@@ -69,9 +72,14 @@
   font-weight: var(--law-weight-medium);
 }
 
+/* 32 位十六进制审批号实测 204px 宽；不可收缩时会在窄窗把整页撑开。 */
 .id {
   margin-left: auto;
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--law-text-caption);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
@@ -82,6 +90,7 @@
   color: var(--law-text-primary);
   font-size: var(--law-text-md);
   line-height: var(--law-leading-md);
+  overflow-wrap: anywhere;
 }
 
 .facts {
@@ -107,6 +116,8 @@
 .fact dd {
   margin: 0;
   min-width: 0;
+  /* 目标路径与参数是不可断行的长串：允许在任意位置折行，而不是溢出卡片。 */
+  overflow-wrap: anywhere;
   color: var(--law-text-secondary);
   font-size: var(--law-text-sm);
   line-height: var(--law-leading-sm);
@@ -172,4 +183,51 @@
   color: var(--law-text-secondary);
   font-size: var(--law-text-sm);
   line-height: var(--law-leading-sm);
+}
+
+/* 终态收起态：只占一行，结果仍在，输入区上方不再被长期占满。 */
+.collapsed {
+  padding: var(--law-space-md) var(--law-space-xl);
+}
+
+.collapsedTarget {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--law-font-mono);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.toggle,
+.dismiss {
+  flex: 0 0 auto;
+  height: 24px;
+  border: 1px solid var(--law-border-l3);
+  border-radius: var(--law-radius-md);
+  background: var(--law-bg-layer-1);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  cursor: pointer;
+  transition: background var(--law-duration-base) var(--law-ease);
+}
+
+.toggle {
+  margin-left: auto;
+  padding: 0 var(--law-space-md);
+}
+
+.dismiss {
+  width: 24px;
+  padding: 0;
+}
+
+.toggle:hover,
+.dismiss:hover {
+  background: var(--law-button-ghost-hover);
+  color: var(--law-text-primary);
 }

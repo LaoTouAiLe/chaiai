@@ -258,6 +258,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/workspaces/pick": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 弹出目录选择器
+         * @description 弹出**本机**原生目录选择器，返回选中的绝对路径；用户取消时 `path=null`。
+         *
+         *     为什么是独立一步、而不是"选完直接登记"：取消是正常操作，不该改变任何状态。选完之后由
+         *     前端调既有的 `POST /workspaces/select { path }`——校验、幂等与错误码全部复用那条路。
+         */
+        post: operations["pick_workspace_directory_api_workspaces_pick_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces/select": {
         parameters: {
             query?: never;
@@ -1345,6 +1368,19 @@ export interface components {
             stream_sequence: number;
             /** Task Id */
             task_id: string;
+        };
+        /**
+         * PickDirectoryView
+         * @description 本机目录选择器的结果：`path` 是选中的**绝对路径**，用户取消时为 `null`。
+         *
+         *     刻意**不做成业务 DTO**（不放 `application/models.py`）：弹一个原生窗口是宿主进程的能力，
+         *     不是应用服务的用例——应用服务只认"按路径登记工作区"，对"路径怎么来的"没有意见。
+         *
+         *     取消用 `200 + null` 表达而不是错误：取消是正常操作，不该被读成失败、也不该改变任何状态。
+         */
+        PickDirectoryView: {
+            /** Path */
+            path?: string | null;
         };
         /**
          * PlanStepView
@@ -2764,6 +2800,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkspaceRef"][];
+                };
+            };
+        };
+    };
+    pick_workspace_directory_api_workspaces_pick_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PickDirectoryView"];
+                };
+            };
+            /** @description 不是本机页面的同源请求（本接口只服务于页面） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 宿主弹不出目录选择器 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

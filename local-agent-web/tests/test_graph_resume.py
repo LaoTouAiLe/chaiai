@@ -371,6 +371,22 @@ def test_external_shell_cwd_requires_approval(
     assert not rejected.get("tool_results")  # 拒绝后不执行
 
 
+def _unanswered_tool_calls(messages: list[AnyMessage]) -> list[str]:
+    """历史里"带 tool_calls 却没有对应 ToolMessage"的调用 id。
+
+    OpenAI 兼容端点会直接 400（``insufficient tool messages following tool_calls
+    message``），所以每条调用都必须有结果——包括被人工拒绝的那条。
+    """
+    answered = {str(m.tool_call_id) for m in messages if isinstance(m, ToolMessage)}
+    return [
+        str(call["id"])
+        for message in messages
+        if isinstance(message, AIMessage)
+        for call in (message.tool_calls or [])
+        if str(call["id"]) not in answered
+    ]
+
+
 def _delete_flow(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> tuple[builder.ChatGraph, dict[str, Any], Path, RuntimeContext, Path]:
@@ -428,6 +444,11 @@ def test_delete_rejection_keeps_file_and_stops(
     assert [item["decision"] for item in result["approval_history"]] == ["reject"]
     assert result["final_response"] == nodes.REJECTED_REPLY
     assert graph.get_state(_config(THREAD)).next == ()  # 拒绝后不自动重试
+    # 回归（T37 真实验收实证，2026-09-29）：被拒的调用也必须留下 ToolMessage 应答。
+    # 缺了它，历史里就留下"有 tool_calls 却没有结果"的助手消息，下一轮原样发给
+    # OpenAI 兼容端点会被 400 拒绝（`insufficient tool messages following tool_calls message`），
+    # 异常从 SSE 端点逃逸 → 页面永远停在"正在生成回答…"、会话状态卡在 `running`。
+    assert _unanswered_tool_calls(result["messages"]) == []
 
 
 def test_delete_approval_executes_exactly_once(
@@ -1679,6 +1700,18 @@ def test_workspace_switching_binds_one_session_per_workspace(tmp_path: Path) -> 
     same = store.switch_workspace(root_b / ".." / "b")
     assert same.session_id == session_b.session_id
     assert len(store.list_sessions()) == 2
+
+    # 让 b 的旧活动时间明确晚于 a：切回 a 必须把 a 记为最近使用，而不是碰巧
+    # 因为两条秒级时间戳相同、路径字母序排在前面才通过。
+    connection.execute(
+        "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+        ("2000-01-01T00:00:00+00:00", session_a.session_id),
+    )
+    connection.execute(
+        "UPDATE sessions SET updated_at = ? WHERE session_id = ?",
+        ("2000-01-02T00:00:00+00:00", session_b.session_id),
+    )
+    connection.commit()
 
     # 切回原工作区复用原会话
     back = store.switch_workspace(root_a)

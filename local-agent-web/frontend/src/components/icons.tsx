@@ -25,6 +25,21 @@ export function ChevronRight({ size = 12 }: IconProps) {
   )
 }
 
+export function ChevronLeft({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <path
+        d="M7.5 2.5 4 6l3.5 3.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 export function Check({ size = 12 }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">

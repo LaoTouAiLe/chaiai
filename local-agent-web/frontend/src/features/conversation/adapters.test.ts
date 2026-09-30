@@ -111,6 +111,39 @@ describe('mapTool', () => {
     expect(row.target).toBeNull() // 没有结构化结果就不猜目标路径
   })
 
+  it('keeps the structured payload, result preview and timings for the trace view', () => {
+    const row = mapTool(
+      toolMessage('ok', {
+        redacted_arguments: { command: 'pytest -q', cwd: '.' },
+        output_preview: 'first line\nsecond line',
+        output_digest: 'sha256:abc123',
+        truncated: true,
+        started_at: '2026-09-27T10:02:00+00:00',
+        finished_at: '2026-09-27T10:02:02+00:00',
+      }).tool,
+    )
+
+    // 结构化参数与压平后的 `summary` 并存：轨迹检查器要键值对，不从 summary 反解。
+    expect(row.parameters).toEqual([
+      { name: 'command', value: 'pytest -q' },
+      { name: 'cwd', value: '.' },
+    ])
+    expect(row.summary).toBe('command=pytest -q · cwd=.')
+    // 有 outcome 时预览不再进卡片，但轨迹仍要能显示它，所以这里单独保留。
+    expect(row.resultPreview).toBe('first line\nsecond line')
+    expect(row.resultTruncated).toBe(true)
+    expect(row.resultDigest).toBe('sha256:abc123')
+    expect(row.toolCallId).toBe('call-9')
+    expect(row.startedLabel).not.toBe('')
+    expect(row.finishedLabel).not.toBe('')
+  })
+
+  it('leaves an unreported result digest as null instead of inventing one', () => {
+    const row = mapTool(toolMessage('ok').tool)
+    expect(row.resultDigest).toBeNull()
+    expect(row.parameters).toEqual([{ name: 'path', value: 'src/app.ts' }])
+  })
+
   it('renders a read result as a read card and surfaces the normalised target', () => {
     const row = mapTool(
       toolMessage('ok', {
@@ -537,6 +570,7 @@ describe('mapStats', () => {
           inputTokens: 600,
           outputTokens: 20,
           elapsedLabel: '1.2s',
+          schemaFingerprint: null, // 这一支没记录工具 Schema：未知，不编指纹
         },
         {
           id: 'run-1:model:2',
@@ -545,6 +579,7 @@ describe('mapStats', () => {
           inputTokens: 600,
           outputTokens: 20,
           elapsedLabel: '1.2s',
+          schemaFingerprint: null,
         },
       ],
     })

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 
 import { Composer } from '../components/Composer'
 import { Sidebar } from '../components/Sidebar'
@@ -6,6 +6,8 @@ import { TopBar } from '../components/TopBar'
 import { Conversation } from '../features/conversation/Conversation'
 import { ModelSettingsDialog } from '../features/settings/ModelSettingsDialog'
 import { SettingsDialog } from '../features/settings/SettingsDialog'
+import { traceFromMessages } from '../features/trace/adapters'
+import { TraceView } from '../features/trace/TraceView'
 import { findScenario } from '../fixtures/scenarios'
 import { sidebarWorkspaces } from '../fixtures/sidebar'
 import { LiveApp } from './LiveApp'
@@ -15,7 +17,12 @@ export function App() {
   // 默认是**真实**会话壳（T30）。`?state=` 仍然可达，但它现在只服务一件事：
   // T26 的静态视觉基线（54 张截图按场景驱动）。产品入口不再经过 fixture。
   const scenarioId = readScenarioId()
-  return scenarioId === null ? <LiveApp /> : <PrototypeHost scenarioId={scenarioId} />
+  return scenarioId === null ? (
+    <LiveApp />
+  ) : (
+    // 按场景 id 重建宿主：换场景时页签要跟着场景走（新场景不得沿用上一个场景选中的页签）。
+    <PrototypeHost key={scenarioId} scenarioId={scenarioId} />
+  )
 }
 
 /** `?state=diff|errors|shell` 选择渲染哪个 fixture 场景（视觉基线专用宿主）。 */
@@ -42,7 +49,14 @@ function readLiveFlag(): boolean {
 function PrototypeHost({ scenarioId }: { scenarioId: string | null }) {
   const scenario = findScenario(scenarioId)
   const [liveOpen, setLiveOpen] = useState(true)
+  // 页签是界面状态；`?state=` 只决定初始页（`trace` 场景从轨迹页开始）。
+  const [tab, setTab] = useState<'conversation' | 'trace'>(scenario.tab ?? 'conversation')
   const live = readLiveFlag()
+  // 轨迹与对话来自**同一份消息**：原型里也不另写一套轨迹数据，否则两个页签可能互相矛盾。
+  const trace = useMemo(
+    () => traceFromMessages(scenario.messages, scenario.stats?.calls ?? []),
+    [scenario],
+  )
   const workspaces = sidebarWorkspaces.map((workspace) => ({
     ...workspace,
     sessions: workspace.sessions.map((session) => {
@@ -62,9 +76,10 @@ function PrototypeHost({ scenarioId }: { scenarioId: string | null }) {
         <TopBar
           title={scenario.session.title}
           workspace={scenario.session.workspace}
-          activeTab="conversation"
+          activeTab={tab}
+          onSelectTab={setTab}
         />
-        <Conversation scenario={scenario} />
+        {tab === 'trace' ? <TraceView trace={trace} /> : <Conversation scenario={scenario} />}
         <Composer
           session={scenario.session}
           plan={scenario.plan}

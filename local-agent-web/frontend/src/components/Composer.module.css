@@ -71,8 +71,18 @@
 .controls {
   display: flex;
   align-items: center;
+  /* 窄窗允许折行：整组（计量器+发送）下移一行，而不是把发送按钮推出视口。 */
+  flex-wrap: wrap;
   gap: var(--law-space-md);
   padding: 0 var(--law-space-xs);
+}
+
+/* 折行后仍靠右。宽窗空闲空间先被 `.spacer` 吃掉，所以分组前的像素不受影响。 */
+.right {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  margin-left: auto;
 }
 
 .command {
@@ -93,8 +103,12 @@
   color: var(--law-text-primary);
 }
 
+/* `nowrap` 让内容成为不可收缩的最小宽度：没有 `min-width: 0` 时，两个 chip 会把
+   发送按钮顶出视口（640 下越界 25–57px）。极窄时才截断文案。 */
 .chip {
   height: 26px;
+  min-width: 0;
+  overflow: hidden;
   padding: 0 var(--law-space-lg);
   border-radius: var(--law-radius-pill);
   border: 1px solid var(--law-border-l2);
@@ -102,6 +116,7 @@
   color: var(--law-text-secondary);
   font-size: var(--law-text-sm);
   line-height: var(--law-leading-sm);
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 

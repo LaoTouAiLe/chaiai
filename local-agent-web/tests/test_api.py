@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import socket
 import threading
 import time
@@ -24,6 +25,7 @@ import uvicorn
 from fastapi.testclient import TestClient
 
 from local_agent import config as config_module
+from local_agent import directory_picker
 from local_agent.api import __main__ as api_main
 from local_agent.api.app import create_app
 from local_agent.api.container import ApiRuntime, instance_lock_path, open_runtime
@@ -33,6 +35,7 @@ from local_agent.api.security import LocalBoundaryMiddleware, _authority
 from local_agent.api.sse import event_stream
 from local_agent.application.errors import (
     APPROVAL_EXPIRED,
+    DIRECTORY_PICKER_UNAVAILABLE,
     IDEMPOTENCY_CONFLICT,
     RECOVERY_REQUIRED,
     SESSION_BUSY,
@@ -51,6 +54,9 @@ WORKSPACE_NAME = "ws"
 #: 这样**默认配置本身**就是被测对象（而不是测试专用的放宽配置）。
 LOCAL_BASE_URL = "http://127.0.0.1"
 VITE_ORIGIN = "http://127.0.0.1:5173"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+#: 真实前端构建产物（`frontend/dist`，被 `.gitignore` 排除；没构建过就不存在）。
+REAL_DIST = PROJECT_ROOT / "frontend" / "dist"
 
 
 def _config(tmp_path: Path, app_config: AppConfig, **web_overrides: Any) -> AppConfig:
@@ -358,6 +364,77 @@ def test_new_workspace_path_is_validated_and_not_echoed(
     assert neither.status_code == 422
 
 
+def test_pick_directory_returns_the_chosen_path_only(
+    api: tuple[TestClient, ApiRuntime], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """选中目录：只回路径，**不顺手登记工作区**。
+
+    分两步是为了让"取消"能保持零副作用——登记由前端接着调 `select { path }` 完成。
+    """
+    client, _runtime = api
+    before = client.get("/api/workspaces").json()
+    monkeypatch.setattr(directory_picker, "pick_directory", lambda: r"D:\projects\demo")
+
+    response = client.post("/api/workspaces/pick", headers={"origin": LOCAL_BASE_URL})
+
+    assert response.status_code == 200
+    assert response.json() == {"path": r"D:\projects\demo"}
+    assert client.get("/api/workspaces").json() == before  # 状态没变
+
+
+def test_pick_directory_cancel_is_not_an_error(
+    api: tuple[TestClient, ApiRuntime], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取消是正常操作：`200 + null`，不是失败、也不改状态。"""
+    client, _runtime = api
+    before = client.get("/api/workspaces").json()
+    monkeypatch.setattr(directory_picker, "pick_directory", lambda: None)
+
+    response = client.post("/api/workspaces/pick", headers={"origin": LOCAL_BASE_URL})
+
+    assert response.status_code == 200
+    assert response.json() == {"path": None}
+    assert client.get("/api/workspaces").json() == before
+
+
+def test_pick_directory_failure_is_executable_and_redacted(
+    api: tuple[TestClient, ApiRuntime], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """宿主弹不出窗口：503 + 可重试提示，且**不回显子进程原文**（它可能带本机路径）。"""
+    client, _runtime = api
+
+    def boom() -> str | None:
+        raise directory_picker.DirectoryPickerError(r"目录选择器未能打开：C:\secret\boom.exe")
+
+    monkeypatch.setattr(directory_picker, "pick_directory", boom)
+    response = client.post("/api/workspaces/pick", headers={"origin": LOCAL_BASE_URL})
+
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == DIRECTORY_PICKER_UNAVAILABLE
+    assert error["retryable"] is True
+    assert "boom.exe" not in json.dumps(error, ensure_ascii=False)
+
+
+def test_pick_directory_rejects_callers_without_a_local_origin(
+    api: tuple[TestClient, ApiRuntime], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """没有 `Origin`（curl / 本机脚本）要被拒，而且**在被拒时不该真的弹窗**。
+
+    这是本服务唯一会干扰用户桌面的能力；它只有本机页面该调——本机脚本想要原生对话框的话
+    自己就能弹，不需要借这条路。
+    """
+    client, _runtime = api
+    calls: list[str] = []
+    monkeypatch.setattr(directory_picker, "pick_directory", lambda: calls.append("弹了") or "x")
+
+    for headers in ({}, {"origin": "http://evil.example"}, {"origin": "null"}):
+        response = client.post("/api/workspaces/pick", headers=headers)
+        assert response.status_code == 403, headers
+
+    assert calls == []  # 403 判定发生在弹窗之前
+
+
 # ---- 本机边界 ---------------------------------------------------------------
 
 
@@ -522,6 +599,57 @@ def test_missing_frontend_build_explains_itself(api: tuple[TestClient, ApiRuntim
     response = client.get("/")
     assert response.status_code == 404
     assert "npm run build" in response.json()["detail"]
+
+
+#: 构建出的 `index.html` 里对带哈希资源的引用（Vite 把它们放在 `assets/` 下）。
+_ASSET_REFERENCE = re.compile(r'(?:src|href)="(/assets/[^"]+)"')
+
+
+def _referenced_assets(html: str) -> list[str]:
+    """取出产物真正引用的资源路径（去重、保持出现顺序）。"""
+    seen: dict[str, None] = {}
+    for match in _ASSET_REFERENCE.finditer(html):
+        seen.setdefault(match.group(1), None)
+    return list(seen)
+
+
+def test_the_real_frontend_build_is_served_asset_by_asset(open_api: OpenApi) -> None:
+    """生产形态的静态托管集成门（T37）：拿**真实构建产物**跑一遍托管。
+
+    上面几条用的是手工造的假产物——文件名是编的、`index.html` 只有一行标题。真实产物里是带内容
+    哈希的资源名，且 `index.html` 引用着它们；"引用的每个文件是否真的取得到、MIME 是否与后缀一致"
+    （本机 `mimetypes` 把 `.js` 猜成 `text/plain`、整页空白那次）只有真产物才验得到。
+
+    没有构建过就跳过：`frontend/dist` 被 `.gitignore` 排除，这条门的意义只在"产物存在"时成立，
+    而要求跑测试的人先构建前端会把只依赖 node 的用例变成依赖 npm。
+    """
+    if not (REAL_DIST / "index.html").is_file():
+        pytest.skip(f"没有前端产物（{REAL_DIST}）：先在 frontend/ 执行 npm run build")
+    client, _runtime = open_api(decision="chat", static_dir=REAL_DIST)
+
+    index = client.get("/")
+    assert index.status_code == 200
+    assert index.headers["content-type"].startswith("text/html")
+    assert index.headers["cache-control"] == "no-cache"
+
+    referenced = _referenced_assets(index.text)
+    assert referenced, "index.html 没有引用任何 assets/ 资源，产物或解析规则不对"
+    checked = 0
+    for path in referenced:
+        asset = client.get(path)
+        assert asset.status_code == 200, path
+        # 带内容哈希 → 长期缓存；MIME 由我们按后缀定，不靠平台猜。
+        assert asset.headers["cache-control"].startswith("public, max-age=31536000"), path
+        expected = {"js": "text/javascript", "css": "text/css"}.get(Path(path).suffix.lstrip("."))
+        if expected is not None:
+            assert asset.headers["content-type"].startswith(expected), path
+            checked += 1
+    assert checked >= 2, "产物里应当至少有一个 JS 与一个 CSS 被引用"
+
+    # 深链接仍交给前端路由（刷新不能 404）。
+    deep = client.get("/sessions/real-deep-link")
+    assert deep.status_code == 200
+    assert deep.headers["content-type"].startswith("text/html")
 
 
 # ---- SSE --------------------------------------------------------------------
@@ -721,6 +849,66 @@ async def test_events_stream_projects_the_turn_that_happens_while_it_is_open(ope
     assert payload["event_type"] == "message_completed"
     assert payload["session_id"] == session_id
     assert payload["payload"]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_event_trace_exports_without_keys_or_hidden_reasoning(
+    open_api: OpenApi, tmp_path: Path
+) -> None:
+    """T37 自动门槛：把一次真实运行的**事件轨迹**导出成文件，里面不许有密钥或隐藏思维链。
+
+    轨迹就是这条 SSE 连接上收到的全部帧，而它同时也是页面能看到的全部内容——所以"页面上看不见的
+    东西"不该出现在轨迹里；反过来，轨迹干净也就证明投影层没有把密钥或 `reasoning_content` 带出去。
+    导出按验收记录要留的形状落盘（一份 JSON），断言因此落在**盘上的字节**上，而不是内存对象上。
+
+    场景取"一次真的执行了工具的问答"：工具参数与输出摘要是最容易被顺手带出密钥与私人路径的地方，
+    拿它当样品比纯聊天更有说服力。
+    """
+    (tmp_path / WORKSPACE_NAME).mkdir(exist_ok=True)
+    (tmp_path / WORKSPACE_NAME / "notes.txt").write_text("笔记正文\n", encoding="utf-8")
+    client, runtime = open_api(
+        decision="tool",
+        reply="读完了",
+        tool_calls=[{"name": "read_file", "args": {"path": "notes.txt"}, "id": "call-1"}],
+        web_overrides={**SSE_WEB, "sse_idle_timeout_seconds": 3.0},
+    )
+    session_id = _create_session(client)
+    app = create_app(runtime)
+
+    stream = asyncio.create_task(_collect_stream(app, _sse_url(session_id), limit=15.0))
+    # 等到订阅真的建立（快照已入队）再提交——不靠 sleep 猜时间。
+    for _ in range(200):
+        if runtime.service._bus.subscriber_count(session_id) >= 1:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.to_thread(runtime.service.submit_message, session_id, "读一下 notes.txt", "req-1")
+    frames = await stream
+
+    kinds = [name for name, _data in frames]
+    assert kinds[0] == "session_snapshot"
+    assert {"tool_completed", "message_completed", "task_completed"} <= set(kinds)
+    assert kinds[-1] == "stream_idle_timeout"
+
+    trace_path = tmp_path / "event-trace.json"
+    trace_path.write_text(
+        json.dumps(
+            {
+                "session_id": session_id,
+                "events": [{"event": name, "data": data} for name, data in frames],
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    exported = trace_path.read_text(encoding="utf-8")
+    # `sk-test-secret` 是 conftest 给 `llm.api_key_env` 设的那个值：轨迹里连它都不该出现。
+    assert "sk-test-secret" not in exported
+    lowered = exported.lower()
+    for forbidden in ("api_key", "authorization", "reasoning_content", "system_prompt"):
+        assert forbidden not in lowered, forbidden
 
 
 @pytest.mark.asyncio
@@ -1159,6 +1347,7 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
     assert set(schema["paths"]) == {
         "/api/health",
         "/api/workspaces",
+        "/api/workspaces/pick",
         "/api/workspaces/select",
         "/api/sessions",
         "/api/sessions/{session_id}",

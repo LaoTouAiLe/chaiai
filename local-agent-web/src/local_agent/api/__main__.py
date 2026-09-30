@@ -3,6 +3,10 @@
 启动前只做三件事：读 `.env` 与配置 → 构造模型客户端 → 装配运行时。装配失败一律给**可执行的
 提示**并以 1 退出，不做半启动（与 Streamlit 入口同一口径）。
 
+本入口同时是"目录选择器"的自我 spawn 目标：带 ``--pick-directory`` 启动时**不做任何装配**，
+只弹一个原生选择窗并把结果打到 stdout（见 `local_agent.directory_picker`）。源码模式经
+`python -m local_agent.api` 进入；打包后 exe 通过 `sys.executable` 自启动。
+
 多 worker 属于**不受支持配置**，所以这里硬编 ``workers=1``；配套的排他文件锁会让第二个进程
 在启动时就失败——进程内广播、每会话互斥与幂等台账都以"只有一个进程在写"为前提（§15.1）。
 """
@@ -18,6 +22,7 @@ from pathlib import Path
 import uvicorn
 
 from local_agent import config as config_module
+from local_agent import directory_picker
 from local_agent.api.app import create_app
 from local_agent.api.container import open_runtime
 from local_agent.config import ConfigError
@@ -26,6 +31,11 @@ from local_agent.exceptions import SessionStoreError
 
 def main(argv: Sequence[str] | None = None) -> int:
     """启动本机服务；返回进程退出码（0 = 正常结束，1 = 装配失败）。"""
+    forwarded = list(sys.argv[1:] if argv is None else argv)
+    # 自我 spawn 的对话框分支：必须在 argparse **之前**，它不做任何装配就接走整个进程。
+    if directory_picker.PICK_DIRECTORY_FLAG in forwarded:
+        return directory_picker.main(forwarded)
+
     parser = argparse.ArgumentParser(
         prog="python -m local_agent.api",
         description="启动 local-agent-web 的本机 Web 服务（v0.4，单进程单 worker）",

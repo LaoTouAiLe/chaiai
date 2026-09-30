@@ -198,3 +198,15 @@ class HealthView(BaseModel):
     #: 不该固化进公开契约（前端也不需要）。
     storage: Literal["sqlite"] = "sqlite"
     static_frontend: bool
+
+
+class PickDirectoryView(BaseModel):
+    """本机目录选择器的结果：`path` 是选中的**绝对路径**，用户取消时为 `null`。
+
+    刻意**不做成业务 DTO**（不放 `application/models.py`）：弹一个原生窗口是宿主进程的能力，
+    不是应用服务的用例——应用服务只认"按路径登记工作区"，对"路径怎么来的"没有意见。
+
+    取消用 `200 + null` 表达而不是错误：取消是正常操作，不该被读成失败、也不该改变任何状态。
+    """
+
+    path: str | None = None

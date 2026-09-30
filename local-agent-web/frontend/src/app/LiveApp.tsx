@@ -18,6 +18,7 @@ import { TopBar } from '../components/TopBar'
 import { Conversation } from '../features/conversation/Conversation'
 import {
   mapApproval,
+  mapCall,
   mapContext,
   mapError,
   mapMessages,
@@ -30,13 +31,29 @@ import {
 import { mapSidebar } from '../features/sidebar/adapters'
 import { ModelSettingsDialog } from '../features/settings/ModelSettingsDialog'
 import { parseSelectionVersion, selectionExpectation, toModelMenu } from '../features/settings/modelMenuAdapter'
+import { traceFromMessages } from '../features/trace/adapters'
+import { TraceView } from '../features/trace/TraceView'
 import { ApiError } from '../api/client'
-import { queryKeys, useHealth, useModelConnections, useSessions, useSnapshot, useSubmitMessage, useWorkspaces, useCreateSession, useSelectWorkspace, useSelectSessionModel, useResolveApproval } from '../api/queries'
+import { queryKeys, useHealth, useModelConnections, useSessions, useSnapshot, useSubmitMessage, useWorkspaces, useCreateSession, useSelectWorkspace, useSelectSessionModel, useResolveApproval, usePickWorkspaceDirectory } from '../api/queries'
 import { useSessionStream } from '../api/useSessionStream'
 import { useStreamTail } from '../stores/stream'
 import { useUiStore } from '../stores/ui'
 import type { ConversationScenario, MessageView } from '../fixtures/types'
 import styles from './App.module.css'
+
+/**
+ * 低于这个宽度侧栏自动收成 56px 窄轨。
+ *
+ * 268px 的侧栏加 760px 的会话列需要 1028px 才放得下；再窄就会把内容压出横向滚动。
+ * 用户手动点过收起/展开之后以手动选择为准（见下面的 `collapsedPref`）。
+ */
+const NARROW_SIDEBAR_QUERY = '(max-width: 1024px)'
+
+/** jsdom（单测环境）没有 `matchMedia`：拿不到就按宽窗处理，不抛异常。 */
+function isNarrowViewport(): boolean {
+  if (typeof window.matchMedia !== 'function') return false
+  return window.matchMedia(NARROW_SIDEBAR_QUERY).matches
+}
 
 export function LiveApp() {
   const workspaceId = useUiStore((state) => state.workspaceId)
@@ -46,9 +63,26 @@ export function LiveApp() {
   const openSession = useUiStore((state) => state.openSession)
   const setDraft = useUiStore((state) => state.setDraft)
 
+  // 侧栏折叠：`null` = 跟随窗口宽度，非 null = 用户手动选择过（手动优先）。
+  const [collapsedPref, setCollapsedPref] = useState<boolean | null>(null)
+  const [narrowViewport, setNarrowViewport] = useState(isNarrowViewport)
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return
+    const query = window.matchMedia(NARROW_SIDEBAR_QUERY)
+    const onChange = (event: MediaQueryListEvent) => setNarrowViewport(event.matches)
+    query.addEventListener('change', onChange)
+    return () => query.removeEventListener('change', onChange)
+  }, [])
+
+  const sidebarCollapsed = collapsedPref ?? narrowViewport
+
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [modelError, setModelError] = useState<string | null>(null)
+  const [workspaceActionError, setWorkspaceActionError] = useState<string | null>(null)
+  // 顶部页签：对话 / 轨迹。纯界面状态，刷新后回到对话页（不猜用户上次看的是哪一页）。
+  const [tab, setTab] = useState<'conversation' | 'trace'>('conversation')
   // 工具行的展开态：**纯界面状态**，不来自快照。T32 的结构化 diff 就在展开后才可见
   // （`ToolRow` 收起时只有一行摘要），所以真会话必须能让用户按需展开。
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(() => new Set())
@@ -61,6 +95,7 @@ export function LiveApp() {
   const connections = useModelConnections()
   const createSession = useCreateSession()
   const selectWorkspace = useSelectWorkspace()
+  const pickWorkspace = usePickWorkspaceDirectory()
   const submit = useSubmitMessage(activeSessionId)
   const selectSessionModel = useSelectSessionModel(activeSessionId)
   const approvalDecision = useResolveApproval(activeSessionId)
@@ -191,6 +226,19 @@ export function LiveApp() {
     tail,
   ])
 
+  /**
+   * 轨迹页签的数据来源与对话页签**完全相同**：同一份消息（工具行的展开态与它无关，不参与）
+   * 加上会话级模型调用。两个页签因此不可能各说一套。
+   */
+  const trace = useMemo(
+    () =>
+      traceFromMessages(
+        scenario.messages,
+        snapshot === null ? [] : (snapshot.model_calls ?? []).map(mapCall),
+      ),
+    [scenario.messages, snapshot],
+  )
+
   const changeModel = (connectionId: string | null) => {
     if (snapshot === null || selectSessionModel.isPending) return
     const target = connectionId === null
@@ -270,14 +318,62 @@ export function LiveApp() {
             : `${approvalDecision.error.message}${approvalDecision.error.hint === null ? '' : ` ${approvalDecision.error.hint}`}`
         : '审批决定未能提交。请刷新会话核对状态后再试。'
 
+  // 选已有工作区、弹出目录选择器和登记新目录共用这处就地错误提示；成功/重试时清除旧错误。
+  // 取消目录选择器是正常响应（path=null），不显示错误。
+
   return (
     <div className={styles.app} data-scenario="live">
       <Sidebar
         workspaces={sidebar}
+        collapsed={sidebarCollapsed}
+        addWorkspace={{ pending: pickWorkspace.isPending, error: workspaceActionError }}
         actions={{
           onSelectWorkspace: (id) => {
-            setWorkspace(id)
-            selectWorkspace.mutate({ workspace_id: id })
+            setWorkspaceActionError(null)
+            selectWorkspace.mutate({ workspace_id: id }, {
+              onSuccess: (selected) => {
+                setWorkspace(selected.workspace?.workspace_id ?? id)
+                openSession(selected.session_id)
+              },
+              onError: (error) => {
+                setWorkspaceActionError(error instanceof ApiError
+                  ? `${error.message}${error.hint === null ? '' : ` ${error.hint}`}`
+                  : '没能切换工作区。请重试。')
+              },
+            })
+          },
+          /**
+           * 新增工作区 = 两步，刻意不合成一次调用。
+           *
+           * 第一步只取路径（取消是零副作用的成功响应），第二步才登记——登记完全复用既有的
+           * `selectWorkspace`，于是"路径非法 / 目录不存在"的错误码与幂等语义一份都不用重写。
+           * 新增后**立刻选中它并打开它的会话**：用户刚选完目录，期待看到的就是它。
+           */
+          onAddWorkspace: () => {
+            if (pickWorkspace.isPending) return
+            setWorkspaceActionError(null)
+            pickWorkspace.mutate(undefined, {
+              onSuccess: ({ path }) => {
+                if (path === null) return
+                selectWorkspace.mutate({ path }, {
+                  onSuccess: (created) => {
+                    setWorkspaceActionError(null)
+                    openSession(created.session_id)
+                    setWorkspace(created.workspace?.workspace_id ?? null)
+                  },
+                  onError: (error) => {
+                    setWorkspaceActionError(error instanceof ApiError
+                      ? `${error.message}${error.hint === null ? '' : ` ${error.hint}`}`
+                      : '没能添加这个工作区。请重新选择目录。')
+                  },
+                })
+              },
+              onError: (error) => {
+                setWorkspaceActionError(error instanceof ApiError
+                  ? `${error.message}${error.hint === null ? '' : ` ${error.hint}`}`
+                  : '没能打开目录选择器。重试一次即可。')
+              },
+            })
           },
           onSelectSession: (id) => openSession(id),
           onNewSession: () => {
@@ -287,13 +383,15 @@ export function LiveApp() {
             })
           },
           onOpenSettings: () => setSettingsOpen(true),
+          onToggleCollapse: () => setCollapsedPref(!sidebarCollapsed),
         }}
       />
       <main className={styles.main}>
         <TopBar
           title={session?.title ?? '新会话'}
           workspace={session?.workspace ?? null}
-          activeTab="conversation"
+          activeTab={tab}
+          onSelectTab={setTab}
         />
         {stream.notices.length === 0 ? null : (
           // 传输层提示（超限/空闲超时/无法解析的帧）如实显示：它们不代表数据损坏，但用户有权知道。
@@ -339,7 +437,12 @@ export function LiveApp() {
             }}>刷新状态</button>
           </p>
         )}
-        <Conversation scenario={scenario} autoFollow onToggleTool={toggleTool} />
+        {tab === 'trace' ? (
+          <TraceView trace={trace} />
+        ) : (
+          <Conversation scenario={scenario} autoFollow onToggleTool={toggleTool} />
+        )}
+        {/* 轨迹视图只替换对话区；输入区留在这里，两个页签下都能继续写草稿。 */}
         <Composer
           session={session ?? { title: '新会话', workspace: null, status: 'idle', modelLabel: '' }}
           plan={scenario.plan}

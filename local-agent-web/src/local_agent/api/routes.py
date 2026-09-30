@@ -13,12 +13,15 @@
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final, cast
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 
+from local_agent import directory_picker
 from local_agent import workspaces as workspaces_module
 from local_agent.api.container import ApiRuntime
 from local_agent.api.schemas import (
@@ -27,12 +30,14 @@ from local_agent.api.schemas import (
     ErrorResponse,
     HealthView,
     ModelConnectionRequest,
+    PickDirectoryView,
     SelectDefaultConnectionRequest,
     SelectionExpectation,
     SelectSessionModelRequest,
     SelectWorkspaceRequest,
     SubmitMessageRequest,
 )
+from local_agent.api.security import is_allowed_origin
 from local_agent.application import errors as app_errors
 from local_agent.application.models import (
     SCHEMA_VERSION,
@@ -68,10 +73,14 @@ _STATUS_BY_CODE: Final[dict[str, int]] = {
     app_errors.WORKSPACE_BOUNDARY_VIOLATION: 403,
     app_errors.MODEL_RETRY_EXHAUSTED: 504,
     app_errors.SETTINGS_STORE_UNAVAILABLE: 503,
+    # 宿主能力故障（弹不出目录选择器）：服务还在，依赖不可用，稍后可重试。
+    app_errors.DIRECTORY_PICKER_UNAVAILABLE: 503,
 }
 
 #: 默认状态码：不在表里就是**未预期**，不假装知道它该怎么重试。
 DEFAULT_STATUS = 500
+
+logger = logging.getLogger(__name__)
 
 _NOT_FOUND: Final[dict[int | str, dict[str, Any]]] = {
     404: {"model": ErrorResponse, "description": "会话或工作区不存在"}
@@ -79,6 +88,10 @@ _NOT_FOUND: Final[dict[int | str, dict[str, Any]]] = {
 _STATE_CONFLICT: Final[dict[int | str, dict[str, Any]]] = {
     404: {"model": ErrorResponse, "description": "会话不存在"},
     409: {"model": ErrorResponse, "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"},
+}
+_PICK_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
+    403: {"description": "不是本机页面的同源请求（本接口只服务于页面）"},
+    503: {"model": ErrorResponse, "description": "宿主弹不出目录选择器"},
 }
 
 
@@ -97,6 +110,22 @@ def _validated_path(raw: str) -> Path:
         return workspaces_module.validate_workspace(raw)
     except SessionStoreError as exc:
         raise app_errors.workspace_unusable(occurred_at=datetime.now(timezone.utc)) from exc
+
+
+def _require_browser_origin(request: Request, *, allowed_origins: Iterable[str]) -> None:
+    """只接受**带同源浏览器元数据**的请求，否则抛传输层 403。
+
+    本服务只有这一个接口需要额外加严：它会往用户桌面上弹一个窗口，是唯一能**干扰桌面**的能力。
+    跨源网页已被中间件挡住，这一条挡的是**本机脚本**（curl）——它想要原生对话框的话自己就能弹，
+    没有理由借这条路。
+
+    拒绝走传输层语义（`{"detail": ...}`）而不是业务信封：这不是业务结论，而是"这个请求不配进
+    业务逻辑"，与中间件对 `Host` / `Origin` 的判定属于同一层。
+    """
+    origin = request.headers.get("origin")
+    host = request.headers.get("host", "")
+    if origin is None or not is_allowed_origin(origin, host, allowed_origins):
+        raise HTTPException(status_code=403, detail="本接口只接受来自本机页面的同源请求。")
 
 
 def _selection_ref(payload: SelectionExpectation) -> SelectionRef:
@@ -174,6 +203,29 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         if payload.workspace_id is not None:
             return service.select_workspace_by_id(payload.workspace_id)
         return service.select_workspace(_validated_path(payload.path or ""))
+
+    @router.post(
+        "/workspaces/pick",
+        response_model=PickDirectoryView,
+        responses=_PICK_RESPONSES,
+        summary="弹出目录选择器",
+    )
+    def pick_workspace_directory(request: Request) -> PickDirectoryView:
+        """弹出**本机**原生目录选择器，返回选中的绝对路径；用户取消时 `path=null`。
+
+        为什么是独立一步、而不是"选完直接登记"：取消是正常操作，不该改变任何状态。选完之后由
+        前端调既有的 `POST /workspaces/select { path }`——校验、幂等与错误码全部复用那条路。
+        """
+        _require_browser_origin(request, allowed_origins=runtime.web.dev_origins)
+        try:
+            path = directory_picker.pick_directory()
+        except directory_picker.DirectoryPickerError as exc:
+            # 子进程原文只进本地日志：它可能带本机路径，不能进 ErrorView（§15.8）。
+            logger.warning("目录选择器不可用：%s", exc)
+            raise app_errors.directory_picker_unavailable(
+                occurred_at=datetime.now(timezone.utc)
+            ) from None
+        return PickDirectoryView(path=path)
 
     @router.get("/sessions", response_model=list[SessionSummaryView], summary="会话列表")
     def list_sessions(

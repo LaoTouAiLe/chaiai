@@ -51,7 +51,10 @@ test('批准一次大范围编辑：卡片接管输入区，刷新不丢，批�
   const card = page.getByLabel('审批')
   await expect(card.getByText('等待审批', { exact: true })).toBeVisible()
   await expect(card.getByText('edit_file')).toBeVisible()
-  await expect(card.getByText('notes.txt', { exact: true }).first()).toBeVisible()
+  // 目标：服务端把结构化请求里的 `path` 解析成**规范化绝对路径**再展示（卡片要让用户核对完整目标）；
+  // 模型原样给的相对路径在下一行的参数里，两处都要能对上。
+  await expect(card.getByRole('definition').filter({ hasText: /notes\.txt$/ }))
+    .toHaveText(/^(\/|[A-Za-z]:\/).*notes\.txt$/)
   await expect(card.getByText('path=notes.txt')).toBeVisible()
   await expect(input).toHaveCount(0)
 
@@ -92,11 +95,14 @@ test('拒绝一次大范围编辑：卡片如实说未执行，文件没有任�
   await expect(card.getByText('等待审批', { exact: true })).toBeVisible()
   await card.getByRole('button', { name: '拒绝' }).click()
 
-  // 拒绝之后：卡片只报告结果，输入区恢复（用户可以立刻重新发起请求）。
+  // 拒绝之后：卡片**收起成一行**只报告结果，输入区恢复（用户可以立刻重新发起请求）。
+  // 收起是不让一条已结束的卡片长期霸占输入区上方；决定本身没有变。
   await expect(card.getByText('已拒绝', { exact: true })).toBeVisible()
-  await expect(card.getByText('该操作未执行。')).toBeVisible()
   await expect(page.getByPlaceholder('给智能体发消息')).toBeVisible()
   await expect(card.getByRole('button', { name: '允许一次' })).toHaveCount(0)
+  // 详情按需点开——"该操作未执行"仍然在，只是不占地方。
+  await card.getByRole('button', { name: '展开详情' }).click()
+  await expect(card.getByText('该操作未执行。')).toBeVisible()
 
   // 没有任何结构化 diff：这次调用没有落盘，页面也不该显示"改了什么"。
   await expect(page.locator('figure')).toHaveCount(0)

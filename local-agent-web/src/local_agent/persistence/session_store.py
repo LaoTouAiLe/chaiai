@@ -74,7 +74,7 @@ class Session:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _clean_title(title: str) -> str:
@@ -159,8 +159,10 @@ class SessionStore:
         也不新增 State 字段（架构 §10.6）。
         """
         rows = self._connection.execute(
-            "SELECT workspace_root, MAX(updated_at) AS last_used FROM sessions "
-            "GROUP BY workspace_root ORDER BY last_used DESC, workspace_root ASC"
+            "SELECT workspace_root, MAX(updated_at) AS last_used, "
+            "MAX(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS is_active "
+            "FROM sessions GROUP BY workspace_root "
+            "ORDER BY last_used DESC, is_active DESC, workspace_root ASC"
         ).fetchall()
         return [str(row[0]) for row in rows]
 
@@ -253,14 +255,15 @@ class SessionStore:
         """
         root = self.workspace_root if workspace_root is None else Path(workspace_root).resolve()
         session_id = uuid4().hex[:12]
+        now = _now()
         record = Session(
             session_id=session_id,
             thread_id=thread_id or f"thread-{session_id}",
             title=_clean_title(title) if title else DEFAULT_TITLE,
             workspace_root=normalize_path(root),
             project_id=project_id_for(root),
-            created_at=_now(),
-            updated_at=_now(),
+            created_at=now,
+            updated_at=now,
             last_checkpoint_id=None,
             status=STATUS_ACTIVE,
         )
@@ -283,15 +286,15 @@ class SessionStore:
         return record
 
     def switch(self, session_id: str) -> Session:
-        """把指定会话设为当前会话（切换即恢复：调用方随后按它的 ``thread_id`` 读图）。"""
+        """把指定会话设为当前会话，并记下这次使用（随后按其 ``thread_id`` 读图）。"""
         target = self._require(session_id)
         if target.is_active:
             return target
         with self._connection:
             self._deactivate_all()
             self._connection.execute(
-                "UPDATE sessions SET status = ? WHERE session_id = ?",
-                (STATUS_ACTIVE, session_id),
+                "UPDATE sessions SET status = ?, updated_at = ? WHERE session_id = ?",
+                (STATUS_ACTIVE, _now(), session_id),
             )
         return self._require(session_id)
 

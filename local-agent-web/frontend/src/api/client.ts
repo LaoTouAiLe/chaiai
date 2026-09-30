@@ -153,6 +153,18 @@ export function selectWorkspace(payload: {
   return request('/api/workspaces/select', { method: 'POST', body: JSON.stringify(payload) })
 }
 
+export type PickDirectoryDto = Ok<paths['/api/workspaces/pick']['post']>
+
+/**
+ * 弹出**本机**原生目录选择器（宿主能力，不是业务接口）。
+ *
+ * 取消是正常操作：返回 `{ path: null }`，既不抛错也不改变任何状态——选中之后由调用方接着调
+ * `selectWorkspace({ path })` 完成登记，校验与幂等全在那条路上。
+ */
+export function pickWorkspaceDirectory(): Promise<PickDirectoryDto> {
+  return request('/api/workspaces/pick', { method: 'POST' })
+}
+
 /** 会话列表；按工作区过滤时传 `workspace_id`。 */
 export function listSessions(workspaceId?: string): Promise<Schemas['SessionSummaryView'][]> {
   const query = workspaceId === undefined ? '' : `?workspace_id=${encodeURIComponent(workspaceId)}`

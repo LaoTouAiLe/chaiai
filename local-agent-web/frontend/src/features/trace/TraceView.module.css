@@ -1,0 +1,323 @@
+/* 轨迹视图（matrix 20/21）：左侧时间线表格 + 右侧检查器。
+   两栏都自己滚动，外层不产生横向溢出（e2e 有 layout guard：页面不得横向溢出）。 */
+
+.split {
+  display: flex;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.tablePane {
+  flex: 1 1 auto;
+  min-width: 0;
+  /* 表格要多宽才可读，取决于**这个窗格**（= 视口 − 侧栏 − 检查器），不取决于视口：
+     同一个视口宽度下，检查器在不在能差出 360px。所以这里按窗格宽度判定。 */
+  container-type: inline-size;
+  overflow: auto;
+  padding: var(--law-space-lg) var(--law-space-2xl) var(--law-space-2xl);
+}
+
+.inspectorPane {
+  flex: 0 0 auto;
+  width: 360px;
+  overflow-y: auto;
+  border-left: 1px solid var(--law-border-l1);
+  background: var(--law-bg-layer-1);
+}
+
+/* 窗格放了检查器之后可能只剩很窄的一条：`table-layout: fixed` 会把四列按百分比压缩，
+   窄到一定程度列就只剩几像素。给表格一个最小宽度，让它在自己那个 `overflow: auto`
+   的窗格里横向滚动，而不是把列压没。520px 分给列宽 24/32/34/10 约是
+   125/166/177/52，每列还放得下一个词组；比这宽时（1280 下窗格约 604px）表格照常
+   `width: 100%`，像素不变。 */
+@container (max-width: 519px) {
+  .table {
+    min-width: 520px;
+  }
+}
+
+.table {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.caption {
+  padding: 0 0 var(--law-space-lg);
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+  text-align: left;
+}
+
+.table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: var(--law-space-md) var(--law-space-lg);
+  border-bottom: 1px solid var(--law-border-l2);
+  background: var(--law-bg-base);
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xs);
+  font-weight: var(--law-weight-medium);
+  text-align: left;
+}
+
+.colType {
+  width: 24%;
+}
+
+.colPayload {
+  width: 32%;
+}
+
+.colResult {
+  width: 34%;
+}
+
+.colTime {
+  width: 10%;
+}
+
+.row {
+  cursor: pointer;
+}
+
+.row:hover td {
+  background: var(--law-button-ghost-hover);
+}
+
+.rowSelected td {
+  background: var(--law-surface-selector);
+}
+
+.table td {
+  padding: var(--law-space-md) var(--law-space-lg);
+  border-bottom: 1px solid var(--law-border-l1);
+  color: var(--law-text-primary);
+  /* 单行不换行：长参数/长结果在列内省略，而不是把表格撑宽。 */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 整行可点由 `<tr>` 承担，这个按钮承担键盘可达性：同一份文案、同一次选择。 */
+.typeButton {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: var(--law-space-md);
+  border-radius: var(--law-radius-pill);
+  vertical-align: middle;
+}
+
+.statusRunning {
+  background: var(--law-state-info);
+}
+
+.statusSucceeded {
+  background: var(--law-state-success);
+}
+
+.statusFailed {
+  background: var(--law-state-error);
+}
+
+.payloadCell,
+.resultCell {
+  color: var(--law-text-secondary);
+}
+
+.truncated {
+  color: var(--law-text-caption);
+}
+
+.timeCell {
+  color: var(--law-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.empty {
+  margin: var(--law-space-xl) 0 0;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-md);
+}
+
+/* ---- 检查器 ---- */
+
+.hint {
+  margin: 0;
+  padding: var(--law-space-xl) var(--law-space-2xl);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-md);
+}
+
+.inspector {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xl);
+  padding: var(--law-space-xl) var(--law-space-2xl) var(--law-space-3xl);
+}
+
+.inspectorHead {
+  margin: 0;
+  color: var(--law-text-primary);
+  font-size: var(--law-text-md);
+  font-weight: var(--law-weight-medium);
+  line-height: var(--law-leading-md);
+  overflow-wrap: anywhere;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-sm);
+  padding-top: var(--law-space-lg);
+  border-top: 1px solid var(--law-border-l1);
+}
+
+.sectionTitle {
+  margin: 0;
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xs);
+  font-weight: var(--law-weight-medium);
+  line-height: var(--law-leading-xs);
+  letter-spacing: 0.04em;
+}
+
+.field {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: var(--law-space-md);
+  align-items: baseline;
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.fieldLabel {
+  color: var(--law-text-tertiary);
+}
+
+.fieldValue {
+  color: var(--law-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.value {
+  margin: 0;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.note {
+  margin: 0;
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-md);
+}
+
+.pairs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xxs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.pair {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr);
+  gap: var(--law-space-md);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.pairName {
+  color: var(--law-text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.pairValue {
+  color: var(--law-text-primary);
+  font-family: var(--law-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.calls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-sm);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.call {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xxs);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.callPurpose {
+  color: var(--law-text-primary);
+  font-weight: var(--law-weight-medium);
+}
+
+.callModel {
+  color: var(--law-text-secondary);
+}
+
+.callFingerprint {
+  color: var(--law-text-tertiary);
+  font-family: var(--law-font-mono);
+  overflow-wrap: anywhere;
+}
+
+.callNumbers {
+  color: var(--law-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 窄窗：表格与检查器上下堆叠。固定 360px 的检查器在 640 下会越出视口 28px，
+   且把表格挤到不可读。 */
+@media (max-width: 900px) {
+  .split {
+    flex-direction: column;
+  }
+
+  /* 堆叠后靠高度分配，`min-width: 0` 换成 `min-height: 0`。 */
+  .tablePane {
+    min-height: 0;
+  }
+
+  .inspectorPane {
+    width: 100%;
+    max-height: 45%;
+    border-left: none;
+    border-top: 1px solid var(--law-border-l1);
+  }
+}

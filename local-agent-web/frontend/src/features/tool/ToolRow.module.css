@@ -82,8 +82,14 @@
   color: var(--law-text-primary);
 }
 
+/* 参数摘要里有 64 位 sha256 与 reason 全文，宽度可达 1300px：必须可收缩+省略，
+   否则整行按 max-content 撑开会话区（1440 下也超出 686px）。全文在展开卡里。 */
 .summary {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--law-text-secondary);
 }
 

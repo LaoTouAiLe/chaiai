@@ -1,4 +1,5 @@
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import {
   approvalExpiredScenario,
@@ -34,13 +35,40 @@ describe('Composer takeover', () => {
 
   it('gives the input area back once the request is no longer actionable', () => {
     renderComposer(approvalExpiredScenario)
-    // The outcome stays visible ...
+    // The outcome stays visible — collapsed to one line, so a finished card cannot
+    // keep occupying the space above the composer ...
     expect(screen.getByText('审批已失效')).toBeInTheDocument()
-    expect(screen.getByText(/该审批已超时失效，未执行任何操作/)).toBeInTheDocument()
     // ... and the user can issue a new request again.
     expect(screen.getByRole('textbox', { name: '给智能体发消息' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '发送消息' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '允许一次' })).not.toBeInTheDocument()
+  })
+
+  it('shows a different finished approval after the previous one was dismissed', async () => {
+    if (approvalExpiredScenario.takeover.kind !== 'approval') throw new Error('fixture mismatch')
+    const baseApproval = approvalExpiredScenario.takeover.approval
+    const user = userEvent.setup()
+    const renderWithApproval = (approvalId: string) => (
+      <Composer
+        session={approvalExpiredScenario.session}
+        plan={approvalExpiredScenario.plan}
+        meter={approvalExpiredScenario.context}
+        takeover={{
+          kind: 'approval',
+          approval: { ...baseApproval, approvalId },
+        }}
+        modelMenu={approvalExpiredScenario.modelMenu}
+        state={approvalExpiredScenario.composer}
+      />
+    )
+
+    const { rerender } = render(renderWithApproval('old-approval'))
+    await user.click(screen.getByRole('button', { name: '关闭审批结果' }))
+    expect(screen.queryByRole('region', { name: '审批' })).not.toBeInTheDocument()
+
+    rerender(renderWithApproval('new-approval'))
+    expect(screen.getByRole('region', { name: '审批' })).toBeInTheDocument()
+    expect(screen.getByText('审批已失效')).toBeInTheDocument()
   })
 
   it('restores the input for every state that no longer needs a decision', () => {

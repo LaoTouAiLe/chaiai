@@ -65,6 +65,10 @@ MODEL_SETTINGS_INVALID: Final[str] = "MODEL_SETTINGS_INVALID"
 # 配置：没有可用设置库时明确告知降级原因（§15.9）。
 SETTINGS_STORE_UNAVAILABLE: Final[str] = "SETTINGS_STORE_UNAVAILABLE"
 
+# 宿主能力：本机原生目录选择器打不开（没有桌面会话、Tk 缺失、子进程起不来或超时）。
+# 文案必须把"没弹出来"与"你选错了目录"分开——后者是 `WORKSPACE_NOT_FOUND`。
+DIRECTORY_PICKER_UNAVAILABLE: Final[str] = "DIRECTORY_PICKER_UNAVAILABLE"
+
 # 安全：与既有 SecurityError / WorkspaceBoundaryError 对应（v0.1–v0.3 语义不变）。
 SECURITY_POLICY_DENIED: Final[str] = "SECURITY_POLICY_DENIED"
 WORKSPACE_BOUNDARY_VIOLATION: Final[str] = "WORKSPACE_BOUNDARY_VIOLATION"
@@ -128,10 +132,13 @@ _ERROR_CATEGORY_OF: Final[dict[str, ErrorCategory]] = {
     SIDE_EFFECT_UNCONFIRMED: "recovery",
     SESSION_NOT_FOUND: "system",
     WORKSPACE_NOT_FOUND: "configuration",
+    DIRECTORY_PICKER_UNAVAILABLE: "system",
 }
 
 #: 同一次提交在条件满足后能否原样重试（§15.5）。
-_RETRYABLE: Final[frozenset[str]] = frozenset({SESSION_BUSY, MODEL_RATE_LIMITED, MODEL_RETRY_EXHAUSTED})
+_RETRYABLE: Final[frozenset[str]] = frozenset(
+    {SESSION_BUSY, MODEL_RATE_LIMITED, MODEL_RETRY_EXHAUSTED, DIRECTORY_PICKER_UNAVAILABLE}
+)
 
 #: 条件说明。重试条件不是"现在就能重试"，页面按此决定是否显示按钮与如何措辞。
 _RETRY_CONDITION: Final[dict[str, str]] = {
@@ -163,6 +170,7 @@ _RETRY_CONDITION: Final[dict[str, str]] = {
     SIDE_EFFECT_UNCONFIRMED: "需要先人工核对上一次运行的记录，不能自动重试。",
     SESSION_NOT_FOUND: "刷新会话列表后重新选择；已删除的会话不会恢复。",
     WORKSPACE_NOT_FOUND: "刷新工作区列表后重新选择；新工作区可按路径添加。",
+    DIRECTORY_PICKER_UNAVAILABLE: "确认本机桌面会话可用（远程桌面断开时弹不出窗口）后重新点击。",
 }
 
 ERROR_CODES: Final[tuple[str, ...]] = tuple(_ERROR_CATEGORY_OF)
@@ -305,6 +313,23 @@ class ApplicationError(Exception):
     @property
     def code(self) -> str:
         return self.view.code
+
+
+def directory_picker_unavailable(*, occurred_at: datetime) -> ApplicationError:
+    """宿主没能弹出目录选择器：这是**宿主能力**故障，不是"你选的目录有问题"。
+
+    文案里不带任何路径、也不带子进程原文（§15.8）——具体原因只进本地日志。
+    """
+    return ApplicationError(
+        ErrorView.for_code(
+            DIRECTORY_PICKER_UNAVAILABLE,
+            title="打不开目录选择器",
+            message="没能弹出系统的文件夹选择窗口：这次没有选中任何目录，工作区没有被改变。",
+            hint="重新点一次「添加工作区」即可；若反复打不开，先确认本机桌面会话可用。",
+            diagnostic_id=diagnostic_id_for(DIRECTORY_PICKER_UNAVAILABLE, "pick"),
+            occurred_at=occurred_at,
+        )
+    )
 
 
 def session_busy(*, session_id: str, request_id: str, occurred_at: datetime) -> ApplicationError:

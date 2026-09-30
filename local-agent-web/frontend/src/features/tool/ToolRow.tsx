@@ -20,7 +20,12 @@ const STATUS_CLASS: Record<ToolRowView['status'], string> = {
   failed: styles.statusFailed ?? '',
 }
 
-const STATUS_LABEL: Record<ToolRowView['status'], string> = {
+/**
+ * 状态的三个人话说法，**组件与轨迹视图共用**。
+ *
+ * 导出是为了让轨迹表用同一套词：同一个状态在两个页签里显示不同说法，用户会以为是两回事。
+ */
+export const TOOL_STATUS_LABEL: Record<ToolRowView['status'], string> = {
   running: '执行中',
   succeeded: '成功',
   failed: '失败',
@@ -50,7 +55,7 @@ export function ToolRow({ tool, onToggle }: ToolRowProps) {
       <button type="button" className={styles.row} aria-expanded={tool.expanded} onClick={onToggle}>
         <span className={`${styles.status} ${STATUS_CLASS[tool.status]}`}>
           <StatusIcon status={tool.status} />
-          <span className="visually-hidden">{STATUS_LABEL[tool.status]}</span>
+          <span className="visually-hidden">{TOOL_STATUS_LABEL[tool.status]}</span>
         </span>
         <span className={styles.chevron} aria-hidden="true">
           <ChevronRight />
@@ -59,7 +64,9 @@ export function ToolRow({ tool, onToggle }: ToolRowProps) {
           <ToolIcon name={tool.name} />
         </span>
         <span className={styles.name}>{tool.name}</span>
-        <span className={styles.summary}>{tool.summary}</span>
+        <span className={styles.summary} title={tool.summary}>
+          {tool.summary}
+        </span>
         {tool.target === null ? null : <span className={styles.target}>{tool.target}</span>}
         <span className={styles.duration}>{tool.durationLabel}</span>
       </button>

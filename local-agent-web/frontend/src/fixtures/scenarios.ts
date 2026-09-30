@@ -388,6 +388,17 @@ export const toolsScenario: ConversationScenario = {
         status: 'failed',
         durationLabel: '12.6s',
         target: 'pnpm run check',
+        // 轨迹视图读的字段与对话行同源：一次调用只有一份参数、一份结果预览。
+        toolCallId: 'call-7f31a2',
+        parameters: [
+          { name: 'command', value: 'pnpm run check' },
+          { name: 'cwd', value: 'local-agent-web' },
+        ],
+        resultPreview: terminalOutput,
+        resultTruncated: false,
+        resultDigest: 'sha256:4d1c9a7e3b02',
+        startedLabel: '14:02',
+        finishedLabel: '14:03',
         card: {
           kind: 'terminal',
           command: 'pnpm run check',
@@ -408,6 +419,17 @@ export const toolsScenario: ConversationScenario = {
         status: 'succeeded',
         durationLabel: '0.6s',
         target: 'packages/client',
+        toolCallId: 'call-18b4e0',
+        parameters: [
+          { name: 'pattern', value: 'DEFAULT_SEARCH_MAX_LINES' },
+          { name: 'path', value: 'packages/client' },
+        ],
+        resultPreview:
+          'packages/client/ui-primitives/src/SearchBlock.tsx:16: export const DEFAULT_SEARCH_MAX_LINES = 16',
+        resultTruncated: true,
+        resultDigest: 'sha256:9b27c41f0d55',
+        startedLabel: '14:02',
+        finishedLabel: '14:02',
         card: {
           kind: 'search',
           shape: 'matches',
@@ -439,6 +461,13 @@ export const toolsScenario: ConversationScenario = {
         status: 'succeeded',
         durationLabel: '0.3s',
         target: '**/SearchBlock*',
+        toolCallId: 'call-2c90da',
+        parameters: [{ name: 'pattern', value: '**/SearchBlock*' }],
+        resultPreview: 'packages/client/ui-primitives/src/SearchBlock.tsx',
+        resultTruncated: true,
+        resultDigest: 'sha256:77a0be13c9f4',
+        startedLabel: '14:02',
+        finishedLabel: '14:02',
         card: {
           kind: 'search',
           shape: 'paths',
@@ -464,6 +493,17 @@ export const toolsScenario: ConversationScenario = {
         status: 'succeeded',
         durationLabel: '0.1s',
         target: 'packages/host/webserver/src/index.ts',
+        toolCallId: 'call-5e07fb',
+        parameters: [
+          { name: 'path', value: 'packages/host/webserver/src/index.ts' },
+          { name: 'offset', value: '41' },
+          { name: 'limit', value: '5' },
+        ],
+        resultPreview: 'export interface ReadBlockProps {',
+        resultTruncated: false,
+        resultDigest: 'sha256:31bd8f6a24c7',
+        startedLabel: '14:02',
+        finishedLabel: '14:02',
         card: readWindow(
           41,
           [
@@ -487,6 +527,13 @@ export const toolsScenario: ConversationScenario = {
         status: 'succeeded',
         durationLabel: '0.2s',
         target: null,
+        toolCallId: 'call-a6e12c',
+        parameters: [{ name: 'todos', value: '[4 项]' }],
+        resultPreview: '任务清单已更新：1 项完成 · 2 项进行中 · 1 项待办',
+        resultTruncated: false,
+        resultDigest: 'sha256:c82d9014be6f',
+        startedLabel: '14:02',
+        finishedLabel: '14:02',
         card: {
           kind: 'todo',
           items: [
@@ -507,6 +554,15 @@ export const toolsScenario: ConversationScenario = {
         status: 'succeeded',
         durationLabel: '0.4s',
         target: null,
+        // 这一行刻意**什么都不补**：参数与结果预览都没有记录。轨迹里如实显示"未知"，
+        // 而不是为了好看写 0 或编一段结果。
+        toolCallId: 'call-d40f58',
+        parameters: [],
+        resultPreview: '',
+        resultTruncated: false,
+        resultDigest: null,
+        startedLabel: '14:03',
+        finishedLabel: '14:03',
         card: {
           kind: 'generic',
           headline: '工具返回了结构化结果',
@@ -523,6 +579,16 @@ export const toolsScenario: ConversationScenario = {
         status: 'succeeded',
         durationLabel: '9.4s',
         target: 'pnpm run build',
+        toolCallId: 'call-9f2b6d',
+        parameters: [
+          { name: 'command', value: 'pnpm run build' },
+          { name: 'cwd', value: 'local-agent-web' },
+        ],
+        resultPreview: ['> local-agent-web-frontend@0.4.0 build', '✓ built in 848ms'].join('\n'),
+        resultTruncated: false,
+        resultDigest: 'sha256:5a71ec09d3b8',
+        startedLabel: '14:03',
+        finishedLabel: '14:03',
         card: {
           kind: 'terminal',
           command: 'pnpm run build',
@@ -584,6 +650,33 @@ export const toolsScenario: ConversationScenario = {
   takeover: { kind: 'none' },
   settings: null,
   modelMenu: null,
+}
+
+/**
+ * Matrix 20 / 21 — 轨迹页签：工具调用表格 + 点击行展开的右侧检查器。
+ *
+ * 与 `tools` 是**同一个会话的另一个页签**（同 `sessionId`、同消息、同会话头）：轨迹与对话看的是
+ * 同一份数据，用两个 fixture 各写一套就迟早会互相矛盾。这里只覆写两处：
+ *
+ * - 初始页签为 `trace`（`?state=trace` 直接落在轨迹页）；
+ * - 逐次模型调用补上 `tools_schema_fingerprint`——契约里有这个字段，Schema 段要如实展示它。
+ *   "最终回答"那一次没有发送工具 Schema，因此指纹为 `null`（页面显示"未知"，不编哈希）。
+ */
+export const traceScenario: ConversationScenario = {
+  ...toolsScenario,
+  id: 'trace',
+  tab: 'trace',
+  purpose: '轨迹视图：工具调用表格（类型 / 参数 / 结果摘要）+ 点击行展开的检查器（Summary / Payload / Result / Schema / Timing）',
+  stats: toolsScenario.stats === null
+    ? null
+    : {
+      ...toolsScenario.stats,
+      calls: toolsScenario.stats.calls.map((call, index) => ({
+        ...call,
+        // 只有需要工具的调用才带工具 Schema：没有工具集就没有指纹，这一点不粉饰。
+        schemaFingerprint: index < 2 ? 'sha256:6f1c8a2d90be' : null,
+      })),
+    },
 }
 
 const pendingApproval: ApprovalView = {
@@ -1262,6 +1355,7 @@ export const scenarios: readonly ConversationScenario[] = [
   diffScenario,
   errorsScenario,
   toolsScenario,
+  traceScenario,
   approvalScenario,
   approvalExpiredScenario,
   settingsModelsScenario,
