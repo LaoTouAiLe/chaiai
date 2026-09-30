@@ -374,15 +374,45 @@ export interface ModelConnectionView {
   pendingApply: boolean
 }
 
+/** 工作区外路径档位；与契约同源（`deny` / `whitelist` / `allow`）。 */
+export type ExternalPathsMode = 'deny' | 'whitelist' | 'allow'
+
+/** 一条授权给出的访问级别；"不给访问"用撤销表达，不另立一个级别。 */
+export type ExternalPathAccess = 'read' | 'read_write'
+
+export interface ExternalPathGrantView {
+  /** 用户自己填进来的目录，已由服务端规范化（大小写、分隔符、符号链接）。 */
+  path: string
+  access: ExternalPathAccess
+}
+
+/**
+ * 「设置 → 权限」分区（T38）。
+ *
+ * `defaultMode` 是 `config.yaml` 的出厂默认，用来解释"库里没有用户选择时按哪一档跑"；
+ * `storeUnavailable` 为真时必须如实说明"这里改了也存不下来"，而不是让页面看起来保存成功。
+ * 授权条目只在 `whitelist` 档生效——`deny` 档一条也不读。
+ */
+export interface PermissionsView {
+  mode: ExternalPathsMode
+  defaultMode: ExternalPathsMode
+  grants: readonly ExternalPathGrantView[]
+  storeUnavailable: boolean
+}
+
 export interface SettingsView {
   /**
-   * v0.4 settings only manage chat connections, so the dialog has a single
-   * section. There is deliberately no section switcher: a nav with an inert
-   * item would promise an interaction the prototype does not have.
+   * v0.4 settings has two usable sections — chat connections and permissions — so
+   * the dialog's section switcher is now the real thing, not a nav of inert
+   * items. (Rewriting this note and the `SettingsDialog.test.tsx` assertion of
+   * the same name is part of T38: the old argument was "do not offer a section we
+   * cannot honour", and both sections can be honoured now.)
    */
   connections: readonly ModelConnectionView[]
   /** `'os'` means keys survive a restart; `'unavailable'` means they do not. */
   credentialStore: { kind: 'os' | 'unavailable'; note: string | null }
+  /** 权限分区；`null` 表示还没读到——不编造一个档位出来（§15.9）。 */
+  permissions: PermissionsView | null
 }
 
 export interface ModelMenuItemView {

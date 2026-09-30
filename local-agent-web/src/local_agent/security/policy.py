@@ -31,6 +31,8 @@ from local_agent.config import (
 from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
 from local_agent.security.diff_guard import count_changed_lines, edit_input_mode, parse_patch
 from local_agent.security.path_guard import (
+    ExternalPathPolicy,
+    ResolvedTarget,
     assert_not_protected_target,
     is_sensitive_path,
     is_within,
@@ -76,13 +78,17 @@ class SecurityPolicy:
         security: SecurityConfig,
         workspace: WorkspaceConfig,
         secret_values: tuple[str, ...] = (),
+        external_policy: ExternalPathPolicy | None = None,
     ) -> None:
         self.workspace_root = workspace_root
         self.security = security
         self.workspace = workspace
-        #: ``workspace.allow_external_paths``：是否允许**显式绝对路径**访问工作区外目标。
-        #: 为真不等于关闭安全校验：越界判定、受保护目标、外部副作用强制审批都照旧生效。
-        self.allow_external_paths = bool(workspace.allow_external_paths)
+        #: 工作区外路径的档位与逐条授权（T38；架构 §1.5）。界面上的档位存在设置库里，
+        #: 由应用层解析后传进来；缺省取 ``config.yaml`` 的出厂默认。放开不等于关闭安全校验：
+        #: 越界判定、受保护目标、外部 cwd 强制审批与四项硬约束都照旧生效。
+        self.external_policy = external_policy or ExternalPathPolicy(
+            mode=workspace.external_paths.mode
+        )
         self._secret_values = secret_values
         #: 本次执行中被人工批准的动作指纹（一次性授权，执行完立即撤销）。
         self._granted: set[str] = set()
@@ -94,6 +100,7 @@ class SecurityPolicy:
         *,
         workspace_root: Path,
         environ: Mapping[str, str] | None = None,
+        external_policy: ExternalPathPolicy | None = None,
     ) -> SecurityPolicy:
         """按配置构造策略；密钥值从环境变量读取，仅用于输出脱敏。
 
@@ -101,10 +108,12 @@ class SecurityPolicy:
             app_config: 完整配置。
             workspace_root: 工作区根目录。
             environ: 环境变量映射，默认取 ``os.environ``。
+            external_policy: 外部路径档位与授权。界面上的档位可在设置库里被改，应用层解析后
+                从这里传进来；给 ``None`` 时取 ``config.yaml`` 的出厂默认。
 
         Returns:
-            构造好的策略对象。``workspace.allow_external_paths`` 只是打开"显式绝对路径的受控
-            外部访问"（架构 §1.5），不放松越界判定本身。
+            构造好的策略对象。外部档位只是放开"显式绝对路径的受控外部访问"（架构 §1.5），
+            不放松越界判定本身，也不放宽四项硬约束。
         """
         env = os.environ if environ is None else environ
         secret_names = [
@@ -124,25 +133,30 @@ class SecurityPolicy:
             security=app_config.security,
             workspace=app_config.workspace,
             secret_values=secret_values,
+            external_policy=external_policy,
         )
 
     # ------------------------------------------------------------------ 路径
 
-    def resolve_path(self, path: str) -> Path:
-        """把路径解析为规范化绝对路径（目标可以不存在）。
+    def resolve_target(self, path: str) -> ResolvedTarget:
+        """解析路径并给出访问级别（目标可以不存在）。判定与执行共用这一个入口。
 
-        工作区外的目标仅在 ``allow_external_paths=true`` **且原始输入是绝对路径**时放行
-        （架构 §1.5）；其余越界输入一律失败。
+        工作区外的目标仅在**原始输入是绝对路径**且当前档位认可时放行（架构 §1.5）；
+        其余越界输入一律失败。
 
         Raises:
-            WorkspaceBoundaryError: 空路径，或路径在工作区之外且不被允许。
+            WorkspaceBoundaryError: 空路径，或路径在工作区之外且未被授权。
         """
         return resolve_target(
             path,
             base_dir=self.workspace_root,
             workspace_root=self.workspace_root,
-            allow_external=self.allow_external_paths,
-        ).path
+            external_policy=self.external_policy,
+        )
+
+    def resolve_path(self, path: str) -> Path:
+        """把路径解析为规范化绝对路径（目标可以不存在）；越界且未授权时失败。"""
+        return self.resolve_target(path).path
 
     def is_external(self, path: Path) -> bool:
         """该规范化路径是否在当前工作区之外（用于外部路径的审批与展示）。"""
@@ -236,31 +250,34 @@ class SecurityPolicy:
         """工作区外副作用与受保护目标的统一判定；``None`` 表示按常规规则继续判。
 
         - 受保护目标（根目录、主目录、Git 元数据、系统关键目录）→ **硬拒绝**，不可审批；
-        - 工作区外的普通目标 → 强制人工审批，且不参与免审白名单；
-        - 工作区内目标 → ``None``，交给各工具自己的风险规则。
+        - 越界且未被授权 → **硬拒绝**（失败闭合），提示指向「设置 → 权限」；
+        - 只有**只读**授权的外部目标 → 拒绝写操作，并说明该授权只覆盖读取；
+        - **读写**授权的外部目标 → ``None``：视同工作区内，交给各工具自己的风险规则
+          （四项硬约束仍然生效）；
+        - 工作区内目标 → ``None``。
         """
         if not path.strip():
             # 没给路径（或空串）：交给工具自身的解析去报错，这里不抢先判定，
             # 否则"只按文本判定"的调用（例如只传 old_text/new_text）会被误判为缺路径。
             return None
         try:
-            target = self.resolve_path(path)
+            target = self.resolve_target(path)
         except WorkspaceBoundaryError as exc:
             return SafetyDecision(allowed=False, requires_approval=False, reason=str(exc))
-        reason = protected_target_reason(target)
+        reason = protected_target_reason(target.path)
         if reason:
             return SafetyDecision(
                 allowed=False,
                 requires_approval=False,
-                reason=f"禁止{verb}受保护目标（{reason}）：{target.as_posix()}",
+                reason=f"禁止{verb}受保护目标（{reason}）：{target.path.as_posix()}",
             )
-        if self.is_external(target):
+        if target.access == "read":
             return SafetyDecision(
                 allowed=False,
-                requires_approval=True,
+                requires_approval=False,
                 reason=(
-                    f"工作区外路径：{target.as_posix()}；{verb}工作区外目标必须人工审批"
-                    "（架构 §1.5）"
+                    f"该路径只有只读授权，不能{verb}：{target.path.as_posix()}。"
+                    "请在「设置 → 权限」中把该目录改为「可读写」，或改到工作区内操作"
                 ),
             )
         return None
@@ -336,7 +353,7 @@ class SecurityPolicy:
             cwd=str(args.get("cwd") or "."),
             timeout_seconds=as_int(args.get("timeout_seconds")),
             env_keys=env_keys,
-            allow_external_cwd=self.allow_external_paths,
+            external_policy=self.external_policy,
         )
         if plan.cwd is not None and self.is_external(plan.cwd):
             # 工作区外 cwd 不受免审白名单影响：必须人工批准（架构 §1.5）

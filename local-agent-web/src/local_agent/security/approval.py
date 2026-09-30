@@ -158,9 +158,9 @@ def action_fingerprint(
             cwd=str(args.get("cwd") or "."),
             timeout_seconds=requested_timeout,
             env_keys=[str(key) for key in (args.get("env_keys") or [])],
-            # 与安全判定/执行同一套 cwd 语义：允许外部路径时外部 cwd 才解析得出可执行文件，
+            # 与安全判定/执行同一套 cwd 语义：档位认可的外部 cwd 才解析得出可执行文件，
             # 否则指纹里的 executable_path 会与执行阶段不一致（架构 §5.3）。
-            allow_external_cwd=policy.allow_external_paths,
+            external_policy=policy.external_policy,
         )
         parts += [
             # 原始命令原文必须进指纹：`split_command` 会丢掉管道/重定向等 Shell 运算符，

@@ -158,18 +158,63 @@ class EmbeddingConfig(_StrictModel):
         return found
 
 
+class ExternalPathsConfig(_StrictModel):
+    """工作区外路径的**出厂默认档位**（T38；架构 §1.5）。
+
+    界面上的档位存在设置库里（"保存即生效、作用于下一轮"），这里只是新安装与旧配置的起点：
+
+    - ``deny``：拒绝一切工作区外目标；
+    - ``whitelist``：只放行「设置 → 权限」里逐条添加的授权目录。**默认值**——空白名单等价于
+      ``deny``，因此出厂默认拒绝一切外部路径，分发出去的实例开箱安全；
+    - ``allow``：放行显式绝对路径的外部目标（``~``、相对路径逃逸与 Windows 盘符相对路径仍被
+      拒绝），删除/覆盖/破坏性 Shell/大范围编辑四类敏感操作照旧必须人工批准。
+
+    档位只决定"常规小改动是否需要逐次询问"，不放宽任何硬约束。
+    """
+
+    mode: Literal["deny", "whitelist", "allow"] = "whitelist"
+
+
 class WorkspaceConfig(_StrictModel):
     """工作区边界（架构 §1.5）；相对路径以**当前会话绑定的工作区**为根。
 
     ``root`` 只是启动默认值：T14C 起网页可以选择工作区并随会话保存，每个会话只绑定一个
-    工作区。``allow_external_paths`` 打开的是"**显式绝对路径**的受控外部访问"，不是关闭安全
-    校验：``~``、相对路径逃逸与 Windows 盘符相对路径仍被拒绝，外部副作用一律人工审批，
+    工作区。外部访问由 ``external_paths.mode``（T38）控制；``allow_external_paths`` 是 T14C 的
+    旧键，保留为快捷方式（``true`` 等价 ``mode: allow``），现有配置文件不因 T38 失效。
+    无论哪一档，``~``、相对路径逃逸与 Windows 盘符相对路径仍被拒绝，外部副作用按分级判定，
     根目录/主目录/系统目录/ Git 元数据即使用户批准也不执行。
     """
 
     root: str = "."
+    #: 旧键（T14C）：``true`` 等价 ``external_paths.mode: allow``。只作快捷方式，不再单独生效。
     allow_external_paths: bool = False
+    external_paths: ExternalPathsConfig = Field(default_factory=ExternalPathsConfig)
     max_file_size_bytes: int = Field(default=2_000_000, gt=0)
+
+    @model_validator(mode="after")
+    def _resolve_external_paths(self) -> WorkspaceConfig:
+        """旧键归一为新档位；只有**真实的语义冲突**才报错。
+
+        "新旧同时出现就报错"这条看似更严格，实际会把 ``model_dump() → model_validate()`` 的往返
+        判成冲突（往返必然把两个键都写出来），现有配置的读回也就跟着坏掉——T29A 的
+        ``_provider_conflicts`` 已经为同类问题定过口径："显式出现**且有值**、且会给出不同结果"
+        才拦。这里沿用同一口径：
+
+        - 旧键 ``allow_external_paths: true`` + 新键显式写了非 ``allow`` 的档位 → 报错（谁生效说不清）；
+        - 只有旧键为 ``true`` → 归一为 ``mode: allow``，配置照常启动；
+        - 其余情况新键优先，旧键保持默认。
+        """
+        if not self.allow_external_paths:
+            return self
+        if "external_paths" in self.model_fields_set and self.external_paths.mode != "allow":
+            raise ValueError(
+                "workspace.allow_external_paths 与 workspace.external_paths.mode 语义冲突："
+                "旧键 true 等价 mode: allow。请二选一——删除旧键只留 "
+                f"external_paths.mode: {self.external_paths.mode}，"
+                "或把档位也改成 allow"
+            )
+        self.external_paths = ExternalPathsConfig(mode="allow")
+        return self
 
 
 class AgentsPrecedenceConfig(_StrictModel):

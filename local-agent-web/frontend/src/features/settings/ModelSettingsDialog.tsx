@@ -10,10 +10,13 @@ import { toSettingsView } from '../../api/viewModels'
 import { ConnectionForm } from './ConnectionForm'
 import { SettingsDialog } from './SettingsDialog'
 import { useModelSettings } from './useModelSettings'
+import { usePermissions } from './usePermissions'
 import styles from './SettingsDialog.module.css'
 
 export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
   const settings = useModelSettings()
+  // 权限分区有自己的读入口：档位与授权进设置库，和"用哪条连接"互不影响，失败也各挂各的。
+  const permissions = usePermissions()
   const [formOpen, setFormOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [confirmId, setConfirmId] = useState<string | null>(null)
@@ -37,8 +40,16 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
           pendingApply: dto.connection_id === pendingId,
           testing: dto.connection_id === settings.testingId,
         }),
+        permissions.permissions,
       ),
-    [confirmId, pendingId, settings.connections, settings.health, settings.testingId],
+    [
+      confirmId,
+      pendingId,
+      permissions.permissions,
+      settings.connections,
+      settings.health,
+      settings.testingId,
+    ],
   )
 
   const closeForm = useCallback(() => {
@@ -96,6 +107,14 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
     <SettingsDialog
       settings={view}
       form={form}
+      permissionBusy={permissions.busy}
+      permissionError={permissions.error?.message ?? null}
+      permissionActions={{
+        onSelectMode: (mode) => void permissions.setMode(mode),
+        onAddGrant: (path, access) => void permissions.grant(path, access),
+        onRevokeGrant: (path) => void permissions.revoke(path),
+        onReload: () => void permissions.reload(),
+      }}
       actions={{
         busyId: settings.busyId,
         creating: settings.creating,

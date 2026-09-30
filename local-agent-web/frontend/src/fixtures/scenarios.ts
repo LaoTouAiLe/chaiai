@@ -926,7 +926,20 @@ export const settingsModelsScenario: ConversationScenario = {
   stats: shellScenario.stats,
   context: shellScenario.context,
   takeover: { kind: 'none' },
-  settings: { connections, credentialStore: { kind: 'os', note: null } },
+  settings: {
+    connections,
+    credentialStore: { kind: 'os', note: null },
+    // 权限分区（T38）：停在「自定义」，带两条授权，一条只读一条读写。
+    permissions: {
+      mode: 'whitelist',
+      defaultMode: 'whitelist',
+      grants: [
+        { path: 'E:/design-assets', access: 'read' },
+        { path: 'D:/team/shared', access: 'read_write' },
+      ],
+      storeUnavailable: false,
+    },
+  },
   modelMenu: null,
 }
 
@@ -949,6 +962,13 @@ export const settingsEmptyScenario: ConversationScenario = {
     credentialStore: {
       kind: 'unavailable',
       note: '当前系统凭据存储不可用：密钥只保存在本次进程内，重启后需要重新录入，也不会写入明文文件。',
+    },
+    // 权限同样存不下：停在最保守的档位，并如实说明重启后会回到出厂默认。
+    permissions: {
+      mode: 'deny',
+      defaultMode: 'whitelist',
+      grants: [],
+      storeUnavailable: true,
     },
   },
   modelMenu: null,

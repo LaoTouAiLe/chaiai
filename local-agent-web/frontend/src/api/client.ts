@@ -14,6 +14,9 @@ import type { components, paths } from './schema.gen'
 export type ErrorView = components['schemas']['ErrorView']
 export type ModelConnectionDto = components['schemas']['ModelConnectionView']
 export type HealthDto = components['schemas']['HealthView']
+export type PermissionsDto = components['schemas']['PermissionsView']
+export type ExternalPathsModeDto = PermissionsDto['mode']
+export type ExternalPathAccessDto = components['schemas']['ExternalPathGrantView']['access']
 
 /** 生成契约里的 200 响应体。 */
 type Ok<T> = T extends { responses: { 200: { content: { 'application/json': infer R } } } } ? R : never
@@ -287,5 +290,47 @@ export function selectSessionModel(
       expected_selection: expectation,
       expected_version: expectedVersion,
     }),
+  })
+}
+
+// ---- 权限：工作区外路径档位与授权（T38；§1.5）--------------------------------
+
+/**
+ * 当前档位与授权条目。
+ *
+ * 没有可用设置库时**不报错**：服务端返回出厂默认档位并置 `store_unavailable=true`，
+ * 设置页据此如实说明"这里改了也存不下来"，而不是整页打不开。
+ */
+export function getPermissions(): Promise<PermissionsDto> {
+  return request<PermissionsDto>('/api/permissions')
+}
+
+/** 切换档位。改动**作用于下一轮**：正在跑或等待审批的那些运行已按当时的档位判定完。 */
+export function setPermissionsMode(mode: ExternalPathsModeDto): Promise<PermissionsDto> {
+  return request<PermissionsDto>('/api/permissions', {
+    method: 'PUT',
+    body: JSON.stringify({ mode }),
+  })
+}
+
+/** 给一个工作区外目录授权；同一目标重复授权是**改写**级别，不是加两行。 */
+export function grantExternalPath(
+  path: string,
+  access: ExternalPathAccessDto,
+): Promise<PermissionsDto> {
+  return request<PermissionsDto>('/api/permissions/grants', {
+    method: 'POST',
+    body: JSON.stringify({ path, access }),
+  })
+}
+
+/**
+ * 撤销一条授权；**不存在也算成功**（幂等）。
+ *
+ * 路径走查询参数而不是请求体：它是这条记录的自然键（含层级分隔符），URL 编码即可原样送达。
+ */
+export function revokeExternalPath(path: string): Promise<PermissionsDto> {
+  return request<PermissionsDto>(`/api/permissions/grants?path=${encodeURIComponent(path)}`, {
+    method: 'DELETE',
   })
 }

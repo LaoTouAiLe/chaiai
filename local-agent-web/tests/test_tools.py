@@ -386,7 +386,7 @@ def test_delete_hard_rejected_target_does_not_scan_or_fingerprint(
     tmp_path: Path, app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """T14C 复审：硬拒绝的删除立即失败——不算动作指纹、不描述目标（两者都会遍历目录）。"""
-    config = _config_with_workspace(app_config, allow_external_paths=True)
+    config = _config_with_workspace(app_config, external_paths={"mode": "allow"})
     policy = SecurityPolicy.from_config(config, workspace_root=tmp_path, environ={})
     calls: list[str] = []
     monkeypatch.setattr(
@@ -415,17 +415,21 @@ def test_read_file_reports_missing_file(tmp_path: Path, policy: SecurityPolicy) 
         read_file_content("nope.txt", policy=policy)
 
 
-def test_external_paths_flag_allows_only_absolute_targets(
+def test_external_paths_allow_mode_keeps_hard_constraints(
     tmp_path: Path, app_config: AppConfig
 ) -> None:
-    """T14C：打开 allow_external_paths 只放行**显式绝对路径**的外部目标，副作用仍需审批。"""
+    """T38：``allow`` 档只放行**显式绝对路径**，且不放宽四项硬约束。
+
+    "读写授权视同工作区内"改变的是常规小改动是否逐次询问；覆盖已有文件、删除文件、
+    破坏性 Shell、大范围编辑仍然必须人工批准（架构 §1.5）。
+    """
     workspace = tmp_path / "ws"
     workspace.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
     note = outside / "note.txt"
     note.write_text("外部内容", encoding="utf-8")
-    config = _config_with_workspace(app_config, allow_external_paths=True)
+    config = _config_with_workspace(app_config, external_paths={"mode": "allow"})
     policy = SecurityPolicy.from_config(config, workspace_root=workspace, environ={})
 
     # 只读：绝对路径的外部目标放行，并且能被识别为"外部"
@@ -433,24 +437,37 @@ def test_external_paths_flag_allows_only_absolute_targets(
     assert policy.is_external(note)
     assert not policy.is_external(workspace / "inside.txt")
 
-    # `~` 与相对路径逃逸不能当作外部路径放行
+    # `~` 与相对路径逃逸不能当作外部路径放行（任何档位都不行）
     for raw in ("~/x.txt", "../outside/note.txt"):
         with pytest.raises(WorkspaceBoundaryError):
             policy.resolve_path(raw)
 
-    # 外部副作用必须人工审批（不能因为"新建文件"就免审）
-    decision = policy.classify_tool("write_file", {"path": str(note), "content": "改"})
+    # 读写档下的常规动作：新建外部文件不再逐次询问
+    created = policy.classify_tool(
+        "write_file", {"path": str(outside / "new.txt"), "content": "新"}
+    )
+    assert created.allowed and not created.requires_approval
+
+    # 硬约束一：覆盖已有文件仍然必须人工审批（reason 不再以"工作区外"为由，但改不了这一条）
+    decision = policy.classify_tool(
+        "write_file", {"path": str(note), "content": "改", "overwrite": True}
+    )
     assert decision.requires_approval and not decision.allowed
-    assert "工作区外" in decision.reason
+    assert "覆盖已有文件" in decision.reason
+
+    # 硬约束二：删除文件仍然必须人工审批
+    removed = policy.classify_tool("delete_file", {"path": str(note)})
+    assert removed.requires_approval and not removed.allowed
 
     # 受保护目标（当前用户主目录）即使批准也不执行
     with pytest.raises(SecurityError):
         policy.resolve_writable_path(str(Path.home()))
 
-    # 严格模式（默认配置）下同一个绝对外部路径直接拒绝
+    # 出厂默认（``whitelist`` + 空白名单）下同一个绝对外部路径直接拒绝，提示指向设置页
     strict = SecurityPolicy.from_config(app_config, workspace_root=workspace, environ={})
-    with pytest.raises(WorkspaceBoundaryError):
+    with pytest.raises(WorkspaceBoundaryError) as excinfo:
         strict.resolve_path(str(note))
+    assert "设置" in str(excinfo.value) and "权限" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- 工具包装

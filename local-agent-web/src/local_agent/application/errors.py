@@ -569,6 +569,26 @@ def model_key_missing(*, connection_id: str, occurred_at: datetime) -> Applicati
     )
 
 
+def permission_grant_invalid(*, detail: str, occurred_at: datetime) -> ApplicationError:
+    """新增外部路径授权被拒（T38）。
+
+    复用 ``MODEL_SETTINGS_INVALID``：它表达的是"设置写入没通过服务端校验"，不新增稳定错误码
+    （错误码表是冻结契约，加一个码要同时动契约导出与前端）。``detail`` 是**不含路径**的规则说明：
+    展示文本 fail-closed，``E:\\...`` 这种私人绝对路径会被 `ErrorView` 直接挡下。
+    """
+    return ApplicationError(
+        ErrorView.for_code(
+            MODEL_SETTINGS_INVALID,
+            title="这条外部路径授权没有通过校验",
+            message=f"没有保存：{detail}",
+            hint="换一个可授权的目录（不能是根目录、主目录、Git 元数据或系统目录）。",
+            diagnostic_id=diagnostic_id_for(MODEL_SETTINGS_INVALID, detail),
+            occurred_at=occurred_at,
+            source="settings",
+        )
+    )
+
+
 def settings_store_unavailable(*, detail: str, occurred_at: datetime) -> ApplicationError:
     """§15.9：设置库不可用时要说明降级原因，而不是让页面看到一堆内部异常。
 

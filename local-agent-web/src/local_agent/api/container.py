@@ -155,6 +155,7 @@ def open_runtime(
             # 没显式给脱敏密钥时，从设置库里取（含旧配置导入的那条的环境变量路径）。
             secrets=tuple(secrets) or _settings_secrets(settings),
             connections=None if settings is None else settings.connections,
+            permissions=None if settings is None else settings.permissions,
         )
     except BaseException:
         # 装配失败不能留下"锁被一个不存在的服务占着"的状态。
@@ -189,7 +190,12 @@ def _open_settings(app_config: AppConfig, *, base_dir: Path) -> SettingsDatabase
     path = resolve_under(base_dir, app_config.model_settings.path)
     credentials = open_credential_store(app_config.model_settings.credential_store)
     try:
-        settings = open_settings_database(path, credentials=credentials)
+        settings = open_settings_database(
+            path,
+            credentials=credentials,
+            # config.yaml 里的档位只是**出厂默认**：库里没有用户选择时用它（T38）。
+            default_external_paths_mode=app_config.workspace.external_paths.mode,
+        )
     except (sqlite3.Error, OSError):
         return None
     import_legacy_llm(settings.connections, app_config.llm)

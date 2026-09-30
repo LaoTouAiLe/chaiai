@@ -9,20 +9,32 @@
    也会先被边界拦截，而不是先报“文件不存在”。
 4. 敏感文件（``.env``、私钥等）由 :func:`is_sensitive_path` 单独判定，供调用方决定
    拦截或脱敏。
-5. 工作区外路径（T14C，架构 §1.5）：只有 ``workspace.allow_external_paths=true`` 且
-   **原始输入本身**是绝对路径时才放行；``~``、相对路径逃逸与 Windows 盘符相对路径一律
-   拒绝。放行只针对这一次显式操作，不改变作用域。此外另有一组"不可审批目标"
-   （根目录、主目录、Git 元数据、系统关键目录）即使人工批准也不执行副作用。
+5. 工作区外路径（T14C/T38，架构 §1.5）：只有 **原始输入本身**是绝对路径、且当前档位
+   （``ExternalPathPolicy``）认可该目标时才放行；``~``、相对路径逃逸与 Windows 盘符相对
+   路径一律拒绝。放行只针对这一次显式操作，不改变作用域，并带上访问级别
+   （``read`` / ``read_write``）。此外另有一组"不可审批目标"（根目录、主目录、Git 元数据、
+   系统关键目录）即使人工批准也不执行副作用。
 """
 
 from __future__ import annotations
 
 import fnmatch
 import os
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
+
+#: 工作区外路径的档位（``workspace.external_paths.mode``），同时是设置库里的取值域。
+ExternalPathsMode = Literal["deny", "whitelist", "allow"]
+
+#: 一次路径解析得到的访问级别：工作区内 / 只读授权 / 读写授权。
+AccessLevel = Literal["inside", "read", "read_write"]
+
+#: 授权条目允许保存的级别（``inside`` 只属于工作区，不接受保存）。
+GrantAccess = Literal["read", "read_write"]
 
 #: Windows 上代表操作系统关键目录的环境变量（未设置的跳过）。
 _SYSTEM_DIR_ENV_WINDOWS: tuple[str, ...] = (
@@ -103,10 +115,75 @@ def is_within(path: Path, root: Path) -> bool:
 
 @dataclass(frozen=True)
 class ResolvedTarget:
-    """一次路径解析的结果：规范化绝对路径 + 是否落在当前工作区之外（架构 §1.5）。"""
+    """一次路径解析的结果：规范化绝对路径 + 是否在工作区外 + 访问级别（架构 §1.5）。"""
 
     path: Path
     external: bool
+    #: ``inside``（工作区内）/ ``read``（只读授权）/ ``read_write``（读写授权）。
+    access: AccessLevel = "inside"
+
+    @property
+    def writable(self) -> bool:
+        """是否**视同工作区内**、走常规写规则（读写授权与工作区内为真）。"""
+        return self.access in ("inside", "read_write")
+
+
+def normalize_grant_path(path: str | Path) -> str:
+    """授权条目的规范化键：展开 ``~`` 与符号链接，并统一大小写与路径分隔符。
+
+    同一个目录写成 ``E:/data`` 与 ``e:\\data`` 必须落到同一个键上，否则"授权过却仍被拦下"
+    会变成只能靠肉眼比对路径才能发现的 bug（架构 §1.5）。
+    """
+    return os.path.normcase(str(_resolve(Path(str(path)).expanduser())))
+
+
+def _covers(key: str, grant: str) -> bool:
+    """已归一化的 ``key`` 是否等于授权目录 ``grant`` 或位于其下。"""
+    if key == grant:
+        return True
+    prefix = grant if grant.endswith(os.sep) else grant + os.sep
+    return key.startswith(prefix)
+
+
+@dataclass(frozen=True)
+class ExternalPathPolicy:
+    """工作区外路径的档位与逐条授权（T38；架构 §1.5）。
+
+    - ``deny``：拒绝一切工作区外目标（授权条目也不会被读到）；
+    - ``whitelist``：只放行 ``grants`` 覆盖到的目标，级别取该条目的 ``read`` / ``read_write``；
+      空白名单等价于 ``deny``——出厂默认因此是"拒绝一切外部路径"；
+    - ``allow``：显式绝对路径的外部目标一律按 ``read_write`` 放行。
+
+    档位只决定"常规小改动是否需要逐次询问"，不放宽任何硬约束：删除文件、覆盖已有文件、
+    破坏性 Shell 命令、大范围编辑由调用方照旧要求人工审批；受保护目标照旧不可审批。
+    """
+
+    mode: ExternalPathsMode = "whitelist"
+    #: 规范化路径 → 访问级别；键必须由 :func:`normalize_grant_path` 生成。
+    grants: Mapping[str, GrantAccess] = field(default_factory=dict)
+
+    def access_for(self, resolved: Path) -> AccessLevel | None:
+        """该外部目标可获得的访问级别；未被授权时返回 ``None``。"""
+        if self.mode == "deny":
+            return None
+        if self.mode == "allow":
+            return "read_write"
+        key = os.path.normcase(str(resolved))
+        best: AccessLevel | None = None
+        for grant_path, access in self.grants.items():
+            if not _covers(key, grant_path):
+                continue
+            if access == "read_write":
+                return "read_write"
+            best = "read"
+        return best
+
+    def reaches(self, resolved: Path) -> bool:
+        """该外部目标是否**可达**（``allow`` 档或被任一授权条目覆盖）。
+
+        "可达"与"能写"是两回事：外部工作目录虽然可达，仍必须人工审批（架构 §1.5）。
+        """
+        return self.access_for(resolved) is not None
 
 
 def look_absolute(raw: str) -> bool:
@@ -124,22 +201,21 @@ def resolve_target(
     *,
     base_dir: Path,
     workspace_root: Path,
-    allow_external: bool = False,
+    external_policy: ExternalPathPolicy | None = None,
 ) -> ResolvedTarget:
-    """解析路径并标记它是否在工作区外；严格模式下越界直接失败。
+    """解析路径并给出访问级别；未被授权的越界输入直接失败。
 
     Args:
         path: 用户或模型给的原始路径字符串。
         base_dir: 相对路径的基准目录（本项目即当前工作区）。
         workspace_root: 当前工作区根目录。
-        allow_external: ``workspace.allow_external_paths``。只有为真、**且原始输入本身**
-            是绝对路径时，工作区外的目标才放行。
+        external_policy: 外部路径档位与授权；``None`` 等价 ``deny``（拒绝一切外部目标）。
 
     Returns:
-        :class:`ResolvedTarget`。
+        :class:`ResolvedTarget`：工作区内为 ``inside``，其余取授权给出的级别。
 
     Raises:
-        WorkspaceBoundaryError: 空路径，或越界且当前策略不允许。
+        WorkspaceBoundaryError: 空路径，或目标在工作区外且未被授权。
     """
     text = path.strip()
     if not text:
@@ -152,18 +228,23 @@ def resolve_target(
     resolved = _resolve(candidate)
     root = _resolve(workspace_root)
     if is_within(resolved, root):
-        return ResolvedTarget(path=resolved, external=False)
-    if raw_absolute and allow_external:
-        return ResolvedTarget(path=resolved, external=True)
-    hint = (
-        "；只有原始输入为绝对路径的目标才能作为外部路径访问"
-        "（`~`、相对路径与 Windows 盘符相对路径不在此列）"
-        if allow_external
-        else "；如需访问工作区外路径，请显式设置 workspace.allow_external_paths=true"
-    )
-    raise WorkspaceBoundaryError(
-        f"路径超出工作区：{resolved.as_posix()}（工作区 {root.as_posix()}）{hint}"
-    )
+        return ResolvedTarget(path=resolved, external=False, access="inside")
+    if not raw_absolute:
+        # `~`、相对路径逃逸与 Windows 盘符相对路径：授权也救不了——授权的是**目录**，
+        # 而这类输入根本不指向用户显式认可的绝对目标（架构 §1.5）。
+        raise WorkspaceBoundaryError(
+            f"路径超出工作区：{resolved.as_posix()}（工作区 {root.as_posix()}）；"
+            "工作区外路径只能用绝对路径显式指定（`~`、相对路径与 Windows 盘符相对路径不在此列）"
+        )
+    access = None if external_policy is None else external_policy.access_for(resolved)
+    if access is None:
+        # 提示必须指向用户真能找到的地方（T38）：这句经工具结果回填后由模型转述给最终用户，
+        # 而界面上没有 `workspace.allow_external_paths` 这个开关。
+        raise WorkspaceBoundaryError(
+            f"该路径在工作区外且未被授权：{resolved.as_posix()}（工作区 {root.as_posix()}）。"
+            "请在「设置 → 权限」中添加授权，或改到工作区内操作。"
+        )
+    return ResolvedTarget(path=resolved, external=True, access=access)
 
 
 def protected_target_reason(path: Path) -> str | None:

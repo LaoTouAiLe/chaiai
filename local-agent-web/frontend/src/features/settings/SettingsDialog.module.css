@@ -388,6 +388,132 @@
   font-weight: var(--law-weight-medium);
 }
 
+/* ---- section switcher (T38: both sections are real) --------------------- */
+
+.tabs {
+  display: flex;
+  gap: var(--law-space-sm);
+  border-bottom: 1px solid var(--law-border-l1);
+}
+
+.tab {
+  height: 32px;
+  padding: 0 var(--law-space-xl);
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.tab:hover {
+  color: var(--law-text-primary);
+}
+
+.tabSelected {
+  border-bottom-color: var(--law-button-primary-fill);
+  color: var(--law-text-primary);
+  font-weight: var(--law-weight-medium);
+}
+
+/* ---- permissions (T38) -------------------------------------------------- */
+
+.permission {
+  margin-top: var(--law-space-xl);
+}
+
+.modeGroup {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--law-space-md);
+  margin-top: var(--law-space-lg);
+}
+
+.mode {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xs);
+  padding: var(--law-space-md) var(--law-space-lg);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+  text-align: left;
+}
+
+.mode:hover {
+  background: var(--law-button-ghost-hover);
+}
+
+.modeSelected {
+  border-color: var(--law-button-primary-fill);
+  background: var(--law-state-info-subtle);
+}
+
+.modeLabel {
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  font-weight: var(--law-weight-medium);
+}
+
+.modeNote {
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.grants {
+  margin-top: var(--law-space-xl);
+}
+
+.grantList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.grantRow {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  padding: var(--law-space-xs) var(--law-space-md);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-md);
+}
+
+.grantRow .mono {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--law-text-xs);
+}
+
+.grantAccess {
+  flex: 0 0 auto;
+  padding: 0 var(--law-space-sm);
+  border-radius: var(--law-radius-xs);
+  background: var(--law-surface-selector);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+}
+
+.grantForm {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  margin-top: var(--law-space-lg);
+}
+
+.grantForm .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 /* 新增/编辑连接的表单（T29A）。与对话框共用同一套 token，避免另起一套尺度。 */
 .form {
   display: flex;

@@ -25,11 +25,14 @@ from local_agent import directory_picker
 from local_agent import workspaces as workspaces_module
 from local_agent.api.container import ApiRuntime
 from local_agent.api.schemas import (
+    PATH_MAX_CHARS,
     ApprovalDecisionRequest,
     CreateSessionRequest,
     ErrorResponse,
+    ExternalPathGrantRequest,
     HealthView,
     ModelConnectionRequest,
+    PermissionsModeRequest,
     PickDirectoryView,
     SelectDefaultConnectionRequest,
     SelectionExpectation,
@@ -43,6 +46,7 @@ from local_agent.application.models import (
     SCHEMA_VERSION,
     CommandResultView,
     ModelConnectionView,
+    PermissionsView,
     SessionSnapshot,
     SessionSummaryView,
     WorkspaceRef,
@@ -92,6 +96,11 @@ _STATE_CONFLICT: Final[dict[int | str, dict[str, Any]]] = {
 _PICK_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
     403: {"description": "不是本机页面的同源请求（本接口只服务于页面）"},
     503: {"model": ErrorResponse, "description": "宿主弹不出目录选择器"},
+}
+#: 权限写接口：路径/档位没通过业务校验（422），或没有可用的设置库（503，改动存不下来）。
+_PERMISSION_WRITE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
+    422: {"model": ErrorResponse, "description": "目录路径或档位没有通过校验"},
+    503: {"model": ErrorResponse, "description": "没有可用的设置库，改动存不下来"},
 }
 
 
@@ -388,5 +397,63 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
             expected_selection=_selection_ref(payload.expected_selection),
         )
         return service.get_session_snapshot(session_id)
+
+    # ---- 权限（T38；§1.5）------------------------------------------------------
+    # 这组接口只读写"工作区外路径"的档位与授权条目：档位存设置库（`config.yaml` 只是出厂默认），
+    # 授权条目存设置库的专用表。它们**不能**放宽四项硬约束（删除文件、覆盖已有文件、破坏性 Shell、
+    # 大范围编辑任何档位都要人工批准），因此这里没有"关闭审批"这类入口。
+
+    @router.get("/permissions", response_model=PermissionsView, summary="权限设置")
+    def get_permissions() -> PermissionsView:
+        """当前档位与授权条目。
+
+        没有可用设置库时**不报错**：返回出厂默认档位并置 `store_unavailable=true`——设置页要能
+        打开并如实说明"这里改了也存不下来"，而不是整页打不开。
+        """
+        return service.permissions()
+
+    @router.put(
+        "/permissions",
+        response_model=PermissionsView,
+        responses=_PERMISSION_WRITE_RESPONSES,
+        summary="切换外部路径档位",
+    )
+    def set_permissions_mode(payload: PermissionsModeRequest) -> PermissionsView:
+        """保存档位。改动**作用于下一轮**：正在跑或等待审批的那些运行已按当时的档位判定完。
+
+        `deny` / `whitelist` / `allow` 三档只影响"工作区外路径能不能碰、能怎么碰"，
+        四项硬约束不放宽。
+        """
+        return service.set_external_paths_mode(payload.mode)
+
+    @router.post(
+        "/permissions/grants",
+        response_model=PermissionsView,
+        responses=_PERMISSION_WRITE_RESPONSES,
+        summary="新增外部路径授权",
+    )
+    def grant_external_path(payload: ExternalPathGrantRequest) -> PermissionsView:
+        """给一个工作区外目录授权（`read` 只放宽只读工具，`read_write` 还允许在其中新建/改文件）。
+
+        同一个目标重复授权是**改写**（刷新访问级别），不是加两行；返回授权后的完整视图，
+        让设置页直接渲染，不用再取一次。
+        """
+        return service.grant_external_path(payload.path, payload.access)
+
+    @router.delete(
+        "/permissions/grants",
+        response_model=PermissionsView,
+        responses=_PERMISSION_WRITE_RESPONSES,
+        summary="撤销外部路径授权",
+    )
+    def revoke_external_path(
+        path: str = Query(min_length=1, max_length=PATH_MAX_CHARS),
+    ) -> PermissionsView:
+        """撤销一条授权；**不存在也算成功**（幂等），返回撤销后的完整视图。
+
+        路径走查询参数而不是请求体：它是这条记录的自然键（含层级分隔符），放 URL 里可以正常
+        URL 编码；重复调用同一条不会产生第二种结果。
+        """
+        return service.revoke_external_path(path)
 
     return router

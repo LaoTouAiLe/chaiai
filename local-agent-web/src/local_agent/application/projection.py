@@ -73,7 +73,11 @@ from local_agent.config import redact_secrets
 from local_agent.exceptions import WorkspaceBoundaryError
 from local_agent.graph.projection import message_id, project_messages
 from local_agent.graph.scope import tool_scope_key
-from local_agent.security.path_guard import resolve_target
+from local_agent.security.path_guard import ExternalPathPolicy, resolve_target
+
+#: 审批卡的目标归一与"是否工作区外"只用于**展示**，与访问授权无关：无论档位是什么，
+#: 审批卡都要能显示出完整目标。因此这里固定用最宽的档位做解析，判定权限不在这里。
+_DISPLAY_EXTERNAL_POLICY = ExternalPathPolicy(mode="allow")
 
 #: 记忆召回失败的 stage（与 `graph.nodes.RECALL_MEMORY` 同值；这里不导入 nodes，
 #: 避免把整个 Graph 节点模块拖进投影层，一致性由 `tests/test_projection.py` 对照断言）。
@@ -973,7 +977,10 @@ def _approval_target(
         return _optional_sanitized(raw, secrets), False
     try:
         resolved = resolve_target(
-            str(raw), base_dir=workspace_root, workspace_root=workspace_root, allow_external=True
+            str(raw),
+            base_dir=workspace_root,
+            workspace_root=workspace_root,
+            external_policy=_DISPLAY_EXTERNAL_POLICY,
         )
     except WorkspaceBoundaryError:
         return None, False

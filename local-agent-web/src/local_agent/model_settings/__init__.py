@@ -27,7 +27,10 @@ from local_agent.model_settings.models import (
     validate_draft,
 )
 from local_agent.model_settings.store import (
+    META_EXTERNAL_PATHS_MODE,
     ConnectionStore,
+    PathGrant,
+    PermissionStore,
     Selection,
     SelectionRef,
     SettingsDatabase,
@@ -37,6 +40,7 @@ from local_agent.model_settings.store import (
 )
 
 __all__ = [
+    "META_EXTERNAL_PATHS_MODE",
     "PLACEHOLDER_API_KEY",
     "PROVIDER",
     "CapabilityReport",
@@ -48,6 +52,8 @@ __all__ = [
     "LegacyImportResult",
     "ModelBinding",
     "ModelConnection",
+    "PathGrant",
+    "PermissionStore",
     "Selection",
     "SelectionRef",
     "SettingsDatabase",

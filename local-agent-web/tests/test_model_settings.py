@@ -34,12 +34,14 @@ from local_agent.exceptions import (
 )
 from local_agent.graph import builder
 from local_agent.model_settings import (
+    META_EXTERNAL_PATHS_MODE,
     CapabilityReport,
     ConnectionDraft,
     ConnectionStore,
     InMemoryCredentialStore,
     KeyringCredentialStore,
     ModelConnection,
+    PermissionStore,
     SelectionRef,
     credential_ref_for,
     current_settings_version,
@@ -55,6 +57,7 @@ from local_agent.model_settings import (
 from local_agent.persistence import checkpoint, migrations
 from local_agent.persistence.checkpoint import ChatDatabase
 from local_agent.persistence.request_ledger import RequestLedger
+from local_agent.security.path_guard import ExternalPathPolicy, normalize_grant_path
 
 SECRET = "sk-do-not-persist-1234567890"
 
@@ -1040,6 +1043,133 @@ def test_probe_reports_a_construction_failure_instead_of_raising() -> None:
     assert report.chat == "fail"
     assert report.tools == "unknown" and report.streaming == "unknown"
     assert "无法构造客户端" in (report.message or "")
+
+
+# ---- 权限：外部路径档位与授权（T38）------------------------------------------
+
+
+def _permissions(
+    tmp_path: Path, **kwargs: Any
+) -> tuple[sqlite3.Connection, PermissionStore]:
+    database = open_settings_database(
+        tmp_path / "settings.sqlite", credentials=InMemoryCredentialStore(), **kwargs
+    )
+    return database.connection, database.permissions
+
+
+def test_settings_v2_upgrade_adds_the_grants_table_without_touching_older_rows(
+    tmp_path: Path,
+) -> None:
+    """T38 的结构升级：老库（v1）升到 v2 只是加一张表，既有连接照旧。"""
+    connection, store = _store(tmp_path)
+    store.save(_draft(api_key_env="LEGACY_KEY"), api_key=None)
+    # 造一个"上一次运行留下的 v1 库"：撤掉 v2 的痕迹再升级。
+    connection.execute("DROP TABLE external_path_grants")
+    connection.execute("DELETE FROM schema_migrations WHERE version >= 2")
+    connection.commit()
+
+    assert migrations.apply_settings_migrations(connection) == migrations.SETTINGS_SCHEMA_VERSION
+    assert "external_path_grants" in migrations.table_names(connection)
+    assert [item.display_name for item in store.list_connections()] == ["主力模型"]
+
+
+def test_permission_store_prefers_the_user_choice_over_the_factory_default(
+    tmp_path: Path,
+) -> None:
+    """档位的唯一真源是设置库；``config.yaml`` 只在库里还没有用户选择时兜底。"""
+    _connection, permissions = _permissions(tmp_path)
+    assert permissions.mode() == "whitelist" and permissions.default_mode == "whitelist"
+
+    permissions.set_mode("deny")
+
+    # 重开：出厂默认换了，用户的选择仍然生效（改档位不写回 config.yaml）。
+    reopened = open_settings_database(
+        tmp_path / "settings.sqlite", default_external_paths_mode="allow"
+    )
+    assert reopened.permissions.default_mode == "allow"
+    assert reopened.permissions.mode() == "deny"
+    reopened.connection.close()
+
+
+def test_permission_store_falls_back_to_the_factory_default_on_unknown_mode(
+    tmp_path: Path,
+) -> None:
+    """库里出现不认识的档位文本：回落到出厂默认，判定层不会拿到非法档位。"""
+    connection, permissions = _permissions(tmp_path)
+    connection.execute(
+        "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)",
+        (META_EXTERNAL_PATHS_MODE, "yolo", "2026-01-01T00:00:00+00:00"),
+    )
+
+    assert permissions.mode() == "whitelist"
+
+
+def test_grant_normalizes_rewrites_and_revokes(tmp_path: Path) -> None:
+    """同一目录的另一种写法落到同一行：是**改写**访问级别，不是新增两条。"""
+    _connection, permissions = _permissions(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    created = permissions.grant(outside, "read")
+    assert created.path == normalize_grant_path(outside)
+
+    rewritten = permissions.grant(outside.as_posix(), "read_write")
+
+    assert rewritten.path == created.path
+    assert rewritten.access == "read_write"
+    assert rewritten.created_at == created.created_at  # 创建时间保留
+    assert [item.path for item in permissions.grants()] == [created.path]
+
+    assert permissions.revoke(outside) is True
+    assert permissions.grants() == []
+    assert permissions.revoke(outside) is False  # 撤销不存在的条目也是成功（幂等）
+
+
+@pytest.mark.skipif(os.name != "nt", reason="大小写归一化只对 Windows 盘符路径有意义")
+def test_grant_normalization_unifies_case_and_separators(tmp_path: Path) -> None:
+    _connection, permissions = _permissions(tmp_path)
+    outside = tmp_path / "Outside"
+    outside.mkdir()
+
+    permissions.grant(str(outside).replace(os.sep, "/"), "read")
+
+    assert [item.path for item in permissions.grants()] == [normalize_grant_path(outside)]
+    # 大写写法命中同一条（同一目录两次授权不会变成两行）。
+    assert normalize_grant_path(str(outside).upper()) == normalize_grant_path(outside)
+
+
+def test_grant_with_unknown_access_level_reads_back_as_read_only(tmp_path: Path) -> None:
+    """库里出现不认识的级别：按**只读**处理（失败闭合），不放宽成可写。"""
+    connection, permissions = _permissions(tmp_path)
+    connection.execute(
+        "INSERT INTO external_path_grants (path, access, created_at, updated_at)"
+        " VALUES (?, ?, ?, ?)",
+        (
+            normalize_grant_path(tmp_path / "outside"),
+            "sudo",
+            "2026-01-01T00:00:00+00:00",
+            "2026-01-01T00:00:00+00:00",
+        ),
+    )
+
+    assert [item.access for item in permissions.grants()] == ["read"]
+
+
+def test_permission_policy_reflects_the_current_mode_and_grants(tmp_path: Path) -> None:
+    _connection, permissions = _permissions(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    permissions.grant(outside, "read")
+
+    policy = permissions.policy()
+
+    assert isinstance(policy, ExternalPathPolicy)
+    assert policy.mode == "whitelist"
+    assert policy.access_for(outside.resolve()) == "read"
+    # 档位改成 deny 后，已授权的目标也不再放行（授权条目留在库里，只是当档位不读它）。
+    permissions.set_mode("deny")
+    assert permissions.policy().access_for(outside.resolve()) is None
+    assert len(permissions.grants()) == 1
 
 
 # ---- 真机（可选）：系统凭据存储 ---------------------------------------------

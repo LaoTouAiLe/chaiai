@@ -13,11 +13,13 @@
 import type {
   CapabilityView,
   ConnectionStatus,
+  ExternalPathGrantView,
   ModelConnectionView,
   ModelMenuItemView,
+  PermissionsView,
   SettingsView,
 } from '../fixtures/types'
-import type { HealthDto, ModelConnectionDto } from './client'
+import type { HealthDto, ModelConnectionDto, PermissionsDto } from './client'
 
 const CAPABILITY_ORDER = ['chat', 'tools', 'streaming'] as const
 
@@ -102,12 +104,32 @@ export function toConnectionView(
   }
 }
 
+/**
+ * 「设置 → 权限」分区：DTO 说什么就是什么。
+ *
+ * 档位、访问级别这两个枚举在契约与视图里**字面相同**（不像 transport 那样下划线↔连字符），
+ * 所以这里直接透传，不再多摆一张一一对应的映射表。`store_unavailable` 原样带过去，
+ * 界面据此说明"这里改了也存不下来"——这是事实，不是错误。
+ */
+export function toPermissionsView(dto: PermissionsDto): PermissionsView {
+  return {
+    mode: dto.mode,
+    defaultMode: dto.default_mode,
+    grants: (dto.grants ?? []).map(
+      (grant): ExternalPathGrantView => ({ path: grant.path, access: grant.access }),
+    ),
+    storeUnavailable: dto.store_unavailable,
+  }
+}
+
 /** 设置页整体：连接列表 + 凭据存储的持久性（后者来自健康检查，还没有连接时也能说清）。 */
 export function toSettingsView(
   connections: readonly ModelConnectionDto[],
   health: HealthDto | null,
   /** 每条连接的页面本地态（确认删除 / 正在探测 / 刚保存待下一轮生效）。 */
   optionsFor?: (dto: ModelConnectionDto) => ConnectionViewOptions,
+  /** 权限分区；还没读到时传 `null`——页面宁可显示"读取中"，也不编造一个档位。 */
+  permissions: PermissionsDto | null = null,
 ): SettingsView {
   return {
     connections: connections.map((dto) => toConnectionView(dto, optionsFor?.(dto) ?? {})),
@@ -117,6 +139,7 @@ export function toSettingsView(
       kind: health?.credential_store === 'memory' ? 'unavailable' : 'os',
       note: health?.credential_note ?? null,
     },
+    permissions: permissions === null ? null : toPermissionsView(permissions),
   }
 }
 

@@ -44,6 +44,12 @@ from local_agent.model_settings.models import (
     validate_draft,
 )
 from local_agent.persistence import migrations
+from local_agent.security.path_guard import (
+    ExternalPathPolicy,
+    ExternalPathsMode,
+    GrantAccess,
+    normalize_grant_path,
+)
 
 #: 选择的作用域：默认连接与会话级选择。
 SelectionScope = Literal["default", "session"]
@@ -54,6 +60,9 @@ DEFAULT_SCOPE_ID = "default"
 #: 旧配置导入的记账键：导入只做一次，重复启动不重复导入（§6.8）。
 META_LEGACY_IMPORT = "legacy_import.config_yaml"
 META_LEGACY_IMPORT_AT = "legacy_import.imported_at"
+
+#: 外部路径**档位**在 ``settings_meta`` 里的键（T38）。授权条目另有专表。
+META_EXTERNAL_PATHS_MODE = "permissions.external_paths.mode"
 
 
 def now_iso() -> str:
@@ -92,12 +101,134 @@ class SelectionRef:
 _SCOPE_LABEL = {"default": "默认连接", "session": "这个会话的下一轮模型"}
 
 
+@dataclass(frozen=True)
+class PathGrant:
+    """一条"工作区外路径"授权条目（T38）。"""
+
+    path: str
+    access: GrantAccess
+    created_at: datetime | None
+    updated_at: datetime | None
+
+
+class PermissionStore:
+    """外部路径档位与授权条目的读写（T38；架构 §1.5）；所有 SQL 收敛在这里。
+
+    档位是 ``settings_meta`` 里的一行，授权条目是 ``external_path_grants`` 表——**唯一真源**
+    在设置库里，``config.yaml`` 只是出厂默认（用户改了档位后，重启读到的仍是用户的选择）。
+    写入"保存即生效、作用于下一轮"（T29A 口径），不写回配置文件。
+    """
+
+    def __init__(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        default_mode: ExternalPathsMode = "whitelist",
+    ) -> None:
+        self._connection = connection
+        self._default_mode = default_mode
+
+    @property
+    def default_mode(self) -> ExternalPathsMode:
+        """``config.yaml`` 给的出厂默认档位；库里没有用户选择时用它。"""
+        return self._default_mode
+
+    def mode(self) -> ExternalPathsMode:
+        """当前生效档位：库里的用户选择优先，没有则回落到出厂默认。"""
+        stored = self._mode_value()
+        return self._default_mode if stored is None else stored
+
+    def set_mode(self, mode: ExternalPathsMode) -> None:
+        """保存档位（"保存即生效"；不要求先存在授权条目）。"""
+        self._connection.execute(
+            "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (META_EXTERNAL_PATHS_MODE, mode, now_iso()),
+        )
+        self._connection.commit()
+
+    def grants(self) -> list[PathGrant]:
+        """全部授权条目（按规范化路径排序，输出稳定）。"""
+        rows = self._connection.execute(
+            "SELECT path, access, created_at, updated_at FROM external_path_grants ORDER BY path"
+        ).fetchall()
+        return [
+            PathGrant(
+                path=str(row["path"]),
+                access=_grant_access(row["access"]),
+                created_at=_as_dt(row["created_at"]),
+                updated_at=_as_dt(row["updated_at"]),
+            )
+            for row in rows
+        ]
+
+    def grant_map(self) -> dict[str, GrantAccess]:
+        """规范化路径 → 访问级别；构造判定策略用。"""
+        return {item.path: item.access for item in self.grants()}
+
+    def policy(self) -> ExternalPathPolicy:
+        """按当前档位与授权构造判定策略（每一轮现取，不缓存）。"""
+        return ExternalPathPolicy(mode=self.mode(), grants=self.grant_map())
+
+    def grant(self, path: str | Path, access: GrantAccess) -> PathGrant:
+        """新增或改写一条授权（**同一个规范化目标只留一行**）。
+
+        Returns:
+            写入后的条目（路径已规范化）。
+        """
+        key = normalize_grant_path(path)
+        now = now_iso()
+        self._connection.execute(
+            "INSERT INTO external_path_grants (path, access, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(path) DO UPDATE SET access = excluded.access,"
+            " updated_at = excluded.updated_at",
+            (key, access, now, now),
+        )
+        self._connection.commit()
+        row = self._connection.execute(
+            "SELECT path, access, created_at, updated_at FROM external_path_grants WHERE path = ?",
+            (key,),
+        ).fetchone()
+        return PathGrant(
+            path=str(row["path"]),
+            access=_grant_access(row["access"]),
+            created_at=_as_dt(row["created_at"]),
+            updated_at=_as_dt(row["updated_at"]),
+        )
+
+    def revoke(self, path: str | Path) -> bool:
+        """撤销一条授权；返回是否真的删掉了一行。"""
+        key = normalize_grant_path(path)
+        cursor = self._connection.execute(
+            "DELETE FROM external_path_grants WHERE path = ?", (key,)
+        )
+        self._connection.commit()
+        return cursor.rowcount > 0
+
+    def _mode_value(self) -> ExternalPathsMode | None:
+        row = self._connection.execute(
+            "SELECT value FROM settings_meta WHERE key = ?", (META_EXTERNAL_PATHS_MODE,)
+        ).fetchone()
+        if row is None:
+            return None
+        value = str(row[0])
+        # 库里存的是本进程写过的值；出现未知文本时按出厂默认处理，而不是让判定层拿到非法档位。
+        return cast(ExternalPathsMode, value) if value in ("deny", "whitelist", "allow") else None
+
+
+def _grant_access(value: Any) -> GrantAccess:
+    """把库里的文本收敛成访问级别；未知值按**只读**处理（失败闭合）。"""
+    return "read_write" if str(value) == "read_write" else "read"
+
+
 @dataclass
 class SettingsDatabase:
     """一个设置库文件对应的连接与 store。"""
 
     connection: sqlite3.Connection
     connections: ConnectionStore
+    permissions: PermissionStore
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -108,19 +239,30 @@ def _connect(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def open_settings_database(path: Path, *, credentials: CredentialStore | None = None) -> SettingsDatabase:
+def open_settings_database(
+    path: Path,
+    *,
+    credentials: CredentialStore | None = None,
+    default_external_paths_mode: ExternalPathsMode = "whitelist",
+) -> SettingsDatabase:
     """打开（必要时创建）设置库并升到当前结构版本。
 
     Args:
         path: 库文件路径；父目录不存在时自动创建。
         credentials: 密钥存储；给 ``None`` 时读写密钥的操作会被拒绝（只读设置仍可用）。
+        default_external_paths_mode: ``config.yaml`` 里的外部路径档位，作为**出厂默认**：
+            库里没有用户选择时用它，用户改过档位后以库里的为准（T38）。
 
     Raises:
         sqlite3.Error: 库无法打开或结构变更失败。
     """
     connection = _connect(path)
     migrations.apply_settings_migrations(connection)
-    return SettingsDatabase(connection=connection, connections=ConnectionStore(connection, credentials=credentials))
+    return SettingsDatabase(
+        connection=connection,
+        connections=ConnectionStore(connection, credentials=credentials),
+        permissions=PermissionStore(connection, default_mode=default_external_paths_mode),
+    )
 
 
 def current_settings_version(path: Path) -> int | None:

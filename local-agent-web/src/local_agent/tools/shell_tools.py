@@ -71,7 +71,7 @@ def run_shell_command(
         cwd=cwd,
         timeout_seconds=requested_timeout,
         env_keys=env_keys,
-        allow_external_cwd=policy.allow_external_paths,
+        external_policy=policy.external_policy,
     )
     if plan.cwd is None:
         # 判定没给出可执行目录（命令为空、cwd 非法、超时超限等）→ 失败闭合

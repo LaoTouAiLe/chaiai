@@ -120,6 +120,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/permissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 权限设置
+         * @description 当前档位与授权条目。
+         *
+         *     没有可用设置库时**不报错**：返回出厂默认档位并置 `store_unavailable=true`——设置页要能
+         *     打开并如实说明"这里改了也存不下来"，而不是整页打不开。
+         */
+        get: operations["get_permissions_api_permissions_get"];
+        /**
+         * 切换外部路径档位
+         * @description 保存档位。改动**作用于下一轮**：正在跑或等待审批的那些运行已按当时的档位判定完。
+         *
+         *     `deny` / `whitelist` / `allow` 三档只影响"工作区外路径能不能碰、能怎么碰"，
+         *     四项硬约束不放宽。
+         */
+        put: operations["set_permissions_mode_api_permissions_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/permissions/grants": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 新增外部路径授权
+         * @description 给一个工作区外目录授权（`read` 只放宽只读工具，`read_write` 还允许在其中新建/改文件）。
+         *
+         *     同一个目标重复授权是**改写**（刷新访问级别），不是加两行；返回授权后的完整视图，
+         *     让设置页直接渲染，不用再取一次。
+         */
+        post: operations["grant_external_path_api_permissions_grants_post"];
+        /**
+         * 撤销外部路径授权
+         * @description 撤销一条授权；**不存在也算成功**（幂等），返回撤销后的完整视图。
+         *
+         *     路径走查询参数而不是请求体：它是这条记录的自然键（含层级分隔符），放 URL 里可以正常
+         *     URL 编码；重复调用同一条不会产生第二种结果。
+         */
+        delete: operations["revoke_external_path_api_permissions_grants_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions": {
         parameters: {
             query?: never;
@@ -644,6 +704,43 @@ export interface components {
             title: string;
         };
         EventEnvelope: components["schemas"]["SessionSnapshotEvent"] | components["schemas"]["MessageStartedEvent"] | components["schemas"]["MessageDeltaEvent"] | components["schemas"]["MessageCompletedEvent"] | components["schemas"]["PlanUpdatedEvent"] | components["schemas"]["StepStartedEvent"] | components["schemas"]["StepCompletedEvent"] | components["schemas"]["ToolStartedEvent"] | components["schemas"]["ToolOutputEvent"] | components["schemas"]["ToolCompletedEvent"] | components["schemas"]["ApprovalRequiredEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["MemoryRecalledEvent"] | components["schemas"]["MemoryWrittenEvent"] | components["schemas"]["ModelCallStartedEvent"] | components["schemas"]["ModelUsageReportedEvent"] | components["schemas"]["ModelCallCompletedEvent"] | components["schemas"]["TaskCompletedEvent"] | components["schemas"]["TaskFailedEvent"];
+        /**
+         * ExternalPathGrantRequest
+         * @description 新增 / 改写一条外部路径授权（T38）。
+         *
+         *     只校验**形状**（非空、长度上限）：路径的规范化（大小写、分隔符、符号链接）与"是不是受保护
+         *     位置"都在服务层裁定——那需要真实文件系统，不是传输层能替它做主的。
+         *     `access` 只允许 `read` / `read_write`："不给访问"用撤销表达，不另立一个级别。
+         */
+        ExternalPathGrantRequest: {
+            /**
+             * Access
+             * @enum {string}
+             */
+            access: "read" | "read_write";
+            /** Path */
+            path: string;
+        };
+        /**
+         * ExternalPathGrantView
+         * @description 一条"工作区外路径"授权（T38）。
+         *
+         *     ``path`` 是**用户自己填进来的目录**，与"从机器上发现再泄露给页面"的私人路径不是一回事：
+         *     不回路径，用户就没法在这张列表上撤销授权。它已经规范化（统一大小写与分隔符、展开符号链接）。
+         */
+        ExternalPathGrantView: {
+            /**
+             * Access
+             * @enum {string}
+             */
+            access: "read" | "read_write";
+            /** Created At */
+            created_at?: string | null;
+            /** Path */
+            path: string;
+            /** Updated At */
+            updated_at?: string | null;
+        };
         /**
          * FileDiffHunkView
          * @description 一个 hunk：`@@ -x,y +z,w @@` 头部加它覆盖的行。
@@ -1368,6 +1465,46 @@ export interface components {
             stream_sequence: number;
             /** Task Id */
             task_id: string;
+        };
+        /**
+         * PermissionsModeRequest
+         * @description 切换"工作区外路径"档位（T38）。
+         *
+         *     档位取值与领域层同源（`ExternalPathsMode`），传输层不另立一套字符串——两处各写一份迟早会
+         *     漂移。这里的 `extra="forbid"` 保证打错档位名得到 422，而不是静默保存成别的档位。
+         */
+        PermissionsModeRequest: {
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "deny" | "whitelist" | "allow";
+        };
+        /**
+         * PermissionsView
+         * @description 「设置 → 权限」的读 DTO（T38）。
+         *
+         *     ``mode`` 是当前生效档位（用户的选择优先）；``default_mode`` 是 ``config.yaml`` 的出厂默认，
+         *     用于说明"库里没有用户选择时按哪一档跑"。授权条目只在 ``whitelist`` 档生效。
+         */
+        PermissionsView: {
+            /**
+             * Default Mode
+             * @enum {string}
+             */
+            default_mode: "deny" | "whitelist" | "allow";
+            /** Grants */
+            grants?: components["schemas"]["ExternalPathGrantView"][];
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "deny" | "whitelist" | "allow";
+            /**
+             * Store Unavailable
+             * @default false
+             */
+            store_unavailable: boolean;
         };
         /**
          * PickDirectoryView
@@ -2476,6 +2613,150 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_permissions_api_permissions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PermissionsView"];
+                };
+            };
+        };
+    };
+    set_permissions_mode_api_permissions_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PermissionsModeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PermissionsView"];
+                };
+            };
+            /** @description 目录路径或档位没有通过校验 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    grant_external_path_api_permissions_grants_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ExternalPathGrantRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PermissionsView"];
+                };
+            };
+            /** @description 目录路径或档位没有通过校验 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    revoke_external_path_api_permissions_grants_delete: {
+        parameters: {
+            query: {
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PermissionsView"];
+                };
+            };
+            /** @description 目录路径或档位没有通过校验 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

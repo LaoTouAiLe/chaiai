@@ -72,6 +72,7 @@ from local_agent.llm.usage_recording import (
     use_model_purpose,
     use_model_recorder,
 )
+from local_agent.security.path_guard import ExternalPathPolicy
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.tool_registry import ToolRegistry
 
@@ -235,6 +236,7 @@ def build_runtime_context(
     workspace_root: Path,
     current_cwd: Path | None = None,
     security_policy: SecurityPolicy | None = None,
+    external_policy: ExternalPathPolicy | None = None,
     tool_registry: ToolRegistry | None = None,
     model_capabilities: ModelCapabilities | None = None,
     user_id: str | None = None,
@@ -251,6 +253,8 @@ def build_runtime_context(
         workspace_root: 工作区根目录；AGENTS 扫描与文件工具的边界。
         current_cwd: 当前工作目录，默认取进程当前目录。
         security_policy: 安全策略；省略时按配置构造。
+        external_policy: 工作区外路径的档位与授权（T38）。界面上可改的档位存在设置库里，
+            应用层每轮现取后从这里传进来；省略时取 ``config.yaml`` 的出厂默认。
         tool_registry: 工具注册表；省略时按策略构造。
         model_capabilities: 模型能力；省略时现探测一次（架构 §11.7）。
         user_id: 逻辑用户；单机单用户时为 ``None``。
@@ -267,7 +271,7 @@ def build_runtime_context(
         ConfigError: 配置要求放开工作区边界（本版本不支持）。
     """
     policy = security_policy or SecurityPolicy.from_config(
-        app_config, workspace_root=workspace_root
+        app_config, workspace_root=workspace_root, external_policy=external_policy
     )
     registry = tool_registry or ToolRegistry.build(policy)
     capabilities = model_capabilities or probe_capabilities(

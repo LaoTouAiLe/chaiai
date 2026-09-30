@@ -37,6 +37,7 @@ from local_agent.config import (
 )
 from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
 from local_agent.security.path_guard import (
+    ExternalPathPolicy,
     protected_target_reason,
     resolve_target,
     resolve_within_workspace,
@@ -151,7 +152,7 @@ def prepare_shell(
     timeout_seconds: int | None = None,
     env_keys: list[str] | None = None,
     platform: str | None = None,
-    allow_external_cwd: bool = False,
+    external_policy: ExternalPathPolicy | None = None,
 ) -> ShellPlan:
     """解析并判定一条 Shell 命令。
 
@@ -163,10 +164,10 @@ def prepare_shell(
         timeout_seconds: 请求的超时；不得超过配置上限。
         env_keys: 需要额外透传的环境变量名。
         platform: 覆盖平台判定（测试用），默认按配置与当前系统决定。
-        allow_external_cwd: ``workspace.allow_external_paths``；为真时接受**绝对**的外部
-            工作目录（受保护目标仍然硬拒绝）。审批与免审白名单的处理在调用方：判定侧
-            (:meth:`SecurityPolicy.classify_tool`) 与执行侧 (``run_shell_command``) 都要求
-            外部 cwd 必须持有一次性人工批准。
+        external_policy: 工作区外路径的档位与授权（T38）。只有**绝对**路径、且被档位认可的
+            外部工作目录才解析得出（受保护目标仍然硬拒绝）。审批与免审白名单的处理在调用方：
+            判定侧 (:meth:`SecurityPolicy.classify_tool`) 与执行侧 (``run_shell_command``)
+            都要求外部 cwd 必须持有一次性人工批准。
 
     Returns:
         判定结果与执行参数；不抛异常，拒绝原因放在 ``reason``。
@@ -194,7 +195,7 @@ def prepare_shell(
             cwd,
             base_dir=workspace_root,
             workspace_root=workspace_root,
-            allow_external=allow_external_cwd,
+            external_policy=external_policy,
         )
     except WorkspaceBoundaryError as exc:
         return ShellPlan(False, False, f"工作目录不合法：{exc}", timeout_seconds=timeout)

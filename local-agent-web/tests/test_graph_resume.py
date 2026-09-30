@@ -234,21 +234,26 @@ def test_delete_target_summary_stops_scanning_at_the_limit(
 
 
 def _external_config(app_config: AppConfig) -> AppConfig:
-    """打开 ``workspace.allow_external_paths`` 的配置（T14C 外部路径用例用）。"""
+    """把工作区外路径档位设成 ``allow`` 的配置（T14C/T38 外部路径用例用）。"""
     data = app_config.model_dump()
-    data["workspace"]["allow_external_paths"] = True
+    data["workspace"]["external_paths"] = {"mode": "allow"}
     return AppConfig.model_validate(data)
 
 
-def test_external_write_requires_approval_then_executes(
+def test_external_overwrite_requires_approval_then_executes(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
-    """T14C：工作区外的写入必须人工审批，批准后按同一个规范化目标执行（图级回归）。"""
+    """T38：``allow`` 档下"覆盖已有文件"仍必须人工审批，批准后按同一个规范化目标执行。
+
+    写入一个**新建**的外部文件在读写档下是常规操作（不再逐次询问）；这里钉死的是四类
+    硬约束之一——覆盖已有内容在任何档位都必须人工批准（架构 §1.5）。
+    """
     workspace = tmp_path / "ws"
     workspace.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
     target = outside / "note.txt"
+    target.write_text("旧内容", encoding="utf-8", newline="")
     graph = builder.build_chat_graph(checkpoint.open_checkpointer(_database(tmp_path)))
     model = model_factory(
         decision="tool",
@@ -256,7 +261,11 @@ def test_external_write_requires_approval_then_executes(
         tool_calls=[
             {
                 "name": "write_file",
-                "args": {"path": target.as_posix(), "content": "外部内容"},
+                "args": {
+                    "path": target.as_posix(),
+                    "content": "外部内容",
+                    "overwrite": True,
+                },
                 "id": "call-1",
             }
         ],
@@ -264,14 +273,15 @@ def test_external_write_requires_approval_then_executes(
     context = _context_for(workspace, model, _external_config(app_config))
 
     first = graph.invoke(
-        {"user_input": "写一个工作区外的文件", "thread_id": THREAD},
+        {"user_input": "覆盖工作区外的文件", "thread_id": THREAD},
         config=_config(THREAD),
         context=context,
     )
 
     assert first["pending_approval"]["tool_name"] == "write_file"
     assert "工作区外" in first["pending_approval"]["impact_summary"]
-    assert not target.exists()  # 审批之前不执行
+    assert "覆盖已有文件" in first["pending_approval"]["impact_summary"]
+    assert target.read_text(encoding="utf-8") == "旧内容"  # 审批之前不执行
 
     approved = graph.invoke(
         Command(resume={"decision": "approve"}), config=_config(THREAD), context=context

@@ -10,10 +10,11 @@ import json
 import os
 import shutil
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from local_agent.config import AgentsConfig, AppConfig
 from local_agent.context import agents_loader
@@ -22,7 +23,12 @@ from local_agent.graph import builder
 from local_agent.graph.state import RuntimeContext
 from local_agent.security import shell_guard
 from local_agent.security.approval import action_fingerprint
-from local_agent.security.path_guard import is_sensitive_path
+from local_agent.security.path_guard import (
+    ExternalPathPolicy,
+    GrantAccess,
+    is_sensitive_path,
+    normalize_grant_path,
+)
 from local_agent.security.policy import SecurityPolicy
 from local_agent.security.shell_guard import (
     EXECUTOR_ARGV,
@@ -923,3 +929,227 @@ def test_secret_file_tool_call_is_denied(
 
     assert result["tool_results"][0]["status"] == "denied"
     assert "sk-real-secret" not in json.dumps(result, ensure_ascii=False, default=str)
+
+
+# --------------------------------------------------------------------------- 外部路径档位（T38）
+
+
+def _external_setup(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """（工作区，工作区外目录，外部文件）三件套。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    note = outside / "note.txt"
+    note.write_text("外部内容", encoding="utf-8", newline="")
+    return workspace, outside, note
+
+
+def _policy(
+    app_config: AppConfig,
+    workspace: Path,
+    *,
+    mode: str = "whitelist",
+    grants: Mapping[str, GrantAccess] | None = None,
+) -> SecurityPolicy:
+    return SecurityPolicy.from_config(
+        app_config,
+        workspace_root=workspace,
+        environ={},
+        external_policy=ExternalPathPolicy(mode=mode, grants=dict(grants or {})),  # type: ignore[arg-type]
+    )
+
+
+def _external_config(app_config: AppConfig, **overrides: object) -> AppConfig:
+    data = app_config.model_dump()
+    data["workspace"].update(overrides)
+    return AppConfig.model_validate(data)
+
+
+def test_external_mode_deny_rejects_absolute_targets_even_when_listed(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """``deny`` 档拒一切外部目标：授权条目留在库里也不读，提示指向「设置 → 权限」。"""
+    workspace, outside, note = _external_setup(tmp_path)
+    policy = _policy(
+        app_config, workspace, mode="deny", grants={normalize_grant_path(outside): "read_write"}
+    )
+
+    with pytest.raises(WorkspaceBoundaryError) as excinfo:
+        policy.resolve_path(str(note))
+
+    assert "未被授权" in str(excinfo.value)
+    assert "设置" in str(excinfo.value) and "权限" in str(excinfo.value)
+
+
+def test_external_whitelist_read_grant_allows_reading_and_refuses_writes(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """``read`` 档：只读工具照常，写工具**硬拒绝**并明确说这是授权级别的问题。"""
+    workspace, outside, note = _external_setup(tmp_path)
+    policy = _policy(app_config, workspace, grants={normalize_grant_path(outside): "read"})
+
+    target = policy.resolve_target(str(note))
+    assert target.external and target.access == "read" and not target.writable
+    assert policy.resolve_readable_file(str(note)).read_text(encoding="utf-8") == "外部内容"
+
+    created = policy.classify_tool(
+        "write_file", {"path": str(outside / "new.txt"), "content": "新"}
+    )
+    assert not created.allowed and not created.requires_approval  # 不是"等批准"，是权限不足
+    assert "只有只读授权" in created.reason and "权限" in created.reason
+
+    edited = policy.classify_tool(
+        "edit_file", {"path": str(note), "old_text": "外部内容", "new_text": "改"}
+    )
+    assert not edited.allowed and not edited.requires_approval
+    assert "只有只读授权" in edited.reason
+
+
+def test_external_grants_cover_subdirectories_and_read_write_wins(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """父目录授权覆盖子目录；更具体的 ``read_write`` 条目优先于父目录的 ``read``。"""
+    workspace, outside, _note = _external_setup(tmp_path)
+    sub = outside / "sub"
+    sub.mkdir()
+    policy = _policy(
+        app_config,
+        workspace,
+        grants={
+            normalize_grant_path(outside): "read",
+            normalize_grant_path(sub): "read_write",
+        },
+    )
+
+    assert policy.resolve_target(str(outside / "a.txt")).access == "read"
+    assert policy.resolve_target(str(sub / "b.txt")).access == "read_write"
+    with pytest.raises(WorkspaceBoundaryError):
+        policy.resolve_path(str(tmp_path / "elsewhere" / "c.txt"))
+
+
+def test_external_allow_mode_marks_any_absolute_target_read_write(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """``allow`` 档（= 旧键 ``allow_external_paths: true``）等于给所有绝对外部路径读写授权。"""
+    workspace, outside, note = _external_setup(tmp_path)
+    config = _external_config(app_config, external_paths={"mode": "allow"})
+    policy = SecurityPolicy.from_config(config, workspace_root=workspace, environ={})
+
+    target = policy.resolve_target(str(note))
+    assert target.external and target.access == "read_write" and target.writable
+
+    created = policy.classify_tool(
+        "write_file", {"path": str(outside / "new.txt"), "content": "新"}
+    )
+    assert created.allowed and not created.requires_approval
+
+
+def test_external_paths_never_accept_relative_or_tilde_inputs(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """``~`` 与相对路径逃逸不是"显式指定的绝对目标"：任何档位、任何授权都救不了。"""
+    workspace, outside, _note = _external_setup(tmp_path)
+    policy = _policy(
+        app_config,
+        workspace,
+        mode="allow",
+        grants={normalize_grant_path(outside): "read_write"},
+    )
+
+    for raw in ("~/note.txt", "../outside/note.txt"):
+        with pytest.raises(WorkspaceBoundaryError) as excinfo:
+            policy.resolve_path(raw)
+        assert "只能用绝对路径" in str(excinfo.value)
+
+
+def test_external_read_write_grant_keeps_the_four_hard_constraints(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """``read_write`` 视同工作区内只改变"常规小改动是否逐次询问"，四项硬约束一条不放宽。"""
+    workspace, outside, note = _external_setup(tmp_path)
+    policy = _policy(app_config, workspace, grants={normalize_grant_path(outside): "read_write"})
+
+    # 免审的那一类：在工作区外**新建**文件
+    created = policy.classify_tool(
+        "write_file", {"path": str(outside / "new.txt"), "content": "新"}
+    )
+    assert created.allowed and not created.requires_approval
+
+    # 硬约束一：覆盖已有文件
+    overwrite = policy.classify_tool(
+        "write_file", {"path": str(note), "content": "改", "overwrite": True}
+    )
+    assert not overwrite.allowed and overwrite.requires_approval
+    assert "覆盖已有文件" in overwrite.reason
+
+    # 硬约束二：删除文件
+    removed = policy.classify_tool("delete_file", {"path": str(note)})
+    assert not removed.allowed and removed.requires_approval
+
+    # 硬约束三：大范围编辑（超过免审行数上限的补丁）
+    limit = app_config.security.large_edit.max_changed_lines_without_approval
+    patch = f"@@ -1 +1,{limit + 1} @@\n-a\n" + "".join(
+        f"+l{index}\n" for index in range(limit + 1)
+    )
+    big = policy.classify_tool("edit_file", {"path": str(note), "patch": patch})
+    assert not big.allowed and big.requires_approval
+    assert "大范围修改" in big.reason
+
+    # 硬约束四：工作区外工作目录（命令本身在白名单里也不放行）
+    shell = policy.classify_tool(
+        "run_shell", {"command": "python --version", "cwd": str(outside)}
+    )
+    assert not shell.allowed and shell.requires_approval
+    assert "工作区外工作目录" in shell.reason
+
+
+def test_external_grants_cannot_authorize_protected_targets(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """受保护目标（主目录等）不是"更高审批"，而是**不可授权**：列进白名单也不执行副作用。"""
+    workspace, _outside, _note = _external_setup(tmp_path)
+
+    for mode in ("whitelist", "allow"):
+        policy = _policy(
+            app_config,
+            workspace,
+            mode=mode,
+            grants={normalize_grant_path(Path.home()): "read_write"},
+        )
+        decision = policy.classify_tool("delete_file", {"path": str(Path.home())})
+        assert not decision.allowed and not decision.requires_approval, mode
+        assert "受保护目标" in decision.reason, mode
+
+
+def test_legacy_allow_external_paths_flag_maps_to_allow_mode(app_config: AppConfig) -> None:
+    """T38 兼容：旧键单独出现（``true``）等价于 ``external_paths.mode: allow``。"""
+    data = app_config.model_dump()
+    data["workspace"].pop("external_paths")  # 老配置里没有这个键
+    data["workspace"]["allow_external_paths"] = True
+
+    config = AppConfig.model_validate(data)
+
+    assert config.workspace.external_paths.mode == "allow"
+
+
+def test_legacy_flag_conflicting_with_an_explicit_mode_is_rejected(app_config: AppConfig) -> None:
+    """旧键 ``true`` + 新键显式写了非 ``allow`` 的档位：说不清谁生效，直接拒绝。"""
+    data = app_config.model_dump()
+    data["workspace"]["allow_external_paths"] = True
+    data["workspace"]["external_paths"] = {"mode": "deny"}
+
+    with pytest.raises(ValidationError) as excinfo:
+        AppConfig.model_validate(data)
+
+    assert "语义冲突" in str(excinfo.value)
+
+
+def test_external_paths_config_survives_a_dump_and_validate_round_trip(
+    app_config: AppConfig,
+) -> None:
+    """往返必须可行：``model_dump()`` 会把新旧两个键都写出来，那不是冲突。"""
+    for mode in ("deny", "whitelist", "allow"):
+        config = _external_config(app_config, external_paths={"mode": mode})
+        again = AppConfig.model_validate(config.model_dump())
+        assert again.workspace.external_paths.mode == mode, mode

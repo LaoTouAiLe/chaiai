@@ -820,6 +820,80 @@
           }
         ]
       },
+      "ExternalPathGrantRequest": {
+        "additionalProperties": false,
+        "description": "新增 / 改写一条外部路径授权（T38）。\n\n只校验**形状**（非空、长度上限）：路径的规范化（大小写、分隔符、符号链接）与\"是不是受保护\n位置\"都在服务层裁定——那需要真实文件系统，不是传输层能替它做主的。\n`access` 只允许 `read` / `read_write`：\"不给访问\"用撤销表达，不另立一个级别。",
+        "properties": {
+          "access": {
+            "enum": [
+              "read",
+              "read_write"
+            ],
+            "title": "Access",
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "access"
+        ],
+        "title": "ExternalPathGrantRequest",
+        "type": "object"
+      },
+      "ExternalPathGrantView": {
+        "description": "一条\"工作区外路径\"授权（T38）。\n\n``path`` 是**用户自己填进来的目录**，与\"从机器上发现再泄露给页面\"的私人路径不是一回事：\n不回路径，用户就没法在这张列表上撤销授权。它已经规范化（统一大小写与分隔符、展开符号链接）。",
+        "properties": {
+          "access": {
+            "enum": [
+              "read",
+              "read_write"
+            ],
+            "title": "Access",
+            "type": "string"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "path": {
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "path",
+          "access"
+        ],
+        "title": "ExternalPathGrantView",
+        "type": "object"
+      },
       "FileDiffHunkView": {
         "description": "一个 hunk：`@@ -x,y +z,w @@` 头部加它覆盖的行。",
         "properties": {
@@ -2462,6 +2536,67 @@
           "payload"
         ],
         "title": "ModelUsageReportedEvent",
+        "type": "object"
+      },
+      "PermissionsModeRequest": {
+        "additionalProperties": false,
+        "description": "切换\"工作区外路径\"档位（T38）。\n\n档位取值与领域层同源（`ExternalPathsMode`），传输层不另立一套字符串——两处各写一份迟早会\n漂移。这里的 `extra=\"forbid\"` 保证打错档位名得到 422，而不是静默保存成别的档位。",
+        "properties": {
+          "mode": {
+            "enum": [
+              "deny",
+              "whitelist",
+              "allow"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode"
+        ],
+        "title": "PermissionsModeRequest",
+        "type": "object"
+      },
+      "PermissionsView": {
+        "description": "「设置 → 权限」的读 DTO（T38）。\n\n``mode`` 是当前生效档位（用户的选择优先）；``default_mode`` 是 ``config.yaml`` 的出厂默认，\n用于说明\"库里没有用户选择时按哪一档跑\"。授权条目只在 ``whitelist`` 档生效。",
+        "properties": {
+          "default_mode": {
+            "enum": [
+              "deny",
+              "whitelist",
+              "allow"
+            ],
+            "title": "Default Mode",
+            "type": "string"
+          },
+          "grants": {
+            "items": {
+              "$ref": "#/components/schemas/ExternalPathGrantView"
+            },
+            "title": "Grants",
+            "type": "array"
+          },
+          "mode": {
+            "enum": [
+              "deny",
+              "whitelist",
+              "allow"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "store_unavailable": {
+            "default": false,
+            "title": "Store Unavailable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "mode",
+          "default_mode"
+        ],
+        "title": "PermissionsView",
         "type": "object"
       },
       "PickDirectoryView": {
@@ -4853,6 +4988,171 @@
           }
         },
         "summary": "测试模型连接"
+      }
+    },
+    "/api/permissions": {
+      "get": {
+        "description": "当前档位与授权条目。\n\n没有可用设置库时**不报错**：返回出厂默认档位并置 `store_unavailable=true`——设置页要能\n打开并如实说明\"这里改了也存不下来\"，而不是整页打不开。",
+        "operationId": "get_permissions_api_permissions_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PermissionsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "权限设置"
+      },
+      "put": {
+        "description": "保存档位。改动**作用于下一轮**：正在跑或等待审批的那些运行已按当时的档位判定完。\n\n`deny` / `whitelist` / `allow` 三档只影响\"工作区外路径能不能碰、能怎么碰\"，\n四项硬约束不放宽。",
+        "operationId": "set_permissions_mode_api_permissions_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PermissionsModeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PermissionsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "目录路径或档位没有通过校验"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "没有可用的设置库，改动存不下来"
+          }
+        },
+        "summary": "切换外部路径档位"
+      }
+    },
+    "/api/permissions/grants": {
+      "delete": {
+        "description": "撤销一条授权；**不存在也算成功**（幂等），返回撤销后的完整视图。\n\n路径走查询参数而不是请求体：它是这条记录的自然键（含层级分隔符），放 URL 里可以正常\nURL 编码；重复调用同一条不会产生第二种结果。",
+        "operationId": "revoke_external_path_api_permissions_grants_delete",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "maxLength": 4096,
+              "minLength": 1,
+              "title": "Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PermissionsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "目录路径或档位没有通过校验"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "没有可用的设置库，改动存不下来"
+          }
+        },
+        "summary": "撤销外部路径授权"
+      },
+      "post": {
+        "description": "给一个工作区外目录授权（`read` 只放宽只读工具，`read_write` 还允许在其中新建/改文件）。\n\n同一个目标重复授权是**改写**（刷新访问级别），不是加两行；返回授权后的完整视图，\n让设置页直接渲染，不用再取一次。",
+        "operationId": "grant_external_path_api_permissions_grants_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExternalPathGrantRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PermissionsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "目录路径或档位没有通过校验"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "没有可用的设置库，改动存不下来"
+          }
+        },
+        "summary": "新增外部路径授权"
       }
     },
     "/api/sessions": {

@@ -1,10 +1,10 @@
-﻿// 传输客户端与适配器：只测**映射与失败处理**，不测服务端行为（那些在后端测试里）。
+// 传输客户端与适配器：只测**映射与失败处理**，不测服务端行为（那些在后端测试里）。
 //
 // 用 stub 掉的 `fetch`：本文件不联网，也不需要 dev server 在跑。
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { HealthDto, ModelConnectionDto, ModelConnectionInput } from './client'
+import type { HealthDto, ModelConnectionDto, ModelConnectionInput, PermissionsDto } from './client'
 import {
   ApiError,
   createModelConnection,
@@ -13,7 +13,7 @@ import {
   selectSessionModel,
   updateModelConnection,
 } from './client'
-import { contextWindowLabel, toConnectionView, toModelMenuItem, toSettingsView } from './viewModels'
+import { contextWindowLabel, toConnectionView, toModelMenuItem, toPermissionsView, toSettingsView } from './viewModels'
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -78,6 +78,16 @@ const healthDto: HealthDto = {
   storage: 'sqlite',
   static_frontend: true,
 } as HealthDto
+
+function permissionsDto(overrides: Partial<PermissionsDto> = {}): PermissionsDto {
+  return {
+    mode: 'whitelist',
+    default_mode: 'whitelist',
+    grants: [],
+    store_unavailable: false,
+    ...overrides,
+  }
+}
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -227,6 +237,38 @@ describe('view model adapters', () => {
     expect(settings.connections).toEqual([])
     expect(settings.credentialStore.kind).toBe('unavailable')
     expect(settings.credentialStore.note).toContain('重新录入')
+  })
+
+  it('maps the permissions DTO onto the view without inventing a mode', () => {
+    const view = toPermissionsView({
+      mode: 'allow',
+      default_mode: 'whitelist',
+      grants: [{ path: 'D:/team/shared', access: 'read_write' }],
+      store_unavailable: true,
+    })
+
+    expect(view).toEqual({
+      mode: 'allow',
+      defaultMode: 'whitelist',
+      grants: [{ path: 'D:/team/shared', access: 'read_write' }],
+      storeUnavailable: true,
+    })
+  })
+
+  it('keeps permissions null in the settings view until they have been read', () => {
+    const settings = toSettingsView([], healthDto)
+    expect(settings.permissions).toBeNull()
+  })
+
+  it('carries the permissions DTO into the settings view once read', () => {
+    const settings = toSettingsView(
+      [],
+      healthDto,
+      undefined,
+      permissionsDto({ mode: 'deny', default_mode: 'whitelist', grants: [] }),
+    )
+    expect(settings.permissions?.mode).toBe('deny')
+    expect(settings.permissions?.defaultMode).toBe('whitelist')
   })
 
   it('formats the context window without pretending to know an exact window it was not given', () => {

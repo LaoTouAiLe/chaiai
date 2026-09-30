@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { ReactNode } from 'react'
 
 import { Check, Close, Cross } from '../../components/icons'
@@ -7,6 +8,8 @@ import type {
   ModelConnectionView,
   SettingsView,
 } from '../../fixtures/types'
+import { PermissionSection } from './PermissionSection'
+import type { PermissionActions } from './PermissionSection'
 import styles from './SettingsDialog.module.css'
 
 /** 真实模式下的动作；**不传就是原型宿主**（fixtures 直出、按钮惰性）。 */
@@ -29,9 +32,23 @@ export interface SettingsDialogActions {
 interface SettingsDialogProps {
   settings: SettingsView
   actions?: SettingsDialogActions
+  /** 权限分区的动作；不传就是原型宿主（fixtures 直出、按钮惰性）。 */
+  permissionActions?: PermissionActions
+  /** 权限分区正在提交（按钮据此禁用，防双击）。 */
+  permissionBusy?: boolean
+  /** 权限分区最近一次失败的展示文本（服务端给的用户可读文本，不是响应原文）。 */
+  permissionError?: string | null
   /** 新增/编辑表单：由容器放进来，对话框只负责摆位置（表单自己的状态不在这里）。 */
   form?: ReactNode
 }
+
+type SettingsSection = 'models' | 'permissions'
+
+/** 分节切换器：两个分区都是真的（模型连接、权限），不是摆着好看的空壳（T38）。 */
+const SECTIONS: readonly { id: SettingsSection; label: string }[] = [
+  { id: 'models', label: '模型连接' },
+  { id: 'permissions', label: '权限' },
+]
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
   verified: '已验证',
@@ -214,12 +231,23 @@ function ConnectionCard({
 }
 
 /**
- * Settings dialog (v0.4 scope: chat connections only).
+ * Settings dialog (v0.4 scope: chat connections and permissions).
  *
- * There is deliberately no section switcher — a nav with inert items would
- * promise an interaction the prototype does not have.
+ * The section switcher is real: both sections are fully usable (T38 added the
+ * permissions one), so a nav item now leads somewhere instead of promising an
+ * interaction the dialog does not have. The default section is the model
+ * connections — opening settings is overwhelmingly about "which model", and the
+ * permission section is only entered deliberately.
  */
-export function SettingsDialog({ settings, actions, form }: SettingsDialogProps) {
+export function SettingsDialog({
+  settings,
+  actions,
+  permissionActions,
+  permissionBusy,
+  permissionError,
+  form,
+}: SettingsDialogProps) {
+  const [section, setSection] = useState<SettingsSection>('models')
   const empty = settings.connections.length === 0
   return (
     <div className={styles.overlay}>
@@ -227,7 +255,7 @@ export function SettingsDialog({ settings, actions, form }: SettingsDialogProps)
         <header className={styles.header}>
           <div>
             <h2 className={styles.title}>设置</h2>
-            <p className={styles.subtitle}>聊天模型连接 · 密钥只写入不回读</p>
+            <p className={styles.subtitle}>模型连接与权限 · 密钥只写入不回读</p>
           </div>
           <button
             type="button"
@@ -240,43 +268,81 @@ export function SettingsDialog({ settings, actions, form }: SettingsDialogProps)
         </header>
 
         <div className={styles.body}>
-          <div className={styles.sectionHead}>
-            <div>
-              <h3 className={styles.sectionTitle}>模型连接</h3>
-              <p className={styles.sectionNote}>
-                新会话继承默认连接；切换只影响下一次提交，已开始的一轮固定用提交时的连接。
-              </p>
-            </div>
-            <button
-              type="button"
-              className={styles.primary}
-              // 新增中也要禁用：否则连点两次会建出两条一样的连接（复审实测）。
-              disabled={actions !== undefined && (actions.busyId !== null || actions.creating)}
-              onClick={() => actions?.onAdd()}
-            >
-              添加连接
-            </button>
+          <div className={styles.tabs} role="tablist" aria-label="设置分区">
+            {SECTIONS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                id={`settings-tab-${item.id}`}
+                aria-selected={section === item.id}
+                aria-controls={`settings-panel-${item.id}`}
+                className={`${styles.tab} ${section === item.id ? styles.tabSelected : ''}`}
+                onClick={() => setSection(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
           </div>
 
-          {settings.credentialStore.kind === 'unavailable' && settings.credentialStore.note !== null ? (
-            <p className={styles.storeWarning}>{settings.credentialStore.note}</p>
-          ) : null}
-
-          {form}
-
-          {empty ? (
-            <div className={styles.empty}>
-              <p className={styles.emptyTitle}>还没有模型连接</p>
-              <p className={styles.emptyText}>
-                添加一个 OpenAI 兼容连接后即可开始对话。工具能力在检测前只是"尚未确认"——普通对话照常可用；
-                只有**检测明确为不支持**时，需要工具的任务才会被拒绝，而且不会静默换模型。
-              </p>
+          {section === 'permissions' ? (
+            <div
+              role="tabpanel"
+              id="settings-panel-permissions"
+              aria-labelledby="settings-tab-permissions"
+            >
+              <PermissionSection
+                permissions={settings.permissions}
+                errorText={permissionError}
+                busy={permissionBusy}
+                actions={permissionActions}
+              />
             </div>
           ) : (
-            <div className={styles.cards}>
-              {settings.connections.map((connection) => (
-                <ConnectionCard key={connection.id} connection={connection} actions={actions} />
-              ))}
+            <div
+              role="tabpanel"
+              id="settings-panel-models"
+              aria-labelledby="settings-tab-models"
+            >
+              <div className={styles.sectionHead}>
+                <div>
+                  <h3 className={styles.sectionTitle}>模型连接</h3>
+                  <p className={styles.sectionNote}>
+                    新会话继承默认连接；切换只影响下一次提交，已开始的一轮固定用提交时的连接。
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className={styles.primary}
+                  // 新增中也要禁用：否则连点两次会建出两条一样的连接（复审实测）。
+                  disabled={actions !== undefined && (actions.busyId !== null || actions.creating)}
+                  onClick={() => actions?.onAdd()}
+                >
+                  添加连接
+                </button>
+              </div>
+
+              {settings.credentialStore.kind === 'unavailable' && settings.credentialStore.note !== null ? (
+                <p className={styles.storeWarning}>{settings.credentialStore.note}</p>
+              ) : null}
+
+              {form}
+
+              {empty ? (
+                <div className={styles.empty}>
+                  <p className={styles.emptyTitle}>还没有模型连接</p>
+                  <p className={styles.emptyText}>
+                    添加一个 OpenAI 兼容连接后即可开始对话。工具能力在检测前只是"尚未确认"——普通对话照常可用；
+                    只有**检测明确为不支持**时，需要工具的任务才会被拒绝，而且不会静默换模型。
+                  </p>
+                </div>
+              ) : (
+                <div className={styles.cards}>
+                  {settings.connections.map((connection) => (
+                    <ConnectionCard key={connection.id} connection={connection} actions={actions} />
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -26,8 +26,8 @@ CHAT_SCHEMA_VERSION = 3
 #: 长期记忆库当前代码期望的结构版本。
 LONG_TERM_SCHEMA_VERSION = 2
 
-#: 模型连接设置库当前代码期望的结构版本（T29A；契约 §6.8）。
-SETTINGS_SCHEMA_VERSION = 1
+#: 模型连接设置库当前代码期望的结构版本（T29A；契约 §6.8）。v2 = T38 外部路径授权。
+SETTINGS_SCHEMA_VERSION = 2
 
 #: 兼容既有调用：未加前缀的 ``SCHEMA_VERSION`` 指聊天库。
 SCHEMA_VERSION = CHAT_SCHEMA_VERSION
@@ -41,6 +41,7 @@ SETTINGS_TABLES: tuple[str, ...] = (
     "model_connection_versions",
     "model_selection",
     "settings_meta",
+    "external_path_grants",
 )
 
 _SESSIONS_SQL = """
@@ -236,6 +237,24 @@ CREATE TABLE IF NOT EXISTS settings_meta (
 );
 """
 
+#: 模型连接设置库 v2（T38；架构 §1.5）。
+#:
+#: 界面上的"档位 + 授权目录"必须**唯一真源**地存在一处：档位是 ``settings_meta`` 里的一行
+#: （``permissions.external_paths.mode``），逐条授权是这张表。授权**不写回 config.yaml**——
+#: 让应用改自己的配置文件会抹掉注释、在只读挂载上直接失败，那正是 T29A 定过的口径。
+#:
+#: ``path`` 存**规范化**键（展开 ``~`` 与符号链接、统一大小写与分隔符，见
+#: ``path_guard.normalize_grant_path``）：同一目录写成 ``E:/data`` 与 ``e:\data`` 必须落到
+#: 同一个主键上，否则"授权过却仍被拦"会变成只能靠肉眼比对路径才能发现的 bug。
+_SETTINGS_V2_SQL = """
+CREATE TABLE IF NOT EXISTS external_path_grants (
+    path TEXT PRIMARY KEY,
+    access TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
 #: 聊天库的迁移；(版本号, 该版本的结构变更 SQL)，只允许在末尾追加，不允许改写已发布的版本。
 _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SESSIONS_SQL),
@@ -250,7 +269,10 @@ _LONG_TERM_MIGRATIONS: tuple[tuple[int, str], ...] = (
 )
 
 #: 模型连接设置库的迁移；规则同上（独立文件、独立版本号）。
-_SETTINGS_MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _SETTINGS_V1_SQL),)
+_SETTINGS_MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (1, _SETTINGS_V1_SQL),
+    (2, _SETTINGS_V2_SQL),
+)
 
 _SCHEMA_MIGRATIONS_SQL = (
     "CREATE TABLE IF NOT EXISTS schema_migrations ("

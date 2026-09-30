@@ -15,7 +15,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from local_agent.application.errors import ErrorView
-from local_agent.application.models import SCHEMA_VERSION
+from local_agent.application.models import (
+    SCHEMA_VERSION,
+    ExternalPathAccess,
+    ExternalPathsMode,
+)
 
 #: 会话名与请求标识的长度上限：够用即可，真正的截断规则在会话库里。
 TITLE_MAX_CHARS = 1000
@@ -210,3 +214,28 @@ class PickDirectoryView(BaseModel):
     """
 
     path: str | None = None
+
+
+# ---- 权限（T38；§1.5）------------------------------------------------------
+
+
+class PermissionsModeRequest(_Request):
+    """切换"工作区外路径"档位（T38）。
+
+    档位取值与领域层同源（`ExternalPathsMode`），传输层不另立一套字符串——两处各写一份迟早会
+    漂移。这里的 `extra="forbid"` 保证打错档位名得到 422，而不是静默保存成别的档位。
+    """
+
+    mode: ExternalPathsMode
+
+
+class ExternalPathGrantRequest(_Request):
+    """新增 / 改写一条外部路径授权（T38）。
+
+    只校验**形状**（非空、长度上限）：路径的规范化（大小写、分隔符、符号链接）与"是不是受保护
+    位置"都在服务层裁定——那需要真实文件系统，不是传输层能替它做主的。
+    `access` 只允许 `read` / `read_write`："不给访问"用撤销表达，不另立一个级别。
+    """
+
+    path: str = Field(min_length=1, max_length=PATH_MAX_CHARS)
+    access: ExternalPathAccess

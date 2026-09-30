@@ -37,6 +37,7 @@ from local_agent.application.errors import (
     APPROVAL_EXPIRED,
     DIRECTORY_PICKER_UNAVAILABLE,
     IDEMPOTENCY_CONFLICT,
+    MODEL_SETTINGS_INVALID,
     RECOVERY_REQUIRED,
     SESSION_BUSY,
     SESSION_NOT_FOUND,
@@ -45,6 +46,7 @@ from local_agent.application.errors import (
 from local_agent.application.models import SCHEMA_VERSION
 from local_agent.application.service import EventSubscription
 from local_agent.config import AppConfig
+from local_agent.security.path_guard import normalize_grant_path
 
 ModelFactory = Callable[..., Any]
 OpenApi = Callable[..., tuple[TestClient, ApiRuntime]]
@@ -1252,6 +1254,79 @@ def test_setup_mode_works_without_any_config_and_becomes_usable_after_saving_a_c
         runtime.close()
 
 
+# ---- 权限（T38；§1.5）------------------------------------------------------
+
+
+def test_permissions_endpoint_reports_the_factory_default(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    client, _runtime = api
+
+    body = client.get("/api/permissions").json()
+
+    assert body["mode"] == "whitelist" and body["default_mode"] == "whitelist"
+    assert body["grants"] == []
+    # 设置库打得开：改档位与加授权都存得下来。
+    assert body["store_unavailable"] is False
+
+
+def test_permissions_mode_and_grants_round_trip(
+    api: tuple[TestClient, ApiRuntime], tmp_path: Path
+) -> None:
+    """保存即生效：写接口直接回完整视图，GET 读回同一份；撤销幂等。"""
+    client, _runtime = api
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    switched = client.put("/api/permissions", json={"mode": "allow"})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["mode"] == "allow"
+
+    created = client.post(
+        "/api/permissions/grants", json={"path": str(outside), "access": "read"}
+    )
+    assert created.status_code == 200, created.text
+    grants = created.json()["grants"]
+    assert len(grants) == 1
+    assert grants[0]["path"] == normalize_grant_path(outside)
+    assert grants[0]["access"] == "read"
+    assert client.get("/api/permissions").json()["grants"] == grants
+
+    # 同一目标的另一种写法是改写（级别刷新），不是加第二条。
+    rewritten = client.post(
+        "/api/permissions/grants", json={"path": outside.as_posix(), "access": "read_write"}
+    )
+    assert [item["access"] for item in rewritten.json()["grants"]] == ["read_write"]
+
+    removed = client.delete("/api/permissions/grants", params={"path": str(outside)})
+    assert removed.status_code == 200 and removed.json()["grants"] == []
+    # 反复撤销同一条也是 200（幂等）。
+    assert client.delete(
+        "/api/permissions/grants", params={"path": str(outside)}
+    ).status_code == 200
+
+
+def test_permissions_reject_unknown_mode_blank_path_and_protected_target(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    client, _runtime = api
+
+    assert client.put("/api/permissions", json={"mode": "yolo"}).status_code == 422
+    assert (
+        client.post("/api/permissions/grants", json={"path": "  ", "access": "read"}).status_code
+        == 422
+    )
+
+    refused = client.post(
+        "/api/permissions/grants", json={"path": str(Path.home()), "access": "read_write"}
+    )
+    assert refused.status_code == 422, refused.text
+    error = refused.json()["error"]
+    # 复用冻结错误码表里的取值；展示文本里**不回显**用户填的绝对路径（§15.8）。
+    assert error["code"] == MODEL_SETTINGS_INVALID
+    assert str(Path.home()) not in json.dumps(error, ensure_ascii=False)
+
+
 # ---- 真机（真 ASGI 服务器）验收 ---------------------------------------------
 
 
@@ -1359,6 +1434,8 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/model-connections/{connection_id}",
         "/api/model-connections/{connection_id}/test",
         "/api/model-connections/default",
+        "/api/permissions",
+        "/api/permissions/grants",
     }
     text = json.dumps(schema, ensure_ascii=False)
     # 内部**类型名**与模块名不得出现。刻意不查 "checkpoint" 这个词：公开 DTO 里本来就有

@@ -163,6 +163,43 @@ class ModelConnectionView(_Dto):
         return self
 
 
+# ---- 权限（T38；§1.5）------------------------------------------------------
+
+
+ExternalPathsMode = Literal["deny", "whitelist", "allow"]
+ExternalPathAccess = Literal["read", "read_write"]
+
+EXTERNAL_PATHS_MODES: Final[tuple[ExternalPathsMode, ...]] = get_args(ExternalPathsMode)
+EXTERNAL_PATH_ACCESSES: Final[tuple[ExternalPathAccess, ...]] = get_args(ExternalPathAccess)
+
+
+class ExternalPathGrantView(_Dto):
+    """一条"工作区外路径"授权（T38）。
+
+    ``path`` 是**用户自己填进来的目录**，与"从机器上发现再泄露给页面"的私人路径不是一回事：
+    不回路径，用户就没法在这张列表上撤销授权。它已经规范化（统一大小写与分隔符、展开符号链接）。
+    """
+
+    path: str = Field(min_length=1)
+    access: ExternalPathAccess
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class PermissionsView(_Dto):
+    """「设置 → 权限」的读 DTO（T38）。
+
+    ``mode`` 是当前生效档位（用户的选择优先）；``default_mode`` 是 ``config.yaml`` 的出厂默认，
+    用于说明"库里没有用户选择时按哪一档跑"。授权条目只在 ``whitelist`` 档生效。
+    """
+
+    mode: ExternalPathsMode
+    default_mode: ExternalPathsMode
+    grants: list[ExternalPathGrantView] = Field(default_factory=list)
+    #: 没有可用设置库时为真：这时改档位与加授权都存不下，界面必须如实说明。
+    store_unavailable: bool = False
+
+
 # ---- 计划 / 工具 / 审批 ----------------------------------------------------
 
 

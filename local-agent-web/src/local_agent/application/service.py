@@ -52,9 +52,13 @@ from local_agent.application.events import (
 from local_agent.application.models import (
     CapabilityCheckView,
     CommandResultView,
+    ExternalPathAccess,
+    ExternalPathGrantView,
+    ExternalPathsMode,
     KeyStatus,
     ModelConnectionView,
     ModelSelectionView,
+    PermissionsView,
     SessionSnapshot,
     SessionSummaryView,
     WorkspaceRef,
@@ -79,6 +83,7 @@ from local_agent.model_settings import (
     ConnectionStore,
     ModelBinding,
     ModelConnection,
+    PermissionStore,
     Selection,
     SelectionRef,
 )
@@ -95,6 +100,7 @@ from local_agent.persistence.request_ledger import (
 )
 from local_agent.persistence.session_store import Session, SessionStore
 from local_agent.scope import SCOPE_WORKSPACE, scope_key_for
+from local_agent.security.path_guard import ExternalPathPolicy, protected_target_reason
 
 #: 任务的终态，用于"能否证明终态"的判断（§15.2 的恢复口径）。
 TASK_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({"completed", "failed"})
@@ -401,6 +407,7 @@ class ApplicationService:
         bus: EventBus | None = None,
         sequencer: StreamSequencer | None = None,
         connections: ConnectionStore | None = None,
+        permissions: PermissionStore | None = None,
         model_factory: Callable[[LlmConfig, str], Any] | None = None,
     ) -> None:
         self._graph = graph
@@ -409,6 +416,9 @@ class ApplicationService:
         #: 模型连接设置（§6.8）。``None`` = 没有可用设置库：按 ``app_config.llm`` + 注入的适配器运行，
         #: 并把降级原因如实告诉页面（不假装设置还在生效）。
         self._connections = connections
+        #: 工作区外路径的档位与授权（T38）。与连接同库同生命周期：没有设置库时退回
+        #: ``config.yaml`` 的出厂默认（``external_policy()`` 返回 ``None`` 由下层兜底）。
+        self._permissions = permissions
         #: 按连接构造客户端的可调用对象；测试注入确定性假模型走同一条路径。
         self._build_model = model_factory or llm_factory.build_chat_model
         self._workspace_root = Path(workspace_root)
@@ -776,6 +786,81 @@ class ApplicationService:
             return None
         selection = self._sqlite_access(partial(self._connections.session_selection, session_id))
         return None if selection is None else selection.connection_id
+
+    # ---- 权限（T38；§1.5）---------------------------------------------------
+
+    def permissions(self) -> PermissionsView:
+        """当前档位与授权条目（"设置 → 权限"的读）。没有设置库时用出厂默认并如实标注。"""
+        default_mode = self._app_config.workspace.external_paths.mode
+        if self._permissions is None:
+            return PermissionsView(
+                mode=default_mode, default_mode=default_mode, grants=[], store_unavailable=True
+            )
+        store = self._permissions
+
+        def read() -> PermissionsView:
+            # 档位与授权条目必须在一把锁里读完：两次读之间用户可能刚好改过档位。
+            return PermissionsView(
+                mode=store.mode(),
+                default_mode=store.default_mode,
+                grants=[
+                    ExternalPathGrantView(
+                        path=item.path,
+                        access=item.access,
+                        created_at=item.created_at,
+                        updated_at=item.updated_at,
+                    )
+                    for item in store.grants()
+                ],
+            )
+
+        return self._sqlite_access(read)
+
+    def set_external_paths_mode(self, mode: ExternalPathsMode) -> PermissionsView:
+        """保存档位（"保存即生效、作用于下一轮"）。
+
+        Raises:
+            ApplicationError: 没有可用设置库（``SETTINGS_STORE_UNAVAILABLE``）。
+        """
+        self._require_permissions().set_mode(mode)
+        return self.permissions()
+
+    def grant_external_path(
+        self, path: str, access: ExternalPathAccess
+    ) -> PermissionsView:
+        """新增或改写一条外部路径授权（同一个规范化目标只留一行）。
+
+        Raises:
+            ApplicationError: 路径为空、目标是受保护位置，或设置库不可用。
+        """
+        target = path.strip()
+        if not target:
+            raise app_errors.permission_grant_invalid(
+                detail="目录路径不能为空。", occurred_at=_now()
+            )
+        protected = protected_target_reason(Path(target).expanduser())
+        if protected:
+            # 受保护目标即使人工批准也不执行副作用，授权它没有任何意义，只会让用户以为放开了。
+            raise app_errors.permission_grant_invalid(
+                detail=f"该目录属于受保护位置（{protected}），不能授权给 Agent。",
+                occurred_at=_now(),
+            )
+        store = self._require_permissions()
+        self._sqlite_access(partial(store.grant, target, access))
+        return self.permissions()
+
+    def revoke_external_path(self, path: str) -> PermissionsView:
+        """撤销一条授权；不存在也算成功（幂等），返回撤销后的完整视图。"""
+        store = self._require_permissions()
+        self._sqlite_access(partial(store.revoke, path))
+        return self.permissions()
+
+    def _require_permissions(self) -> PermissionStore:
+        if self._permissions is None:
+            raise app_errors.settings_store_unavailable(
+                detail="设置库没有打开", occurred_at=_now()
+            )
+        return self._permissions
 
     def _require_store(self) -> ConnectionStore:
         if self._connections is None:
@@ -1354,9 +1439,18 @@ class ApplicationService:
             workspace_root=Path(session.workspace_root),
             provider_name=env.provider_name,
             model_capabilities=env.capabilities,
+            # 档位与授权**每一轮现取**（"保存即生效、作用于下一轮"，T29A 口径）：用户刚在
+            # 「设置 → 权限」里改完，下一次运行就该按新档位判定。
+            external_policy=self.external_paths_policy(),
             # 录音机挂在上下文上：节点的用量装饰器从 `RuntimeContext` 取它（§15.6）。
             usage_recorder=env.usage_recorder,
         )
+
+    def external_paths_policy(self) -> ExternalPathPolicy | None:
+        """当前生效的外部路径档位与授权；没有设置库时返回 ``None``（下层取配置默认）。"""
+        if self._permissions is None:
+            return None
+        return self._sqlite_access(self._permissions.policy)
 
     def _run_env(
         self, session: Session, binding: ModelBinding | None, *, for_resume: bool = False
