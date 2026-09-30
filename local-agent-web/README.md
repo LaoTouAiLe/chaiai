@@ -1,7 +1,7 @@
 # local-agent-web
 
 本机运行的学习型网页 Agent：浏览器里自然聊天、读写本地代码、执行受控命令。
-技术栈 Python + Streamlit + LangGraph + LangChain Core。
+当前主界面采用 FastAPI + React，Agent 内核采用 Python + LangGraph + LangChain Core；Streamlit 保留为调试入口。
 
 - 架构契约：[../ARCHITECTURE.md](../ARCHITECTURE.md)
 - 实施计划与验收标准：[../DEVELOPMENT_PLAN.md](../DEVELOPMENT_PLAN.md)
@@ -37,6 +37,7 @@
 | v0.3 / T22 | 编辑预览与 Patch 冲突（`edit_file` 新增 unified diff 输入模式，冲突/错 hunk/旧 Hash 不符即拒绝） | 已完成 |
 | v0.3 / T21 | 按需代码 RAG（工作区搜索 + 有界片段读取，不建持久索引，局部 AST 可选） | 已完成（检索/注入/来源定位契约；回答质量记入 T23 基线） |
 | v0.3 / T23 | 轨迹与评测（固定任务集指标与报表，双层评测 + 最终回答流式展示） | 已完成（T24 继续遥测/全功能回归） |
+| v0.4 | 独立 Web 与应用服务；朋友试用前完成权限、展示和 Windows EXE 分发门槛 | 主体开发完成，T38/T39/T40 与 T37 朋友试用复验未完成 |
 
 **现在能做什么**：本机网页里和模型多轮闲聊；刷新/重启后会话仍在，可新建、切换、重命名会话；**在侧栏选择工作区**（输入本机绝对路径或从已用列表切换，切换即恢复该工作区最近的会话）；加载 AGENTS 规则；列目录、读文件、精确串替换改文件（也可以按 unified diff 打补丁，冲突即拒绝且不动原文件）、新建文件、执行安全命令（白名单内免审直执行，其余批准后执行，含管道/重定向的走平台 Shell 适配器）；打开 `rag.enabled` 后，代码问题会先在工作区里按需检索、把带路径与行号的片段交给模型（**默认关闭**）；删除、覆盖写、大范围编辑、白名单外命令与危险命令会**暂停等待你在页面上批准 / 修改参数 / 拒绝**。
 **现在不能做什么**：工作区外的路径默认拒绝（打开 `workspace.allow_external_paths` 后只接受显式绝对路径，且外部副作用强制审批）、密钥文件与未获批准的命令一律拒绝；**代码检索默认关闭**（`rag.enabled=false`，打开后按需搜索工作区、不建索引；LSP、全库符号图与持久语义索引不在本阶段范围）；**记忆只在"任务完成且反思给出候选"或"闲聊里用户明确要求记住"时写入，普通闲聊不会自动写记忆**；没有会话删除或归档、没有公网部署与账号体系。
@@ -203,8 +204,9 @@ uv run python -m local_agent.api          # 默认 http://127.0.0.1:8000
   `uv run python scripts/export_openapi.py` 从代码导出（`--check` 做漂移检查，导出不需要数据库或密钥）；
   前端的只读传输类型从它生成：`cd frontend` → `npm run generate:api`（生成物不得手改）、
   `npm run check:api`（重新生成后逐字节比对）。
-- **注意**：`frontend/` 目前仍是**静态原型**（只渲染 fixture，按钮无行为），接线属 T30。
-  日常对话仍请走 Streamlit 入口；v0.4 前端要到 T30 才能用，T33 才把 Streamlit 从正式入口换下来。
+- **入口现状**：v0.4 的 React 前端已经在 T30–T35 接线完成，是**正式入口**（会话、消息、流式回答、
+  计划/工具/记忆展示、审批接管、diff、用量计量都在其中）。上面的 Streamlit 入口**保留为调试与回归对照**
+  （T33 起两个 UI 都只经应用服务访问业务能力），朋友试用不需要它。
 
 ### 本机环境备忘（Windows）
 
@@ -215,6 +217,50 @@ uv run python -m local_agent.api          # 默认 http://127.0.0.1:8000
   $env:UV_CACHE_DIR='E:\uv-cache'; $env:TEMP='E:\tmp'; $env:TMP='E:\tmp'
   ```
 - 已避免使用系统环境变量存放密钥：Key 只从项目根目录的 `.env` 读取。
+
+## 开发与构建（v0.4 前端）
+
+前端是 v0.4 的正式入口，代码在 `frontend/`，是**独立的 npm 工程**（不在 Python 包内）。
+Node / npm 版本要求见 `frontend/package.json` 的 `engines`。
+
+```powershell
+cd frontend
+npm ci            # 严格按 package-lock.json 安装；换机器复现用这个，不要用 npm install
+npm run dev       # 开发服务器 http://127.0.0.1:5173，/api 代理到 127.0.0.1:8000
+npm run build     # 先 typecheck 再产出 frontend/dist（生产静态托管读的就是这里）
+npm run preview   # 本地预览构建产物（没有 /api 代理，只看静态部分）
+```
+
+开发时**两个进程一起跑**：先 `uv run python -m local_agent.api`（后端 :8000），再 `npm run dev`（:5173）。
+生产形态不需要 Vite——`npm run build` 之后由 FastAPI 同源托管 `frontend/dist` 与 `/api`（见上面的启动一节）。
+
+质量与契约命令（与上面的「质量命令」并列）：
+
+```powershell
+npm run typecheck     # tsc --noEmit
+npm run lint          # eslint
+npm run test          # vitest（单测，jsdom）
+npm run generate:api  # 由 docs/api/openapi.json 生成只读传输类型（生成物不得手改）
+npm run check:api     # 重新生成后逐字节比对，检测契约漂移
+```
+
+端到端（Playwright）：
+
+- 默认套件 `npm run test:e2e` 只依赖 node（视觉基线 + 设置页），**不需要** uv 或后端工程；
+- 四条**真后端** live 套件各自拉起 `scripts/serve_fake.py`——注入确定性假模型与假密钥，
+  **不需要真 Key、不产生费用**——并同源托管 `frontend/dist`，因此**需要 `uv` 与后端工程可用**：
+
+```powershell
+npm run test:live            # :8123 conversation-live.spec.ts
+npm run test:live:streaming  # :8124 conversation-streaming.spec.ts
+npm run test:live:variants   # :8125 conversation-variants.spec.ts
+npm run test:live:approval   # :8126 approval-live.spec.ts
+```
+
+每个 live 套件的 `webServer` 会先 `npm run build` 再起服务，首次跑要把构建时间算进去；
+本地重复跑时 `reuseExistingServer` 会复用已起的实例。**并发务必压到 1–2**
+（`npm run test:live -- --workers=2`）：本机按 8 个 worker 跑会 OOM。
+浏览器走本机已装的 Chrome（`devices['Desktop Chrome']`），不额外下载 headless shell。
 
 ## 数据库初始化
 
@@ -247,10 +293,30 @@ python -m mypy src
   `uv sync --extra memory`。`mypy src` 在两种环境下都干净（`chromadb` / `fastembed` 在
   `pyproject.toml` 的 `ignore_missing_imports` 名单里）。
 
+## 故障诊断
+
+先看**服务端自己给的错误文本**：配置、端口、锁、静态产物这几类都是启动即失败并写明原因，不需要翻代码。
+
+| 现象 | 常见原因 | 处理 |
+|---|---|---|
+| `uv run python -m local_agent.api` 直接拒绝启动 | `web.host` 被改成非回环地址，而 `web.allow_non_loopback` 仍为 `false` | 改回 `127.0.0.1`；确实要对外暴露时显式设 `web.allow_non_loopback: true`，并清楚 v0.4 **没有鉴权** |
+| 启动报数据库锁被占 | 已经有同一个库的实例在跑（排他锁 `data/checkpoints.sqlite.api.lock`） | 用已在跑的那个进程，或先把它停掉——同一目录只能有一个 Python 服务（见「单进程、单 worker」） |
+| 打开 `http://127.0.0.1:8000/` 只有一段提示 | 没有构建产物，服务只提供 API | `cd frontend; npm ci; npm run build`，然后刷新 |
+| `npm run dev` 起不来（端口 5173） | Vite 配了 `strictPort` | 停掉占用 5173 的进程；不要靠改端口绕过，代理目标写死在 `vite.config.ts` |
+| 页面出现「事件流提示：stream_idle_timeout / stream_overrun」 | 服务端主动结束了这条 SSE 连接（长时间无事件 / 客户端读得太慢） | 前端会自动重连并先取快照，**任务不会被取消**；偶发可忽略，持续出现看服务端日志 |
+| 页面出现「事件流提示：snapshot_refresh_failed」 | 对账用的快照请求失败 | 切会话瞬间的取消是正常行为、不会再报；其他情况先确认后端进程还活着 |
+| 启动即失败并点名某个配置键 | `config.yaml` 校验不通过 | 按提示补：`llm.context_window_tokens` **必填**；`security.require_approval` 四项不允许写 `false`；YAML 语法 / 字段拼错 / `api_key_env` 指的环境变量没设 |
+| 中期记忆相关功能不可用 | 打开了 `memory.medium_term.enabled` 但没装可选项 | `uv sync --extra memory`；缺依赖给的是可读提示而不是 `ImportError`，embedding 缓存目录不可用时侧栏状态为 `not_ready` |
+| `uv` / `npm` / `node` 提示"无法识别为 cmdlet" | 终端 PATH 没生效（shell 每次调用不共享环境） | 见上面的「本机环境备忘（Windows）」，或用全路径调用 |
+| live 套件（`test:live*`）失败 | 缺 `uv`、并发太高、或本机没装 Chrome | 确认 `uv` 可用；`--workers=2`（8 会 OOM）；浏览器走本机 Chrome，不额外下载 headless shell |
+| `npm run check:api` 失败 | `docs/api/openapi.json` 与后端代码漂移 | `uv run python scripts/export_openapi.py` 重新导出 → `npm run generate:api` → 再比对 |
+| 报"数据库结构未就绪" | 库还没建或版本旧 | `uv run python scripts/init_db.py --check` 看原因，需要时跑一次 `scripts/init_db.py` |
+
 ## 已知限制与安全边界
 
 - 只监听 `127.0.0.1`。本地网页不是安全边界，将来若开放远程访问，必须另行设计身份认证与隔离。
-- 网页只是客户端：工作区、文件读写和命令执行都发生在运行 Streamlit 的本机 Python 进程中。
+- 网页只是客户端：工作区、文件读写和命令执行都发生在**本机那个 Python 服务进程**里（v0.4 是
+  `python -m local_agent.api`，Streamlit 入口同样如此），浏览器不直接碰文件系统与 Shell。
 - Shell 判定基于**解析后的命令结构**，不是字符串包含：
   - `security.shell.whitelist` 命中（平台 + 归一化可执行名 + 参数完全一致 + 可选 `cwd`）的命令
     免审直执行（`shell=False` + argv 数组）；

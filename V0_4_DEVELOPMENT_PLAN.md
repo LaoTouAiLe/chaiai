@@ -4,16 +4,17 @@
 >
 > 架构基线：[ARCHITECTURE.md](ARCHITECTURE.md)。现有 v0.1–v0.3 实施记录：[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)。
 >
-> 状态：待审查的 v0.4 实施计划，不代表功能已经实现。本文件只拆解 v0.4，不提前把 v0.5–v1.0 变成代码任务。
+> 状态（2026-09-30）：项目负责人反馈 v0.4 主体开发已完成；T38 尚未实施，T37 的朋友试用门槛尚未通过。**下一步按 T38 → T39（展示与浏览器数据收口）→ T40（Windows 可解压 EXE 试用包）→ T37 朋友试用复验执行**，完成后再启动 v0.5 能力扩展。本文件保留实施与验收历史，不把未验证项写成已通过。
 
 ## 1. 目标与成功口径
 
-v0.4 同时解决三个已经影响真实使用的问题：
+v0.4 同时解决以下影响真实使用的问题：
 
 1. 交付一个朋友可以在本人机器上启动并正常使用的独立 Web 页面；视觉与交互以 DeepSeek Harness 当前 Web 页面为高保真基准。
 2. 建立应用服务、结构化事件和 HTTP/SSE 边界，使 React 与保留的 Streamlit 都不再直接解释 LangGraph 内部 State、节点或 `Command`。
 3. 记录供应商实际 Token 与缓存命中，随后把模型请求改造成稳定前缀、追加式动态上下文和可解释的缓存 epoch，降低未缓存输入成本。
 4. 让朋友在 Web 设置页自行添加、测试和选择多个 OpenAI 兼容聊天模型连接；保存或切换后下一轮立即生效，无需重启服务。
+5. 朋友试用前完成 T38 权限边界、T39 页面与浏览器数据收口、T40 Windows 可解压 EXE 试用包，再用实际分发包复验 T37。
 
 v0.4 完成不等于后台任务平台完成。首版仍是本机、单用户、单进程，并且只支持单个 Uvicorn worker（`workers=1`）；任务在一次前端提交请求的生命周期内运行，Checkpoint 继续是执行恢复真源。多 worker、跨进程广播和分布式锁不属于本阶段。
 
@@ -171,6 +172,10 @@ select_session_model(session_id, connection_id)
 submit_message(session_id, text, client_request_id)
 resolve_approval(session_id, approval_id, decision, client_request_id)
 subscribe_events(session_id)
+get_permissions()
+update_permission_mode(mode, expected_version)
+grant_external_path(path, access)
+revoke_external_path(path)
 ```
 
 v0.4 不公开真正的 `cancel_task()`。DTO 可以返回 `can_cancel=false`，页面不得渲染一个无后端语义的停止按钮。流式展示失败只能降级为最终完整结果，不能通过重调 Graph 制造第二次副作用。
@@ -197,6 +202,10 @@ PATCH /api/model-connections/{connection_id}
 DELETE /api/model-connections/{connection_id}
 POST /api/model-connections/{connection_id}/test
 PUT  /api/model-connections/default
+GET    /api/permissions
+PATCH  /api/permissions/mode
+POST   /api/permissions/external-paths
+DELETE /api/permissions/external-paths
 PUT  /api/sessions/{session_id}/model
 POST /api/sessions/{session_id}/messages
 POST /api/sessions/{session_id}/approvals/{approval_id}
@@ -2250,7 +2259,156 @@ T30 交接的缺口在此关闭：T30 收尾记录写明"记忆行不渲染（T3
 - **功能门槛**：逐项走通“添加/测试两个兼容模型 → 设置默认与会话下一轮模型 → 选择工作区 → 新建会话 → 两轮对话 → 切换模型 → 工具 → 计划 → 审批/拒绝 → diff/结果 → 刷新 → 重启恢复”；模型切换和重连不重放副作用，在途/等待审批运行不被切换改写。
 - **缓存门槛**：实际与估算 Token 分开；未知缓存字段正确显示；真实 DeepSeek 固定场景有优化前后记录，首轮后出现正数 cache read，且正确性评测不回退。若仍为 `blocked-external`，默认不得宣称 v0.4 缓存验收通过；确需发布时必须由人工在验收记录中明确批准豁免，写明证据、影响、未验证声明和补验条件。
 - **分发门槛**：生产模式只启动一个 Python 服务、一个 Uvicorn worker 即可使用页面/API/SSE；README 给出开发、构建、启动、配置、故障诊断、单 worker 限制和已知限制；默认只监听回环地址。
-- **朋友试用门槛**：由未参与开发的人按 README 在一台目标 Windows 环境完成首次启动和核心任务；观察问题只进入独立清单，阻断项修复后重跑相关自动与人工门槛。
+- **朋友试用门槛**：在 T38、T39、T40 通过后，由未参与开发的人在一台目标 Windows 环境解压试用包、双击 EXE 完成首次启动和核心任务；观察问题只进入独立清单，阻断项修复后重跑相关自动与人工门槛。此前按 README 源码启动的验证属于 T37 初验记录，不替代打包试用复验。
+
+#### T37 执行记录（2026-09-29）
+
+**状态**：**进行中**——当时按源码运行口径的自动门槛、视觉门槛、功能门槛、缓存门槛、分发门槛已取得实测证据；**朋友试用门槛未完成**（2026-09-30 增加 T38/T39/T40 后，须由未参与开发的人在目标 Windows 环境使用 EXE 试用包复验，不可代做）。本轮同时修掉一个阻断级缺陷（见第二节）。
+
+**一、本轮范围与改动（未提交）**
+
+用户裁定：本轮不只跑门槛，还要**把轨迹视图做出来**（T25 状态矩阵第 20/21 项）。矩阵第 4 节注 2 原文写「轨迹有两个入口……本项目可选择其一，不必两个都做」；本项目**两个都做**，属范围扩展。
+
+- 后端：**零改动**——`ToolUseView`、`ModelCallRecordView` 的字段在 T32/T34 已备齐，`schema.gen.ts` 也早已包含相关内容。本轮未改后端契约。
+- 前端新增：`frontend/src/features/trace/`（轨迹列表 + 检查器）；`adapters.ts` / `adapters.test.ts` 补轨迹字段适配；`App.tsx`、`LiveApp.tsx` 两处壳层接线；`fixtures/scenarios.ts` / `types.ts` 补 fixture 场景；`ToolRow.tsx` 把 `STATUS_LABEL` 改为导出常量 `TOOL_STATUS_LABEL`；`useSessionStream.ts` / `useSessionStream.test.tsx` 同步。
+- e2e/基线：`prototype.spec.ts`、`conversation-variants.spec.ts`、`approval-live.spec.ts` 增/改用例；新增 6 张基线（1440×900 与 1280×800 各 3 张：`trace.png`、`trace-inspector.png`、`trace-inspector-bottom.png`）。
+- 缺陷修复：`src/local_agent/graph/nodes.py` + `tests/test_graph_resume.py`（见第二节）。
+- 文档：`README.md` 新增「开发与构建（v0.4 前端）」「故障诊断」两节，修正「入口现状」与「已知限制」中的 Streamlit 表述。
+
+**二、阻断级缺陷：拒绝审批后会话永久卡死（本轮发现并已修复）**
+
+- **现象**：在页面上**拒绝**一次审批后，**同一会话的下一轮**提交 → 页面永远停在「正在生成回答…」，会话状态卡在 `running`，无任何终止事件，刷新与重启都不恢复（checkpoint 里就是坏历史）。
+- **服务端原文**：
+  `OpenAIInvalidRequestError: Error code: 400 - {'error': {'message': "An assistant message with 'tool_calls' must be followed by tool messages responding to each 'tool_call_id'. (insufficient tool messages following tool_calls message) (request_id: 6bf60225-…)", 'type': 'invalid_request_error', …}}`，
+  伴随 `During task with name 'agent_decision_node'`，异常从 ASGI/SSE 端点逃逸（`ERROR: Exception in ASGI application`）。
+- **根因**：`approval_interrupt_node` 的**拒绝分支**只追加了 `AIMessage(content=REJECTED_REPLY)`，**没有为被拒的 `tool_call_id` 补 `ToolMessage`**。于是历史里留下「助手消息带 `tool_calls`、后面却没有对应结果」的残缺序列——下一轮把它原样外发给 OpenAI 兼容端点必然 400。异常在 SSE 生成器里抛出，前端等不到终止事件。
+  值得记一笔：**硬拒绝路径（安全门）本来就补了 `ToolMessage`**，同一个不变式在两条路径上只落实了一条——这不是设计缺失，是实现不一致。
+- **修复**：拒绝分支在写 `REJECTED_REPLY` 之前先补一条应答（`nodes.py`，`approval_interrupt_node`）：
+  `ToolMessage(content=f"已拒绝执行 {approved_name}：该动作未执行，也不会自动重试。", tool_call_id=approved_id, name=approved_name)`。
+- **回归防护**：`tests/test_graph_resume.py` 新增不变式辅助 `_unanswered_tool_calls(messages)`（列出「带 `tool_calls` 却没有对应 `ToolMessage`」的调用 id），并在 `test_delete_rejection_keeps_file_and_stops` 末尾断言其为空——把「每条调用都必须有结果，包括被拒的那条」钉成可执行的不变式，而不是只修这一处。
+- **端到端复验**（新会话 `b630d7ab928a`）：拒绝 `delete_file` → 文件保留 → 同会话下一轮「刚才那个删除为什么没执行？」**11.1 秒正常完成**，模型复述了新 ToolMessage 原文「已拒绝执行 delete_file：该动作未执行，也不会自动重试」；新服务日志 `BadRequestError` 计数 **0**、无 Traceback；该会话 `session_state=completed`、`errors=0`。
+- **对 UI 无影响（故不动视觉基线）**：该会话 `messages` 8 条里**看不到**这条 ToolMessage——投影层只为 `state["tool_events"]` 出工具行（`ToolMessage` 仅用于配对填充 payload），因此页面渲染与基线都不变。
+- 已卡死的旧会话 `f5041ba4d176` **按用户裁定「先留着」**，不做数据修复；本修复只对后续轮次生效。
+
+**三、各门槛实测数字**
+
+- **自动门槛（后端）**：ruff `All checks passed!`；mypy `Success: no issues found in 89 source files`；`tests/test_graph_resume.py` 单跑 `63 passed`；全量 pytest `854 passed, 6 skipped, 1 failed` in 128.69s。
+  - 那 1 failed 是 `test_workspace_switching_binds_one_session_per_workspace`：断言工作区列表顺序（实际 `[b, a]`、期望 `[a, b]`），**单跑必过**，判定为**既有 flaky**（并列 `created_at` 的排序不稳定），与本轮改动无关——如实记录，未顺手改。
+- **自动门槛（前端）**：`npm ci` 通过；typecheck 通过（无输出）；lint `1 problem (0 errors, 1 warning)`（见第四节第 4 条）；unit `Tests 202 passed (202)` across 23 files；build `index-CLCORH9h.js 493.37 kB (gzip 152.14 kB)` + `index-CB6Lef-5.css 58.20 kB (gzip 9.25 kB)`。
+- **自动门槛（Playwright）**：`110 passed (26.6s)`（1440×900 与 1280×800 两视口全绿，`maxDiffPixelRatio: 0`）。
+- **视觉门槛**：两视口基线各 **30 张**齐备，含本轮新增的 `trace.png` / `trace-inspector.png` / `trace-inspector-bottom.png` 各 2 套（共 6 张）。新增基线**只**用 `-g 'trace' --update-snapshots=all` 作用域重拍，未全量重建。逐项核对结论：无默认控件、裸 JSON、关键错位、遮挡、低对比度或临时占位组件。**遗留**：`docs/ui-reference/state-matrix.md` 的进度账（L140）第 20/21 行仍写「⛔ 未做」，与现状不符，**本轮未同步**（见第四节第 5 条）。
+- **功能门槛（真实 DeepSeek 端点，页面实测）**：逐项走通——
+  1. **连接与默认模型**：两个兼容连接「聊天 / 工具调用 / 流式」全通过；`deepseek-v4-pro` 设为默认。
+  2. **会话内切模型**：第 1 轮全部 `deepseek-v4-pro`，第 2–4 轮全部 `deepseek-flash`（逐调用明细可查，切换只作用于下一轮）。
+  3. **两轮对话 + 工具 + 计划 + diff**：读文件 → 精确串替换（sha256 由 `f5277fd4…` 变为 `7de87ead…`，完整值见该会话工具事件）→ diff 卡恰好一对增删。
+  4. **审批通过**：`delete_file .t37-trial/approve-delete.txt` → 批准后文件消失（`Test-Path` = False，耗时 11 ms）。
+  5. **审批拒绝**：`delete_file .t37-trial/reject-delete.txt` → 拒绝后文件保留（`Test-Path` = True）。（此轮即暴露了第二节的阻断缺陷，修复后在新会话复验通过。）
+  6. **刷新恢复**：F5 等价重载后 4 轮消息、6 张工具卡、计划、审批、逐轮统计全部还原；`messages` 仍 23 条、`turn_usages` 仍 4，**无重放**。
+  7. **重启恢复**：重启 :8000 后同样全部还原；顺带验证深链 `/sessions/f5041ba4d176` 的 SPA 回退返回 200。
+- **缓存门槛**：**通过（有证据）**。优化前后对照记录见 T35 / T36：`scripts/measure_usage_baseline.py` 在固定模型与端点下跑四步多轮场景，逐调用落 JSON，**首轮后出现正数 `cache_read`**，正确性评测未回退。本轮浏览器实测中，逐轮「缓存命中」显示为**「未知」**——该路径供应商未上报该字段，按诚实规则**未编造 0**；「实际 token / 估算 token」分离已在 UI 落实。`scripts/measure_usage_baseline.py` 保留在仓库，供后续真实验收重跑对照。
+- **分发门槛**：**通过**。生产形态下只启动一个 `uv run python -m local_agent.api` 进程、一个 Uvicorn worker（启动日志逐字为 `local-agent-web v0.4 已启动：http://127.0.0.1:8000（单进程、单 worker）`），页面 / `/api` / SSE 同源可用；README 已给出开发、构建、启动、配置、故障诊断、单 worker 限制与已知限制；默认只监听回环地址。
+- **朋友试用门槛**：**未完成**（见「状态」）。
+
+**四、未验证项与已知缺口（如实记录，不粉饰）**
+
+1. **「在途/等待审批运行不被切换改写」只验证了一半**：运行与等待审批期间，模型按钮的 `disabled` 仍为 `false`（未被禁用），**点击后是否被后端拒绝、是否真的不影响在途运行，本轮未验证**。这是功能门槛里唯一没有闭环的一条。
+2. **`Session log` 仍是惰性按钮**：`TopBar.tsx` 里它没有 handler、没有页面、没有接口；该处注释本身就写着「缺口记在 T37 验收记录里」——现在记在这里。v0.4 未实现会话日志导出，**申请在分发门槛上人工豁免**（不影响朋友试用核心路径），后续任务补齐。
+3. **已卡死会话 `f5041ba4d176`**：按用户裁定保留，不做数据修复。
+4. **前端 lint 的 1 warning 未处置**：`ToolRow.tsx 28:14 react-refresh/only-export-components`，源于本轮把 `STATUS_LABEL` 改成 `export const TOOL_STATUS_LABEL`（在组件文件中导出常量）。不是 error，是否提取到独立常量文件待定。
+5. **`state-matrix.md` 进度账未同步**：L140 的综合行仍写「08 / 10–16 / 20 / 21 轨迹与详情 | ⛔ 未做」，而 20/21 已于本轮落地。
+
+**五、次要观察（本轮发现，未修复，留作后续）**
+
+1. **拒绝后计划状态不收敛**：`plan = [failed, running, pending, pending]`（后三步停在 `running`/`pending`），而 `session_state = blocked`。语义上「本轮已结束、在等用户补充信息」时，计划步骤应同时收敛，现在不一致。
+2. **已决审批卡丢字段**：拒绝后 `tool_name = "（未记录）"`、`impact_summary = "（未记录影响摘要）"`、`target = null`、`redacted_arguments = {}`。字段本身有 `min_length=1` 约束，故落占位串；观感上「刚拒绝的这张卡却说没记录」不合理，根因是审批请求的事实没有随已决状态一起留存。
+3. **侧栏显示「空闲」而快照为 `running`**：两处状态口径不一致，刷新瞬间可观察到。
+4. **拒绝后不产生「被拒绝」工具卡**：`ToolStatus` 里有 `denied`，但页面上的工具行没有出现被拒的那条，用户看不到「这次调用被谁拒了」的完整链条。
+5. **`edit_file` 折叠摘要过长**：摘要里塞进了完整的 64 字符 `expected_sha256`，折叠态就该只给短标识。
+6. **占位说明 `preserve_recent_tool_steps` 的一次性回退**（T36 遗留项，已量化）：净收益约 216 token，供应商按 64 token 块取整后**实际收益为 0**，故不动 `short_term.py`。
+
+**六、清理与待办**
+
+- **待清理**：`local-agent-web/.t37-trial/`（本轮验收样本 `notes.txt`、`reject-delete.txt`；`approve-delete.txt` 已在批准环节被真删除）。
+- **仓库根未跟踪文件**：`OPTIMIZATION_BACKLOG.md`（未跟踪，是否入库由用户决定）；前端三张调试图（`probe-fixture-400.png` / `-588.png` / `-900.png`）此前已提示清理。
+- **提交**：本轮全部改动**未提交**，提交由用户自己完成。
+- **剩余 T37 任务**：`t37-visual`（按 `state-matrix.md` 逐项核对两视口截图，并把进度账同步为已完成）、`t37-trial`（朋友试用清单，必须第三方执行）。
+
+### 页面适配修复记录（2026-09-29）｜窄窗可用性与溢出
+
+**背景**：用户上传页面截图，指出多处「超出」「不适配」。经询问裁定两条边界：**窄窗也要能用**（目标降约 640px；窗口变窄时侧栏收成 56px 图标栏；任何宽度都不得出现横向滚动条）、**允许改动 1440×900 / 1280×800 既有视觉基线**（可读性优先）。
+
+**一、诊断：不是零散「超出」，是三层结构性缺陷**
+
+1. **内容不可收缩**：`flex: 0 0 auto` + `white-space: nowrap` 的项按 max-content 定尺寸，父级 `min-width: 0` 在子项也不可收缩时失效。
+2. **输入区控件在窄窗互相挤压**：计量器与发送按钮同处一行，挤压时把发送按钮顶出视口。
+3. **全前端没有任何宽度断点**（仅 1 条 `@media (prefers-reduced-motion)`），且真应用的侧栏折叠**根本没接线**——折叠态存在（矩阵 24 已有基线），但没有任何入口能到达它。
+
+**硬证据（决定性）**：把截图里那条 `edit_file` 参数串（含 64 位 `sha256` 与 reason 全文）注入工具行后实测 `ToolRow .summary`：`flex: 0 0 auto`、`min-width: auto`，盒子宽 **1312px 且永不收缩**，超出会话列 **+686px**（1440/1280 同样），640 下 +1074px；`.scroll` 因 `overflow-y: auto` 把另一轴的 `overflow-x` 计算成 `auto`，于是出现横向滚动条。
+
+**二、改动清单（前端 10 个文件，后端零改动）**
+
+| 文件 | 改动 |
+| --- | --- |
+| `features/tool/ToolRow.module.css` / `.tsx` | `.summary` 改可收缩 + 省略，并补 `title` 取全文（全文仍在展开卡里） |
+| `features/approval/ApprovalCard.module.css` | `.head` 允许换行；`.id`（32 位十六进制）可收缩省略；`.summary` 与 `.fact dd` 任意位置折行 |
+| `features/memory/MemoryRow.module.css` | `.sourceRef` 由省略号改折行（省略会抹掉定位信息） |
+| `components/Composer.tsx` / `.module.css` | 计量器 + 发送包成 `.right`，`.controls` 允许换行（整组下移而不是顶出视口）；`.chip` 可收缩 |
+| `components/icons.tsx` | 新增 `ChevronLeft`（镜像 `ChevronRight`） |
+| `components/Sidebar.tsx` / `.module.css` | 品牌行右侧新增折叠按钮；折叠态「展开侧边栏」补上 `onClick`（此前是死按钮） |
+| `app/LiveApp.tsx` | 折叠状态接线：手动优先 + `≤1024px` 自动收起；`isNarrowViewport()` 做环境守卫 |
+| `features/trace/TraceView.module.css` | 窄窗表格与检查器上下堆叠；表格最小宽度按**窗格**宽度判断（容器查询）而非视口 |
+
+**三、验证（实测数字）**
+
+- **越界扫描**：20 个状态 × 640/768/900/1024/1440 = **100 次加载，页面级横向溢出 0**（`documentElement.scrollWidth - clientWidth ≤ 0`）。修复前 640 下所有含输入区的状态整页溢出（docSW 665–705）。
+- **前端门禁**：typecheck 通过（无输出）；lint `1 problem (0 errors, 1 warning)`（即 T37 已有的 `react-refresh/only-export-components`，非本轮引入）；unit `Tests 202 passed (202)`；build `index-D-9ldOyf.js 494.43 kB (gzip 152.35 kB)` + `index-DRx_4XzV.css 59.04 kB (gzip 9.33 kB)`；Playwright **`110 passed (22.0s)`**。
+- **单测失败修复**：jsdom 29 没有 `window.matchMedia`，原写法在 `useState` 初始化器里直接调用，导致 `LiveApp.test.tsx` 13 例全失败；改为 `isNarrowViewport()` 守卫（取不到就按宽窗处理），失败清零。
+- **视觉基线（54 张受影响，经用户批准后重拍）**：受影响的全是**含展开态侧栏**的场景与滚动捕获（`sidebar-collapsed` 不受折叠按钮影响）。逐张与 HEAD 做像素比对：**每张差异 ≤ 36 像素，全部集中在 `(238,21)-(244,31)`**，即新增的折叠按钮字形；另有每张 ≤ 10 个孤立抗锯齿像素，非布局位移。`sidebar-collapsed` 仅差 5 像素。
+- **本轮自查出的回归并已修正**：给 `.table` 加 `min-width: 640px` 后，1280 下窗格宽约 604px 就开始生效，把整张轨迹表撑宽、4 列全部位移（差异 1.7 万像素）。改为 `@container (max-width: 519px)` 按窗格宽度判定后，1280 轨迹差异回到 26 像素（只有折叠按钮）。
+- **未重跑后端门禁**：本轮后端零改动，故未重跑 ruff / mypy / pytest。
+- **清理**：删除前端根目录 3 张调试图 `_tmp_shot_a_960.png` / `_tmp_shot_a_1280.png` / `_tmp_shot_a_1920.png`。
+
+**四、未验证项与遗留（如实记录）**
+
+1. **折叠按钮在真应用（`LiveApp`）的点击行为未在真后端页面上手工点过**：只经单测（`LiveApp.test.tsx`）与代码路径确认；`LiveApp` 未导出折叠状态，e2e 无法直接断言。
+2. **折叠偏好不落盘**：刷新后回到「跟随窗口宽度」，未做 `localStorage`（避免引入新的持久化层）。
+3. **轨迹表在极窄窗格内横向滚动**：`@container` 生效时表格保持 520px 并在自己那个 `overflow: auto` 的窗格里滚动——这是设计内行为，非页面级溢出。
+
+### T38｜权限模式与外部路径授权（L）
+
+- **目标**：把"Agent 能不能碰工作区外的文件"从单一布尔升级为**可配置、可在界面上维护**的能力边界。两条都必须成立：分发给朋友的实例**开箱安全**（默认拒绝一切外部路径），同时**不卡死在"什么都干不了"**（用户自己点两下就能放开）。
+- **主要文件**：`src/local_agent/config.py`、`security/path_guard.py`、`security/policy.py`、`application/service.py`、新增授权存储与 `application` 用例、`api/schemas.py`、`api/routes.py`、`frontend/src/features/settings/`、`tests/`。
+- **实现要点**：
+  1. **配置只管档位，授权条目进库**：`workspace.external_paths.mode`（`deny` / `whitelist` / `allow`，默认 `whitelist`）。`whitelist` + 空授权 ≡ `deny`，因此**出厂默认拒绝一切外部路径**。界面上能改的东西不写回 `config.yaml`（注释会被抹、文件可能只读、让应用改自己的配置文件本身就是坑）——授权条目与模式一起进设置库，沿用 T29A"保存即生效、作用于下一轮"的口径。
+  2. **旧键平滑**：`workspace.allow_external_paths` 保留为快捷方式（`true` ≡ `mode: allow`），新旧同时出现时报错要求二选一。现有配置文件**不因本任务失效**——这是刻意的，改配置才能启动是不可接受的升级代价。
+  3. **判定分级**：`path_guard.resolve_target` 从"布尔放行"改为"查授权表"，`ResolvedTarget` 带上访问级别；`policy._external_side_effect_decision` 据此分级——`read` 只放宽只读工具；**`read_write` 的目录视同工作区内**，写操作走常规规则（用户裁定 2026-09-29）。不这么做的话"读写授权"名不副实：既然认可了目录，却每次改一行都要再问一遍，用户不如不授权。
+  4. **四项硬约束不受任何模式影响**：删除文件、覆盖已有文件、破坏性 Shell 命令、大范围编辑**在任何档位下都必须人工批准**。`RequireApprovalConfig` 的存在意义正是"不能由配置放开"，本任务不碰它。授权改变的只是"常规小改动是否需要逐次询问"。
+  5. **权限模式只是预设，不是新机制**：手动审批（默认）/ 放行 / 自定义。**放行档不要求用户配任何东西**（等价 `mode: allow` 放开全部外部路径，敏感操作照旧询问）；**白名单只在自定义档出现**——让用户在"少打扰"档里一条条加目录，与这个档位的名字自相矛盾。
+  6. **错误提示指向用户真能找到的地方**：`path_guard` 现在那句"请显式设置 workspace.allow_external_paths=true"是写给运维的，经工具结果回填后由模型转述给**最终用户**，而界面上根本没有这个开关——用户被指向一个不存在的地方（返工实证，2026-09-29）。改为"该路径在工作区外且未被授权。请在「设置 → 权限」中添加授权，或改到工作区内操作。"
+  7. **入口只有一个**：权限配置并入现有「设置」对话框作为分区，不再开第二个对话框。代价是 `SettingsDialog.test.tsx` 那条"不提供分节切换"的断言（以及组件头部的同名注释）**必须一并改写**——当初的论据是"不摆做不到的分节"，现在做得到了。
+- **依赖**：T29A（设置库与"保存即生效"口径）、T32（审批链路与审批卡的既有语义）。
+- **测试**：三种 mode × 命中/未命中 × `read`/`read_write` × 相对路径/`~`/绝对路径；**硬约束回归**（三种 mode 下四类敏感操作都必须审批，这是本任务最该钉死的一条）；配置兼容（旧键等价、新旧冲突报错）；授权表增删改查与路径规范化（`E:/` 与 `E:\`、大小写、符号链接）；契约同步（`export_openapi.py` + `check:api`）；前端权限分区单测。
+- **人工验收**：切到「放行」→ 让 Agent 读写一个工作区外的目录并成功 → 再让它删除该目录里的文件，**必须出现审批卡**；切回「手动审批」→ 同样的请求被拒，且提示指向「设置 → 权限」里真实存在的位置。
+- **停止条件**：任何模式下能绕过那四项硬约束；`read_write` 授权后删除/覆盖不再请求批准；出厂默认（空白名单）就能访问工作区外；同一份配置存在第二处真源（yaml 与库各存一份授权）；为兼容旧键而保留两套并行写法且没有冲突校验。
+
+### T39｜朋友试用前的展示与浏览器数据收口（T38 后执行）
+
+- **目标**：普通对话先呈现回答、当前进度、需要用户决定的动作、修改结果和失败后的下一步；工具调用以用户能理解的动作与状态表达。技术轨迹保留可复核证据，但不让原始工具名、线程/会话/运行 ID、协议字段名和长工具输出占据默认页面。
+- **已确认现象**：`frontend/src/features/tool/ToolRow.tsx:64-66` 直接渲染 `tool.name`；`frontend/src/features/trace/TraceInspector.tsx:51-129` 在页面写出 `ToolUseView`、`run_id`、Schema/结果指纹和契约缺口说明；`frontend/src/features/tool/ToolCards.tsx:46-77,108-158` 会显示文件正文与 stdout/stderr；`frontend/src/components/TopBar.tsx:19,55` 的 `Session log` 仍是惰性按钮。Playwright fixture 截图 `trace-inspector.png`、`tools.png` 证明这些界面状态存在，不代表已做过真实朋友试用。用户反馈还看到线程 ID；具体出现位置需在 T39 逐页复核，不能把该反馈冒充已定位的代码证据。
+- **改动边界**：先按 `ARCHITECTURE.md` §15.8 逐页、逐字段审查快照、SSE、导出及浏览器网络响应，分类为默认可见 / 用户主动展开 / 开发诊断 / 不进入浏览器；再修订契约、应用投影和前端。稳定的会话等不透明 ID 若为请求、重连或幂等所必需，可作为协议字段留在浏览器，但不能当页面文案展示；其余内部字段应从浏览器 DTO 移除，而不是仅用 CSS 隐藏。服务端负责脱敏、裁剪和字段白名单。审批、失败、diff、来源、用量事实与刷新恢复保持可达；可展开详情也使用面向用户的名称和有界摘要。
+- **验收**：空会话、普通问答、工具成功/失败、长输出、审批、diff、轨迹和刷新恢复在 1440×900/1280×800 核对；普通页面和展开详情不出现原始工具名、线程/会话/运行 ID、DTO 名、Schema/结果指纹等内部字段；浏览器响应对密钥、隐藏推理、完整 Prompt、私人绝对路径、未经脱敏记忆、原始供应商错误及无业务必要的内部字段有负例断言；可见按钮均能操作或移除。保留的协议 ID 只服务操作与重连，刷新不重放工具。
+- **试用放行**：T37 记录的工作区排序失败已在 2026-09-30 以确定性用例复现并修复，仓库外临时目录下的 Python 全量回归为 871 passed / 6 skipped；T39 仍需复核在途/等待审批时模型切换语义，并在改动后重跑全量回归。T40 打包验收后再由未参与开发的朋友完成解释文件、定位问题、审批修改等真实任务，记录是否成功、卡点和是否需要口头解释。若任务必须理解内部术语才能继续，T37 朋友试用门槛不通过。
+- **本次不做**：Profile、Git、Web 搜索、Skill、后台任务或新插件体系；这些仍属于后续阶段。
+
+### T40｜Windows 可解压 EXE 试用包（T39 后执行）
+
+- **目标**：交付一个可解压文件夹；朋友在目标 Windows 机器双击其中的 EXE 即能进入本机页面、完成初次设置和核心任务，不需要安装 Python、Node、uv 或运行命令。仅支持本机回环地址、单进程、单 worker；不把公网部署或安装器纳入本任务。
+- **已确认入口与路径**：`src/local_agent/api/__main__.py` 已有服务入口和 `--pick-directory` 自启动分支，但目前只打印 URL；`api/container.py` 按配置文件所在目录解析数据库、设置和前端路径；`api/static.py` 从 `frontend/dist` 托管页面。打包时须明确区分只读程序/前端资源与可写配置、数据库、日志和用户工作区，不能让 `_internal` 或临时解压目录成为持久数据目录。
+- **实现边界**：在 Windows 上用目录式打包方案做可复现构建，先以 PyInstaller onedir 作为验证候选，跑通后锁定工具版本与构建脚本；把前端生产构建和所需 Python 运行依赖随包交付，保留目录选择器的 `sys.executable --pick-directory` 分支。双击启动需给出可见的启动/失败提示并打开本机页面；重复启动、端口占用和退出行为要有可理解提示。试用包不包含开发者 API Key、真实数据库、日志、工作区或机器绝对路径；朋友自行在设置页配置模型。
+- **数据与边界**：为包选定稳定的用户可写数据目录与迁移/备份口径，重启和覆盖升级后保留设置、凭据引用、Checkpoint 和会话。前端静态资源和 Python 字节码会随包送到用户机器，EXE 不是保密机制；项目设计的暴露控制依赖 T39 的服务端投影与界面收口，不能用“打包后看不到源码”替代验收。
+- **自动验收**：构建产物含 EXE、静态页及全部运行资源；清洁解压后启动页面/API/SSE，验证重启持久化、单实例锁、目录选择器子进程、核心审批与配置流程；检查分发目录及前端资源中没有密钥、真实数据或开发机路径。保存构建版本、文件清单与校验值，并给出明确的压缩包制作步骤。
+- **人工验收**：在没有开发工具的目标 Windows 环境，分别从普通路径及含空格/中文的路径解压，双击启动、设置模型、选工作区、执行只读任务及需审批的修改、刷新、退出、重启、覆盖升级；故障信息能指导朋友自行处理。T37 的朋友试用必须使用这份实际分发包。
+- **本次不做**：单文件 EXE、安装器、自动更新、跨平台发行或代码混淆；先让目录式试用包可靠可用。
 
 ## 8. 实施顺序、提交与审查节奏
 
@@ -2258,7 +2416,7 @@ T30 交接的缺口在此关闭：T30 收尾记录写明"记忆行不渲染（T3
 
 ```text
 T25 → T26 → T27 → T28 → T29 → T29A → T30 → T31 → T32
-    → T33 → T34 → T35 → T36（证据触发）→ T37
+    → T33 → T34 → T35 → T36（证据触发）→ T37 初验 → T38 → T39 → T40 → T37 朋友试用复验
 ```
 
 - T26 被刻意放在应用服务实现前：先把高保真页面壳做出来，尽早验证视觉方向；它只能使用 fixture，不能临时直连 Graph。
@@ -2288,7 +2446,10 @@ T25 → T26 → T27 → T28 → T29 → T29A → T30 → T31 → T32
 | 动态上下文快照 | T35 | Checkpoint/消费者隔离测试 | 重启后请求字节重建 | 显示为用户气泡、触发记忆/摘要/RAG 或建立伪轮次 |
 | 缓存 epoch | T36 | compression/projection regression | 长对话逐轮命中记录 | 为命中删除原文或放宽预算 |
 | 生产分发 | T37 | build/static/API/e2e gates | 新环境按 README 启动 | 仍需单独 Node 服务、非回环默认监听 |
-| 完整试用 | T37 | 全量门槛 | 未参与开发者完成核心任务 | 阻断操作、审批不可达、重复副作用 |
+| 权限模式与外部路径 | T38 | 模式/路径矩阵与四项强制审批回归 | 切换档位、工作区外读写及删除审批 | 默认放行外部路径、敏感操作绕过审批 |
+| 朋友可理解的展示 | T39 | 浏览器 DTO/SSE/导出字段负例、前端交互与截图 | 普通对话、轨迹、长输出、失败和刷新恢复 | 原始工具名/ID 出现在页面、不应暴露字段进入浏览器、惰性按钮 |
+| Windows EXE 试用包 | T40 | onedir 构建、资源清单、无敏感数据检查、打包后 API/SSE/重启测试 | 无开发工具机器解压双击、初设、目录选择、审批、退出和升级 | 缺资源、需命令行、数据随更新丢失、包内带密钥或真实数据 |
+| 完整试用 | T37 | 全量门槛 | 未参与开发者使用 T40 试用包完成核心任务 | 阻断操作、审批不可达、重复副作用 |
 
 ## 10. 风险与停止条件
 
@@ -2306,7 +2467,7 @@ T25 → T26 → T27 → T28 → T29 → T29A → T30 → T31 → T32
 
 只有同时满足以下条件，才能把 v0.4 标记为实现完成：
 
-- T25–T35（含 T29A）全部通过；T36 已完成或根据真实证据明确延期；T37 全部门槛通过。
+- T25–T35（含 T29A）全部通过；T36 已完成或根据真实证据明确延期；T38、T39、T40 通过后，T37 朋友试用门槛使用分发包复验通过。
 - 独立 Web 达到确认过的 DeepSeek Harness 高保真目标，朋友不需要通过 Streamlit 或原始 JSON 才能使用核心能力。
 - React 与 Streamlit 都只通过应用服务访问业务能力；Checkpoint 仍是唯一执行恢复真源。
 - 页面刷新、SSE 重连和审批恢复不重复模型、工具或文件副作用。
