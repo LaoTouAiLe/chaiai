@@ -1,6 +1,22 @@
+import { useState } from 'react'
+
 import type { SessionSummaryView } from '../fixtures/types'
 import { ChevronLeft, ChevronRight } from './icons'
 import styles from './Sidebar.module.css'
+import { SidebarItemMenu } from './SidebarItemMenu'
+
+export interface SidebarManagement {
+  renameSession: (id: string, title: string) => Promise<void>
+  archiveSession: (id: string) => Promise<void>
+  renameWorkspace: (id: string, title: string) => Promise<void>
+  removeWorkspace: (id: string) => Promise<void>
+  restoreSession: (id: string) => Promise<void>
+  archivedOpen: boolean
+  onToggleArchived: () => void
+  archivedSessions: readonly { id: string; title: string }[]
+  archivedLoading: boolean
+  archivedError: string | null
+}
 
 interface SidebarSession {
   id: string
@@ -32,7 +48,8 @@ export interface SidebarActions {
 }
 
 interface SidebarProps {
-  workspaces: ReadonlyArray<{ id: string; title: string; sessions: readonly SidebarSession[] }>
+  workspaces: ReadonlyArray<{ id: string; title: string; sessions: readonly SidebarSession[]; managed?: boolean }>
+  management?: SidebarManagement
   /**
    * Narrow rail (matrix 24): brand, new session, expand and settings, with no
    * session tree. Nothing is secretly selected — the tree is not rendered at all.
@@ -81,7 +98,19 @@ function statusClass(status: SessionSummaryView['status']): string {
  *
  * Static prototype data only — selection and search become real in T30.
  */
-export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace }: SidebarProps) {
+export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, management }: SidebarProps) {
+  const [search, setSearch] = useState('')
+  const [restoring, setRestoring] = useState<string | null>(null)
+  const [restoreError, setRestoreError] = useState<string | null>(null)
+  const query = search.trim().toLocaleLowerCase()
+  const visibleWorkspaces = query === '' ? workspaces : workspaces
+    .map((workspace) => ({
+      ...workspace,
+      sessions: workspace.title.toLocaleLowerCase().includes(query)
+        ? workspace.sessions
+        : workspace.sessions.filter((session) => session.title.toLocaleLowerCase().includes(query)),
+    }))
+    .filter((workspace) => workspace.sessions.length > 0)
   return (
     <aside
       className={collapsed ? `${styles.sidebar} ${styles.sidebarCollapsed}` : styles.sidebar}
@@ -133,7 +162,7 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace }
 
           <label className={styles.search}>
             <span className="visually-hidden">搜索会话</span>
-            <input placeholder="搜索会话…" type="search" />
+            <input placeholder="搜索会话…" type="search" value={search} onChange={(event) => setSearch(event.target.value)} />
           </label>
 
           <div className={styles.treeHeader}>
@@ -153,18 +182,25 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace }
             <p className={styles.treeError} role="status">{addWorkspace.error}</p>
           )}
           <nav aria-label="会话">
-            {workspaces.map((workspace) => (
+            {visibleWorkspaces.map((workspace) => (
               <div key={workspace.id} className={styles.workspace}>
-                <button
+                <div className={styles.managedRow}>
+                {workspace.managed === false ? <span className={styles.workspaceTitle}>{workspace.title}</span> : <button
                   type="button"
                   className={styles.workspaceTitle}
                   onClick={() => actions?.onSelectWorkspace(workspace.id)}
                 >
                   {workspace.title}
-                </button>
+                </button>}
+                {management === undefined || workspace.managed === false ? null : <SidebarItemMenu
+                  title={workspace.title} kind="工作区"
+                  onRename={(title) => management.renameWorkspace(workspace.id, title)}
+                  onRemove={() => management.removeWorkspace(workspace.id)} />}
+                </div>
                 <ul>
                   {workspace.sessions.map((session) => (
                     <li key={session.id} aria-current={session.selected ? 'true' : undefined}>
+                      <div className={styles.managedRow}>
                       <button
                         type="button"
                         className={session.selected ? `${styles.session} ${styles.sessionSelected}` : styles.session}
@@ -175,12 +211,39 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace }
                         <span className={styles.sessionTitle}>{session.title}</span>
                         <span className={styles.sessionTime}>{session.timeLabel}</span>
                       </button>
+                      {management === undefined ? null : <SidebarItemMenu title={session.title} kind="会话"
+                        blocked={session.status === 'running' || session.status === 'awaiting-approval'}
+                        onRename={(title) => management.renameSession(session.id, title)}
+                        onRemove={() => management.archiveSession(session.id)} />}
+                      </div>
                     </li>
                   ))}
                 </ul>
               </div>
             ))}
+            {query !== '' && visibleWorkspaces.length === 0 ? <p className={styles.noResults}>没有匹配的会话</p> : null}
           </nav>
+          {management === undefined ? null : <section className={styles.archivedSection} aria-label="已归档会话">
+            <button type="button" className={styles.footerButton} aria-expanded={management.archivedOpen}
+              onClick={management.onToggleArchived}>已归档会话</button>
+            {!management.archivedOpen ? null : <>
+              <p className={styles.noResults}>归档保留消息和运行记录，可随时恢复。</p>
+              {management.archivedLoading ? <p role="status">正在读取…</p> : null}
+              {management.archivedError === null ? null : <p role="alert">{management.archivedError}</p>}
+              {restoreError === null ? null : <p role="alert">{restoreError}</p>}
+              {!management.archivedLoading && management.archivedSessions.length === 0 ? <p className={styles.noResults}>没有已归档会话</p> : null}
+              {management.archivedSessions.map((item) => <div className={styles.archivedRow} key={item.id}>
+                <span className={styles.sessionTitle} title={item.title}>{item.title}</span>
+                <button type="button" disabled={restoring !== null} aria-label={`恢复会话「${item.title}」`}
+                  onClick={async () => {
+                    setRestoring(item.id); setRestoreError(null)
+                    try { await management.restoreSession(item.id) }
+                    catch { setRestoreError('恢复未保存，请检查连接后重试。') }
+                    finally { setRestoring(null) }
+                  }}>{restoring === item.id ? '恢复中…' : '恢复'}</button>
+              </div>)}
+            </>}
+          </section>}
         </>
       )}
 

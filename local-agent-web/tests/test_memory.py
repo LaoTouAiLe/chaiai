@@ -307,8 +307,12 @@ def test_legacy_v1_database_without_session_index_still_opens(tmp_path: Path) ->
 
 
 def test_medium_term_disabled_does_not_create_index(
-    app_config: AppConfig, tmp_path: Path
+    app_config: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    previously_imported = "chromadb" in sys.modules
+    def unexpected_import():
+        pytest.fail("关闭中期记忆时不能加载 Chroma")
+    monkeypatch.setattr(medium_term, "_import_chromadb", unexpected_import)
     config = app_config.memory.medium_term.model_copy(
         update={"path": (tmp_path / "chroma").as_posix()}
     )
@@ -318,7 +322,7 @@ def test_medium_term_disabled_does_not_create_index(
         medium_term.open_store(config)
 
     assert not (tmp_path / "chroma").exists()
-    assert "chromadb" not in sys.modules
+    assert ("chromadb" in sys.modules) == previously_imported
 
 
 def test_medium_term_reports_missing_embedding(app_config: AppConfig) -> None:
@@ -2256,8 +2260,12 @@ def test_recall_accepts_naive_now(store: long_term.LongTermStore, tmp_path: Path
 
 
 @requires_fastembed
-def test_embedding_readiness_is_static_and_actionable(tmp_path: Path) -> None:
+def test_embedding_readiness_is_static_and_actionable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Embedding 准备状态：只做静态判断（不加载模型），每种状态都给可照做的说明。"""
+    # This case starts before any HF import; frozen-cache restart behavior has its own regression.
+    monkeypatch.setattr(embedding_module, "_hf_constants", lambda: None)
     disabled = embedding_module.readiness(EmbeddingConfig(enabled=False))
     assert disabled.state == "disabled"
 
@@ -2299,12 +2307,15 @@ def test_embedding_readiness_for_api_provider_needs_credentials() -> None:
 
 
 @requires_fastembed
-def test_embedding_readiness_checks_the_directory_it_will_use(tmp_path: Path) -> None:
+def test_embedding_readiness_checks_the_directory_it_will_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """静态检查要覆盖"存在但不是目录""上级是文件"与离线模式文案。
 
     原来只检查"已存在路径是否可写"，页面会显示 ``ready``，直到首次加载才发现既建不了目录、
     也下不了模型（复审实证）。
     """
+    monkeypatch.setattr(embedding_module, "_hf_constants", lambda: None)
     as_file = tmp_path / "models"
     as_file.write_text("这是文件，不是目录", encoding="utf-8")
 
@@ -2371,6 +2382,8 @@ def _window(
     max_messages: int = 100,
     preserve_recent_turns: int = 0,
     preserve_recent_tool_steps: int = -1,
+    tool_step_budget_chars: int = 0,
+    tool_result_keep_chars: int = 0,
     covered_messages: int = 0,
 ) -> short_term.PromptWindow:
     return short_term.select_prompt_window(
@@ -2379,6 +2392,8 @@ def _window(
         max_messages=max_messages,
         preserve_recent_turns=preserve_recent_turns,
         preserve_recent_tool_steps=preserve_recent_tool_steps,
+        preserve_recent_tool_step_chars=tool_step_budget_chars,
+        tool_result_keep_chars=tool_result_keep_chars,
         covered_messages=covered_messages,
     )
 
@@ -2515,6 +2530,85 @@ def test_prompt_window_keeps_older_tool_steps_when_under_the_limit() -> None:
 
     assert _window(messages, preserve_recent_tool_steps=3).messages == messages
     assert _window(messages).messages == messages
+
+
+def _big_tool_loop(steps: int, body_chars: int) -> list[AnyMessage]:
+    """一个每步结果都是**大 JSON**的长工具循环（工具结果的真实形态：元数据 + 正文）。"""
+    body = "正文" * (body_chars // 2)
+    messages: list[AnyMessage] = [HumanMessage(content="读几个文件")]
+    for index in range(steps):
+        call_id = f"c{index}"
+        messages.append(
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "read_file", "args": {"path": f"f{index}.txt"}, "id": call_id}
+                ],
+            )
+        )
+        messages.append(
+            ToolMessage(
+                content=json.dumps(
+                    {"path": f"f{index}.txt", "content": body, "line_count": 6000},
+                    ensure_ascii=False,
+                ),
+                tool_call_id=call_id,
+                name="read_file",
+            )
+        )
+    return messages
+
+
+def test_prompt_window_squeezes_big_tool_results_unconditionally() -> None:
+    """超**单条**阈值的工具结果**无条件**压中段——不看窗口预算（2026-09-30，对标 dsh）。
+
+    为什么从"超预算才压"改成无条件：实测一次真实对话，未命中输入的大头正是"大工具结果**第一次**
+    进历史"那几次（单个 2 万字符的读取约 1.2 万 token 全价未命中，那一跳命中率只有 **22.6%**），
+    而窗口当时才约 45k token——**远没到 12 万的预算线**，按预算触发的裁剪**一次都没跑**，机制存在
+    等于不存在。dsh 的 ``compaction-tool-result-pruner`` 就是按单条结果阈值（8192）无条件跑的。
+
+    **不破坏前缀**：这一步每次都执行、对同一输入是确定性的，所以一条结果**第一次被发出去时就已经
+    是压过的形态**，之后每次都是同一份字节（不存在"先发全量、后来再改写"）。
+    """
+    body_chars = 12_000
+    body = "正文" * (body_chars // 2)
+    messages = _big_tool_loop(3, body_chars)
+    raw_sizes = [
+        len(str(message.content)) for message in messages if isinstance(message, ToolMessage)
+    ]
+
+    # 对照：阈值 0 = 不压，三条结果原样保留（旧口径）。
+    untouched = _window(messages, preserve_recent_turns=1, preserve_recent_tool_steps=3)
+    assert [
+        len(str(message.content))
+        for message in untouched.messages
+        if isinstance(message, ToolMessage)
+    ] == raw_sizes
+
+    window = _window(
+        messages,
+        preserve_recent_turns=1,
+        preserve_recent_tool_steps=3,
+        tool_result_keep_chars=8_192,
+    )
+
+    assert window.omitted_tool_steps == 0  # 一步都没省
+    assert window.omitted_messages == 0
+    results = [message for message in window.messages if isinstance(message, ToolMessage)]
+    assert len(results) == 3
+    assert _orphan_tool_messages(window.messages) == []
+
+    squeezed = [json.loads(str(message.content)) for message in results]
+    # 压的是**字段**不是字符串：JSON 仍然合法，元数据（path / line_count）照样读得出来。
+    assert [item["path"] for item in squeezed] == ["f0.txt", "f1.txt", "f2.txt"]
+    assert {item["line_count"] for item in squeezed} == {6000}
+    # 被压过的正文：头尾都在，中间有一条**可执行**的说明（不是一句感叹）。
+    compressed = squeezed[0]["content"]
+    assert len(compressed) < len(body)
+    assert compressed.startswith(body[:64])
+    assert compressed.endswith(body[-64:])
+    assert "字符已裁剪" in compressed
+    assert "start_line/end_line" in compressed
 
 
 def test_prompt_window_omits_tool_steps_across_turns_but_keeps_human_messages() -> None:

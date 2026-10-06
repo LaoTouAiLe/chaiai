@@ -3,11 +3,14 @@
   flex-direction: column;
   gap: var(--law-space-xs);
   margin: var(--law-space-md) 0;
-  padding: var(--law-space-md) var(--law-space-lg);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-lg);
-  background: var(--law-bg-layer-2);
+  padding: var(--law-space-xs) 0;
+  color: var(--law-text-secondary);
 }
+
+.details > summary { cursor: pointer; }
+.details > summary::before { content: '›'; color: var(--law-text-tertiary); }
+.details[open] > summary::before { transform: rotate(90deg); }
+.details[open] .head { margin-bottom: var(--law-space-sm); }
 
 .head {
   display: flex;

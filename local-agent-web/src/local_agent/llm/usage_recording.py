@@ -65,6 +65,7 @@ PURPOSE_BY_NODE: dict[str, str] = {
     "planner_node": "planning",
     "reflection_node": "reflection",
     "memory_write_node": "memory_intent",
+    "task_memory_node": "memory_extraction",
     "retrieve_code_node": "retrieval",
     "mode_router": "routing",
     "completion_router": "routing",

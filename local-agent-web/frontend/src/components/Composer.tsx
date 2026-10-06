@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from 'react'
+
 import type {
   ComposerStateView,
   ComposerTakeoverView,
@@ -10,6 +12,7 @@ import { ApprovalCard } from '../features/approval/ApprovalCard'
 import type { ApprovalActions } from '../features/approval/ApprovalCard'
 import { PlanStrip } from '../features/plan/PlanStrip'
 import { ModelMenu } from '../features/settings/ModelMenu'
+import { useGeneralPreferences } from '../features/settings/preferencesContext'
 import { ContextMeter, MeterPanel } from './ContextMeter'
 import styles from './Composer.module.css'
 
@@ -27,9 +30,19 @@ export interface ComposerActions {
   canSend: boolean
   /** Real shell only: the model chip opens or closes the session selector. */
   onToggleModelMenu?: () => void
+  /**
+   * 展开/收起上下文详情面板。省略即原型态：圆环与面板上的关闭按钮都保持惰性。
+   *
+   * 没有它时面板根本打不开（`meterOpen` 永远是 false），所以这一条是让
+   * `ContextMeter` 那句"the ring's click target"变成真的唯一入口。
+   */
+  onToggleMeter?: () => void
+  /** Changing mode creates another session; the current session's mode never changes. */
+  onSelectMode?: (mode: 'chat' | 'agent') => void
 }
 
 interface ComposerProps {
+  mode?: 'chat' | 'agent'
   session: SessionSummaryView
   plan: PlanView | null
   meter: ContextMeterView
@@ -60,7 +73,25 @@ const SEND_BLOCKED_TEXT = '任务进行中：可以先继续写草稿，但要�
  * card stays above it as a visible outcome, because a card that asks the user to
  * re-issue a request must not be the reason they cannot type one.
  */
-export function Composer({ session, plan, meter, takeover, modelMenu, state, actions, modelMenuActions, approvalActions }: ComposerProps) {
+export function Composer({ mode = 'agent', session, plan, meter, takeover, modelMenu, state, actions, modelMenuActions, approvalActions }: ComposerProps) {
+  const { send_shortcut: sendShortcut } = useGeneralPreferences()
+  const [modeMenuOpen, setModeMenuOpen] = useState(false)
+  const modeMenuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!modeMenuOpen) return
+    const closeOutside = (event: PointerEvent) => {
+      if (!modeMenuRef.current?.contains(event.target as Node)) setModeMenuOpen(false)
+    }
+    const closeEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setModeMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    document.addEventListener('keydown', closeEscape)
+    return () => {
+      document.removeEventListener('pointerdown', closeOutside)
+      document.removeEventListener('keydown', closeEscape)
+    }
+  }, [modeMenuOpen])
   const approval = takeover.kind === 'approval' ? takeover.approval : null
   const awaitingDecision = approval !== null && approval.state === 'pending'
   const disabledReason = state?.disabledReason ?? null
@@ -82,7 +113,9 @@ export function Composer({ session, plan, meter, takeover, modelMenu, state, act
 
         {modelMenu === null || awaitingDecision ? null : <ModelMenu menu={modelMenu} actions={modelMenuActions} />}
 
-        {meterOpen && !awaitingDecision ? <MeterPanel meter={meter} /> : null}
+        {meterOpen && !awaitingDecision ? (
+          <MeterPanel meter={meter} onClose={actions?.onToggleMeter} />
+        ) : null}
 
         {awaitingDecision ? (
           <ApprovalCard key={approval.approvalId} approval={approval} actions={approvalActions} />
@@ -119,7 +152,8 @@ export function Composer({ session, plan, meter, takeover, modelMenu, state, act
                       ? undefined
                       : (event) => {
                         // Enter sends, Shift+Enter keeps the newline (chat convention).
-                        if (event.key === 'Enter' && !event.shiftKey && actions.canSend) {
+                        const sendKey = sendShortcut === 'ctrl_enter' ? event.ctrlKey || event.metaKey : !event.ctrlKey && !event.metaKey
+                        if (event.key === 'Enter' && sendKey && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229 && actions.canSend) {
                           event.preventDefault()
                           actions.onSend()
                         }
@@ -138,12 +172,35 @@ export function Composer({ session, plan, meter, takeover, modelMenu, state, act
                 </p>
               )}
               <div className={styles.controls}>
-                <button type="button" className={styles.command} aria-label="命令">
-                  <span aria-hidden="true">＋</span>
-                </button>
-                <button type="button" className={styles.chip}>
-                  Workspace Write
-                </button>
+                <div className={styles.modeSelector} ref={modeMenuRef}>
+                  {actions?.onSelectMode === undefined ? (
+                    <span className={styles.chip}>{mode === 'chat' ? '闲聊 · 可读文件' : 'Agent'}</span>
+                  ) : (
+                    <button
+                      type="button"
+                      className={styles.chip}
+                      aria-label="选择会话模式"
+                      aria-expanded={modeMenuOpen}
+                      aria-haspopup="menu"
+                      onClick={() => setModeMenuOpen((open) => !open)}
+                    >
+                      {mode === 'chat' ? '闲聊 · 可读文件' : 'Agent'} ⌄
+                    </button>
+                  )}
+                  {modeMenuOpen && actions?.onSelectMode !== undefined ? (
+                    <div className={styles.modeMenu} role="menu" aria-label="会话模式">
+                      <p className={styles.modeHint}>每个会话固定一种模式。切换会新建会话。</p>
+                      <button type="button" role="menuitemradio" aria-checked={mode === 'chat'} onClick={() => {
+                        setModeMenuOpen(false)
+                        if (mode !== 'chat') actions.onSelectMode?.('chat')
+                      }}>闲聊 <span>可读取文件，不修改</span></button>
+                      <button type="button" role="menuitemradio" aria-checked={mode === 'agent'} onClick={() => {
+                        setModeMenuOpen(false)
+                        if (mode !== 'agent') actions.onSelectMode?.('agent')
+                      }}>Agent <span>可执行受控工具</span></button>
+                    </div>
+                  ) : null}
+                </div>
                 <button
                   type="button"
                   className={styles.chip}
@@ -156,7 +213,7 @@ export function Composer({ session, plan, meter, takeover, modelMenu, state, act
                 <div className={styles.spacer} />
                 {/* 计量器与发送是一个整体：窄窗整组折到第二行，而不是把发送挤出视口。 */}
                 <div className={styles.right}>
-                  <ContextMeter meter={meter} open={meterOpen} />
+                  <ContextMeter meter={meter} open={meterOpen} onToggle={actions?.onToggleMeter} />
                   {/* v0.4 exposes no `cancel_task()`, so the primary action is never a
                       stop button: sending is simply unavailable until the turn ends
                       (ARCHITECTURE §15.2, plan §T30). */}

@@ -40,14 +40,22 @@ interface SettingsDialogProps {
   permissionError?: string | null
   /** 新增/编辑表单：由容器放进来，对话框只负责摆位置（表单自己的状态不在这里）。 */
   form?: ReactNode
+  extraSections?: Partial<Record<SettingsSection, ReactNode>>
 }
 
-type SettingsSection = 'models' | 'permissions'
+export type SettingsSection = 'models' | 'permissions' | 'general' | 'execution' | 'retrieval' | 'memory' | 'medium_term' | 'embedding' | 'advanced'
 
-/** 分节切换器：两个分区都是真的（模型连接、权限），不是摆着好看的空壳（T38）。 */
+/** 原型保留连接/权限；真实宿主注入七组应用设置。 */
 const SECTIONS: readonly { id: SettingsSection; label: string }[] = [
   { id: 'models', label: '模型连接' },
   { id: 'permissions', label: '权限' },
+  { id: 'general', label: '通用与外观' },
+  { id: 'execution', label: '任务执行' },
+  { id: 'retrieval', label: '自动代码检索' },
+  { id: 'memory', label: '长期记忆' },
+  { id: 'medium_term', label: '中期记忆' },
+  { id: 'embedding', label: '向量库与 Embedding' },
+  { id: 'advanced', label: '高级配置' },
 ]
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -246,6 +254,7 @@ export function SettingsDialog({
   permissionBusy,
   permissionError,
   form,
+  extraSections,
 }: SettingsDialogProps) {
   const [section, setSection] = useState<SettingsSection>('models')
   const empty = settings.connections.length === 0
@@ -255,7 +264,7 @@ export function SettingsDialog({
         <header className={styles.header}>
           <div>
             <h2 className={styles.title}>设置</h2>
-            <p className={styles.subtitle}>模型连接与权限 · 密钥只写入不回读</p>
+            <p className={styles.subtitle}>连接、偏好与运行参数 · 密钥只写入不回读</p>
           </div>
           <button
             type="button"
@@ -269,7 +278,7 @@ export function SettingsDialog({
 
         <div className={styles.body}>
           <div className={styles.tabs} role="tablist" aria-label="设置分区">
-            {SECTIONS.map((item) => (
+            {SECTIONS.filter(item => item.id === 'models' || item.id === 'permissions' || extraSections?.[item.id] !== undefined).map((item) => (
               <button
                 key={item.id}
                 type="button"
@@ -285,6 +294,11 @@ export function SettingsDialog({
             ))}
           </div>
 
+          {Object.entries(extraSections ?? {}).map(([id, content]) => (
+            <div key={id} hidden={section !== id} role="tabpanel" id={`settings-panel-${id}`} aria-labelledby={`settings-tab-${id}`}>
+              {content}
+            </div>
+          ))}
           {section === 'permissions' ? (
             <div
               role="tabpanel"
@@ -298,7 +312,7 @@ export function SettingsDialog({
                 actions={permissionActions}
               />
             </div>
-          ) : (
+          ) : section === 'models' ? (
             <div
               role="tabpanel"
               id="settings-panel-models"
@@ -344,7 +358,7 @@ export function SettingsDialog({
                 </div>
               )}
             </div>
-          )}
+          ) : null}
         </div>
       </div>
     </div>

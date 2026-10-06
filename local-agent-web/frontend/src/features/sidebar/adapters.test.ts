@@ -14,16 +14,22 @@ const session = (
   isActive = false,
 ) => ({
   session_id: id,
+  mode: 'agent' as const,
   thread_id: `thread-${id}`,
   title,
   workspace: workspace(workspaceId, workspaceId),
   is_active: isActive,
+  archived: false,
   created_at: updatedAt,
   updated_at: updatedAt,
   last_checkpoint_id: null,
 })
 
 describe('mapSidebar', () => {
+  it('工作区移除后历史会话进入未分组，仍可选择', () => {
+    const rows = mapSidebar({ workspaces: [], sessions: [session('s1', 'removed', '历史', '2026-09-27T11:00:00Z')], activeSessionId: 's1', activeStatus: 'completed' })
+    expect(rows[0]).toMatchObject({ title: '未分组会话', managed: false, sessions: [{ id: 's1', selected: true }] })
+  })
   it('groups sessions under their workspace', () => {
     const rows = mapSidebar(
       {

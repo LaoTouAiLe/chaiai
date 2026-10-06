@@ -496,6 +496,18 @@ def model_settings_conflict(*, connection_id: str, occurred_at: datetime) -> App
     )
 
 
+def preferences_conflict(*, occurred_at: datetime) -> ApplicationError:
+    """偏好使用同一设置版本冲突码，但展示应用设置自己的文案。"""
+    return ApplicationError(ErrorView.for_code(
+        MODEL_SETTINGS_CONFLICT,
+        title="应用设置已被另一个页面改过",
+        message="设置版本已更新，本次修改没有覆盖已保存的内容。",
+        hint="重新读取最新设置后再修改；当前草稿仍保留。",
+        diagnostic_id=diagnostic_id_for(MODEL_SETTINGS_CONFLICT, "app-preferences"),
+        occurred_at=occurred_at, source="settings",
+    ))
+
+
 def selection_conflict(*, scope_id: str, occurred_at: datetime) -> ApplicationError:
     """写入的**选择**已被别的页面改过（§6.1）。
 

@@ -29,12 +29,26 @@ Checkpoint 里的 ``messages`` 是审计与恢复用的原始记录，**不因�
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+
+#: 压中段时，工具结果保留的**头部**字符数。
+#:
+#: 2026-09-30 由 4096 下调到 3072：压完的**输出**大小约等于「头 + 尾 + 标记」，与阈值无关，
+#: 所以总占用由这两个常量决定。实测一次真实对话读到 26 条工具结果，按 4096+1024（约 5.2k/条）
+#: 合计约 135k 字符，**超过了 120k 的窗口预算**，于是"安全网"整步省略触发——它重写窗口中段，
+#: 供应商前缀缓存整段失效：紧接两次调用的缓存读从 48,512 **塌到 3,456**，单这一次就多花约 9 万
+#: 未命中 token（相当于那次提问全部未命中的 79%）。降到这里后 26 条约 100k，留出余量。
+TOOL_RESULT_HEAD_CHARS = 3072
+#: 压中段时，工具结果保留的**尾部**字符数（对标 dsh 的 ``tailChars``，按同一比例下调）。
+TOOL_RESULT_TAIL_CHARS = 768
+#: 超过这个长度的**正文字段**才值得压（对标 dsh 的 ``thresholdChars``）。
+TOOL_RESULT_SQUEEZE_CHARS = 8192
 
 #: 省略较早工具步时插入的说明头：让模型知道中间有内容被省略，而不是以为什么都没做过。
 #: 占位只带**可信元数据**（工具名、状态、输出长度），不带工具输出原文——它是以系统角色出站的，
@@ -79,7 +93,10 @@ def select_prompt_window(
     max_messages: int,
     preserve_recent_turns: int = 0,
     preserve_recent_tool_steps: int = -1,
+    preserve_recent_tool_step_chars: int = 0,
+    tool_result_keep_chars: int = 0,
     covered_messages: int = 0,
+    prune_tool_steps: bool = True,
 ) -> PromptWindow:
     """选出本轮送模型的消息窗口。
 
@@ -89,10 +106,16 @@ def select_prompt_window(
         max_messages: ``memory.short_term.prompt_window_messages``，窗口条数上限。
         preserve_recent_turns: ``memory.compression.preserve_recent_turns``，至少保留的最近轮次；
             小于等于 0 表示不按轮次保底（只按条数裁剪）。
-        preserve_recent_tool_steps: ``memory.compression.preserve_recent_tool_steps``，窗口里最多
-            保留的**最近完整工具步**数量；更早的工具步整步省略（见 :func:`_omit_older_tool_steps`）。
-            **默认 ``-1`` 表示不裁剪**（安全默认）；``0`` 表示把工具步全省略（只留一条说明占位），
-            配置项的默认值由 ``CompressionConfig`` 决定（当前 ``3``）。
+        preserve_recent_tool_steps: ``memory.compression.preserve_recent_tool_steps``，窗口里**至少**
+            保留的**最近完整工具步**数量（下限）；更早的工具步按预算省略
+            （见 :func:`_omit_older_tool_steps`）。**默认 ``-1`` 表示不裁剪**（安全默认）；
+            ``0`` 表示至少保留 0 步（仍受预算下限约束）。
+        preserve_recent_tool_step_chars: ``memory.compression.tool_step_budget_chars``，工具步内容的
+            **字符预算**：从最新一步往回累计，超预算的更早步骤才整步省略。``0`` 表示不按预算
+            多留（退化成只按 ``preserve_recent_tool_steps`` 条数省略，即 2026-09-30 之前的行为）。
+        tool_result_keep_chars: ``memory.compression.tool_result_keep_chars``，**单条工具结果**的字符
+            阈值：超过它的结果**无条件**压成「头 + 中段标记 + 尾」（见
+            :func:`_squeeze_oversized_results`）。``0`` 表示不压。
         covered_messages: 已经被会话摘要覆盖的消息条数
             （``context_budget.summary_covered_messages``）。这些消息**不再进窗口**——摘要已经
             代表它们（架构 §10.5 第 5 条）；不排除的话每轮都会重发同一批历史，压缩反而让
@@ -105,13 +128,22 @@ def select_prompt_window(
     total = len(items)
     if not enabled or total == 0:
         return PromptWindow(messages=items, total_messages=total)
+    # 超阈值的工具结果**无条件**压中段（2026-09-30，对标 dsh 的按条阈值裁剪器）。
+    # 放在切片之前：整条序列都压，于是左边被摘要覆盖的那段、以及后面的预算计算，看到的都是压过的
+    # 尺寸——按预算触发时这一步根本没机会跑（实测窗口才 45k token 就远没到 80k 的线）。
+    squeezed = _squeeze_oversized_results(items, tool_result_keep_chars)
+    if squeezed is not None:
+        items = squeezed
     floor = max(0, min(int(covered_messages), total))
     start = max(floor, total - max(1, int(max_messages)))
     if preserve_recent_turns > 0:
         start = max(floor, min(start, recent_turns_start(items, preserve_recent_turns)))
     start = _align_to_turn_start(items, start, floor=floor)
-    window, omitted_steps, omitted_messages = _omit_older_tool_steps(
-        items[start:], keep=preserve_recent_tool_steps
+    window, omitted_steps, omitted_messages = (
+        _omit_older_tool_steps(
+            items[start:], keep=preserve_recent_tool_steps,
+            max_chars=preserve_recent_tool_step_chars,
+        ) if prune_tool_steps else (items[start:], 0, 0)
     )
     return PromptWindow(
         messages=window,
@@ -218,9 +250,9 @@ def _call_ids(message: AnyMessage) -> list[str] | None:
 
 
 def _omit_older_tool_steps(
-    messages: Sequence[AnyMessage], *, keep: int
+    messages: Sequence[AnyMessage], *, keep: int, max_chars: int = 0
 ) -> tuple[list[AnyMessage], int, int]:
-    """只保留最近 ``keep`` 个完整工具步，更早的整步省略（在原位插一条说明占位）。
+    """保留最近的一批完整工具步，更早的整步省略（在原位插一条说明占位）。
 
     返回 ``(窗口消息, 被省略的步数, 被省略的原始消息条数)``。``keep`` 为负或步骤数不超过
     ``keep`` 时原样返回。
@@ -228,6 +260,14 @@ def _omit_older_tool_steps(
     为什么需要它：轮次保底对"一个用户请求内的长工具循环"无效（只有 1 个人类轮次），整条工具链
     会原样进窗口。省略是**整步**的（调用与结果同去同留），占位插在被省略区段的起点，因此不会落进
     其它步骤的"调用—结果"之间。
+
+    ``max_chars``（2026-09-30 新增）是**字符预算**：从最新一步往回累计，装得下就继续留；
+    一旦装上会超预算，就在那里停住，更早的整步省略。``keep`` 变成**下限**——预算再紧也至少留
+    ``keep`` 步（避免把最近的关键上下文省掉）。``max_chars <= 0`` 时只看 ``keep``，即改动前的行为。
+
+    为什么加预算：只按条数省会在**每一步**都重写窗口的中段，而窗口一变，供应商的前缀缓存就整段
+    失效。实测一个 20 步循环因此命中率只有 19.9%（只有 ``[system]`` 那段还能复用），未命中输入
+    635,714 token。改成预算驱动后，短循环一个字都不省——历史保持**追加式**，前缀稳定因而可缓存。
     """
     items = list(messages)
     if keep < 0:
@@ -235,7 +275,9 @@ def _omit_older_tool_steps(
     spans = tool_step_spans(items)
     if len(spans) <= keep:
         return items, 0, 0
-    dropped = spans[: len(spans) - keep] if keep else spans
+    #: 第一个**保留**步在 ``spans`` 里的下标；它之前的都要省略。
+    first_kept = _first_kept_by_budget(items, spans, keep=keep, max_chars=max_chars)
+    dropped = spans[:first_kept]
     cutting = {index for begin, end in dropped for index in range(begin, end)}
     notice = _tool_step_notice(items, dropped)
     result: list[AnyMessage] = []
@@ -248,6 +290,104 @@ def _omit_older_tool_steps(
             continue
         result.append(message)
     return result, len(dropped), len(cutting)
+
+
+def _first_kept_by_budget(
+    items: Sequence[AnyMessage],
+    spans: Sequence[tuple[int, int]],
+    *,
+    keep: int,
+    max_chars: int,
+) -> int:
+    """从最新一步往回累计，返回第一个**保留**步在 ``spans`` 里的下标（更早的都要省/压）。
+
+    ``keep`` 是**下限**：下限之内无条件保留（避免把最近的关键上下文省掉）。``max_chars <= 0``
+    时只看 ``keep``，即"只按条数省"的旧行为。
+    """
+    if max_chars <= 0:
+        return len(spans) - keep
+    used = 0
+    index = len(spans)
+    while index > 0:
+        begin, end = spans[index - 1]
+        cost = sum(len(str(getattr(item, "content", ""))) for item in items[begin:end])
+        # 下限之内无条件保留；之外要装得下才留。
+        if index <= len(spans) - keep and used + cost > max_chars:
+            break
+        used += cost
+        index -= 1
+    return index
+
+
+def _squeeze_oversized_results(
+    items: Sequence[AnyMessage], threshold_chars: int
+) -> list[AnyMessage] | None:
+    """把所有**超阈值**的工具结果压成「头 + 中段标记 + 尾」；无改动返回 ``None``。
+
+    与"窗口超预算才压"的区别是**无条件**（只要单条结果超阈值就压）。为什么必须改成无条件——实测
+    一次真实对话：未命中的大头正是"大工具结果**第一次**进历史"那几次（单个 2 万字符的读取约 1.2 万
+    token，全价未命中，那一跳的命中率只有 **22.6%**），而窗口当时才约 45k token，**根本没到 80k 的
+    预算线**，于是按预算触发的裁剪器**一次都没跑**——机制存在，等于没生效。对标 dsh：它的
+    ``compaction-tool-result-pruner`` 是按**单条结果**的阈值（8192 字符）无条件跑的。
+
+    **为什么不破坏前缀**：这一步在**每次组装窗口时**都执行，且对同一输入是确定性的，所以一条结果
+    **第一次被发出去时就已经是压过的形态**，之后每次都是同一份字节——不存在"先发全量、之后再改写"。
+    """
+    if threshold_chars <= 0:
+        return None
+    squeezed = list(items)
+    changed = False
+    for index, message in enumerate(squeezed):
+        if not isinstance(message, ToolMessage):
+            continue
+        text = str(message.content)
+        shrunk = _squeeze_tool_payload(text, threshold_chars)
+        if shrunk != text:
+            squeezed[index] = message.model_copy(update={"content": shrunk})
+            changed = True
+    return squeezed if changed else None
+
+
+def _squeeze_tool_payload(text: str, threshold_chars: int) -> str:
+    """**JSON 感知**的中段裁剪：只压正文字段，保持 JSON 合法与数据边界完整。
+
+    为什么不直接切字符串：工具结果是 JSON（元数据在前、正文在后），按字符切会把结构切坏，模型看到
+    的是半个对象，连 ``path`` / ``sha256`` 都读不出来；而工具结果的正文又**必须留在 ``ToolMessage``
+    里**——``<<<TOOL_OUTPUT>>>`` 边界之外才是可执行指令，把它挪进系统占位是复审明确否掉的做法
+    （见 :func:`_tool_step_notice` 的说明）。所以只能原地、按字段压。
+
+    为什么保留**尾部**：只留头会让"文件最后一段讲了什么"永远看不到（长文件用例就是靠
+    ``next_start_line`` 续读才拿到末尾的）。两端都留，模型至少知道这一步的结果长什么样；
+    中间那条说明是可执行的（告诉它怎么拿回完整内容），不是一句感叹。
+    """
+    if threshold_chars <= 0 or len(text) <= threshold_chars:
+        return text
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return text  # 不是 JSON：宁可长，也不要把别人的结构切坏
+    if not isinstance(payload, dict):
+        return text
+    changed = False
+    for key, value in list(payload.items()):
+        if isinstance(value, str) and len(value) > TOOL_RESULT_SQUEEZE_CHARS:
+            payload[key] = _head_and_tail(value)
+            changed = True
+    if not changed:
+        return text
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _head_and_tail(text: str) -> str:
+    """保留头 :data:`TOOL_RESULT_HEAD_CHARS` + 尾 :data:`TOOL_RESULT_TAIL_CHARS`，中间插可执行说明。"""
+    head = text[:TOOL_RESULT_HEAD_CHARS]
+    tail = text[-TOOL_RESULT_TAIL_CHARS:]
+    omitted = len(text) - len(head) - len(tail)
+    return (
+        f"{head}\n"
+        f"……（中间 {omitted} 字符已裁剪；需要完整内容请用 start_line/end_line 或更小的范围重新读取）……\n"
+        f"{tail}"
+    )
 
 
 def _tool_step_notice(

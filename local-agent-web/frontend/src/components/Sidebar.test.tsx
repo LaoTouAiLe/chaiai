@@ -48,3 +48,20 @@ describe('Sidebar 添加工作区', () => {
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
   })
 })
+
+it('搜索会话会筛选侧栏，并能清空恢复', () => {
+  render(<Sidebar workspaces={[{
+    id: 'workspace-1', title: '项目', sessions: [
+      { id: 'session-1', title: '解释 README', status: 'completed', timeLabel: '', selected: false },
+      { id: 'session-2', title: '修复测试', status: 'idle', timeLabel: '', selected: false },
+    ],
+  }]} />)
+  const search = screen.getByRole('searchbox', { name: '搜索会话' })
+  fireEvent.change(search, { target: { value: 'README' } })
+  expect(screen.getByText('解释 README')).toBeInTheDocument()
+  expect(screen.queryByText('修复测试')).not.toBeInTheDocument()
+  fireEvent.change(search, { target: { value: '不存在' } })
+  expect(screen.getByText('没有匹配的会话')).toBeInTheDocument()
+  fireEvent.change(search, { target: { value: '' } })
+  expect(screen.getByText('修复测试')).toBeInTheDocument()
+})

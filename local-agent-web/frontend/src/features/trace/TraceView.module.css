@@ -137,6 +137,8 @@
   background: var(--law-state-success);
 }
 
+.statusPending { background: var(--law-text-caption); }
+
 .statusFailed {
   background: var(--law-state-error);
 }

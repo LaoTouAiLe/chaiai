@@ -31,7 +31,7 @@ def merge_event_schemas(document: dict[str, Any]) -> None:
     走 `TypeAdapter` 而不是 `models_json_schema`：`EventEnvelope` 是 `Annotated` 别名，
     后者只接受模型类。`$ref` 用同一个模板，写法与 FastAPI 自己生成的引用一致。
     """
-    schema = TypeAdapter(EventEnvelope).json_schema(ref_template="#/components/schemas/{model}")
+    schema = TypeAdapter(EventEnvelope).json_schema(mode="serialization", ref_template="#/components/schemas/{model}")
     payloads = dict(schema.pop("$defs", {}))
     payloads[EVENT_ENVELOPE_SCHEMA] = schema
     schemas = document.setdefault("components", {}).setdefault("schemas", {})

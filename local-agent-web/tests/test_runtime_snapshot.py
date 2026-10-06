@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import datetime, timezone
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -420,7 +421,7 @@ def test_snapshot_sits_right_before_the_current_user_input(
         if any(_is_snapshot(message) for message in call)
         and any(message.id == second["run_user_message_id"] for message in call)
     )
-    snapshot_index = next(
+    snapshot_index = max(
         index for index, message in enumerate(messages) if _is_snapshot(message)
     )
     user_index = next(
@@ -431,7 +432,7 @@ def test_snapshot_sits_right_before_the_current_user_input(
 
     assert messages[0].type == "system"
     assert snapshot_index == user_index - 1
-    assert snapshot_index != 1  # 第 2 条不是快照块：历史仍在原位，前缀没有被打断
+    assert snapshot_index != 1  # 当前快照追加在后面；历史快照仍在原位。
     assert messages[snapshot_index].text == latest_runtime_snapshot(
         second["runtime_context_snapshots"]
     ).canonical_text  # type: ignore[union-attr]
@@ -599,7 +600,12 @@ def test_snapshot_marks_rag_disabled_failed_and_empty_apart(
 ) -> None:
     """RAG 未启用 / 检索失败 / 检索无结果三种占位在快照里仍然分得开（T35 不得混说）。"""
     workspace = _workspace(tmp_path)
-    context = _context(workspace, model_factory(decision="tool", reply="x"), app_config)
+    # **显式关掉检索**：2026-10-01 起 ``rag.enabled`` 默认为 ``true``，不能靠默认值拿"未启用"这一支
+    # （否则这条测的是别的东西，而且默认值一变就莫名其妙地红）。
+    off_config = app_config.model_copy(
+        update={"rag": app_config.rag.model_copy(update={"enabled": False})}
+    )
+    context = _context(workspace, model_factory(decision="tool", reply="x"), off_config)
     failed_state = {
         "run_id": "run-1",
         # 失败判定只认**本轮**的失败（按事件里的 ``run_id`` 比对）：历史轮次的失败不污染当前快照。
@@ -758,6 +764,7 @@ def test_snapshot_tokens_follow_the_frozen_text(
 
 
 def test_tool_loop_injects_one_unchanged_snapshot_block(
+    legacy_loop,
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     """真实工具循环：每次出站请求里的快照块逐字节相同，且本 run 只落一条快照记录。
@@ -788,3 +795,50 @@ def test_tool_loop_injects_one_unchanged_snapshot_block(
     # 循环里计划确实推进了：否则"快照没变"可能只是因为它本来就一样。
     unfrozen = {**result, "runtime_context_snapshots": []}
     assert nodes._snapshot_text(unfrozen, context) != blocks[0]
+
+
+# ---- 11. 不变量：出站请求是追加式的（前缀缓存的前提） --------------------------
+
+
+def _outbound_shape(messages: list[AnyMessage]) -> list[tuple[str, str]]:
+    """把一条出站消息规约成 ``(角色, 正文)``，用于逐条比对请求前缀。"""
+    return [
+        (str(getattr(message, "type", "")), str(getattr(message, "content", "")))
+        for message in messages
+    ]
+
+
+def test_outbound_requests_are_append_only_within_a_run(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """同一轮内，相邻两次出站请求必须**追加式增长**（后一次以前一次为前缀）。
+
+    为什么值得当成不变量（对标 dsh 的 ``invariant.ts``：它在运行时断言"请求必须等于会话日志的派生"，
+    不一致直接 fail）：DeepSeek 的缓存是**隐式最长公共前缀**——请求前缀被改写一点点，它后面的**全部**
+    内容就失去缓存资格。实测过一次真实提问命中率只有 **19.9%**，成因正是"每步按条数省略窗口里的
+    中段"重写了已经发过的那段；当时同一次提问里只有开头 ``[system]`` 那 5,248 token 还能命中，
+    恰好说明只有最前面那段没被动过。
+
+    与第 10 节的"快照冻结"是两件事：冻结只保证**快照块**不被改写，这里管的是**整条出站消息序列**
+    相对上一次请求是否为前缀——快照只是其中最靠前、代价最大的那一段。
+    """
+    workspace = _workspace(tmp_path)
+    model = _recording_model(
+        decision="tool",
+        reply="列完了",
+        repeated_tool_calls=True,
+        tool_calls=[{"name": "list_dir", "args": {"path": "."}, "id": "call-1"}],
+        plan_steps=["列出目录", "汇总说明"],
+    )
+    graph = builder.build_chat_graph(checkpoint.open_checkpointer(_database(tmp_path)))
+    _run(graph, _context(workspace, model, app_config), "列出目录再汇总")
+
+    outbounds = [call for call in model.calls if call]
+    assert len(outbounds) >= 3, "需要多次出站请求才能验证追加式"
+
+    for position, (previous, current) in enumerate(pairwise(outbounds), start=2):
+        assert len(current) >= len(previous), f"第 {position} 次请求比上一次还短"
+        assert _outbound_shape(current)[: len(previous)] == _outbound_shape(previous), (
+            f"第 {position} 次请求改写了前面已经发过的内容："
+            "供应商的前缀缓存会从改写点起整段失效"
+        )

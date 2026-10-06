@@ -126,10 +126,17 @@ class RouteResult:
 
 def mode_router_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
     """判定本次请求的模式并写入 State。"""
-    result = decide_mode(
-        user_text=str(state.get("user_input", "")),
-        context=runtime.context,
-    )
+    session_mode = state.get("session_mode")
+    if session_mode == "chat":
+        result = RouteResult(mode="chat", reason="本会话固定为闲聊（仅可读取文件）")
+    elif session_mode == "agent":
+        result = RouteResult(mode="tool", reason="本会话固定为 Agent")
+    else:
+        # 旧的直接调用 Graph 的入口尚未传会话模式，保留原有自动判定。
+        result = decide_mode(
+            user_text=str(state.get("user_input", "")),
+            context=runtime.context,
+        )
     record = make_decision_record(
         str(state.get("run_id") or "run"),
         stage="mode_router",
@@ -233,11 +240,13 @@ def route_by_mode(state: AgentState) -> str:
 
 def route_after_compression(state: AgentState) -> str:
     """压缩节点之后按模式分流（§5.2 走闲聊节点，§5.3 走决策节点）。"""
+    if state.get("session_mode") == "chat":
+        return ROUTE_TOOL  # 固定闲聊会话通过只读工具决策取得文件证据。
     return ROUTE_TOOL if state.get("mode") == "tool" else ROUTE_CHAT
 
 
 def route_after_decision(state: AgentState) -> str:
-    """决策节点之后：有工具调用就过安全门；计划还没走完先反思；其余直接产出回答。
+    """有调用过安全门；新循环回答经机械收口，旧协议仍按计划反思。
 
     计划里还有未完成步骤时**不能直接收尾**：模型偶尔会在第二步就给出"任务完成了"的回答，
     直接进 ``final_response_node`` 会让整张图在第二步结束、第三步永远不执行——而且
@@ -246,6 +255,16 @@ def route_after_decision(state: AgentState) -> str:
     """
     if state.get("pending_tool_calls"):
         return ROUTE_WITH_TOOLS
+    if state.get("session_mode") == "chat":
+        return ROUTE_CHAT  # 决策无文件调用时，交 chat_node 流式输出最终回答。
+    if state.get("agent_loop_version") == 1:
+        if state.get("task_status") == "failed":
+            return ROUTE_WITHOUT_TOOLS
+        current_events = [event for event in state.get("tool_events", [])
+                          if event.run_id == state.get("run_id")]
+        if not current_events and not state.get("plan_managed"):
+            return ROUTE_WITHOUT_TOOLS  # 原有直接回答路径，不伪造工具证据。
+        return ROUTE_REFLECT  # 仅机械收口；不再另调模型判断答案。
     if _plan_has_unfinished_steps(state):
         return ROUTE_REFLECT
     return ROUTE_WITHOUT_TOOLS
@@ -267,7 +286,14 @@ def route_after_safety(state: AgentState) -> str:
     """安全门之后：有待审批的动作先走审批，有放行调用就执行，否则直接反思。"""
     if state.get("pending_approval") is not None:
         return ROUTE_TO_APPROVAL
-    return ROUTE_EXECUTE if state.get("pending_tool_calls") else ROUTE_REFLECT
+    if state.get("pending_tool_calls"):
+        return ROUTE_EXECUTE
+    return ROUTE_CHAT if state.get("session_mode") == "chat" else ROUTE_REFLECT
+
+
+def route_after_tool_execution(state: AgentState) -> str:
+    """闲聊读取后继续让模型形成回答；Agent 工具结果交反思节点。"""
+    return ROUTE_CHAT if state.get("session_mode") == "chat" else ROUTE_TOOL
 
 
 def route_after_approval(state: AgentState) -> str:
@@ -323,6 +349,10 @@ def completion_route(state: AgentState) -> str:
     if route == ROUTE_FINISH and _has_memory_candidates(state):
         return ROUTE_MEMORY_WRITE
     return route
+
+
+def route_after_task_memory(state: AgentState) -> str:
+    return ROUTE_MEMORY_WRITE if _has_memory_candidates(state) else ROUTE_FINISH
 
 
 def _has_memory_candidates(state: AgentState) -> bool:

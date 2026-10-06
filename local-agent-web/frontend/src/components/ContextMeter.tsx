@@ -7,6 +7,14 @@ interface ContextMeterProps {
   meter: ContextMeterView
   /** The detail is open as a panel elsewhere, so the hover popover is suppressed. */
   open?: boolean
+  /**
+   * 点击圆环展开/收起详情面板。省略即**原型态**：圆环保持惰性、也不声明 `aria-expanded`。
+   *
+   * 悬停与聚焦本来就能打开浮层，所以省略它不会让数字读不到；但只有它存在时，
+   * `aria-expanded` 与"展开上下文详情"这个动作型标签才是真的——**键盘用户走的就是这一步**
+   * （matrix 22/23 要求"没有指针也能拿到同一份详情"）。
+   */
+  onToggle?: () => void
 }
 
 const SCOPE_LABEL: Record<ContextMeterView['scope'], string> = {
@@ -89,7 +97,7 @@ function MeterDetail({ meter }: { meter: ContextMeterView }) {
  * available as a pinned panel through `MeterPanel`, so the numbers are reachable
  * without a pointer (matrix 22/23).
  */
-export function ContextMeter({ meter, open = false }: ContextMeterProps) {
+export function ContextMeter({ meter, open = false, onToggle }: ContextMeterProps) {
   const known = meter.usedTokens !== null && meter.windowTokens !== null && meter.windowTokens > 0
   const ratio = known && meter.usedTokens !== null && meter.windowTokens !== null
     ? Math.min(meter.usedTokens / meter.windowTokens, 1)
@@ -111,9 +119,11 @@ export function ContextMeter({ meter, open = false }: ContextMeterProps) {
       <button
         type="button"
         className={styles.trigger}
-        aria-expanded={open}
+        // 惰性按钮不谎称展开态：没有 handler 时连这个属性都不渲染（基线不受影响）。
+        aria-expanded={onToggle === undefined ? undefined : open}
         aria-label={open ? '收起上下文详情' : '展开上下文详情'}
         aria-describedby={open ? undefined : 'context-meter-popover'}
+        onClick={onToggle === undefined ? undefined : () => onToggle()}
       >
         <span
           className={known ? (nearLimit ? `${styles.ring} ${styles.ringWarn}` : styles.ring) : `${styles.ring} ${styles.ringUnknown}`}
@@ -138,12 +148,17 @@ export function ContextMeter({ meter, open = false }: ContextMeterProps) {
 }
 
 /** The same detail as a block panel: the ring's click target, pinned open. */
-export function MeterPanel({ meter }: { meter: ContextMeterView }) {
+export function MeterPanel({ meter, onClose }: { meter: ContextMeterView; onClose?: () => void }) {
   return (
     <section className={styles.panel} aria-label="上下文详情">
       <header className={styles.panelHead}>
         <h2 className={styles.panelTitle}>上下文详情</h2>
-        <button type="button" className={styles.panelClose} aria-label="收起上下文详情">
+        <button
+          type="button"
+          className={styles.panelClose}
+          aria-label="收起上下文详情"
+          onClick={onClose === undefined ? undefined : () => onClose()}
+        >
           <Close />
         </button>
       </header>

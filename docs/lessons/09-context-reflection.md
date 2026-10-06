@@ -296,7 +296,7 @@ return _NO_RAG_TEXT if enabled else _NO_RAG_DISABLED_TEXT
 
 而**"没启用"和"查失败"也要分开**（[L33-37](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/context/prompt_context.py#L33-L37)）：
 
-> 默认配置下 `rag.enabled=false`，说成"没有检索到匹配片段"会让模型以为检索跑过了，进而对用户说"我检索了但没找到"——那是它并不知道的结论。
+> 关掉 `rag.enabled` 时，说成"没有检索到匹配片段"会让模型以为检索跑过了，进而对用户说"我检索了但没找到"——那是它并不知道的结论。
 
 这就是贯穿全项目的原则在**提示文案**层面的落地：
 

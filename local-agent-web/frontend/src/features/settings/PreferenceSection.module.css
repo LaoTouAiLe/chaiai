@@ -1,0 +1,20 @@
+.section { font-size: var(--law-text-md); }
+.section h3 { font-size: var(--law-text-md); font-weight: 600; }
+.note { color: var(--law-text-secondary); font-size: var(--law-text-xs); line-height: 1.7; margin: 8px 0 18px; }
+.fields { border: 0; padding: 0; margin: 0; }
+.field { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 16px 0; border-bottom: 1px solid var(--law-border-l1); }
+.field strong { display: block; font-weight: 500; }
+.field small { display: block; color: var(--law-text-secondary); font-size: var(--law-text-xs); line-height: 1.7; margin-top: 4px; max-width: 380px; }
+.field select, .field input:not([type='checkbox']) { width: 180px; max-width: 100%; min-width: 0; flex: 0 0 180px; height: 34px; border: 1px solid var(--law-border-l2); border-radius: 8px; padding: 4px 8px; background: var(--law-bg-layer-1); color: var(--law-text-primary); font: inherit; }
+.field input[type='checkbox'] { width: 18px; height: 18px; accent-color: var(--law-text-primary); }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px; }
+.actions button, .error button { font-size: var(--law-text-sm); padding: 7px 14px; border: 1px solid var(--law-border-l2); border-radius: 8px; }
+.actions .primary { background: var(--law-button-primary-fill); color: var(--law-text-on-brand); }
+.actions button:disabled { opacity: .45; cursor: default; }
+.saved { color: var(--law-state-success); margin-top: 16px; }
+.error { color: var(--law-state-error); margin-top: 16px; }
+.overview { margin-top: 24px; }
+.overview div { display: flex; justify-content: space-between; gap: 20px; padding: 12px 0; border-bottom: 1px solid var(--law-border-l1); }
+.overview dt { color: var(--law-text-secondary); }
+.overview dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .field { align-items: flex-start; flex-wrap: wrap; gap: 10px; } .field select, .field input:not([type='checkbox']) { flex-basis: 160px; } }

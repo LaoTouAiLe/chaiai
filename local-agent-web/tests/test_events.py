@@ -329,6 +329,39 @@ def test_same_input_serializes_byte_identical() -> None:
     assert canonical_json(parsed) == canonical_json(build())
 
 
+def test_snapshot_and_sse_exclude_local_diagnostics_but_keep_operation_references() -> None:
+    from local_agent.api.sse import format_event
+
+    call = app_models.ModelCallRecordView(
+        model_call_id="call-1", run_id="run-1", purpose="tool_decision",
+        connection_id="connection-1", config_version="1", provider="openai_compatible",
+        model_id="test", started_at=AT, status="ok", endpoint_fingerprint="local-endpoint-hash",
+        tools_schema_fingerprint="local-tool-hash", system_prompt_fingerprint="local-system-hash",
+        history_prefix_fingerprint="local-history-hash", dynamic_context_fingerprint="local-context-hash",
+    )
+    snapshot = _snapshot(model_calls=[call])
+    event = SessionSnapshotEvent(
+        event_id="event-1", session_id=snapshot.session_id, occurred_at=AT,
+        stream_sequence=1, payload=snapshot,
+    )
+    for text in (canonical_json(snapshot), format_event(event)):
+        for forbidden in ("output_digest", "endpoint_fingerprint", "tools_schema_fingerprint", "system_prompt_fingerprint",
+                          "history_prefix_fingerprint", "dynamic_context_fingerprint", "runtime_context", "local-tool-hash"):
+            assert forbidden not in text
+        assert '"model_call_id"' in text
+        assert '"session_id"' in text
+    assert call.tools_schema_fingerprint == "local-tool-hash"
+    assert parse_event(canonical_json(event)).event_type == "session_snapshot"
+
+    complete = app_events.ToolCompletedEvent(
+        event_id="event-2", session_id="s-1", occurred_at=AT, stream_sequence=2,
+        task_id="run-1", run_id="run-1",
+        payload=app_events.ToolCompletedPayload(tool_call_id="t1", status="ok", output_digest="local-output-hash"),
+    )
+    assert "local-output-hash" not in format_event(complete)
+    assert "output_digest" not in format_event(complete)
+
+
 # ---- 前向兼容 --------------------------------------------------------------
 
 
@@ -513,7 +546,10 @@ def test_cache_metrics_stay_unknown_instead_of_zero() -> None:
     assert cache_hit_ratio(None, 100, None) is None
     assert cache_hit_ratio(100, None, None) is None
     # 明确上报零才算 0.0。
-    assert cache_hit_ratio(100, 0, None) is None
+    # 2026-09-30：第三项由 None 改为 0.0。**写缓存**缺失不再算"未知"——DeepSeek 这类隐式缓存
+    # 供应商根本没有这个桶（缓存写入是服务端自动行为，计费只有命中/未命中），原来要求三项齐全
+    # 会让命中率在 DeepSeek 上**恒为未知**，页面一直是"缓存命中 未知"。
+    assert cache_hit_ratio(100, 0, None) == 0.0
     assert cache_hit_ratio(100, 0, 0) == 0.0
     # 分母为零 → None。
     assert cache_hit_ratio(0, 0, 0) is None

@@ -21,6 +21,10 @@
 现代 `IFileDialog`（子控件含 `DUIViewWndClassName`、面包屑地址栏与搜索框），**不是**老式
 `SHBrowseForFolder`；但进程默认 **DPI-unaware**，在非 100% 缩放下对话框会被系统位图拉伸
 而模糊——所以弹窗之前主动设置 DPI 感知。
+
+**另一条实测事实**（2026-09-30，用户报"对话框在浏览器下面、以为卡住"）：`IFileDialog` 的
+z 序跟着它的宿主窗口走，而子进程没有前台窗口（`CREATE_NO_WINDOW` 起、由后台服务 spawn），
+所以宿主窗口的层级就是对话框的层级——宿主必须可见且置顶，见 :func:`_ask_directory`。
 """
 
 from __future__ import annotations
@@ -81,16 +85,24 @@ def _ask_directory() -> str:
 
     只该由 :func:`main` 在子进程里调用：`tkinter` 在此处才导入（父进程导入本模块时不该加载
     Tk），而且 Tk 的调用必须与创建实例同线程。
+
+    **宿主窗口必须可见且置顶**（实测 2026-09-30）：对话框是宿主窗口的**被拥有窗口**，z 序跟着
+    宿主走。子进程没有前台窗口，宿主若被 ``withdraw()`` 成不可见窗口，它就落在 z 序最底，
+    对话框跟着沉到浏览器下面——用户看不见窗，以为卡住了。因此宿主改成一个 1×1、无边框、
+    移出屏幕外的**置顶**窗口：对话框随之浮在最上层，又不占位、不进任务栏与 Alt-Tab。
     """
     import tkinter
     from tkinter import filedialog
 
     root = tkinter.Tk()
-    root.withdraw()
+    root.overrideredirect(True)
+    root.geometry("1x1+-100+-100")
+    root.attributes("-topmost", True)
     try:
         # `mustexist`：选一个真实存在的目录。新建目录由系统对话框自带的"新建文件夹"承担，
         # 所以这里不自己造一套建目录流程。
-        return filedialog.askdirectory(title=_DIALOG_TITLE, mustexist=True) or ""
+        # `parent=root`：让对话框被上面那个置顶宿主拥有，从而落在最上层。
+        return filedialog.askdirectory(title=_DIALOG_TITLE, mustexist=True, parent=root) or ""
     finally:
         root.destroy()
 

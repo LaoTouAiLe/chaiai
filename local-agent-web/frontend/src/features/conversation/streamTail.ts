@@ -23,6 +23,9 @@ export interface StreamTail {
   readonly text: string
   /** 已应用的最大 `chunk_sequence`；同一 `model_call_id` 内递增。 */
   readonly sequence: number
+  readonly reasoning?: string
+  readonly reasoningTruncated?: boolean
+  readonly channel?: 'text' | 'reasoning'
 }
 
 /** 增量的处理结果：`duplicate` 与 `gap` 由调用方决定要不要提示/刷新。 */
@@ -40,11 +43,13 @@ export function startTail(
   payload: MessageStartedPayload,
 ): StreamTail | null {
   if (payload.role !== 'assistant') return current
+  if (payload.reset && current?.messageId === payload.message_id && current.sequence >= (payload.chunk_sequence ?? 0)) return current
+  if (!payload.reset && current?.messageId === payload.message_id && current.modelCallId === payload.model_call_id) return current
   return {
     messageId: payload.message_id,
     modelCallId: payload.model_call_id,
     text: '',
-    sequence: 0,
+    sequence: payload.chunk_sequence ?? 0,
   }
 }
 
@@ -65,7 +70,10 @@ export function applyDelta(current: StreamTail | null, payload: MessageDeltaPayl
     tail: {
       messageId: payload.message_id,
       modelCallId: payload.model_call_id,
-      text: (base === null ? '' : base.text) + payload.text_delta,
+      text: (base?.text ?? '') + (payload.channel === 'reasoning' ? '' : payload.text_delta),
+      reasoning: (base?.reasoning ?? '') + (payload.channel === 'reasoning' ? payload.text_delta : ''),
+      reasoningTruncated: (base?.reasoningTruncated ?? false) || (payload.reasoning_truncated ?? false),
+      channel: payload.channel ?? 'text',
       sequence: payload.chunk_sequence,
     },
     duplicate: false,
@@ -85,17 +93,27 @@ export function applyCompleted(
 /**
  * 用权威快照对账尾部。
  *
- * 两种丢弃：① 快照里已有这条**完整**消息（说明它已经进权威状态了）；② 快照里根本没有这条消息，
- * 但尾部是更早一轮留下的孤儿（例如切会话回来）。保留的条件只有一个：这个 `message_id` 在快照里
- * 是"还没完成的那条"。
+ * 恢复服务端安全的未完成展示副本，按 chunk_sequence 去重边界重叠。
+ * 完整消息、终态或不同运行撤下尾部；同一运行的较早节点快照不会删除刚开始的增量。
  */
 export function reconcile(current: StreamTail | null, snapshot: SessionSnapshot): StreamTail | null {
-  if (current === null) return null
   // 生成的类型把 `messages` 标成可选（契约里它必有），这里按"没有消息"处理即可：
   // 那种情况下尾部就是孤儿，本来就该丢。
   const messages = snapshot.messages ?? []
-  const found = messages.find((message) => message.message_id === current.messageId)
-  if (found === undefined) return null
-  if (found.kind === 'assistant' && found.complete) return null
-  return current
+  const partial = messages.find((message) => message.kind === 'assistant' && !message.complete)
+  if (partial?.kind === 'assistant') {
+    if (current?.messageId === partial.message_id && current.sequence > (partial.chunk_sequence ?? 0)) return current
+    return {
+      messageId: partial.message_id, modelCallId: partial.model_call_id ?? null,
+      text: partial.text, reasoning: partial.reasoning ?? '',
+      reasoningTruncated: partial.reasoning_truncated ?? false,
+      sequence: partial.chunk_sequence ?? 0, channel: partial.stream_channel ?? 'text',
+    }
+  }
+  // 同一轮的节点快照可能早于新流式消息；只有明确的完整消息/不同运行/终态才撤下尾部。
+  if (current === null) return null
+  if (messages.some((message) => message.message_id === current.messageId && message.kind === 'assistant' && message.complete)) return null
+  const run = snapshot.current_task?.run_id
+  return snapshot.session_state === 'running' && run != null && current.messageId.startsWith(`${run}:`)
+    ? current : null
 }

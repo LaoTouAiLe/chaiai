@@ -380,8 +380,11 @@ def test_decided_approval_only_reports_the_state_without_buttons() -> None:
     not embedding_module.fastembed_available(),
     reason="需要可选依赖 memory（fastembed）：uv sync --extra memory",
 )
-def test_memory_status_lines_describe_each_layer(tmp_path: Path) -> None:
+def test_memory_status_lines_describe_each_layer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """侧栏状态块：三层各一行；默认开关与配置问题都必须如实展示（架构 §1.4）。"""
+    monkeypatch.setattr(embedding_module, "_hf_constants", lambda: None)
     base = load_config(PROJECT_ROOT / "config.yaml.example")
 
     default_lines, default_warn = web.memory_status_lines(base)

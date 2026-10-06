@@ -35,7 +35,8 @@ export function MemoryRow({ memory }: MemoryRowProps) {
   const { retrieval, write } = memory
   return (
     <section className={styles.row} aria-label="检索与记忆">
-      <header className={styles.head}>
+      <details open={retrieval.outcome === 'failed'} className={styles.details}>
+      <summary className={styles.head}>
         <span className={styles.label}>检索与记忆</span>
         <span className={`${styles.outcome} ${OUTCOME_CLASS[retrieval.outcome]}`}>
           {OUTCOME_LABEL[retrieval.outcome]}
@@ -46,7 +47,7 @@ export function MemoryRow({ memory }: MemoryRowProps) {
         {retrieval.outcome === 'failed' ? (
           <span className={styles.reason}>{retrieval.reason}</span>
         ) : null}
-      </header>
+      </summary>
 
       {retrieval.outcome === 'hit' ? (
         <ul className={styles.sources}>
@@ -61,6 +62,7 @@ export function MemoryRow({ memory }: MemoryRowProps) {
       ) : null}
 
       {retrieval.note === '' ? null : <p className={styles.note}>{retrieval.note}</p>}
+      </details>
 
       {write === null ? null : (
         <p className={write.outcome === 'written' ? styles.writeOk : styles.writeFailed}>

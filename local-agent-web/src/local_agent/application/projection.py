@@ -53,6 +53,7 @@ from local_agent.application.models import (
     RetrievalSourceView,
     RuntimeContextSnapshotView,
     RuntimeSourceVersionView,
+    SearchMatchView,
     SessionSnapshot,
     SessionState,
     TaskRef,
@@ -102,6 +103,8 @@ STAGE_REFLECTION_FINAL_ANSWER: Final[str] = "reflection_node:final_answer"
 STAGE_REFLECTION_STREAM: Final[str] = "reflection_node:stream"
 STAGE_REFLECTION_SIDE_EFFECT: Final[str] = "reflection_node:side_effect"
 STAGE_REFLECTION_MEMORY_INTENT: Final[str] = "reflection_node:memory_intent"
+STAGE_TASK_MEMORY_INTENT: Final[str] = "task_memory_node:memory_intent"
+STAGE_DECISION_STREAM: Final[str] = "agent_decision_node:stream"
 STAGE_REFLECTION_MEMORY_FINAL: Final[str] = "reflection_node:memory_final"
 
 #: 旧 Checkpoint 里确实没有这个事实时的写法：**如实说没有记录**，不猜一个看起来合理的值。
@@ -132,6 +135,8 @@ _STAGE_ERRORS: Final[dict[str, tuple[str, ErrorCategory]]] = {
     STAGE_REFLECTION_STREAM: (app_errors.RUN_DEGRADED, "system"),
     STAGE_REFLECTION_SIDE_EFFECT: (app_errors.SIDE_EFFECT_UNCONFIRMED, "recovery"),
     STAGE_REFLECTION_MEMORY_INTENT: (app_errors.RUN_DEGRADED, "system"),
+    STAGE_TASK_MEMORY_INTENT: (app_errors.RUN_DEGRADED, "system"),
+    STAGE_DECISION_STREAM: (app_errors.RUN_DEGRADED, "system"),
     STAGE_REFLECTION_MEMORY_FINAL: (app_errors.RUN_DEGRADED, "system"),
 }
 
@@ -191,13 +196,32 @@ _ERROR_TEXT: Final[dict[str, tuple[str, str]]] = {
     ),
 }
 
-#: 路径的边界要排除中文标点与括号：否则 `C:\…\x.txt，别的说明` 会被整段当成路径吞掉。
-_ABSOLUTE_PATH = re.compile(r"(?:[A-Za-z]:[\\/][^\s\"'，。；：、（）()\[\]]*|/(?:home|Users)/[^\s\"'，。；：、（）()\[\]]*)")
+#: 只隐藏私人目录；项目所在的其他盘符/系统路径不能一概变成不可核对的占位符。
+#: 空格属于路径的一部分，私人路径遇到空格时宁可多隐藏一段说明，也不能只隐藏前半截。
+_PRIVATE_PATH = re.compile(
+    r"(?:[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/]|/(?:home|Users)/)"
+    r"[^\"'，。；：、（）()\[\]\r\n]*"
+)
 #: 密钥**样式**（不只是已知密钥值）：即使调用方没把环境里的密钥传进来，这里也要抹掉，
 #: 否则 `ErrorView` 的 fail-closed 校验会让整份快照构造失败——那比少显示一段文字更糟。
 _KEY_LIKE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
 _HIDDEN_PATH = "[已隐藏的绝对路径]"
 _MASK = "***"
+
+_OPERATION_NAMES: Final[dict[str, str]] = {
+    "list_dir": "查看目录", "read_file": "读取文件", "edit_file": "修改文件",
+    "write_file": "写入文件", "delete_file": "删除文件", "run_shell": "运行命令",
+    "grep": "搜索内容", "glob": "查找文件", "update_plan": "更新计划",
+}
+_ERROR_ABSOLUTE_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|/(?:home|Users|tmp|var)/)[^\"'，。；：、（）()\[\]\r\n]*")
+
+
+def _public_error_text(text: str, secrets: Iterable[str]) -> str:
+    """Keep actionable failure reasons; raw operation names and machine paths stay local."""
+    public = sanitize_text(text, secrets)
+    for name, label in _OPERATION_NAMES.items():
+        public = re.sub(rf"(?<![\w]){name}(?![\w])", label, public)
+    return _ERROR_ABSOLUTE_PATH.sub(_HIDDEN_PATH, public)[:TOOL_DETAIL_STREAM_CHARS]
 
 #: 工具详情的展示上限（§15.8）：超长内容有界折叠，完整正文留在本地工具事件里，不进入页面。
 TOOL_DETAIL_TEXT_CHARS: Final[int] = 4000
@@ -210,7 +234,9 @@ TOOL_DIFF_LINES: Final[int] = 400
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
-def sanitize_text(text: str, secrets: Iterable[str] = ()) -> str:
+def sanitize_text(
+    text: str, secrets: Iterable[str] = (), *, hide_private_paths: bool = True
+) -> str:
     """展示文本的清洗：已知密钥值 → `***`，密钥样式串 → `***`，绝对私人路径 → 占位符。
 
     节点侧的 `error_events` 文案是给内部看的，进入页面之前必须过这一层（§15.5、§15.8）。
@@ -218,7 +244,39 @@ def sanitize_text(text: str, secrets: Iterable[str] = ()) -> str:
     """
     cleaned = redact_secrets(text, list(secrets))
     cleaned = _KEY_LIKE.sub(_MASK, cleaned)
-    return _ABSOLUTE_PATH.sub(_HIDDEN_PATH, cleaned)
+    return _PRIVATE_PATH.sub(_HIDDEN_PATH, cleaned) if hide_private_paths else cleaned
+
+
+REASONING_DISPLAY_LIMIT = 16_000
+
+
+def safe_stream_boundary(text: str, boundary: int, secrets: Iterable[str] = ()) -> int:
+    """分段不能切开待脱敏的完整值（密钥也可能包含空格等分隔符）。"""
+    spans = [(match.start(), match.end()) for pattern in (_KEY_LIKE, _PRIVATE_PATH)
+             for match in pattern.finditer(text)]
+    # 私人路径尚未遇到结束分隔符时，继续保留整个路径，不能先遮盖前缀再泄漏下一块的后缀。
+    spans.extend((match.start(), match.end() + 1) for match in _PRIVATE_PATH.finditer(text)
+                 if match.end() == len(text))
+    for secret in secrets:
+        if not secret:
+            continue
+        start = text.find(secret)
+        while start >= 0:
+            spans.append((start, start + len(secret)))
+            start = text.find(secret, start + 1)
+    # 重叠值的保护范围可能相接；直到边界不再穿过任何敏感值。
+    while any(start < boundary < end for start, end in spans):
+        boundary = min(start for start, end in spans if start < boundary < end)
+    return boundary
+
+
+def reasoning_view(message: AIMessage, secrets: Iterable[str] = ()) -> tuple[str | None, bool]:
+    """供应商思考的有限展示副本；完整扩展字段继续留在原消息中。"""
+    raw = message.additional_kwargs.get("reasoning_content")
+    if not isinstance(raw, str) or not raw:
+        return None, False
+    cleaned = sanitize_text(raw, secrets)
+    return cleaned[:REASONING_DISPLAY_LIMIT] or None, len(cleaned) > REASONING_DISPLAY_LIMIT
 
 
 def _as_utc(value: Any) -> datetime | None:
@@ -241,6 +299,18 @@ def _as_utc(value: Any) -> datetime | None:
     return None
 
 
+# Only declared operation inputs needed to review an action enter browser DTOs.
+# Hashes, vendor metadata, prompts and arbitrary extension fields stay local.
+_DISPLAY_ARGUMENT_NAMES: Final[frozenset[str]] = frozenset({
+    "path", "cwd", "command", "timeout_seconds", "recursive", "overwrite",
+    "old_text", "new_text", "patch", "content", "replace_all", "reason",
+    "start_line", "end_line", "pattern", "glob", "output_mode", "ignore_case",
+    "include_hidden", "max_entries", "max_chars", "max_matches", "max_files",
+    "env_keys", "explanation",
+})
+DISPLAY_ARGUMENT_CHARS: Final[int] = 2000
+
+
 def _display_arguments(arguments: Any, secrets: Iterable[str] = ()) -> dict[str, str]:
     """把工具参数渲染成**已脱敏的展示字符串**。
 
@@ -253,10 +323,13 @@ def _display_arguments(arguments: Any, secrets: Iterable[str] = ()) -> dict[str,
         return {}
     rendered: dict[str, str] = {}
     for key, value in arguments.items():
+        if key not in _DISPLAY_ARGUMENT_NAMES:
+            continue
         if value is None:
             rendered[str(key)] = ""
         else:
-            rendered[str(key)] = sanitize_text(str(value), secrets)
+            text = sanitize_text(str(value), secrets)
+            rendered[str(key)] = text if len(text) <= DISPLAY_ARGUMENT_CHARS else text[:DISPLAY_ARGUMENT_CHARS] + "…（已截断）"
     return rendered
 
 
@@ -354,15 +427,19 @@ def project_messages_view(state: Mapping[str, Any], *, secrets: Iterable[str] = 
             views.append(
                 UserMessageView(
                     message_id=message_id(message),
-                    text=sanitize_text(_text_of(message), secrets),
+                    # 用户自己提交过的路径已在其浏览器中；回显时只隐藏密钥。
+                    text=sanitize_text(_text_of(message), secrets, hide_private_paths=False),
                     created_at=None,
                 )
             )
         elif isinstance(message, AIMessage):
+            reasoning, reasoning_truncated = reasoning_view(message, secrets)
             views.append(
                 AssistantMessageView(
                     message_id=message_id(message),
                     text=sanitize_text(_text_of(message), secrets),
+                    reasoning=reasoning,
+                    reasoning_truncated=reasoning_truncated,
                     created_at=None,
                     complete=True,
                 )
@@ -585,6 +662,39 @@ def _tool_outcome(
     path = _optional_sanitized(payload.get("path"), secrets)
     note = _optional_str(payload.get("note"))
 
+    if tool_name == "glob" or (tool_name == "grep" and payload.get("output_mode", "content") != "content"):
+        raw_paths = payload.get("files") if tool_name == "glob" else [hit.get("path") for hit in _mappings(payload.get("hits"))]
+        search_paths = [sanitize_text(item, secrets) for item in raw_paths if isinstance(item, str)][:TOOL_DETAIL_PATHS] if isinstance(raw_paths, list) else []
+        total = _int_of(payload.get("total_files" if tool_name == "glob" else "total_matches"))
+        return ToolOutcomeView(
+            kind="list", target=path, paths=search_paths, total=total,
+            summary=f"找到 {total if total is not None else len(search_paths)} {'个文件' if tool_name == 'glob' else '处匹配'}",
+            truncated=bool(payload.get("truncated")) or (isinstance(raw_paths, list) and len(raw_paths) > len(search_paths)),
+        )
+
+    if tool_name == "grep":
+        matches: list[SearchMatchView] = []
+        budget = TOOL_DETAIL_TEXT_CHARS
+        clipped = False
+        for item in _mappings(payload.get("matches")):
+            match_path = _optional_sanitized(item.get("path"), secrets)
+            line = _int_of(item.get("line_number"))
+            if not match_path or line is None or line < 1:
+                continue
+            if budget <= 0 or len(matches) >= TOOL_DETAIL_PATHS:
+                clipped = True
+                break
+            match_text = sanitize_text(str(item.get("text") or ""), secrets)
+            clipped = clipped or len(match_text) > budget
+            matches.append(SearchMatchView(path=match_path, line_number=line, text=match_text[:budget]))
+            budget -= len(match_text)
+        total = _int_of(payload.get("total_matches"))
+        return ToolOutcomeView(
+            kind="search", target=path, matches=matches, total=total,
+            summary=f"找到 {total if total is not None else len(matches)} 处匹配",
+            truncated=bool(payload.get("truncated")) or clipped,
+        )
+
     if tool_name == "list_dir":
         entries = payload.get("entries")
         paths: list[str] = []
@@ -721,7 +831,7 @@ def _evidence_map(state: Mapping[str, Any], secrets: Iterable[str]) -> dict[str,
             continue
         evidence[call_id] = ToolEvidenceView(
             evidence_type=str(reference.get("evidence_type") or "stdout"),
-            summary=summary,
+            summary="本次操作的结果",
             verified=bool(reference.get("verified")),
         )
     return evidence
@@ -762,6 +872,20 @@ def project_tool_rows(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) 
             or _optional_str((result or {}).get("tool_name"))
             or ""
         )
+        outcome = _tool_outcome(tool_name, _take_payload(payloads, call_id), secrets)
+        verification = evidence.get(call_id) if run == current_run else None
+        if verification is not None and outcome is not None and outcome.summary:
+            verification = verification.model_copy(update={"summary": outcome.summary})
+        # The original JSON contains hashes and internal keys. Known operations
+        # expose a summary plus typed detail; unrecognized JSON stays local.
+        if outcome is not None:
+            preview = outcome.summary
+        elif preview is not None and preview.lstrip().startswith(("{", "[")):
+            preview = "操作已返回结果；该结果格式暂无可展示的详情。"
+        if preview is not None:
+            preview = preview[:TOOL_DETAIL_STREAM_CHARS]
+            if _tool_status(event, result) in {"error", "denied"}:
+                preview = _public_error_text(preview, secrets)
         rows[tool_scope_key(run, call_id)] = (
             run,
             ToolUseView(
@@ -778,9 +902,9 @@ def project_tool_rows(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) 
                 started_at=started,
                 finished_at=finished,
                 elapsed_ms=_elapsed_ms(started, finished),
-                outcome=_tool_outcome(tool_name, _take_payload(payloads, call_id), secrets),
+                outcome=outcome,
                 # 证据没有轮次字段：只在本轮的行上贴，历史轮次的行保持为 `None`。
-                evidence=evidence.get(call_id) if run == current_run else None,
+                evidence=verification,
             ),
         )
 
@@ -985,7 +1109,8 @@ def _approval_target(
     except WorkspaceBoundaryError:
         return None, False
     # 审批卡必须能让用户核对完整目标；这里只抹密钥，不套用普通输出的路径隐藏规则。
-    target = _KEY_LIKE.sub(_MASK, redact_secrets(resolved.path.as_posix(), list(secrets)))
+    path = resolved.path.as_posix() if resolved.external else resolved.path.relative_to(workspace_root.resolve()).as_posix()
+    target = _KEY_LIKE.sub(_MASK, redact_secrets(path, list(secrets)))
     return target, resolved.external
 
 
@@ -1035,8 +1160,12 @@ def project_approval(
         )
         return ApprovalView(
             approval_id=approval_id,
-            run_id=run,
-            tool_call_id=call_id,
+            # `run_id` / `tool_call_id` 在旧 Checkpoint 里可能确实没有（决定记录早于这两个字段，或
+            # `pending_approval` 已被清掉）。DTO 要求非空，直接填空串会让**整个会话详情接口 500**——
+            # 实测一个会话因此完全打不开（`GET /api/sessions/{id}` → `ApprovalView` 校验失败）。
+            # 按这一层既有口径写 `_NOT_RECORDED`：如实说没有记录，不猜一个看起来合理的值。
+            run_id=run or _NOT_RECORDED,
+            tool_call_id=call_id or _NOT_RECORDED,
             # 决定本身不带工具名，`pending_approval` 又可能已被清掉：从工具事件里补；
             # 旧 Checkpoint 两处都没有时写"未记录"，而不是猜一个名字。
             tool_name=_tool_name_of(state, run, call_id) or _NOT_RECORDED,
@@ -1047,9 +1176,7 @@ def project_approval(
             # 目标只能从原始请求参数来；请求已被清掉时如实为空，不去别处猜。
             target=target,
             outside_workspace=outside,
-            impact_summary=sanitize_text(
-                str((request or {}).get("impact_summary") or "（未记录影响摘要）"), secrets
-            ),
+            impact_summary=_approval_impact(request, secrets, workspace_root),
             risk="high" if bool((request or {}).get("requires_second_confirmation")) else "normal",
             state=state_value,
             created_at=_as_utc((request or {}).get("created_at")) or _as_utc(decided.get("created_at")) or _epoch(),
@@ -1064,22 +1191,31 @@ def project_approval(
     target, outside = _approval_target(request.get("tool_name"), request.get("arguments"), secrets, workspace_root)
     return ApprovalView(
         approval_id=approval_id,
-        run_id=str(request.get("run_id") or ""),
-        tool_call_id=str(request.get("tool_call_id") or ""),
+        # 与上面的"已决定"分支同一口径：缺失写 `_NOT_RECORDED`，绝不填空串——DTO 要求非空，
+        # 空串会让整个会话详情接口 500，把"某个字段没有记录"升级成"这个会话打不开"。
+        run_id=str(request.get("run_id") or "") or _NOT_RECORDED,
+        tool_call_id=str(request.get("tool_call_id") or "") or _NOT_RECORDED,
         tool_name=str(request.get("tool_name") or ""),
         action_fingerprint=str(request.get("action_fingerprint") or ""),
         redacted_arguments=_display_arguments(request.get("arguments"), secrets),
         target=target,
         outside_workspace=outside,
         confirmation_stage=2 if confirmation_stage == 2 else 1,
-        impact_summary=sanitize_text(
-            str(request.get("impact_summary") or "（未记录影响摘要）"), secrets
-        ),
+        impact_summary=_approval_impact(request, secrets, workspace_root),
         risk="high" if bool(request.get("requires_second_confirmation")) else "normal",
         state=approval_state,
         created_at=_as_utc(request.get("created_at")) or _epoch(),
         note=None if approved_now else "该审批已失效，未执行任何操作。请重新发起请求。",
     )
+
+
+def _approval_impact(request: Mapping[str, Any] | None, secrets: Iterable[str], workspace_root: Path | None) -> str:
+    text = str((request or {}).get("impact_summary") or "（未记录影响摘要）")
+    if workspace_root is not None:
+        root = workspace_root.resolve()
+        for prefix in (root.as_posix() + "/", str(root) + "\\"):
+            text = text.replace(prefix, "")
+    return sanitize_text(text.replace("（T10）", "").replace("(T10)", ""), secrets)[:DISPLAY_ARGUMENT_CHARS]
 
 
 def _epoch() -> datetime:
@@ -1107,7 +1243,7 @@ def _error_view(event: Mapping[str, Any], *, secrets: Iterable[str]) -> ErrorVie
     stage = str(event.get("stage") or "")
     code, _category = _STAGE_ERRORS.get(stage, (app_errors.RUN_STAGE_FAILED, "system"))
     title, hint = _ERROR_TEXT[code]
-    message = sanitize_text(str(event.get("message") or "").strip() or title, secrets)
+    message = _public_error_text(str(event.get("message") or "").strip() or title, secrets)
     return ErrorView.for_code(
         code,
         title=title,
@@ -1120,17 +1256,14 @@ def _error_view(event: Mapping[str, Any], *, secrets: Iterable[str]) -> ErrorVie
 
 
 def _diagnostic_id(code: str, event_id: str, stage: str, run_id: str) -> str:
-    """公开诊断编号：**去掉内部 event_id 里的节点名**，只留公开码 + 轮次 + 作用域。
+    """Stable public correlation number; internal run, node and tool IDs stay local.
 
-    内部 `event_id` 形如 `run-1:error:tool_execution:0:t1`，其中 `tool_execution` 是节点名——
-    直接回显等于把节点名送到页面（§15.1）。去掉它之后，本地日志仍可用 `run_id` + 尾部作用域
-    与同一条记录对上；形状不符合预期时退回稳定哈希，**不**把原始 id 原样透出。
+    Local error records can reproduce this number from their original identity.
+    It is a diagnostic locator, not a model-prompt or tool-result fingerprint.
     """
-    prefix = f"{run_id}:error:{stage}:"
-    if event_id.startswith(prefix):
-        return f"{code}:{run_id}:{event_id[len(prefix):]}"
-    digest = hashlib.sha256(event_id.encode()).hexdigest()[:12]
-    return f"{code}:{run_id}:{digest}"
+    identity = json.dumps([event_id, stage, run_id], ensure_ascii=False)
+    digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
+    return f"{code}:{digest}"
 
 
 # ---- 用量 / 上下文 / 结果 --------------------------------------------------
@@ -1141,20 +1274,30 @@ def project_usage(state: Mapping[str, Any], run_id: str | None = None) -> TurnRe
 
     - 明细 = 本轮（`run_id` 相同）的 `model_call_records`；汇总字段逐项加总得出。
     - 任一明细缺某字段 → 该字段汇总为 `None`（未知即不显示，绝不把"缺"当 0）。
+    - **失败尝试不参与加总**（§15.6，2026-09-30）：没成功、且没有报告任何实际用量的调用按"没有消耗"
+      处理（见 :func:`_counts_toward_usage`），但仍逐条留在 `calls` 明细里。
     - 没有任何明细记录（旧 Checkpoint）→ `usage_recorded=False`，页面显示"历史版本未记录"。
     """
     run_id = run_id or current_run_id(state)
     if not run_id:
         return None
     records = [record for record in _model_call_records(state) if getattr(record, "run_id", "") == run_id]
+    # **加总只用"计费的调用"**（§15.6）。改这一处的原因是实测到的后果：被端点拒绝的请求（例如不支持
+    # `response_format: json_schema` 的端点回 400，客户端会降级重试）留下一条 `status="error"` 的记录，
+    # 它的"缺"是**已知的零**（没计费），可 `_sum_optional` 把它当未知，于是**整轮**的输入、命中率、输出
+    # 全部塌成未知——页面上的"缓存命中 未知"就是这么来的。T34 基线的结论 3 曾把这个行为当成预期
+    # （"有一次调用失败且没拿到用量，整轮汇总就是未知"），现按 §15.6 新增的口径改成"失败尝试不毒掉整轮"。
+    counted = [record for record in records if _counts_toward_usage(record)]
     turn = _turn_record(state, run_id)
     context = project_context(state) if run_id == current_run_id(state) else ContextMeterView()
     latest = records[-1] if records else None
-    uncached = _sum_optional([record.actual_uncached_input_tokens for record in records])
-    cache_read = _sum_optional([record.actual_cache_read_tokens for record in records])
-    cache_write = _sum_optional([record.actual_cache_write_tokens for record in records])
-    output = _sum_optional([record.actual_output_tokens for record in records])
-    reasoning = _sum_optional([record.actual_reasoning_tokens for record in records])
+    uncached = _sum_optional([record.actual_uncached_input_tokens for record in counted])
+    cache_read = _sum_optional([record.actual_cache_read_tokens for record in counted])
+    cache_write = _sum_optional([record.actual_cache_write_tokens for record in counted])
+    output = _sum_optional([record.actual_output_tokens for record in counted])
+    reasoning = _sum_optional([record.actual_reasoning_tokens for record in counted])
+    # 估算量**仍然算上失败尝试**：它描述的是"本轮组装并发出过多少请求"，失败的那次确实组装并发了；
+    # 实际量描述的是"计费消耗"，失败的那次不计费。两者口径不同，不是不一致。
     estimated = _sum_optional([record.estimated_prompt_tokens for record in records])
     if not records:
         # 旧 Checkpoint：一条用量记录都没有。估算值仍然可用——它就是本轮组装请求的估算输入
@@ -1284,6 +1427,32 @@ def _sum_optional(values: Sequence[int | None]) -> int | None:
     if not values or any(value is None for value in values):
         return None
     return sum(value for value in values if value is not None)
+
+
+def _counts_toward_usage(record: Any) -> bool:
+    """这条调用记录是否参与本轮用量的**加总**（§15.6「失败尝试不毒掉整轮」）。
+
+    只有一种不参与：**没成功、且没有报告任何实际用量**的调用。它与"成功但供应商没上报某个字段"
+    是两件不同的事：
+
+    - 后者（成功、字段缺失）仍按**未知**处理——那才是"未上报 ≠ 0"，会如实把该字段的汇总抹成未知；
+    - 前者（被拒绝的请求）按**没有消耗**处理——请求根本没被受理，供应商也没有产生计费。
+
+    **已知边界**：记录里没有错误种类，无法区分"被拒绝"与"生成中途失败"。后者若供应商不回报用量，
+    这里会**低估**——所以失败调用必须继续出现在明细里（标失败、用量未知），页面不得把它当作不存在。
+    """
+    if getattr(record, "status", "ok") == "ok":
+        return True
+    return any(
+        getattr(record, field, None) is not None
+        for field in (
+            "actual_uncached_input_tokens",
+            "actual_cache_read_tokens",
+            "actual_cache_write_tokens",
+            "actual_output_tokens",
+            "actual_reasoning_tokens",
+        )
+    )
 
 
 def _run_tool_events(state: Mapping[str, Any], run_id: str) -> list[Any]:

@@ -156,6 +156,7 @@ def open_runtime(
             secrets=tuple(secrets) or _settings_secrets(settings),
             connections=None if settings is None else settings.connections,
             permissions=None if settings is None else settings.permissions,
+            preferences=None if settings is None else settings.preferences,
         )
     except BaseException:
         # 装配失败不能留下"锁被一个不存在的服务占着"的状态。

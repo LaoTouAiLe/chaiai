@@ -1,6 +1,7 @@
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Check, Copy, Doc } from '../../components/icons'
 import type { ToolCardView } from '../../fixtures/types'
+import { copyText } from '../conversation/clipboard'
 import styles from './ToolCards.module.css'
 
 interface CardShellProps {
@@ -18,6 +19,8 @@ interface CardShellProps {
  * (ARCHITECTURE §15.8).
  */
 function CardShell({ title, meta, children, label }: CardShellProps) {
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const copyLabel = copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : `复制 ${title}`
   return (
     <section className={styles.card} aria-label={label}>
       <header className={styles.header}>
@@ -26,7 +29,9 @@ function CardShell({ title, meta, children, label }: CardShellProps) {
         </span>
         <span className={styles.title}>{title}</span>
         <span className={styles.meta}>{meta}</span>
-        <button type="button" className={styles.copy} aria-label={`复制 ${title}`}>
+        <button type="button" className={styles.copy} aria-label={copyLabel} title={copyLabel} onClick={() => {
+          void copyText(title).then((ok) => setCopyState(ok ? 'copied' : 'failed'))
+        }}>
           <Copy />
         </button>
       </header>
@@ -54,7 +59,7 @@ function ReadCard({ card }: { card: Extract<ToolCardView, { kind: 'read' }> }) {
       </div>
       {card.truncated === true ? (
         <p className={styles.note}>
-          正文较长，仅显示前 {String(card.lines.length)} 行；完整内容保存在工具事件中。
+          正文较长，仅显示前 {String(card.lines.length)} 行。如需更多，可让助手按行继续读取。
         </p>
       ) : null}
     </CardShell>
@@ -62,13 +67,15 @@ function ReadCard({ card }: { card: Extract<ToolCardView, { kind: 'read' }> }) {
 }
 
 function SearchCard({ card }: { card: Extract<ToolCardView, { kind: 'search' }> }) {
-  const shown = card.shape === 'matches' ? card.groups.length : card.paths.length
-  const unit = card.shape === 'matches' ? '个文件' : '个路径'
+  const countsMatches = card.shape === 'matches' && card.totalUnit === 'matches'
+  const shown = countsMatches ? card.groups.reduce((sum, group) => sum + group.matches.length, 0)
+    : card.shape === 'matches' ? card.groups.length : card.paths.length
+  const unit = countsMatches ? '处匹配' : card.shape === 'matches' ? '个文件' : '个路径'
   return (
     <CardShell
       label="搜索结果"
       title={card.shape === 'matches' ? '按内容匹配' : '按路径匹配'}
-      meta={`显示 ${String(shown)} ${unit} / 共 ${String(card.total)}`}
+      meta={`显示 ${String(shown)} ${unit} / 共 ${String(card.total)}${countsMatches ? ` 处匹配 · ${String(card.groups.length)} 个文件` : ''}`}
     >
       {card.shape === 'matches' ? (
         <ul className={styles.groups}>
@@ -95,7 +102,7 @@ function SearchCard({ card }: { card: Extract<ToolCardView, { kind: 'search' }> 
       )}
       {card.truncated ? (
         <p className={styles.note}>
-          结果已截断，仅显示前 {String(shown)} {unit}；完整结果保存在工具事件中。
+          结果已截断，仅显示前 {String(shown)} {unit}。可缩小范围后继续搜索。
         </p>
       ) : null}
     </CardShell>
@@ -139,11 +146,11 @@ function TerminalCard({ card }: { card: Extract<ToolCardView, { kind: 'terminal'
         <pre className={styles.terminal}>{card.output}</pre>
       )}
       {card.timedOut === true ? (
-        <p className={styles.note}>命令超时，已停止执行；完整内容保存在工具事件中。</p>
+        <p className={styles.note}>命令超时，已停止执行。</p>
       ) : null}
       {card.collapsedLines > 0 ? (
         <p className={styles.note}>
-          输出较长，已折叠 {String(card.collapsedLines)} 行；完整内容保存在工具事件中。
+          输出较长，当前省略了 {String(card.collapsedLines)} 行。
         </p>
       ) : null}
     </CardShell>
@@ -166,7 +173,7 @@ function ResultCard({ card }: { card: Extract<ToolCardView, { kind: 'result' }> 
     >
       {card.body === '' ? null : <pre className={styles.terminal}>{card.body}</pre>}
       {card.truncated ? (
-        <p className={styles.note}>内容较长，已截断；完整结果保存在工具事件中。</p>
+        <p className={styles.note}>内容较长，当前只显示部分结果。</p>
       ) : null}
     </CardShell>
   )
@@ -199,7 +206,7 @@ function TodoCard({ card }: { card: Extract<ToolCardView, { kind: 'todo' }> }) {
 
 function GenericCard({ card }: { card: Extract<ToolCardView, { kind: 'generic' }> }) {
   return (
-    <CardShell label="工具结果" title={card.headline} meta="通用渲染器">
+    <CardShell label="工具结果" title={card.headline} meta="结果详情">
       <p className={styles.generic}>{card.detail}</p>
     </CardShell>
   )

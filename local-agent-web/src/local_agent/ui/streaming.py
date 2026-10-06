@@ -1,27 +1,8 @@
-"""最终回答的流式展示（T23；架构 §5.3、§11.7）。
+"""同一次模型输出的实时展示（T39，沿用 T23 的聚合与降级边界）。
 
-**范围（刻意收紧）**：只流式展示**最终自然语言回答**。planner、reflection、工具调用、工具结果、
-隐藏推理（``reasoning_content``）一律不流式展示——它们要么不是给用户看的内容，要么会把中间态
-（"我先读一下这个文件"）或模型的隐藏推理推到页面上。
-
-**为什么只接两个调用点**：``chat_node``（闲聊回答）与 ``reflection_node`` 的收尾合成是**唯一**两处
-"模型输出就是最终回答"的地方。``agent_decision_node`` 的调用既可能产出回答、也可能产出工具调用
-（同一轮里还可能先写一句中间说明），**事先无法区分**，所以不流式。
-
-**四条硬规则（T23 验收）**：
-
-1. **不逐块写 Checkpoint**：增量只进页面 sink，节点返回的仍是**一条**完整 ``AIMessage``；
-2. **不支持 / 首块前失败** → 退化为**一次**普通完整调用（能力不支持不记事件，真失败才记）；
-3. **中途失败**（已经产生过文本）→ ``discard()`` 丢掉页面上的不完整投影，再**普通调用重试一次**，
-   把异常类型交给调用方记一条**可见降级事件**；
-4. **退化只重调模型**：绝不重放工具、不重写记忆（这两个调用点本来也不执行工具与记忆写入）。
-
-sink 用 contextvar 传入：网页在提交/审批恢复那一次设置、图内部读取；离开作用域自动失效，
-因此 Streamlit 重绘、刷新与恢复都不会重新调用模型。
-
-聚合方式与 LangChain 的流式聚合一致（``AIMessageChunk`` 相加后转成普通 ``AIMessage``）：
-这样落进 Checkpoint 的那条消息与非流式路径**同形**（含 ``additional_kwargs``，思考模式的
-``reasoning_content`` 因此也不会丢）。
+正文与供应商实际返回的 reasoning_content 分通道投影；工具参数不推到页面。
+增量不写 Checkpoint，也不判断任务完成；完整 AIMessage（含原扩展字段和用量）
+仍由节点提交。失败丢弃临时展示，仅重试模型一次，不重放工具与记忆。
 """
 
 from __future__ import annotations
@@ -33,7 +14,7 @@ from typing import Any
 from langchain_core.messages import AIMessage, BaseMessage
 
 from local_agent.context.token_budget import estimate_messages_tokens
-from local_agent.llm.compat import stream_placeholder_fields
+from local_agent.llm.compat import REASONING_CONTENT_KEY, stream_placeholder_fields
 from local_agent.llm.models import ModelCapabilities
 from local_agent.llm.stream_context import AnswerSink, current_sink, use_sink
 from local_agent.llm.usage_recording import (
@@ -95,14 +76,19 @@ def stream_answer(
     try:
         for chunk in streamer(list(messages)):
             text = _chunk_text(chunk)
-            if text:
+            reasoning = _chunk_reasoning(chunk)
+            if text or reasoning:
                 if message_id is None:
                     begin = getattr(sink, "begin", None)
                     if callable(begin):
                         message_id = str(begin())
                 chunks += 1
                 note_first_token(handle)
-                sink.push(text)
+                push_reasoning = getattr(sink, "push_reasoning", None)
+                if reasoning and callable(push_reasoning):
+                    push_reasoning(reasoning)
+                if text:
+                    sink.push(text)
             aggregated = chunk if aggregated is None else aggregated + chunk
     except Exception as exc:  # noqa: BLE001 —— 流式失败必须退化为普通调用，不中断本轮
         if handle is not None:
@@ -150,8 +136,13 @@ def stream_answer(
     return StreamedAnswer(message=message, streamed=True, chunks=chunks)
 
 
+def _chunk_reasoning(chunk: Any) -> str:
+    raw = getattr(chunk, "additional_kwargs", {}).get(REASONING_CONTENT_KEY)
+    return raw if isinstance(raw, str) else ""
+
+
 def _chunk_text(chunk: Any) -> str:
-    """只取**正文**：工具调用参数块与隐藏推理都不算最终回答。"""
+    """只取正文：工具参数不展示，实际思考由独立通道处理。"""
     if getattr(chunk, "tool_call_chunks", None):
         return ""
     content = getattr(chunk, "content", "")

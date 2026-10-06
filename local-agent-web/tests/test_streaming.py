@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 
 from local_agent import scope
@@ -365,3 +366,43 @@ def test_streaming_does_not_repeat_memory_writes(
 
     assert plain_count == 1
     assert streamed_count == plain_count  # 流式不得多写一条
+
+
+@pytest.mark.parametrize("decision", [False, True])
+def test_reasoning_stream_failure_resets_both_channels_and_retries_only_model(decision):
+    from local_agent.ui.decision_streaming import stream_decision
+    class Sink:
+        def __init__(self):
+            self.text, self.reasoning, self.resets = "", "", 0
+        def push(self, text):
+            self.text += text
+        def push_reasoning(self, text):
+            self.reasoning += text
+        def discard(self):
+            self.text, self.reasoning = "", ""
+            self.resets += 1
+    class Model:
+        def __init__(self):
+            self.calls = 0
+            self.seen = []
+        def stream(self, messages):
+            self.seen.append(messages)
+            yield AIMessageChunk(content="", additional_kwargs={"reasoning_content": "失败的思考。"})
+            yield AIMessageChunk(content="半句正文。")
+            raise RuntimeError("模拟断流")
+        def invoke(self, messages):
+            self.seen.append(messages)
+            self.calls += 1
+            return AIMessage(content="完整回答。", additional_kwargs={"reasoning_content": "重试后思考。"})
+    model, sink = Model(), Sink()
+    messages = [HumanMessage(content="固定输入")]
+    with use_sink(sink):
+        if decision:
+            result = stream_decision(model, messages, capabilities=None, enabled=True,
+                                     estimated_prompt_tokens=10, tools_schema_fingerprint="fixed")
+        else:
+            result = stream_answer(model, messages)
+    assert model.calls == 1 and model.seen == [messages, messages]
+    assert sink.resets == 1 and "失败" not in sink.reasoning and "半句" not in sink.text
+    assert result.message.text == "完整回答。"
+    assert result.message.additional_kwargs["reasoning_content"] == "重试后思考。"

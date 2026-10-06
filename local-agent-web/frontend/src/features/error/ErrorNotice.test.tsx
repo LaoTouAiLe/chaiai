@@ -26,7 +26,7 @@ describe('ErrorNotice', () => {
     }
   })
 
-  it('offers retry only when the failure is retryable', () => {
+  it('gives retry guidance without a dead resend button', () => {
     const [authFailed, rateLimited, retryExhausted] = notices()
     expect(authFailed).toBeDefined()
     expect(rateLimited).toBeDefined()
@@ -40,11 +40,11 @@ describe('ErrorNotice', () => {
     unmountAuth()
 
     const { unmount: unmountRate } = render(<ErrorNotice notice={rateLimited as ErrorNoticeView} />)
-    expect(screen.getByRole('button', { name: '重新发送' })).toBeInTheDocument()
+    expect(screen.getByText('检查后可在输入框重新发送')).toBeInTheDocument()
     unmountRate()
 
     render(<ErrorNotice notice={retryExhausted as ErrorNoticeView} />)
-    expect(screen.getByRole('button', { name: '重新发送' })).toBeInTheDocument()
+    expect(screen.getByText('检查后可在输入框重新发送')).toBeInTheDocument()
   })
 
   it('gives each server-side conflict code its own next step', () => {

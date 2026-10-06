@@ -12,6 +12,7 @@ export interface SidebarWorkspaceFixture {
   id: string
   title: string
   sessions: readonly SidebarSessionFixture[]
+  managed?: boolean
 }
 
 /**
@@ -35,7 +36,15 @@ export const sidebarWorkspaces: readonly SidebarWorkspaceFixture[] = [
       { id: 's-memory', title: '检索与记忆的三种结果', status: 'completed', timeLabel: '3 分钟', selected: false },
       { id: 's-diff', title: '压缩阈值重构', status: 'completed', timeLabel: '1 分钟', selected: false },
       { id: 's-errors', title: '连接故障排查', status: 'idle', timeLabel: '2 分钟', selected: false },
-      { id: 's-tools', title: '定位构建失败原因', status: 'completed', timeLabel: '3 分钟', selected: false },
+      // 刻意用一句长标题：侧栏那一格必须**自己省略**，而不是把右侧时间顶出去。
+      // 与 `toolsScenario.session.title` 保持一致（`e2e/prototype.spec.ts` 守着这条前提）。
+      {
+        id: 's-tools',
+        title: '定位构建失败原因：pnpm 与 vitest 两套门槛、可选依赖口径与 Windows 路径差异',
+        status: 'completed',
+        timeLabel: '3 分钟',
+        selected: false,
+      },
       { id: 's-approval', title: '清理构建产物', status: 'awaiting-approval', timeLabel: '4 分钟', selected: false },
       { id: 's-running', title: '检查可选依赖口径', status: 'running', timeLabel: '5 分钟', selected: false },
     ],

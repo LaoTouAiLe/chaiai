@@ -13,7 +13,7 @@
   就返回 `RECOVERY_REQUIRED`，**绝不自动重提**。
 - **图抛异常不写终态**：异常可能发生在工具副作用之后，写成"失败"等于声称"什么都没发生"；
   台账保留"执行中"并标记需要恢复，由下一次重试按 Checkpoint 核对（见 `_execute`）。
-- **读取与订阅都不得改业务状态**：`get_session_snapshot` 只读 Checkpoint；事件是 State 的单向投影。
+- **读取与订阅都不得改业务状态**：`get_session_snapshot` 只读 Checkpoint 与进程内脱敏展示副本，不推进图；完整业务事件仍是 State 的单向投影。
 - **模型连接在提交边界解析并在这一轮固定**（§6.8）：新提交按"会话选择 → 默认连接"构造客户端，并把
   `model_binding`（连接 id + 版本 + 不含明文的凭据引用）写进 State；审批恢复按**那一轮固定的**版本
   重建客户端。所以换模型/改参数只影响下一轮，等待审批的运行不会被中途换掉。没有可用设置库时退回
@@ -28,8 +28,8 @@ import hashlib
 import json
 import threading
 from collections import Counter, deque
-from collections.abc import Callable, Iterable, Mapping
-from contextlib import nullcontext
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import partial
@@ -50,6 +50,7 @@ from local_agent.application.events import (
     event_id_for,
 )
 from local_agent.application.models import (
+    AssistantMessageView,
     CapabilityCheckView,
     CommandResultView,
     ExternalPathAccess,
@@ -86,8 +87,23 @@ from local_agent.model_settings import (
     PermissionStore,
     Selection,
     SelectionRef,
+    memory_settings,
 )
 from local_agent.model_settings import probe as connection_probe
+from local_agent.model_settings.preferences import (
+    MemoryProbeRequest,
+    MemoryProbeResult,
+    PreferenceConflict,
+    PreferencesRequest,
+    PreferenceStore,
+    PreferencesView,
+    RuntimePreferenceBinding,
+    RuntimePreferences,
+    advanced_preferences,
+    apply_runtime_preferences,
+    complete_preferences,
+    initial_preferences,
+)
 from local_agent.persistence.request_ledger import (
     OPERATION_RESOLVE_APPROVAL,
     OPERATION_SUBMIT,
@@ -138,6 +154,7 @@ class _RunEnv:
     provider_name: str
     capabilities: ModelCapabilities | None
     binding: ModelBinding | None
+    preference_binding: RuntimePreferenceBinding
     #: 本轮用量录音机（§15.6）。与 `app_config` 同时定好：录音机里的连接/窗口信息必须来自
     #: **这次真正在用的**那份配置，不能读"当前设置"——等待审批的运行不该被中途换掉的设置影响。
     usage_recorder: ModelCallRecorder | None = None
@@ -286,7 +303,7 @@ class EventBus:
 
 
 class _StreamingAnswerSink:
-    """最终回答的临时增量；只有完整回答会进 Checkpoint。
+    """模型消息的临时增量；完整消息仍由节点提交到 Checkpoint。
 
     增量按安全分隔符成段推出，并保留最长已知密钥的重叠后缀：密钥、`sk-` 样式与绝对路径
     即使跨模型 chunk 也不会从 SSE 原样漏出。无分隔符的长串延至结束才显示，安全优先。
@@ -305,9 +322,16 @@ class _StreamingAnswerSink:
         self._model_call_id: str | None = None
         self._sequence = 0
         self._pending = ""
+        self._pending_channel: Literal["text", "reasoning"] = "text"
+        self._display_lock = threading.Lock()
+        self._text = ""
+        self._reasoning = ""
+        self._reasoning_truncated = False
+        self._last_channel: Literal["text", "reasoning"] = "text"
 
-    def bind_run(self, run_id: str) -> None:
+    def bind_run(self, run_id: str, *, call_index: int = 0) -> None:
         self._run_id = run_id
+        self._call_index = call_index
 
     def _envelope(self, event_type: str, identity: str, payload: Any, model: type) -> Any:
         if self._run_id is None:
@@ -325,10 +349,15 @@ class _StreamingAnswerSink:
     def begin(self) -> str:
         if self._run_id is None:
             raise RuntimeError("最终回答增量早于本轮 run 绑定")
-        self._call_index += 1
-        self._model_call_id = f"{self._run_id}:final-call:{self._call_index}"
-        self._message_id = f"{self._run_id}:final-message:{self._call_index}"
-        self._sequence = 0
+        with self._display_lock:
+            self._call_index += 1
+            self._model_call_id = f"{self._run_id}:final-call:{self._call_index}"
+            self._message_id = f"{self._run_id}:final-message:{self._call_index}"
+            self._sequence = 0
+            self._text = ""
+            self._reasoning = ""
+            self._reasoning_truncated = False
+            self._last_channel = "text"
         self._pending = ""
         self._started()
         return self._message_id
@@ -343,17 +372,29 @@ class _StreamingAnswerSink:
                 message_id=self._message_id,
                 role="assistant",
                 model_call_id=self._model_call_id,
+                reset=reset,
+                chunk_sequence=self._sequence,
             ),
             app_events.MessageStartedEvent,
         )
         self._bus.publish(self._session_id, [event])
 
     def push(self, text: str) -> None:
+        self._push(text, "text")
+
+    def push_reasoning(self, text: str) -> None:
+        self._push(text, "reasoning")
+
+    def _push(self, text: str, channel: Literal["text", "reasoning"]) -> None:
         if self._message_id is None:
             return
+        if channel != self._pending_channel:
+            self.flush()
+        self._pending_channel = channel
         self._pending += text
-        limit = len(self._pending) - self._holdback
+        limit = max(0, len(self._pending) - self._holdback)
         boundary = max((index + 1 for index, char in enumerate(self._pending[:limit]) if char in self._BREAKS), default=0)
+        boundary = proj.safe_stream_boundary(self._pending, boundary, self._secrets)
         if boundary:
             self._emit(self._pending[:boundary])
             self._pending = self._pending[boundary:]
@@ -364,7 +405,19 @@ class _StreamingAnswerSink:
         cleaned = proj.sanitize_text(raw, self._secrets)
         if not cleaned:
             return
-        self._sequence += 1
+        with self._display_lock:
+            if self._pending_channel == "reasoning":
+                remaining = proj.REASONING_DISPLAY_LIMIT - len(self._reasoning)
+                was_truncated = self._reasoning_truncated
+                self._reasoning_truncated |= len(cleaned) > remaining
+                cleaned = cleaned[:remaining]
+                if not cleaned and was_truncated:
+                    return
+                self._reasoning += cleaned
+            else:
+                self._text += cleaned
+            self._last_channel = self._pending_channel
+            self._sequence += 1
         event = self._envelope(
             "message_delta",
             app_events.stream_delta_identity(self._model_call_id, self._sequence),
@@ -374,6 +427,8 @@ class _StreamingAnswerSink:
                 model_call_id=self._model_call_id,
                 chunk_sequence=self._sequence,
                 text_delta=cleaned,
+                channel=self._pending_channel,
+                reasoning_truncated=self._reasoning_truncated,
             ),
             app_events.MessageDeltaEvent,
         )
@@ -386,9 +441,28 @@ class _StreamingAnswerSink:
 
     def discard(self) -> None:
         self._pending = ""
+        with self._display_lock:
+            self._text = ""
+            self._reasoning = ""
+            self._reasoning_truncated = False
+            self._last_channel = "text"
+            self._sequence += 1
         if self._message_id is not None:
             # 同一个稳定消息重新开始（空尾部）：前端立即清掉失败时的半句，不等普通调用结束。
             self._started(reset=True)
+
+    def partial_view(self, run_id: str) -> AssistantMessageView | None:
+        """进程内的安全展示副本；重订阅可读，不写数据库，也不恢复执行。"""
+        with self._display_lock:
+            if self._run_id != run_id or self._message_id is None:
+                return None
+            return AssistantMessageView(
+                message_id=self._message_id, model_call_id=self._model_call_id,
+                text=self._text, reasoning=self._reasoning or None,
+                reasoning_truncated=self._reasoning_truncated,
+                chunk_sequence=self._sequence, stream_channel=self._last_channel,
+                complete=False,
+            )
 
 
 class ApplicationService:
@@ -408,6 +482,7 @@ class ApplicationService:
         sequencer: StreamSequencer | None = None,
         connections: ConnectionStore | None = None,
         permissions: PermissionStore | None = None,
+        preferences: PreferenceStore | None = None,
         model_factory: Callable[[LlmConfig, str], Any] | None = None,
     ) -> None:
         self._graph = graph
@@ -419,6 +494,7 @@ class ApplicationService:
         #: 工作区外路径的档位与授权（T38）。与连接同库同生命周期：没有设置库时退回
         #: ``config.yaml`` 的出厂默认（``external_policy()`` 返回 ``None`` 由下层兜底）。
         self._permissions = permissions
+        self._preferences = preferences
         #: 按连接构造客户端的可调用对象；测试注入确定性假模型走同一条路径。
         self._build_model = model_factory or llm_factory.build_chat_model
         self._workspace_root = Path(workspace_root)
@@ -433,11 +509,81 @@ class ApplicationService:
         self._sequencer = self._bus.sequencer
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
+        self._streams: dict[str, _StreamingAnswerSink] = {}
+        self._catalog_lock = threading.RLock()
 
     # ---- 会话 ---------------------------------------------------------------
 
+    def preferences_view(self) -> PreferencesView:
+        defaults = initial_preferences(self._app_config)
+        saved = None if self._preferences is None else self._sqlite_access(self._preferences.read)
+        version, values = saved if saved is not None else (0, defaults)
+        values = complete_preferences(values, self._app_config)
+        return PreferencesView(
+            version=version, writable=self._preferences is not None,
+            values=values, defaults=defaults, advanced=advanced_preferences(self._app_config),
+            resources=memory_settings.resources_view(apply_runtime_preferences(self._app_config, values)),
+        )
+
+    def save_preferences(self, request: PreferencesRequest) -> PreferencesView:
+        store = self._preferences
+        if store is None:
+            raise app_errors.settings_store_unavailable(detail="应用偏好暂时无法保存", occurred_at=_now())
+        def write() -> PreferencesView:
+            current = store.read()
+            version, previous = current if current is not None else (0, initial_preferences(self._app_config))
+            if version != request.expected_version:
+                raise app_errors.preferences_conflict(occurred_at=_now())
+            previous = complete_preferences(previous, self._app_config)
+            # Older clients omit the new groups; preserve their currently saved values.
+            values = request.values.model_copy(update={
+                "medium_term": request.values.medium_term or previous.medium_term,
+                "embedding": request.values.embedding or previous.embedding,
+            })
+            try:
+                config = apply_runtime_preferences(self._app_config, values)
+                if values.embedding != previous.embedding or values.medium_term != previous.medium_term:
+                    memory_settings.validate_activation(config)
+            except ValueError as exc:
+                raise app_errors.model_settings_invalid(detail=str(exc), occurred_at=_now()) from exc
+            try:
+                if (values.embedding != previous.embedding or
+                    (values.medium_term != previous.medium_term and config.memory.medium_term.enabled)):
+                    memory_settings.check_configuration_compatibility(config)
+            except Exception as exc:
+                # Keep third-party errors/credentials out of settings responses.
+                detail = "已有向量库无法校验或与新配置不兼容，请检查依赖并沿用匹配的模型配置。"
+                raise app_errors.model_settings_invalid(detail=detail, occurred_at=_now()) from exc
+            try:
+                store.write(values, expected_version=request.expected_version)
+            except PreferenceConflict as exc:
+                raise app_errors.preferences_conflict(occurred_at=_now()) from exc
+            return PreferencesView(
+                version=request.expected_version + 1, writable=True, values=values,
+                defaults=initial_preferences(self._app_config),
+                advanced=advanced_preferences(self._app_config),
+                resources=memory_settings.resources_view(config),
+            )
+        return self._sqlite_access(write)
+
+    def test_memory_preferences(self, request: MemoryProbeRequest) -> MemoryProbeResult:
+        view = self.preferences_view()
+        if view.version != request.expected_version:
+            raise app_errors.preferences_conflict(occurred_at=_now())
+        values = request.values.model_copy(update={
+            "medium_term": request.values.medium_term or view.values.medium_term,
+            "embedding": request.values.embedding or view.values.embedding,
+        })
+        try:
+            config = apply_runtime_preferences(self._app_config, values)
+        except ValueError as exc:
+            raise app_errors.model_settings_invalid(detail=str(exc), occurred_at=_now()) from exc
+        # Model loading/network must not hold the SQLite lock or persist the draft.
+        return memory_settings.probe(config)
+
     def list_sessions(
-        self, *, workspace_root: Path | None = None, workspace_id: str | None = None
+        self, *, workspace_root: Path | None = None, workspace_id: str | None = None,
+        archived: bool = False,
     ) -> list[SessionSummaryView]:
         """列出会话。`workspace_root` 与 `workspace_id` 二选一。
 
@@ -445,7 +591,9 @@ class ApplicationService:
         只拿得到不含路径的稳定标识，路径解析留在服务里。
         """
         root = self._root_of(workspace_root, workspace_id)
-        sessions = self._sqlite_access(partial(self._sessions.list_sessions, workspace_root=root))
+        sessions = self._sqlite_access(
+            partial(self._sessions.list_sessions, workspace_root=root, archived=archived)
+        )
         return [self._summary(session) for session in sessions]
 
     def model_configured(self) -> bool:
@@ -495,12 +643,12 @@ class ApplicationService:
         """已用过的工作区（规范化路径，最近使用的在前）。"""
         paths = [Path(path) for path in self._sqlite_access(self._sessions.list_workspaces)]
         refs = [self._ref_for(path) for path in paths]
-        name_counts = Counter(path.name for path in paths)
+        name_counts = Counter(ref.display_name for ref in refs)
         return [
             WorkspaceRef(
                 workspace_id=ref.workspace_id,
                 display_name=f"{ref.display_name} · {ref.workspace_id[:6]}"
-                if name_counts[path.name] > 1 else ref.display_name,
+                if name_counts[ref.display_name] > 1 else ref.display_name,
             )
             for path, ref in zip(paths, refs)
         ]
@@ -511,10 +659,14 @@ class ApplicationService:
         title: str | None = None,
         workspace_root: Path | None = None,
         workspace_id: str | None = None,
+        mode: str = "agent",
     ) -> SessionSummaryView:
         """新建会话并切换过去；`workspace_root` 与 `workspace_id` 二选一。"""
-        root = self._root_of(workspace_root, workspace_id)
-        session = self._sqlite_access(partial(self._sessions.create, title=title, workspace_root=root))
+        with self._catalog_lock:
+            root = self._root_of(workspace_root, workspace_id)
+            session = self._sqlite_access(
+                partial(self._sessions.create, title=title, workspace_root=root, mode=mode)
+            )
         return self._summary(session)
 
     def select_workspace(self, workspace_root: Path, *, title: str | None = None) -> SessionSummaryView:
@@ -523,14 +675,70 @@ class ApplicationService:
         会话与工作区一对一绑定，所以这里**不改写**已有会话的 `workspace_root`（§10.6）；
         「切工作区」= 切会话。
         """
-        session = self._sqlite_access(
-            partial(self._sessions.switch_workspace, Path(workspace_root), title=title)
-        )
+        with self._catalog_lock:
+            session = self._sqlite_access(
+                partial(self._sessions.switch_workspace, Path(workspace_root), title=title)
+            )
         return self._summary(session)
+
+    def select_session(self, session_id: str) -> SessionSummaryView:
+        with self._catalog_lock:
+            self._session_or_raise(session_id)
+            session = self._sqlite_access(partial(self._sessions.switch, session_id))
+        return self._summary(session)
+
+    def rename_session(self, session_id: str, title: str) -> SessionSummaryView:
+        self._session_or_raise(session_id)
+        return self._summary(self._sqlite_access(partial(self._sessions.rename, session_id, title)))
+
+    def archive_session(self, session_id: str) -> SessionSummaryView:
+        with self._catalog_lock, self._catalog_session_guard(session_id):
+            session = self._sqlite_access(partial(self._sessions.set_archived, session_id, True))
+        return self._summary(session)
+
+    def restore_session(self, session_id: str) -> SessionSummaryView:
+        with self._catalog_lock:
+            self._session_or_raise(session_id, allow_archived=True)
+            session = self._sqlite_access(partial(self._sessions.set_archived, session_id, False))
+        return self._summary(session)
+
+    def rename_workspace(self, workspace_id: str, title: str) -> WorkspaceRef:
+        with self._catalog_lock:
+            root = self._path_for_workspace_id(workspace_id)
+            self._sqlite_access(partial(self._sessions.rename_workspace, root, title))
+        return self._ref_for(root)
+
+    def remove_workspace(self, workspace_id: str) -> None:
+        # 与新建/重新登记串行；所有关联线程都先取得执行锁，再检查挂起审批。
+        with self._catalog_lock, ExitStack() as stack:
+            root = self._path_for_workspace_id(workspace_id)
+            sessions = self._sqlite_access(partial(self._sessions.list_sessions, workspace_root=root))
+            for session in sorted(sessions, key=lambda item: item.session_id):
+                stack.enter_context(self._catalog_session_guard(session.session_id))
+            self._sqlite_access(partial(self._sessions.remove_workspace, root))
+
+    @contextmanager
+    def _catalog_session_guard(self, session_id: str) -> Iterator[None]:
+        lock = self._lock_for(session_id)
+        if not lock.acquire(blocking=False):
+            raise app_errors.session_busy(
+                session_id=session_id, request_id="catalog-update", occurred_at=_now()
+            )
+        try:
+            session = self._session_or_raise(session_id)
+            view = self._read(session)
+            if view.has_live_interrupt or self._snapshot(session, view).session_state == "running":
+                raise app_errors.session_busy(
+                    session_id=session_id, request_id="catalog-update", occurred_at=_now()
+                )
+            yield
+        finally:
+            lock.release()
 
     def select_workspace_by_id(self, workspace_id: str) -> SessionSummaryView:
         """选回列表中的工作区；前端只需传不含绝对路径的稳定标识。"""
-        return self.select_workspace(self._path_for_workspace_id(workspace_id))
+        with self._catalog_lock:
+            return self.select_workspace(self._path_for_workspace_id(workspace_id))
 
     def _path_for_workspace_id(self, workspace_id: str) -> Path:
         """把稳定标识解析回工作区路径；未列出的标识 → `WORKSPACE_NOT_FOUND`。
@@ -954,6 +1162,8 @@ class ApplicationService:
                 "user_input": text,
                 "thread_id": session.thread_id,
                 "session_id": session.session_id,
+                "session_mode": session.mode,
+                "runtime_preferences": env.preference_binding.model_dump(mode="json"),
             }
             if env.binding is not None:
                 # 这次运行从此固定在这条连接的**这个版本**上：之后改设置都不会换掉它（§6.8）。
@@ -1102,6 +1312,8 @@ class ApplicationService:
                 raise app_errors.session_busy(
                     session_id=session.session_id, request_id=request_id, occurred_at=_now()
                 )
+            # 会话可能在加载与取得执行锁之间被归档；取得锁后再次检查。
+            self._session_or_raise(session.session_id)
             if existing is not None and existing["status"] == STATUS_EXECUTING:
                 # 台账说在执行，但锁没被占用：上一次进程留下的。先只读核对，绝不自动重跑。
                 return self._recover(session, entry=existing, operation=operation)
@@ -1251,7 +1463,22 @@ class ApplicationService:
             bus=self._bus,
             secrets=self._secrets,
         )
-        with use_sink(sink):
+        # Approval resume already has a checkpoint-validated run in the ledger.
+        # It skips prepare_context, so its node updates need not repeat run_id;
+        # bind before the resumed model can publish an answer or usage record.
+        entry = self._sqlite_access(partial(self._ledger.get, request_id))
+        resumed_run = entry["run_id"] if entry is not None else None
+        if resumed_run is not None:
+            # 初次决策的 Think 也有稳定消息 id；恢复不能从 1 重新编号，覆盖带工具调用的历史。
+            prefix = f"{resumed_run}:final-message:"
+            previous = proj.project_messages_view(self._read(session).values, secrets=self._secrets)
+            indices = [int(message.message_id[len(prefix):]) for message in previous
+                       if message.message_id.startswith(prefix) and message.message_id[len(prefix):].isdigit()]
+            sink.bind_run(resumed_run, call_index=max(indices, default=0))
+            if env.usage_recorder is not None:
+                env.usage_recorder.bind_run(resumed_run)
+            bound = True
+        with self._live_stream(session.session_id, sink):
             for chunk in self._graph.stream(
                 payload,
                 config={"configurable": {"thread_id": session.thread_id}},
@@ -1271,6 +1498,17 @@ class ApplicationService:
                         bound = True
                 if on_update is not None:
                     on_update()
+
+    @contextmanager
+    def _live_stream(self, session_id: str, sink: _StreamingAnswerSink) -> Iterator[None]:
+        with self._locks_guard:
+            self._streams[session_id] = sink
+        try:
+            with use_sink(sink):
+                yield
+        finally:
+            with self._locks_guard:
+                self._streams.pop(session_id, None)
 
     def _sqlite_access(self, action: Callable[[], _T]) -> _T:
         """在 **Checkpointer 的锁**里访问共享 SQLite 连接上的业务数据。
@@ -1463,19 +1701,35 @@ class ApplicationService:
         - **旧配置模式**（没有设置库）：沿用注入的适配器与 ``app_config.llm``——§6.8 的降级路径，
           页面会看到"设置不可用"的说明。
         """
+        if for_resume:
+            saved = self._read(session).values.get("runtime_preferences")
+            preference_binding = (
+                RuntimePreferenceBinding.model_validate(saved) if saved is not None else
+                RuntimePreferenceBinding(version=0, values=RuntimePreferences.model_validate(
+                    initial_preferences(self._app_config).model_dump(exclude={"general"})
+                ))
+            )
+        elif self._preferences is not None:
+            preference_binding = self._sqlite_access(partial(self._preferences.binding, self._app_config))
+        else:
+            preference_binding = RuntimePreferenceBinding(version=0, values=RuntimePreferences.model_validate(
+                initial_preferences(self._app_config).model_dump(exclude={"general"})
+            ))
+        app_config = apply_runtime_preferences(self._app_config, preference_binding.values)
         if binding is None:
             if self._app_config.llm is None:
                 # 既没有设置库、也没有 llm 段：这台机器上确实没有任何可用的模型来源。
                 raise app_errors.model_connection_required(
                     session_id=session.session_id, occurred_at=_now()
                 )
-            run_config = self._app_config.as_run_config()
+            run_config = app_config.as_run_config()
             return _RunEnv(
                 app_config=run_config,
                 model=self._model_adapter,
                 provider_name=run_config.llm.model,
                 capabilities=None,
                 binding=None,
+                preference_binding=preference_binding,
                 # 旧配置没有连接 id / 版本：如实标成 `legacy-config` / `unversioned`，
                 # 端点指纹按 base_url + 模型名现算（§15.6 只要求"缓存基线可比"）。
                 usage_recorder=ModelCallRecorder(
@@ -1492,13 +1746,14 @@ class ApplicationService:
         connection = self._connection_for_binding(binding)
         llm = connection.to_llm_config()
         return _RunEnv(
-            app_config=self._app_config.model_copy(update={"llm": llm}).as_run_config(),
+            app_config=app_config.model_copy(update={"llm": llm}).as_run_config(),
             model=self._build_model(llm, self._api_key_for(connection)),
             provider_name=llm.model,
             # 恢复中的运行不重新按能力门禁：它在提交时已经被放行过，拿一份可能是"新版本"的检测结论
             # 去改变一个正在等待审批的运行，等于中途换判据（§6.8 的停止条件）。
             capabilities=None if for_resume else _capabilities_from(connection.capability),
             binding=binding,
+            preference_binding=preference_binding,
             # 用量记录用**这一轮固定的连接版本**（不是"当前设置"）：等待审批的运行恢复后，
             # 记录里的连接/窗口必须还是当初那一份。
             usage_recorder=ModelCallRecorder(
@@ -1579,19 +1834,29 @@ class ApplicationService:
     def _ref_for(self, workspace: Path) -> WorkspaceRef:
         return WorkspaceRef(
             workspace_id=scope_key_for(SCOPE_WORKSPACE, workspace_root=workspace),
-            display_name=workspace.name,
+            display_name=self._sqlite_access(partial(self._sessions.workspace_title, workspace))
+            or workspace.name,
         )
 
     def _workspace_ref(self, session: Session) -> WorkspaceRef:
         return self._ref_for(Path(session.workspace_root))
 
     def _snapshot(self, session: Session, view: _ThreadView) -> SessionSnapshot:
-        return self._snapshot_at(
+        # 运行期间可修改显示名称；长期 SSE 订阅捕获的旧 Session 不应覆盖新名称。
+        session = self._sqlite_access(partial(self._sessions.get, session.session_id)) or session
+        snapshot = self._snapshot_at(
             session,
             view,
             snapshot_id=view.checkpoint_id or f"{session.session_id}:no-checkpoint",
             created_at=_now(),
         )
+        with self._locks_guard:
+            sink = self._streams.get(session.session_id)
+        if sink is not None and snapshot.current_task is not None and snapshot.session_state == "running":
+            tail = sink.partial_view(snapshot.current_task.run_id)
+            if tail is not None and not any(message.message_id == tail.message_id for message in snapshot.messages):
+                return snapshot.model_copy(update={"messages": [*snapshot.messages, tail]})
+        return snapshot
 
     def _snapshot_at(
         self, session: Session, view: _ThreadView, *, snapshot_id: str, created_at: datetime
@@ -1674,15 +1939,21 @@ class ApplicationService:
             thread_id=session.thread_id,
             title=session.title,
             workspace=self._ref_for(workspace),
+            # `Session.mode` 来自存储层，类型上是自由字符串（旧库或手工改过的值都可能出现），而 DTO
+            # 只认 "chat" / "agent"。这里**显式收敛**，不用 `cast` 骗过类型检查：真出现第三种值时，
+            # 页面按 Agent 显示，而不是让一句类型谎话把数据问题藏起来（收敛到 Agent 而不是闲聊，
+            # 是因为闲聊只绑定只读工具——把功能误判成闲聊会让会话连该有的工具都拿不到）。
+            mode="chat" if session.mode == "chat" else "agent",
             is_active=(session.status == "active"),
+            archived=session.archived,
             created_at=_as_dt(session.created_at),
             updated_at=_as_dt(session.updated_at),
             last_checkpoint_id=session.last_checkpoint_id,
         )
 
-    def _session_or_raise(self, session_id: str) -> Session:
+    def _session_or_raise(self, session_id: str, *, allow_archived: bool = False) -> Session:
         session = self._sqlite_access(partial(self._sessions.get, session_id))
-        if session is None:
+        if session is None or (session.archived and not allow_archived):
             raise app_errors.session_not_found(session_id=session_id, occurred_at=_now())
         return session
 
@@ -1877,7 +2148,7 @@ class ApplicationService:
                 )
 
         for message in snapshot.messages:
-            if message.kind != "assistant" or not message.text:
+            if message.kind != "assistant" or not message.complete or not (message.text or message.reasoning):
                 continue
             # 本轮开始前就有的回答不属于这一轮；同一条消息只播一次——它的稳定标识就是
             # message id，文本后续被改写由**快照**负责（§15.3），不再发第二条。
@@ -1892,6 +2163,8 @@ class ApplicationService:
                         message_id=message.message_id,
                         role="assistant",
                         text=message.text,
+                        reasoning=message.reasoning,
+                        reasoning_truncated=message.reasoning_truncated,
                         complete=message.complete,
                     ),
                     app_events.MessageCompletedEvent,

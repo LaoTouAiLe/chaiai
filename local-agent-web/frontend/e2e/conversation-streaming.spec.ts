@@ -4,10 +4,12 @@ const REPLY = '第一句回答已经开始。这里是持续生成的补充说�
 
 test('最终回答真正增量出现，并在完成与刷新后只留一份', async ({ page }) => {
   await page.goto('/')
+  await page.getByRole('button', { name: '新建会话' }).click()
+  await page.getByRole('button', { name: '选择会话模式' }).click()
   const streamReady = page.waitForResponse((response) =>
     response.url().includes('/api/sessions/') && response.url().endsWith('/events') && response.status() === 200,
   )
-  await page.getByRole('button', { name: '新建会话' }).click()
+  await page.getByRole('menu', { name: '会话模式' }).getByRole('menuitemradio', { name: /闲聊/ }).click()
   await streamReady
   const input = page.getByPlaceholder('给智能体发消息')
   await input.fill('请回答')

@@ -381,9 +381,11 @@ class AgentState(TypedDict, total=False):
     #: 本次运行固定的模型连接（§6.8）；由应用服务在提交边界写入，之后不因设置变更而变。
     #: 类型来自领域层：绑定是"模型连接的固定引用"，不属于 Graph 自己发明的结构。
     model_binding: ModelBinding
+    runtime_preferences: dict[str, Any]
 
     # 本轮输入与路由（覆盖语义）
     user_input: str
+    session_mode: Literal["chat", "agent"]
     normalized_request: str
     mode: AgentMode
     route_reason: str
@@ -399,6 +401,9 @@ class AgentState(TypedDict, total=False):
     plan: list[PlanStep]
     current_step_index: int
     completed_steps: Annotated[list[str], operator.add]
+    #: T43：缺失表示旧挂起运行；新用户提交固定使用版本 1。
+    agent_loop_version: int
+    plan_managed: bool
 
     # 工具调用与结果
     pending_tool_calls: list[ToolCall]

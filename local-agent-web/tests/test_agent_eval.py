@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import build_legacy_graph
 from langgraph.types import Command
 
 from local_agent import scope
@@ -553,7 +554,11 @@ def _run_case(case: EvalCase, *, tmp_path: Path, app_config: AppConfig, model_fa
     database = tmp_path / f"{case.case_id}.sqlite"
     thread_id = f"eval-{case.case_id}"
     thread = {"configurable": {"thread_id": thread_id}}
-    graph = builder.build_chat_graph(checkpoint.open_checkpointer(database))
+    # 两条固定旧判官轨迹保留恢复回归；其余用例默认运行新主循环。
+    graph_factory = (build_legacy_graph if case.case_id in {
+        "stall-guard-bounded", "rag-natural-question-asks",
+    } else builder.build_chat_graph)
+    graph = graph_factory(checkpoint.open_checkpointer(database))
 
     approvals: list[str] = []
     result = graph.invoke({"user_input": case.user_input, "thread_id": thread_id}, config=thread, context=context)
@@ -566,7 +571,7 @@ def _run_case(case: EvalCase, *, tmp_path: Path, app_config: AppConfig, model_fa
         approvals.append(f"{name}:{'approve' if approved else 'reject'}")
         if case.restart_at_interrupt:
             # 等价于"重启进程后再恢复"：换一条连接重开 Checkpoint
-            graph = builder.build_chat_graph(checkpoint.open_checkpointer(database))
+            graph = graph_factory(checkpoint.open_checkpointer(database))
         result = graph.invoke(
             Command(resume={"decision": "approve" if approved else "reject"}),
             config=thread,

@@ -59,7 +59,7 @@ from typing import Any, Literal, Protocol
 from langchain_openai import OpenAIEmbeddings
 from pydantic import SecretStr
 
-from local_agent.config import ConfigError, EmbeddingConfig
+from local_agent.config import ConfigError, EmbeddingConfig, redact_secrets
 from local_agent.exceptions import EmbeddingLoadError, EmbeddingUnavailableError
 
 #: 缺少可选依赖时的安装提示（消息面向使用者，必须能照做）。
@@ -153,7 +153,7 @@ def ensure_hf_cache_effective(cache_dir: Path) -> None:
     raise EmbeddingLoadError(
         "HuggingFace 缓存已在本进程导入时固化，无法改到 embedding.cache_dir 下："
         + "、".join(stale)
-        + f"。请把 HF_HOME / HF_HUB_CACHE / HF_XET_CACHE 指到 {prefix} 下，"
+        + f"。请保存新缓存目录后重启后端；或把 HF_HOME / HF_HUB_CACHE / HF_XET_CACHE 指到 {prefix} 下，"
         "或确保在导入 fastembed / huggingface_hub 之前先构造 Embedding 适配器"
         "（本机不允许把缓存写到配置之外的位置）。"
     )
@@ -422,7 +422,10 @@ class OnnxLocalEmbedding:
 class OpenAiCompatibleEmbedding:
     """OpenAI 兼容 Embedding API 适配（保留 provider，v0.2 默认不使用）。"""
 
-    def __init__(self, config: EmbeddingConfig, *, api_key: str) -> None:
+    def __init__(
+        self, config: EmbeddingConfig, *, api_key: str,
+        request_timeout_seconds: float | None = None, max_retries: int = 2,
+    ) -> None:
         if config.provider != "openai_compatible":
             raise EmbeddingUnavailableError(
                 f"provider 为 {config.provider}，不能用 OpenAI 兼容适配器"
@@ -434,9 +437,16 @@ class OpenAiCompatibleEmbedding:
             )
         self._model_name = config.model
         self._base_url = config.base_url
+        self._api_key = api_key
         self._dimension: int | None = None
         self._embeddings = OpenAIEmbeddings(
-            model=config.model, base_url=config.base_url, api_key=SecretStr(api_key)
+            model=config.model, base_url=config.base_url, api_key=SecretStr(api_key),
+            timeout=request_timeout_seconds, max_retries=max_retries,
+            # Compatible providers can reject OpenAI token IDs and base64 output.
+            # Send original strings; let the provider reject overlong input rather
+            # than silently splitting with an unrelated tokenizer/model limit.
+            check_embedding_ctx_length=False,
+            model_kwargs={"encoding_format": "float"},
         )
 
     @property
@@ -504,7 +514,7 @@ class OpenAiCompatibleEmbedding:
         return results
 
     def _failure_text(self, error: BaseException) -> str:
-        detail = str(error).strip() or type(error).__name__
+        detail = redact_secrets(str(error).strip(), (self._api_key,)) or type(error).__name__
         return (
             f"调用 OpenAI 兼容 Embedding 失败：model={self._model_name}；"
             f"base_url={self._base_url}；原因：{detail}。"
@@ -513,7 +523,8 @@ class OpenAiCompatibleEmbedding:
 
 
 def build_embedding_function(
-    config: EmbeddingConfig, *, api_key: str | None = None
+    config: EmbeddingConfig, *, api_key: str | None = None,
+    request_timeout_seconds: float | None = None, max_retries: int = 2,
 ) -> EmbeddingFunction:
     """按配置构造 embedding 可调用对象（架构 §10.2：不使用 Chroma 自带默认模型）。
 
@@ -521,6 +532,8 @@ def build_embedding_function(
         config: ``embedding`` 配置节。
         api_key: 已解析的 Key；仅 ``openai_compatible`` 需要（与 ``build_chat_model`` 同样
             由调用方先用 :func:`local_agent.config.resolve_api_key` 取值）。
+        request_timeout_seconds: API 请求超时；显式设置测试使用 30 秒，常规运行沿用默认值。
+        max_retries: API 重试次数；显式设置测试为 0，常规运行沿用默认 2 次。
 
     Returns:
         满足 :class:`EmbeddingFunction` 的对象；模型此时**尚未**加载（``onnx_local`` 惰性）。
@@ -542,7 +555,10 @@ def build_embedding_function(
             "provider 为 openai_compatible 时需要 API Key："
             f"用 resolve_api_key 从环境变量 {config.api_key_env} 读取"
         )
-    return OpenAiCompatibleEmbedding(config, api_key=api_key)
+    return OpenAiCompatibleEmbedding(
+        config, api_key=api_key,
+        request_timeout_seconds=request_timeout_seconds, max_retries=max_retries,
+    )
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -566,6 +582,7 @@ class EmbeddingReadiness:
     cache_dir: str | None
     #: 面向用户的说明；失败时必须说清原因与下一步（架构 §11.6：不允许静默回退）。
     detail: str
+    restart_required: bool = False
 
 
 def fastembed_available() -> bool:
@@ -645,6 +662,15 @@ def readiness(config: EmbeddingConfig, *, api_key: str | None = None) -> Embeddi
     parent = _writable_parent(path, provider=provider, model=model)
     if isinstance(parent, EmbeddingReadiness):
         return parent
+    try:
+        ensure_hf_cache_effective(path)
+    except EmbeddingLoadError:
+        return EmbeddingReadiness(
+            state="not_ready", provider=provider, model=model, cache_dir=cache_dir,
+            restart_required=True,
+            detail="本进程已加载其他 HuggingFace 缓存路径；新缓存目录需保存后重启后端生效。"
+            "重启前不会测试加载该目录，请在重启后再次测试。",
+        )
     if config.local_files_only:
         return EmbeddingReadiness(
             state="ready",

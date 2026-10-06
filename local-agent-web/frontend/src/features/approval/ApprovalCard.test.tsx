@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { approvalExpiredScenario, approvalScenario } from '../../fixtures/scenarios'
 import type { ApprovalView } from '../../fixtures/types'
 import { ApprovalCard } from './ApprovalCard'
@@ -11,11 +11,17 @@ function approvalOf(scenario: typeof approvalScenario): ApprovalView {
 }
 
 describe('ApprovalCard', () => {
+  beforeEach(() => {
+    // "已关闭"记在 localStorage 里，用例之间必须隔离：否则一个用例点过关闭，
+    // 后面复用同一个 approvalId 的用例就整体不渲染了。
+    localStorage.clear()
+  })
   it('shows the action, its normalised target, the impact and the risk before any button', () => {
     const approval = approvalOf(approvalScenario)
     render(<ApprovalCard approval={approval} />)
     expect(screen.getByText('等待审批')).toBeInTheDocument()
-    expect(screen.getByText('delete_file')).toBeInTheDocument()
+    expect(screen.getByText('删除文件')).toBeInTheDocument()
+    expect(screen.queryByText(approval.approvalId)).not.toBeInTheDocument()
     expect(screen.getByText('dist/')).toBeInTheDocument()
     expect(screen.getByText('高风险')).toBeInTheDocument()
     for (const item of approval.impact) {
@@ -60,6 +66,35 @@ describe('ApprovalCard', () => {
     await user.click(screen.getByRole('button', { name: '关闭审批结果' }))
 
     expect(container).toBeEmptyDOMElement()
+  })
+
+  it('keeps a dismissed decision dismissed after a remount (refresh)', () => {
+    // 终态卡片由服务端快照派生，刷新后会重新挂载。只用组件状态记"关过了"的话，
+    // 刷新等于白关——用户实测反馈的"关不掉"就是这个（2026-09-30）。
+    const expired = approvalOf(approvalExpiredScenario)
+    localStorage.setItem('local-agent-web.dismissed-approvals', JSON.stringify([expired.approvalId]))
+
+    const { container } = render(<ApprovalCard approval={expired} />)
+
+    expect(container).toBeEmptyDOMElement()
+  })
+
+  it('still shows a different approval after another one was dismissed', () => {
+    const base = approvalOf(approvalScenario)
+    localStorage.setItem('local-agent-web.dismissed-approvals', JSON.stringify(['某个别的审批']))
+
+    render(<ApprovalCard approval={base} />)
+
+    expect(screen.getByText('等待审批')).toBeInTheDocument()
+  })
+
+  it('survives unreadable storage instead of failing to render', () => {
+    // 隐私模式 / 配额满：读不到就退回"没关过"，而不是把卡片渲染搞崩。
+    localStorage.setItem('local-agent-web.dismissed-approvals', '{ 不是 JSON')
+
+    render(<ApprovalCard approval={approvalOf(approvalExpiredScenario)} />)
+
+    expect(screen.getByText('审批已失效')).toBeInTheDocument()
   })
 
   it('never offers collapse or dismiss while a decision is still pending', () => {
@@ -142,8 +177,8 @@ describe('ApprovalCard', () => {
       render(<ApprovalCard approval={approval} />)
 
       expect(screen.getByText('参数')).toBeInTheDocument()
-      expect(screen.getByText('path=dist')).toBeInTheDocument()
-      expect(screen.getByText('recursive=True')).toBeInTheDocument()
+      expect(screen.getByText('路径：dist')).toBeInTheDocument()
+      expect(screen.getByText('包含子目录：True')).toBeInTheDocument()
       // 没有目标、没有影响清单时，不再渲染空的「目标 / 影响」行。
       expect(screen.queryByText('目标')).not.toBeInTheDocument()
       expect(screen.queryByText('影响')).not.toBeInTheDocument()

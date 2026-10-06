@@ -1,5 +1,6 @@
 import { render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
 import { ContextMeter, MeterPanel } from './ContextMeter'
 
 /** The compact readout. The detail block repeats "未知" by design. */
@@ -61,9 +62,40 @@ describe('ContextMeter', () => {
     unmount()
 
     // With the panel open the same content is pinned, so the popover is gone.
-    render(<ContextMeter meter={meter} open />)
+    render(<ContextMeter meter={meter} open onToggle={vi.fn()} />)
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '收起上下文详情' })).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('forwards a ring click instead of doing nothing', async () => {
+    // 圆环一直自称"展开上下文详情"且带 aria-expanded，但曾经没有 onClick：
+    // 悬停能看、键盘用户点不动（matrix 22/23 要求没有指针也能拿到同一份详情）。
+    const user = userEvent.setup()
+    const onToggle = vi.fn()
+    render(
+      <ContextMeter meter={{ usedTokens: 84_000, windowTokens: 128_000, scope: 'current' }} onToggle={onToggle} />,
+    )
+
+    await user.click(screen.getByRole('button', { name: '展开上下文详情' }))
+
+    expect(onToggle).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not claim to be expandable when nobody wired it', () => {
+    // 惰性按钮不谎称展开态：没有 handler 时连 aria-expanded 都不渲染。
+    render(<ContextMeter meter={{ usedTokens: 84_000, windowTokens: 128_000, scope: 'current' }} />)
+
+    expect(screen.getByRole('button', { name: '展开上下文详情' })).not.toHaveAttribute('aria-expanded')
+  })
+
+  it('lets the pinned panel be closed, not just opened', async () => {
+    const user = userEvent.setup()
+    const onClose = vi.fn()
+    render(<MeterPanel meter={{ usedTokens: null, windowTokens: null, scope: 'unknown' }} onClose={onClose} />)
+
+    await user.click(screen.getByRole('button', { name: '收起上下文详情' }))
+
+    expect(onClose).toHaveBeenCalledTimes(1)
   })
 
   it('keeps the same detail reachable without a pointer', () => {

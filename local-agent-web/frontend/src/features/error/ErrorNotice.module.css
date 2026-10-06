@@ -46,18 +46,6 @@
   color: var(--law-text-primary);
 }
 
-.code {
-  flex: 0 0 auto;
-  padding: var(--law-space-xxs) var(--law-space-sm);
-  border-radius: var(--law-radius-xs);
-  background: var(--law-bg-layer-1);
-  border: 1px solid var(--law-border-l2);
-  color: var(--law-text-secondary);
-  font-family: var(--law-font-mono);
-  font-size: var(--law-text-xxs);
-  line-height: var(--law-leading-xxs);
-}
-
 .message {
   color: var(--law-text-primary);
   font-size: var(--law-text-md);
@@ -85,24 +73,24 @@
   font-variant-numeric: tabular-nums;
 }
 
-.retry {
-  height: 30px;
-  padding: 0 var(--law-space-xl);
-  border-radius: var(--law-radius-md);
-  background: var(--law-button-primary-fill);
-  color: var(--law-text-on-brand);
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
-  font-weight: var(--law-weight-medium);
-  transition: background var(--law-duration-base) var(--law-ease);
-}
-
-.retry:hover {
-  background: var(--law-button-primary-hover);
-}
-
 .notRetryable {
   color: var(--law-text-tertiary);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
+}
+
+.diagnostics {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+}
+
+.diagnostics > summary {
+  width: fit-content;
+  cursor: pointer;
+}
+
+.diagnostics .meta {
+  display: block;
+  padding-top: var(--law-space-xs);
+  overflow-wrap: anywhere;
 }

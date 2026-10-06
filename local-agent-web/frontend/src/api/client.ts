@@ -15,6 +15,9 @@ export type ErrorView = components['schemas']['ErrorView']
 export type ModelConnectionDto = components['schemas']['ModelConnectionView']
 export type HealthDto = components['schemas']['HealthView']
 export type PermissionsDto = components['schemas']['PermissionsView']
+export type PreferencesDto = components['schemas']['PreferencesView']
+export type PreferenceValues = components['schemas']['PreferenceValues']
+export type GeneralPreferences = components['schemas']['GeneralPreferences']
 export type ExternalPathsModeDto = PermissionsDto['mode']
 export type ExternalPathAccessDto = components['schemas']['ExternalPathGrantView']['access']
 
@@ -169,14 +172,40 @@ export function pickWorkspaceDirectory(): Promise<PickDirectoryDto> {
 }
 
 /** 会话列表；按工作区过滤时传 `workspace_id`。 */
-export function listSessions(workspaceId?: string): Promise<Schemas['SessionSummaryView'][]> {
-  const query = workspaceId === undefined ? '' : `?workspace_id=${encodeURIComponent(workspaceId)}`
-  return request(`/api/sessions${query}`)
+export function listSessions(workspaceId?: string, archived = false): Promise<Schemas['SessionSummaryView'][]> {
+  const query = new URLSearchParams()
+  if (workspaceId !== undefined) query.set('workspace_id', workspaceId)
+  if (archived) query.set('archived', 'true')
+  return request(`/api/sessions${query.size === 0 ? '' : `?${query}`}`)
+}
+
+export function selectSession(id: string): Promise<Schemas['SessionSummaryView']> {
+  return request(`/api/sessions/${encodeURIComponent(id)}/select`, { method: 'POST' })
+}
+
+export function renameSession(id: string, title: string): Promise<Schemas['SessionSummaryView']> {
+  return request(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) })
+}
+
+export function archiveSession(id: string): Promise<Schemas['SessionSummaryView']> {
+  return request(`/api/sessions/${encodeURIComponent(id)}/archive`, { method: 'POST' })
+}
+
+export function restoreSession(id: string): Promise<Schemas['SessionSummaryView']> {
+  return request(`/api/sessions/${encodeURIComponent(id)}/restore`, { method: 'POST' })
+}
+
+export function renameWorkspace(id: string, title: string): Promise<Schemas['WorkspaceRef']> {
+  return request(`/api/workspaces/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) })
+}
+
+export function removeWorkspace(id: string): Promise<void> {
+  return request(`/api/workspaces/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
 /** 新建会话；不传工作区就用服务端启动时的默认工作区。 */
 export function createSession(
-  payload: { title?: string; workspace_id?: string } = {},
+  payload: { title?: string; workspace_id?: string; mode?: 'chat' | 'agent' } = {},
 ): Promise<Schemas['SessionSummaryView']> {
   return request('/api/sessions', { method: 'POST', body: JSON.stringify(payload) })
 }
@@ -303,6 +332,23 @@ export function selectSessionModel(
  */
 export function getPermissions(): Promise<PermissionsDto> {
   return request<PermissionsDto>('/api/permissions')
+}
+
+export function getPreferences(): Promise<PreferencesDto> {
+  return request('/api/preferences')
+}
+
+export function savePreferences(values: PreferenceValues, expectedVersion: number): Promise<PreferencesDto> {
+  return request('/api/preferences', {
+    method: 'PUT', body: JSON.stringify({ values, expected_version: expectedVersion }),
+  })
+}
+
+export type MemoryProbeDto = components['schemas']['MemoryProbeResult']
+export function testMemoryPreferences(values: PreferenceValues, expectedVersion: number): Promise<MemoryProbeDto> {
+  return request('/api/preferences/memory/test', {
+    method: 'POST', body: JSON.stringify({ values, expected_version: expectedVersion }),
+  })
 }
 
 /** 切换档位。改动**作用于下一轮**：正在跑或等待审批的那些运行已按当时的档位判定完。 */

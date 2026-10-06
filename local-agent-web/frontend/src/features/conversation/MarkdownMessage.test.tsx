@@ -35,6 +35,20 @@ describe('MarkdownMessage', () => {
     expect(screen.getByRole('button', { name: '复制代码' })).toHaveTextContent('已复制')
   })
 
+  it('renders a GFM table as a real table instead of raw pipes', () => {
+    // 2026-09-30：`react-markdown` 默认只解析 CommonMark，缺 `remark-gfm` 时表格会退化成一行带
+    // 竖线的普通文本（实测：表格是本项目架构类回答的主要呈现形式）。
+    const { container } = render(
+      <MarkdownMessage text={'| 模块 | 职责 |\n|---|---|\n| `api/` | 传输层 |'} />,
+    )
+
+    expect(container.querySelector('table')).not.toBeNull()
+    expect(screen.getByRole('columnheader', { name: '模块' })).toBeInTheDocument()
+    expect(screen.getByRole('cell', { name: '传输层' })).toBeInTheDocument()
+    // 没解析时整行会原样作为文本出现：反过来钉住"没有竖线残留"
+    expect(container.textContent ?? '').not.toContain('|---|')
+  })
+
   it('reports a failed copy instead of claiming success', async () => {
     setClipboard(vi.fn().mockRejectedValue(new Error('clipboard unavailable')))
     render(<MarkdownMessage text={'```\nsecret-free sample\n```'} />)

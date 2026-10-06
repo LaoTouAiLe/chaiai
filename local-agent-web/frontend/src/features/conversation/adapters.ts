@@ -25,6 +25,7 @@ import type {
   TurnStatsView,
 } from '../../fixtures/types'
 import type { StreamTail } from './streamTail'
+import { toolLabel } from '../tool/display'
 
 type Snapshot = components['schemas']['SessionSnapshot']
 type TransportError = components['schemas']['ErrorView']
@@ -56,15 +57,13 @@ const SESSION_STATE: Record<SessionState, SessionSummaryView['status']> = {
 }
 
 /**
- * 工具状态 → 三态。
+ * 工具状态：排队与执行分开，被拒绝与执行失败都不冒充成功。
  *
- * 两处降级，都是视图模型暂时缺位（不是数据缺失）：
- * - `pending`（已接受、还没开始）没有对应的视觉态，按"进行中"呈现；
  * - `denied`（用户拒绝）与 `error` 都会显示成失败——**被拒绝不是成功**，这个方向不会误导；
  *   具体是"被拒绝"还是"执行失败"由下面 `outcome` 里的证据行与参数如实表达。
  */
 const TOOL_STATUS: Record<ToolUse['status'], ToolRowView['status']> = {
-  pending: 'running',
+  pending: 'pending',
   running: 'running',
   ok: 'succeeded',
   error: 'failed',
@@ -116,12 +115,25 @@ function argumentSummary(pairs: readonly { name: string; value: string }[]): str
  */
 function outcomeCard(tool: ToolUse, outcome: ToolOutcome): ToolCardView {
   switch (outcome.kind) {
+    case 'search': {
+      const groups = new Map<string, { line: number; text: string }[]>()
+      for (const match of outcome.matches ?? []) {
+        const matches = groups.get(match.path) ?? []
+        matches.push({ line: match.line_number, text: match.text })
+        groups.set(match.path, matches)
+      }
+      return {
+        kind: 'search', shape: 'matches', paths: [],
+        groups: [...groups].map(([path, matches]) => ({ path, matches })),
+        total: outcome.total ?? (outcome.matches ?? []).length, totalUnit: 'matches', truncated: outcome.truncated,
+      }
+    }
     case 'read': {
       const body = outcome.text ?? ''
       const lines = body === '' ? [] : body.split('\n').map((text, index) => ({ number: index + 1, text }))
       return {
         kind: 'read',
-        path: outcome.target ?? tool.tool_name,
+        path: outcome.target ?? '读取结果',
         lines,
         totalLines: outcome.total ?? lines.length,
         language: '',
@@ -143,7 +155,7 @@ function outcomeCard(tool: ToolUse, outcome: ToolOutcome): ToolCardView {
       return {
         kind: 'terminal',
         // 命令本身是已脱敏参数；cwd 与退出码来自结构化结果，不从自然语言里解析。
-        command: tool.redacted_arguments?.command ?? tool.tool_name,
+        command: tool.redacted_arguments?.command ?? '命令未记录',
         cwd: outcome.target ?? '',
         exitCode: outcome.exit_code ?? null,
         signal: null,
@@ -234,14 +246,14 @@ export function mapTool(tool: ToolUse): ToolRowView {
     parameters,
     resultPreview: preview,
     resultTruncated: tool.truncated === true,
-    resultDigest: tool.output_digest ?? null,
+    resultDigest: null,
     startedLabel: timeLabel(tool.started_at),
     finishedLabel: timeLabel(tool.finished_at),
     evidence:
       tool.evidence === null || tool.evidence === undefined
         ? null
         : {
-          evidenceType: tool.evidence.evidence_type,
+          evidenceType: '',
           summary: tool.evidence.summary,
           verified: tool.evidence.verified,
         },
@@ -249,7 +261,7 @@ export function mapTool(tool: ToolUse): ToolRowView {
       outcome === null
         ? {
           kind: 'generic',
-          headline: tool.tool_name,
+          headline: toolLabel(tool.tool_name),
           detail: tool.truncated === true && preview !== '' ? `${preview}\n（输出已截断）` : preview,
         }
         : outcomeCard(tool, outcome),
@@ -258,7 +270,7 @@ export function mapTool(tool: ToolUse): ToolRowView {
 
 /** 计划条：没有计划就是 `null`，不用空计划占位（契约已经这样返回）。 */
 export function mapPlan(plan: Snapshot['plan']): PlanView | null {
-  if (plan === null || plan === undefined) return null
+  if (plan === null || plan === undefined || (plan.steps ?? []).length === 0) return null
   return {
     goal: plan.goal,
     steps: (plan.steps ?? []).map((step) => ({
@@ -354,6 +366,13 @@ export function mapMessages(snapshot: Snapshot, tail: StreamTail | null = null):
             ? tail.text
             : message.text ?? '',
           at: timeLabel(message.created_at),
+          reasoning: !message.complete && tail?.messageId === message.message_id
+            ? tail.reasoning ?? message.reasoning ?? '' : message.reasoning ?? '',
+          reasoningTruncated: !message.complete && tail?.messageId === message.message_id
+            ? tail.reasoningTruncated ?? message.reasoning_truncated : message.reasoning_truncated,
+          streaming: !message.complete,
+          reasoningRunning: !message.complete && (tail?.messageId === message.message_id
+            ? tail.channel ?? message.stream_channel : message.stream_channel) === 'reasoning',
         })
         break
       case 'tool':
@@ -373,10 +392,12 @@ export function mapMessages(snapshot: Snapshot, tail: StreamTail | null = null):
         break
     }
   }
-  if (tail !== null && tail.text !== '' &&
+  if (tail !== null && (tail.text !== '' || (tail.reasoning ?? '') !== '') &&
     !(snapshot.messages ?? []).some((message) => message.message_id === tail.messageId) &&
     !hasCompleteAssistant(snapshot, tail.messageId)) {
-    mapped.push({ kind: 'assistant', id: tail.messageId, text: tail.text, at: '' })
+    mapped.push({ kind: 'assistant', id: tail.messageId, text: tail.text, at: '',
+      reasoning: tail.reasoning, reasoningTruncated: tail.reasoningTruncated,
+      streaming: true, reasoningRunning: tail.channel === 'reasoning' })
   }
   return mapped
 }
@@ -395,16 +416,18 @@ export function mapContext(snapshot: Snapshot): ContextMeterView {
  * 调用用途 → 页面说法。
  *
  * 契约里的 `purpose` 已经是**产品级词表**（架构 §15.4：不得泄露内部节点名），这里只把它译成人话，
- * 不做任何判断。出现词表外的取值时**原样显示**——不猜它是哪一类，也不吞掉它。
+ * 出现词表外的取值时显示“模型调用”，不把内部用途名写进页面。
  */
 const PURPOSE_LABEL: Record<string, string> = {
   chat: '闲聊回答',
+  main_decision: '主模型处理',
   tool_decision: '工具决策',
   final_answer: '最终回答',
   summarize: '上下文摘要',
   planning: '计划拆步',
   reflection: '结果反思',
   memory_intent: '记忆意图',
+  memory_extraction: '任务记忆提取',
   retrieval: '检索决策',
   routing: '意图路由',
 }
@@ -418,13 +441,13 @@ const PURPOSE_LABEL: Record<string, string> = {
 export function mapCall(call: TransportCall): ModelCallView {
   return {
     id: call.model_call_id,
-    purpose: PURPOSE_LABEL[call.purpose] ?? call.purpose,
+    purpose: PURPOSE_LABEL[call.purpose] ?? '模型调用',
     modelLabel: call.model_id,
     inputTokens: call.actual_uncached_input_tokens ?? null,
     outputTokens: call.actual_output_tokens ?? null,
     elapsedLabel: durationLabel(call.model_elapsed_ms),
     // 供应商/服务端没记录就是 `null`（页面写"未知"），不编一个指纹出来。
-    schemaFingerprint: call.tools_schema_fingerprint ?? null,
+    schemaFingerprint: null,
   }
 }
 
@@ -445,6 +468,8 @@ function mapUsage(
   steps: number,
 ): TurnStatsView {
   const recorded = usage.usage_recorded
+  const output = usage.actual_output_tokens ?? null
+  const modelElapsedMs = usage.model_elapsed_ms ?? null
   return {
     // 一次提交到终态就是一轮（§15.6："本轮"即一次用户提交）。
     turns: 1,
@@ -453,8 +478,18 @@ function mapUsage(
     // 有记录就只显示**实际量**（没上报就是"未知"）；没有记录（旧 Checkpoint）才退回估算输入，
     // 而且只在那一支用 `estimated` 标记，估算值不会被当成供应商实际量。
     inputTokens: recorded ? (usage.actual_uncached_input_tokens ?? null) : (usage.estimated_prompt_tokens ?? null),
-    outputTokens: usage.actual_output_tokens ?? null,
+    outputTokens: output,
     elapsedLabel: durationLabel(usage.turn_elapsed_ms),
+    // 耗时三项与首 token 直接来自契约，不做二次计算；缺失留空串 → 页面显示"未知"。
+    modelElapsedLabel: durationLabel(usage.model_elapsed_ms),
+    toolElapsedLabel: durationLabel(usage.tool_elapsed_ms),
+    firstTokenLabel: durationLabel(usage.time_to_first_token_ms),
+    // 吞吐只在两个数都是**实际量**时才算：缺一个就不猜（§15.6 "未上报 ≠ 0"）。
+    throughput:
+      output !== null && modelElapsedMs !== null && modelElapsedMs > 0
+        ? Math.round(output / (modelElapsedMs / 1000))
+        : null,
+    cacheReported: usage.cache_metrics_reported ?? false,
     estimated: !recorded,
     calls: calls.map(mapCall),
   }
@@ -467,12 +502,13 @@ export function mapStats(snapshot: Snapshot): TurnStatsView | null {
 }
 
 /** 按持久用户消息锚点把各轮统计放回对话流；旧记录缺锚点时不猜归属。 */
-export function mapTurnStats(snapshot: Snapshot, messages: readonly MessageView[]) {
+export function mapTurnStats(snapshot: Snapshot, messages: readonly MessageView[], hideCurrent = false) {
   const turns = snapshot.turn_usages ?? []
   const userPositions = messages.flatMap((message, index) =>
     message.kind === 'user' ? [index] : [],
   )
   return turns.flatMap((turn) => {
+    if (hideCurrent && turn.usage.run_id === snapshot.current_task?.run_id) return []
     const start = messages.findIndex((message) => message.id === turn.user_message_id && message.kind === 'user')
     if (start < 0) return []
     const next = userPositions.find((position) => position > start) ?? messages.length

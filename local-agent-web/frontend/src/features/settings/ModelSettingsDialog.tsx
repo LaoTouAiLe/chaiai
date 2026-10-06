@@ -11,6 +11,7 @@ import { ConnectionForm } from './ConnectionForm'
 import { SettingsDialog } from './SettingsDialog'
 import { useModelSettings } from './useModelSettings'
 import { usePermissions } from './usePermissions'
+import { PreferenceSection } from './PreferenceSection'
 import styles from './SettingsDialog.module.css'
 
 export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
@@ -107,6 +108,15 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
     <SettingsDialog
       settings={view}
       form={form}
+      extraSections={{
+        general: <PreferenceSection group="general" />,
+        execution: <PreferenceSection group="execution" />,
+        retrieval: <PreferenceSection group="retrieval" />,
+        memory: <PreferenceSection group="memory" />,
+        medium_term: <PreferenceSection group="medium_term" />,
+        embedding: <PreferenceSection group="embedding" />,
+        advanced: <PreferenceSection group="advanced" />,
+      }}
       permissionBusy={permissions.busy}
       permissionError={permissions.error?.message ?? null}
       permissionActions={{

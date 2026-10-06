@@ -42,7 +42,12 @@ from local_agent.security.path_guard import (
 from local_agent.security.shell_guard import prepare_shell
 
 #: 只读工具。
-READ_ONLY_TOOLS: tuple[str, ...] = ("list_dir", "read_file")
+#:
+#: ``grep`` / ``glob``（2026-09-30 新增）也是只读：它们只返回"哪个文件哪一行命中了什么"，
+#: 不写盘、不改状态，因此与 ``list_dir`` / ``read_file`` 同级，**不需要人工审批**。
+#: 但它们必须登记在这里——``KNOWN_TOOLS`` 是"可绑定给模型"的白名单，没登记的会被安全门拒。
+READ_ONLY_TOOLS: tuple[str, ...] = ("list_dir", "read_file", "grep", "glob")
+CONTROL_TOOLS: tuple[str, ...] = ("update_plan",)
 
 #: 写入类工具（本版本只放行其中的安全子集）。
 WRITE_TOOLS: tuple[str, ...] = ("edit_file", "write_file")
@@ -55,7 +60,7 @@ ALWAYS_APPROVAL_TOOLS: tuple[str, ...] = ("delete_file",)
 
 #: 本版本已实现、可绑定给模型的全部工具。
 KNOWN_TOOLS: tuple[str, ...] = (
-    READ_ONLY_TOOLS + WRITE_TOOLS + SHELL_TOOLS + ALWAYS_APPROVAL_TOOLS
+    READ_ONLY_TOOLS + CONTROL_TOOLS + WRITE_TOOLS + SHELL_TOOLS + ALWAYS_APPROVAL_TOOLS
 )
 
 
@@ -219,6 +224,8 @@ class SecurityPolicy:
         未接入或未列入放行清单的工具一律拒绝（失败闭合），不做"默认放行"。
         """
         args = dict(arguments or {})
+        if tool_name in CONTROL_TOOLS:
+            return SafetyDecision(allowed=True, requires_approval=False, reason="当前任务计划更新")
         if tool_name in READ_ONLY_TOOLS:
             return SafetyDecision(allowed=True, requires_approval=False, reason="只读工具")
         if tool_name == "edit_file":

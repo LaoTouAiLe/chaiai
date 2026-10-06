@@ -180,6 +180,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/preferences": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 应用偏好与配置概览 */
+        get: operations["get_preferences_api_preferences_get"];
+        /** 保存应用偏好 */
+        put: operations["put_preferences_api_preferences_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/preferences/memory/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 测试 Embedding 与已有向量集合（不保存草稿、不写入记忆） */
+        post: operations["test_memory_preferences_api_preferences_memory_test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions": {
         parameters: {
             query?: never;
@@ -221,7 +256,8 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        patch?: never;
+        /** Rename Session */
+        patch: operations["rename_session_api_sessions__session_id__patch"];
         trace?: never;
     };
     "/api/sessions/{session_id}/approvals/{approval_id}": {
@@ -235,6 +271,23 @@ export interface paths {
         put?: never;
         /** 提交审批决定 */
         post: operations["resolve_approval_api_sessions__session_id__approvals__approval_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Archive Session */
+        post: operations["archive_session_api_sessions__session_id__archive_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -301,6 +354,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore Session */
+        post: operations["restore_session_api_sessions__session_id__restore_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/select": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Select Session */
+        post: operations["select_session_api_sessions__session_id__select_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/workspaces": {
         parameters: {
             query?: never;
@@ -359,6 +446,27 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/workspaces/{workspace_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove Workspace
+         * @description 仅移除工作区登记，保留磁盘目录与全部会话。
+         */
+        delete: operations["remove_workspace_api_workspaces__workspace_id__delete"];
+        options?: never;
+        head?: never;
+        /** Rename Workspace */
+        patch: operations["rename_workspace_api_workspaces__workspace_id__patch"];
         trace?: never;
     };
 }
@@ -482,8 +590,6 @@ export interface components {
          *     `edit` 目前归入 `approved`，被改写的参数通过 `edited_arguments` 携带，不新增页面状态。
          */
         ApprovalView: {
-            /** Action Fingerprint */
-            action_fingerprint: string;
             /** Approval Id */
             approval_id: string;
             /**
@@ -536,6 +642,11 @@ export interface components {
         /** AssistantMessageView */
         AssistantMessageView: {
             /**
+             * Chunk Sequence
+             * @default 0
+             */
+            chunk_sequence: number;
+            /**
              * Complete
              * @default true
              */
@@ -551,6 +662,19 @@ export interface components {
             message_id: string;
             /** Model Call Id */
             model_call_id?: string | null;
+            /** Reasoning */
+            reasoning?: string | null;
+            /**
+             * Reasoning Truncated
+             * @default false
+             */
+            reasoning_truncated: boolean;
+            /**
+             * Stream Channel
+             * @default text
+             * @enum {string}
+             */
+            stream_channel: "text" | "reasoning";
             /** Text */
             text: string;
         };
@@ -634,10 +758,60 @@ export interface components {
          * @description 新建会话；两项都可以缺省（沿用库的启动默认工作区、自动命名）。
          */
         CreateSessionRequest: {
+            /**
+             * Mode
+             * @default agent
+             * @enum {string}
+             */
+            mode: "chat" | "agent";
             /** Title */
             title?: string | null;
             /** Workspace Id */
             workspace_id?: string | null;
+        };
+        /** EmbeddingPreferences */
+        EmbeddingPreferences: {
+            /**
+             * Allow Plaintext Http
+             * @default false
+             */
+            allow_plaintext_http: boolean;
+            /**
+             * Api Key Env
+             * @default
+             */
+            api_key_env: string;
+            /**
+             * Base Url
+             * @default
+             */
+            base_url: string;
+            /**
+             * Cache Dir
+             * @default
+             */
+            cache_dir: string;
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /**
+             * Local Files Only
+             * @default false
+             */
+            local_files_only: boolean;
+            /**
+             * Model
+             * @default
+             */
+            model: string;
+            /**
+             * Provider
+             * @default onnx_local
+             * @enum {string}
+             */
+            provider: "onnx_local" | "openai_compatible";
         };
         /** ErrorMessageView */
         ErrorMessageView: {
@@ -704,6 +878,17 @@ export interface components {
             title: string;
         };
         EventEnvelope: components["schemas"]["SessionSnapshotEvent"] | components["schemas"]["MessageStartedEvent"] | components["schemas"]["MessageDeltaEvent"] | components["schemas"]["MessageCompletedEvent"] | components["schemas"]["PlanUpdatedEvent"] | components["schemas"]["StepStartedEvent"] | components["schemas"]["StepCompletedEvent"] | components["schemas"]["ToolStartedEvent"] | components["schemas"]["ToolOutputEvent"] | components["schemas"]["ToolCompletedEvent"] | components["schemas"]["ApprovalRequiredEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["MemoryRecalledEvent"] | components["schemas"]["MemoryWrittenEvent"] | components["schemas"]["ModelCallStartedEvent"] | components["schemas"]["ModelUsageReportedEvent"] | components["schemas"]["ModelCallCompletedEvent"] | components["schemas"]["TaskCompletedEvent"] | components["schemas"]["TaskFailedEvent"];
+        /** ExecutionPreferences */
+        ExecutionPreferences: {
+            /** Max Retries Per Step */
+            max_retries_per_step: number;
+            /** Max Tool Loops */
+            max_tool_loops: number;
+            /** Shell Max Output Chars */
+            shell_max_output_chars: number;
+            /** Shell Timeout Seconds */
+            shell_timeout_seconds: number;
+        };
         /**
          * ExternalPathGrantRequest
          * @description 新增 / 改写一条外部路径授权（T38）。
@@ -806,6 +991,37 @@ export interface components {
             /** Summary */
             summary: string;
         };
+        /** GeneralPreferences */
+        GeneralPreferences: {
+            /**
+             * Animations
+             * @default true
+             */
+            animations: boolean;
+            /**
+             * Font Size
+             * @default standard
+             * @enum {string}
+             */
+            font_size: "small" | "standard" | "large";
+            /**
+             * Reasoning Expanded
+             * @default false
+             */
+            reasoning_expanded: boolean;
+            /**
+             * Send Shortcut
+             * @default enter
+             * @enum {string}
+             */
+            send_shortcut: "enter" | "ctrl_enter";
+            /**
+             * Theme
+             * @default light
+             * @enum {string}
+             */
+            theme: "light" | "dark" | "system";
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -852,6 +1068,30 @@ export interface components {
              */
             storage: "sqlite";
         };
+        /** LongTermPreferences */
+        LongTermPreferences: {
+            /** Aging Enabled */
+            aging_enabled: boolean;
+            /** Confidence Threshold */
+            confidence_threshold: number;
+            /** Enabled */
+            enabled: boolean;
+            /** Forget After Days */
+            forget_after_days: number;
+            /** Importance Threshold */
+            importance_threshold: number;
+        };
+        /** MediumTermPreferences */
+        MediumTermPreferences: {
+            /** Decay Half Life Days */
+            decay_half_life_days: number;
+            /** Enabled */
+            enabled: boolean;
+            /** Min Score */
+            min_score: number;
+            /** Top K */
+            top_k: number;
+        };
         /** MemoryMessageView */
         MemoryMessageView: {
             /**
@@ -862,6 +1102,30 @@ export interface components {
             memory: components["schemas"]["MemoryUseView"];
             /** Message Id */
             message_id: string;
+        };
+        /** MemoryProbeRequest */
+        MemoryProbeRequest: {
+            /** Expected Version */
+            expected_version: number;
+            values: components["schemas"]["PreferenceValues"];
+        };
+        /** MemoryProbeResult */
+        MemoryProbeResult: {
+            /** Detail */
+            detail: string;
+            /** Dimension */
+            dimension?: number | null;
+            /** Error Category */
+            error_category?: ("restart_required" | "timeout" | "network" | "authentication" | "request" | "model_or_endpoint" | "rate_limit" | "provider" | "local_load" | "unknown") | null;
+            /** Http Status */
+            http_status?: number | null;
+            /** Records */
+            records?: number | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "passed" | "disabled" | "not_ready" | "incompatible" | "failed";
         };
         /** MemoryRecalledEvent */
         MemoryRecalledEvent: {
@@ -895,6 +1159,33 @@ export interface components {
         /** MemoryRecalledPayload */
         MemoryRecalledPayload: {
             memory: components["schemas"]["MemoryUseView"];
+        };
+        /** MemoryResourcesView */
+        MemoryResourcesView: {
+            /** Backend */
+            backend: string;
+            /** Collection */
+            collection: string;
+            /** Embedding Detail */
+            embedding_detail: string;
+            /**
+             * Embedding State
+             * @enum {string}
+             */
+            embedding_state: "disabled" | "unavailable" | "not_ready" | "ready";
+            /** Key Configured */
+            key_configured: boolean;
+            /** Path */
+            path: string;
+            /**
+             * Restart Required
+             * @default false
+             */
+            restart_required: boolean;
+            /** Vector Available */
+            vector_available: boolean;
+            /** Vector Initialized */
+            vector_initialized: boolean;
         };
         /**
          * MemoryUseView
@@ -1000,6 +1291,16 @@ export interface components {
              */
             model_call_id: string | null;
             /**
+             * Reasoning
+             * @default null
+             */
+            reasoning: string | null;
+            /**
+             * Reasoning Truncated
+             * @default false
+             */
+            reasoning_truncated: boolean;
+            /**
              * Role
              * @enum {string}
              */
@@ -1038,12 +1339,23 @@ export interface components {
         };
         /** MessageDeltaPayload */
         MessageDeltaPayload: {
+            /**
+             * Channel
+             * @default text
+             * @enum {string}
+             */
+            channel: "text" | "reasoning";
             /** Chunk Sequence */
             chunk_sequence: number;
             /** Message Id */
             message_id: string;
             /** Model Call Id */
             model_call_id: string;
+            /**
+             * Reasoning Truncated
+             * @default false
+             */
+            reasoning_truncated: boolean;
             /**
              * Role
              * @enum {string}
@@ -1083,6 +1395,11 @@ export interface components {
         };
         /** MessageStartedPayload */
         MessageStartedPayload: {
+            /**
+             * Chunk Sequence
+             * @default 0
+             */
+            chunk_sequence: number;
             /** Message Id */
             message_id: string;
             /**
@@ -1090,6 +1407,11 @@ export interface components {
              * @default null
              */
             model_call_id: string | null;
+            /**
+             * Reset
+             * @default false
+             */
+            reset: boolean;
             /**
              * Role
              * @enum {string}
@@ -1175,18 +1497,12 @@ export interface components {
             context_used_tokens?: number | null;
             /** Context Window Tokens */
             context_window_tokens?: number | null;
-            /** Dynamic Context Fingerprint */
-            dynamic_context_fingerprint?: string | null;
-            /** Endpoint Fingerprint */
-            endpoint_fingerprint: string;
             /** Estimated Prompt Tokens */
             estimated_prompt_tokens?: number | null;
             /** Finished At */
             finished_at?: string | null;
             /** First Token At */
             first_token_at?: string | null;
-            /** History Prefix Fingerprint */
-            history_prefix_fingerprint?: string | null;
             /** Model Call Id */
             model_call_id: string;
             /** Model Elapsed Ms */
@@ -1211,12 +1527,8 @@ export interface components {
              * @enum {string}
              */
             status: "running" | "ok" | "error" | "aborted";
-            /** System Prompt Fingerprint */
-            system_prompt_fingerprint?: string | null;
             /** Time To First Token Ms */
             time_to_first_token_ms?: number | null;
-            /** Tools Schema Fingerprint */
-            tools_schema_fingerprint?: string | null;
         };
         /** ModelCallStartedEvent */
         ModelCallStartedEvent: {
@@ -1574,6 +1886,56 @@ export interface components {
             /** Steps */
             steps?: components["schemas"]["PlanStepView"][];
         };
+        /** PreferenceValues */
+        PreferenceValues: {
+            embedding?: components["schemas"]["EmbeddingPreferences"] | null;
+            execution: components["schemas"]["ExecutionPreferences"];
+            general?: components["schemas"]["GeneralPreferences"];
+            medium_term?: components["schemas"]["MediumTermPreferences"] | null;
+            memory: components["schemas"]["LongTermPreferences"];
+            retrieval: components["schemas"]["RetrievalPreferences"];
+        };
+        /** PreferencesRequest */
+        PreferencesRequest: {
+            /** Expected Version */
+            expected_version: number;
+            values: components["schemas"]["PreferenceValues"];
+        };
+        /** PreferencesView */
+        PreferencesView: {
+            /** Advanced */
+            advanced: {
+                [key: string]: number | boolean;
+            };
+            defaults: components["schemas"]["PreferenceValues"];
+            resources?: components["schemas"]["MemoryResourcesView"] | null;
+            values: components["schemas"]["PreferenceValues"];
+            /** Version */
+            version: number;
+            /** Writable */
+            writable: boolean;
+        };
+        /**
+         * RenameRequest
+         * @description 会话与工作区的显示名称；不改变目录名或会话绑定。
+         */
+        RenameRequest: {
+            /** Title */
+            title: string;
+        };
+        /** RetrievalPreferences */
+        RetrievalPreferences: {
+            /** Context Lines */
+            context_lines: number;
+            /** Enabled */
+            enabled: boolean;
+            /** Max Files */
+            max_files: number;
+            /** Max Results */
+            max_results: number;
+            /** Timeout Seconds */
+            timeout_seconds: number;
+        };
         /**
          * RetrievalSourceView
          * @description 安全引用：只给定位与用途，**不给正文、向量或内部评分**。
@@ -1629,6 +1991,18 @@ export interface components {
             source: string;
             /** Version */
             version: string;
+        };
+        /**
+         * SearchMatchView
+         * @description A bounded, sanitized content match with its real source line.
+         */
+        SearchMatchView: {
+            /** Line Number */
+            line_number: number;
+            /** Path */
+            path: string;
+            /** Text */
+            text: string;
         };
         /**
          * SelectDefaultConnectionRequest
@@ -1706,7 +2080,6 @@ export interface components {
             model_calls?: components["schemas"]["ModelCallRecordView"][];
             model_selection?: components["schemas"]["ModelSelectionView"] | null;
             plan?: components["schemas"]["PlanView"] | null;
-            runtime_context?: components["schemas"]["RuntimeContextSnapshotView"] | null;
             /**
              * Schema Version
              * @default 1
@@ -1775,6 +2148,11 @@ export interface components {
          */
         SessionSummaryView: {
             /**
+             * Archived
+             * @default false
+             */
+            archived: boolean;
+            /**
              * Created At
              * Format: date-time
              */
@@ -1784,12 +2162,14 @@ export interface components {
              * @default false
              */
             is_active: boolean;
-            /** Last Checkpoint Id */
-            last_checkpoint_id?: string | null;
+            /**
+             * Mode
+             * @default agent
+             * @enum {string}
+             */
+            mode: "chat" | "agent";
             /** Session Id */
             session_id: string;
-            /** Thread Id */
-            thread_id: string;
             /** Title */
             title: string;
             /**
@@ -1957,8 +2337,6 @@ export interface components {
         TaskRef: {
             /** Run Id */
             run_id: string;
-            /** Task Id */
-            task_id: string;
         };
         /** ToolCompletedEvent */
         ToolCompletedEvent: {
@@ -1997,11 +2375,6 @@ export interface components {
              */
             elapsed_ms: number | null;
             /**
-             * Output Digest
-             * @default null
-             */
-            output_digest: string | null;
-            /**
              * Status
              * @enum {string}
              */
@@ -2016,8 +2389,6 @@ export interface components {
          *     `summary` 是**已脱敏**的可读摘要；`verified` 来自反思层的机械校验，不是模型的自我评价。
          */
         ToolEvidenceView: {
-            /** Evidence Type */
-            evidence_type: string;
             /** Summary */
             summary: string;
             /** Verified */
@@ -2053,7 +2424,9 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "read" | "list" | "edit" | "write" | "delete" | "shell";
+            kind: "read" | "list" | "search" | "edit" | "write" | "delete" | "shell";
+            /** Matches */
+            matches?: components["schemas"]["SearchMatchView"][];
             /** Paths */
             paths?: string[];
             /** Stderr */
@@ -2169,8 +2542,6 @@ export interface components {
             /** Finished At */
             finished_at?: string | null;
             outcome?: components["schemas"]["ToolOutcomeView"] | null;
-            /** Output Digest */
-            output_digest?: string | null;
             /** Output Preview */
             output_preview?: string | null;
             /** Redacted Arguments */
@@ -2761,10 +3132,124 @@ export interface operations {
             };
         };
     };
+    get_preferences_api_preferences_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreferencesView"];
+                };
+            };
+        };
+    };
+    put_preferences_api_preferences_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PreferencesRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreferencesView"];
+                };
+            };
+            /** @description 设置版本已更新，草稿未覆盖现有设置 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description 设置库不可用 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    test_memory_preferences_api_preferences_memory_test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MemoryProbeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryProbeResult"];
+                };
+            };
+            /** @description 设置版本已更新 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_sessions_api_sessions_get: {
         parameters: {
             query?: {
                 workspace_id?: string | null;
+                archived?: boolean;
             };
             header?: never;
             path?: never;
@@ -2874,6 +3359,50 @@ export interface operations {
             };
         };
     };
+    rename_session_api_sessions__session_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RenameRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSummaryView"];
+                };
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     resolve_approval_api_sessions__session_id__approvals__approval_id__post: {
         parameters: {
             query?: never;
@@ -2897,6 +3426,55 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CommandResultView"];
+                };
+            };
+            /** @description 会话不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    archive_session_api_sessions__session_id__archive_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSummaryView"];
                 };
             };
             /** @description 会话不存在 */
@@ -3065,6 +3643,86 @@ export interface operations {
             };
         };
     };
+    restore_session_api_sessions__session_id__restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSummaryView"];
+                };
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    select_session_api_sessions__session_id__select_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSummaryView"];
+                };
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_workspaces_api_workspaces_get: {
         parameters: {
             query?: never;
@@ -3141,6 +3799,97 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionSummaryView"];
+                };
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    remove_workspace_api_workspaces__workspace_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 会话不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rename_workspace_api_workspaces__workspace_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                workspace_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RenameRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceRef"];
                 };
             };
             /** @description 会话或工作区不存在 */

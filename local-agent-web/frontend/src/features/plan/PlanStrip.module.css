@@ -9,15 +9,27 @@
   box-shadow: var(--law-shadow-lv1);
 }
 
+/* 标题栏本身就是展开/收起开关（箭头从 div 变成真的按钮）。清掉浏览器默认外观，
+   排版与原来逐项一致。 */
 .head {
   display: flex;
   align-items: center;
   gap: var(--law-space-sm);
   min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
+/* 计划目标是一整句话：`nowrap` + 缺 `min-width` 会把卡片撑破（同 `.stepTitle` 的坑）。 */
 .goal {
   flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -34,8 +46,10 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 运行中那一步的标题同样是一整句，同理。 */
 .current {
   flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -49,18 +63,31 @@
   align-items: center;
   margin-left: auto;
   color: var(--law-text-caption);
+  transition: transform var(--law-duration-base) var(--law-ease);
 }
 
+.expandOpen {
+  transform: rotate(90deg);
+}
+
+/* 纵向排列：步骤的标题是一整句话，`wrap` 的横排会让每行长短差很多、也更难扫读。 */
 .steps {
   display: flex;
-  flex-wrap: wrap;
-  gap: var(--law-space-sm) var(--law-space-lg);
+  flex-direction: column;
+  gap: var(--law-space-sm);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .step {
   display: flex;
   align-items: center;
   gap: var(--law-space-sm);
+  /* `nowrap` 让内容成为不可收缩的最小宽度：没有 `min-width: 0`，一句长标题会把整张卡片
+     撑破、进而把整页顶宽（连轨迹页一起顶出去）。与 `Composer.module.css` 的 `.chip`
+     是同一个坑，本项目已踩过两次。 */
+  min-width: 0;
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
   color: var(--law-text-secondary);
@@ -94,7 +121,10 @@
   height: 6px;
   border-radius: var(--law-radius-pill);
   background: var(--law-state-warn);
+  animation: planPulse 1.4s ease-in-out infinite;
 }
+
+@keyframes planPulse { 50% { opacity: 0.35; } }
 
 .failed {
   color: var(--law-state-error);
@@ -112,12 +142,17 @@
   border: 1px solid var(--law-border-l4);
 }
 
+/* 唯一可收缩的一格：标题让位给右侧状态，超出就省略（完整文案在 `title` 里）。 */
 .stepTitle {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+/* 状态是这一行最不能丢的信息：它必须始终完整可读，所以不可收缩。 */
 .stepStatus {
+  flex: 0 0 auto;
   color: var(--law-text-caption);
 }

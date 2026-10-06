@@ -134,6 +134,12 @@
   gap: var(--law-space-xxs);
 }
 
+.parameters {
+  max-height: min(240px, 30vh);
+  overflow: auto;
+  margin-top: var(--law-space-sm);
+}
+
 .actions {
   display: flex;
   align-items: center;

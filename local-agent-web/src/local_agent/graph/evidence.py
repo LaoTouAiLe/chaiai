@@ -22,7 +22,13 @@ from collections.abc import Mapping
 from typing import Any
 
 #: 单条工具证据的字符上限（含工具名前缀）。够看到标识字段与正文片段，又不至于把提示撑大。
-TOOL_EVIDENCE_CHARS = 600
+#:
+#: 2026-09-30 由 ``600`` 提到 ``4000``（对照实测）：600 字符只够 read_file 读到的**前几行**，
+#: 模型因此给不出行号级引用，还会自述"两个文件的内容均因长度限制只显示了截断片段"，
+#: 并把"证据被截断"当成"任务未完成"而反复空转。同类产品的 read 单次可投递 2000 行 / 50KB，
+#: 600 与之相差两个数量级。上层另有各自的收尾/摘要配额（``nodes.MAX_SYNTHESIS_EVIDENCE_CHARS``、
+#: ``nodes.DETERMINISTIC_SUMMARY_CHARS``），本常量只约束**反思提示**里的证据行。
+TOOL_EVIDENCE_CHARS = 4000
 
 #: 标识/结论字段：短、决定"这次调用做了什么"，优先完整展示。
 _EVIDENCE_SCALAR_FIELDS: tuple[str, ...] = (
@@ -61,6 +67,15 @@ _SUMMARY_NOTE = "…（原文片段，因长度限制只显示到这里；原文
 _SKIPPED_NOTE = "另有 {count} 个字段未展示"
 _NO_CONTENT_TEXT = "（工具没有返回内容）"
 
+#: 工具专属的"怎么拿到更多"提示：只在正文**确实被截断**时追加到截断标注后面。
+#:
+#: 只登记真正有续读手段的工具——给 ``run_shell`` 这类没有行区间参数的工具写"用 start_line 续读"，
+#: 会诱导模型去调用一个不存在的参数，换来一轮必然失败的工具调用（比不给提示更糟）。
+_CONTINUE_HINTS: dict[str, str] = {
+    "read_file": "；需要更多时用 start_line/end_line 读取后续行区间",
+    "list_dir": "；需要更多时对子目录单列一次，或用 recursive/include_hidden 收窄范围",
+}
+
 #: 单个正文片段的最小可用长度：比这更短就不放，改用"未展示"说明。
 _MIN_PIECE = 24
 
@@ -90,25 +105,31 @@ def tool_evidence_text(
     head = f"{tool_name}（{status}）："
     if limit <= len(head):
         return head[:limit]
-    return head + _render_body(payload, limit=limit - len(head))
+    return head + _render_body(
+        payload, limit=limit - len(head), hint=_CONTINUE_HINTS.get(tool_name, "")
+    )
 
 
-def _render_body(payload: str | Mapping[str, Any] | None, *, limit: int) -> str:
+def _render_body(
+    payload: str | Mapping[str, Any] | None, *, limit: int, hint: str = ""
+) -> str:
     if limit <= 0:
         return ""
     if isinstance(payload, Mapping):
         total = len(json.dumps(payload, ensure_ascii=False, default=str))
-        return _render_structured(payload, limit=limit, total_chars=total)
+        return _render_structured(payload, limit=limit, total_chars=total, hint=hint)
     text = str(payload or "").strip()
     if not text:
         return _NO_CONTENT_TEXT
     parsed = _parse_json(text)
     if isinstance(parsed, Mapping):
-        return _render_structured(parsed, limit=limit, total_chars=len(text))
-    return _clip_text(_normalize_text(text), limit=limit)
+        return _render_structured(parsed, limit=limit, total_chars=len(text), hint=hint)
+    return _clip_text(_normalize_text(text), limit=limit, hint=hint)
 
 
-def _render_structured(payload: Mapping[str, Any], *, limit: int, total_chars: int) -> str:
+def _render_structured(
+    payload: Mapping[str, Any], *, limit: int, total_chars: int, hint: str = ""
+) -> str:
     scalars = [
         f"{key}={_compact(payload[key])}" for key in _EVIDENCE_SCALAR_FIELDS if key in payload
     ]
@@ -133,7 +154,7 @@ def _render_structured(payload: Mapping[str, Any], *, limit: int, total_chars: i
 
     # 需要截断：**先给截断标注留位置**——它是可信度信息，被正文挤掉就会重现"模型以为工具没返回内容"
     # 那个缺陷。剩下的额度先给标识字段，再给正文片段。
-    note = _SUMMARY_NOTE.format(total=total_chars)
+    note = _SUMMARY_NOTE.format(total=total_chars) + hint
     budget = max(limit - len(note) - 1, 0)
     parts: list[str] = []
     used = 0
@@ -161,11 +182,11 @@ def _render_structured(payload: Mapping[str, Any], *, limit: int, total_chars: i
     return rendered[:limit]
 
 
-def _clip_text(text: str, *, limit: int) -> str:
+def _clip_text(text: str, *, limit: int, hint: str = "") -> str:
     """纯文本的截断：同样带"只显示到这里"的标注。"""
     if len(text) <= limit:
         return text
-    note = _SUMMARY_NOTE.format(total=len(text))
+    note = _SUMMARY_NOTE.format(total=len(text)) + hint
     room = max(limit - len(note) - 1, 0)
     return f"{_cut(text, room=room)}{note}"[:limit]
 

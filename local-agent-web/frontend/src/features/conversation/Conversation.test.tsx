@@ -17,6 +17,22 @@ function formatTokens(value: number): string {
 }
 
 describe('Conversation', () => {
+  it('keeps thought, narration and tools in chronological order, without inventing thought', () => {
+    const tool = shellScenario.messages.find(message => message.kind === 'tool')!
+    const messages = [
+      { kind: 'user' as const, id: 'u', text: '测试', at: '' },
+      { kind: 'assistant' as const, id: 'a', text: '开始查阅', at: '', reasoning: '模型思考' },
+      { ...tool, id: 't1' },
+      { kind: 'assistant' as const, id: 'b', text: '继续查阅', at: '' },
+      { ...tool, id: 't2' },
+    ]
+    const { container } = render(<Conversation scenario={{ ...shellScenario, messages, stats: null }} />)
+    expect(screen.getAllByRole('button', { name: 'Think' })).toHaveLength(1)
+    const text = container.textContent ?? ''
+    const label = '读取文件'
+    expect(text.indexOf(label)).toBeGreaterThan(text.indexOf('开始查阅'))
+    expect(text.lastIndexOf(label)).toBeGreaterThan(text.indexOf('继续查阅'))
+  })
   it('reports unknown usage as unknown, never as zero percent', () => {
     render(<Conversation scenario={errorsScenario} />)
     expect(screen.getAllByText(/未知/).length).toBeGreaterThan(0)
@@ -26,8 +42,9 @@ describe('Conversation', () => {
   it('renders each message kind through its own component', () => {
     render(<Conversation scenario={shellScenario} />)
     expect(screen.getByText('在 README 里补一段最小启动步骤。')).toBeInTheDocument()
-    expect(screen.getByText('read_file')).toBeInTheDocument()
-    expect(screen.getByText('edit_file')).toBeInTheDocument()
+    expect(screen.getByText('读取文件')).toBeInTheDocument()
+    expect(screen.getByText('修改文件')).toBeInTheDocument()
+    expect(screen.queryByText(/执行过程/)).not.toBeInTheDocument()
     expect(screen.getByText('缓存命中 62%')).toBeInTheDocument()
   })
 
@@ -40,7 +57,8 @@ describe('Conversation', () => {
     const output = stats.calls.reduce((total, call) => total + (call.outputTokens ?? 0), 0)
     expect(screen.getByText(new RegExp(`输入 ${formatTokens(input)}`))).toBeInTheDocument()
     expect(screen.getByText(new RegExp(`输出 ${formatTokens(output)}`))).toBeInTheDocument()
-    expect(screen.getByText(`明细（${String(stats.calls.length)} 次模型调用）`)).toBeInTheDocument()
+    // 2026-09-30：摘要把整轮耗时也写进去了，这里只钉住条数部分。
+    expect(screen.getByText(new RegExp(`明细（${String(stats.calls.length)} 次模型调用`))).toBeInTheDocument()
   })
 
   it('labels estimated token numbers as estimates', () => {

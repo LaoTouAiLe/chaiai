@@ -2,6 +2,7 @@ import { Check, ChevronRight, Cross, Doc, Pencil } from '../../components/icons'
 import type { ToolRowView } from '../../fixtures/types'
 import { DiffCard } from './DiffCard'
 import { ToolCard } from './ToolCards'
+import { TOOL_STATUS_LABEL, toolLabel } from './display'
 import styles from './ToolRow.module.css'
 
 interface ToolRowProps {
@@ -15,23 +16,14 @@ interface ToolRowProps {
 }
 
 const STATUS_CLASS: Record<ToolRowView['status'], string> = {
+  pending: styles.statusPending ?? '',
   running: styles.statusRunning ?? '',
   succeeded: styles.statusSucceeded ?? '',
   failed: styles.statusFailed ?? '',
 }
 
-/**
- * 状态的三个人话说法，**组件与轨迹视图共用**。
- *
- * 导出是为了让轨迹表用同一套词：同一个状态在两个页签里显示不同说法，用户会以为是两回事。
- */
-export const TOOL_STATUS_LABEL: Record<ToolRowView['status'], string> = {
-  running: '执行中',
-  succeeded: '成功',
-  failed: '失败',
-}
-
 function StatusIcon({ status }: { status: ToolRowView['status'] }) {
+  if (status === 'pending') return <span className={styles.pendingDot} aria-hidden="true" />
   if (status === 'succeeded') return <Check />
   if (status === 'failed') return <Cross />
   return <span className={styles.pulseDot} aria-hidden="true" />
@@ -51,7 +43,7 @@ function ToolIcon({ name }: { name: string }) {
  */
 export function ToolRow({ tool, onToggle }: ToolRowProps) {
   return (
-    <div className={styles.wrapper}>
+    <div className={styles.wrapper} data-state={tool.status}>
       <button type="button" className={styles.row} aria-expanded={tool.expanded} onClick={onToggle}>
         <span className={`${styles.status} ${STATUS_CLASS[tool.status]}`}>
           <StatusIcon status={tool.status} />
@@ -63,10 +55,7 @@ export function ToolRow({ tool, onToggle }: ToolRowProps) {
         <span className={styles.icon} aria-hidden="true">
           <ToolIcon name={tool.name} />
         </span>
-        <span className={styles.name}>{tool.name}</span>
-        <span className={styles.summary} title={tool.summary}>
-          {tool.summary}
-        </span>
+        <span className={styles.name}>{toolLabel(tool.name)}</span>
         {tool.target === null ? null : <span className={styles.target}>{tool.target}</span>}
         <span className={styles.duration}>{tool.durationLabel}</span>
       </button>
@@ -80,7 +69,7 @@ export function ToolRow({ tool, onToggle }: ToolRowProps) {
           )}
           {tool.evidence == null ? null : (
             <p className={styles.evidence}>
-              证据（{tool.evidence.evidenceType}）：{tool.evidence.summary}
+              验证依据：{tool.evidence.summary}
               {tool.evidence.verified ? ' · 已机械校验' : ' · 未通过机械校验'}
             </p>
           )}

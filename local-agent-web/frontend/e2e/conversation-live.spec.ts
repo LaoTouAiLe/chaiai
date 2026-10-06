@@ -33,13 +33,14 @@ test('两轮真实对话，刷新后内容一致', async ({ page }) => {
   await input.fill('第二轮')
   await page.getByRole('button', { name: '发送消息' }).click()
   await expect(page.getByText(REPLY)).toHaveCount(2)
-  await expect(page.getByText('第一轮')).toBeVisible()
-  await expect(page.getByText('第二轮')).toBeVisible()
+  const log = page.getByRole('log', { name: '对话' })
+  await expect(log.getByText('第一轮')).toBeVisible()
+  await expect(log.getByText('第二轮')).toBeVisible()
 
   // 5) 刷新恢复：内容来自服务端快照，而不是浏览器里的本地状态。
   await page.reload()
   await expect(page.getByText(REPLY)).toHaveCount(2)
-  await expect(page.getByText('第二轮')).toBeVisible()
+  await expect(page.getByRole('log', { name: '对话' }).getByText('第二轮')).toBeVisible()
 
   // 真会话菜单：选择写入服务端，下一轮才生效；之后可恢复跟随默认。
   await page.getByRole('button', { name: '选择会话模型' }).click()
@@ -51,4 +52,29 @@ test('两轮真实对话，刷新后内容一致', async ({ page }) => {
   await expect(menu.getByRole('button', { name: '恢复跟随默认模型' })).toBeVisible()
   await menu.getByRole('button', { name: '恢复跟随默认模型' }).click()
   await expect(menu).toHaveCount(0)
+})
+
+test('切换模式会创建并保持一个新的闲聊会话', async ({ page }) => {
+  await page.goto('/')
+  const firstCreated = page.waitForResponse((response) =>
+    response.url().endsWith('/api/sessions') && response.request().method() === 'POST' && response.status() === 200)
+  await page.getByRole('button', { name: '新建会话' }).click()
+  const first = await (await firstCreated).json() as { session_id: string; mode: string }
+  expect(first.mode).toBe('agent')
+
+  await page.getByRole('button', { name: '选择会话模式' }).click()
+  const modeMenu = page.getByRole('menu', { name: '会话模式' })
+  await expect(modeMenu).toContainText('切换会新建会话')
+  const chatCreated = page.waitForResponse((response) =>
+    response.url().endsWith('/api/sessions') && response.request().method() === 'POST' && response.status() === 200)
+  await modeMenu.getByRole('menuitemradio', { name: /闲聊/ }).click()
+  const chat = await (await chatCreated).json() as { session_id: string; mode: string }
+  expect(chat.session_id).not.toBe(first.session_id)
+  expect(chat.mode).toBe('chat')
+  await expect(page.getByRole('button', { name: '选择会话模式' })).toContainText('闲聊')
+
+  await page.reload()
+  await expect(page.getByRole('button', { name: '选择会话模式' })).toContainText('闲聊')
+  const sessions = await (await page.request.get('/api/sessions')).json() as { session_id: string; mode: string }[]
+  expect(sessions.find((item) => item.session_id === chat.session_id)?.mode).toBe('chat')
 })

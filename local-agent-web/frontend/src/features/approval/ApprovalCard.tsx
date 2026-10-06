@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { WarningTriangle } from '../../components/icons'
 import type { ApprovalView } from '../../fixtures/types'
+import { parameterLabel, toolLabel } from '../tool/display'
 import styles from './ApprovalCard.module.css'
 
 /**
@@ -17,6 +18,41 @@ export interface ApprovalActions {
 interface ApprovalCardProps {
   approval: ApprovalView
   actions?: ApprovalActions
+}
+
+/**
+ * 被用户关掉的审批结果（按 `approvalId` 记）。
+ *
+ * 存 localStorage 而**不是组件状态**：终态卡片由服务端快照派生（`project_approval` 会从
+ * `approval_history` 的最后一条决定重新算出来），所以只用 `useState` 记的话，用户关掉它、
+ * 一刷新它又回来了——看起来就是"关不掉"（用户实测反馈，2026-09-30）。
+ *
+ * 这是**界面偏好**，不是账本：它不改变任何决定、不影响服务端，也不需要同步。读不到就退回
+ * "没关过"（隐私模式、存储配额）——宁可让它重新出现，也不要因为存储不可用而崩掉渲染。
+ */
+const DISMISSED_KEY = 'local-agent-web.dismissed-approvals'
+
+/** 只留最近这些条：界面偏好不该无限长大。 */
+const DISMISSED_KEEP = 50
+
+function readDismissed(): ReadonlySet<string> {
+  try {
+    const raw = globalThis.localStorage?.getItem(DISMISSED_KEY)
+    if (raw === null || raw === undefined) return new Set()
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return new Set()
+    return new Set(parsed.filter((item): item is string => typeof item === 'string'))
+  } catch {
+    return new Set()
+  }
+}
+
+function writeDismissed(ids: ReadonlySet<string>): void {
+  try {
+    globalThis.localStorage?.setItem(DISMISSED_KEY, JSON.stringify([...ids].slice(-DISMISSED_KEEP)))
+  } catch {
+    // 存储不可用：这次会话内仍然关得掉，只是刷新之后会回来。
+  }
 }
 
 const STATE_LABEL: Record<ApprovalView['state'], string> = {
@@ -53,7 +89,14 @@ export function ApprovalCard({ approval, actions }: ApprovalCardProps) {
    * `null` = 用户还没表态过，此时跟随状态——待决必展开（要你做决定），终态必收起。
    */
   const [expandedOverride, setExpandedOverride] = useState<boolean | null>(null)
-  const [dismissed, setDismissed] = useState(false)
+  const [dismissedIds, setDismissedIds] = useState<ReadonlySet<string>>(readDismissed)
+  const dismissed = dismissedIds.has(approval.approvalId)
+  const dismiss = () => {
+    const next = new Set(dismissedIds)
+    next.add(approval.approvalId)
+    setDismissedIds(next)
+    writeDismissed(next)
+  }
   const actionable = approval.state === 'pending'
   const expanded = expandedOverride ?? actionable
   const secondStage = approval.risk === 'high' && approval.confirmationStage === 2
@@ -75,7 +118,7 @@ export function ApprovalCard({ approval, actions }: ApprovalCardProps) {
             <WarningTriangle />
           </span>
           <span className={styles.state}>{STATE_LABEL[approval.state]}</span>
-          <span className={styles.action}>{approval.action}</span>
+          <span className={styles.action}>{toolLabel(approval.action)}</span>
           {approval.target === '' ? null : (
             <span className={styles.collapsedTarget}>{approval.target}</span>
           )}
@@ -91,7 +134,7 @@ export function ApprovalCard({ approval, actions }: ApprovalCardProps) {
             type="button"
             className={styles.dismiss}
             aria-label="关闭审批结果"
-            onClick={() => setDismissed(true)}
+            onClick={dismiss}
           >
             ×
           </button>
@@ -107,9 +150,8 @@ export function ApprovalCard({ approval, actions }: ApprovalCardProps) {
           <WarningTriangle />
         </span>
         <span className={styles.state}>{STATE_LABEL[approval.state]}</span>
-        <span className={styles.action}>{approval.action}</span>
+        <span className={styles.action}>{toolLabel(approval.action)}</span>
         {approval.risk === 'high' ? <span className={styles.risk}>高风险</span> : null}
-        <span className={styles.id}>{approval.approvalId}</span>
         {actionable ? null : (
           <button
             type="button"
@@ -125,7 +167,7 @@ export function ApprovalCard({ approval, actions }: ApprovalCardProps) {
             type="button"
             className={styles.dismiss}
             aria-label="关闭审批结果"
-            onClick={() => setDismissed(true)}
+            onClick={dismiss}
           >
             ×
           </button>
@@ -151,13 +193,16 @@ export function ApprovalCard({ approval, actions }: ApprovalCardProps) {
           <div className={styles.fact}>
             <dt>参数</dt>
             <dd className={styles.mono}>
-              <ul className={styles.impact}>
+              <details>
+              <summary>查看操作参数</summary>
+              <ul className={`${styles.impact} ${styles.parameters}`}>
                 {parameters.map((parameter) => (
                   <li key={parameter.name}>
-                    {parameter.name}={parameter.value}
+                    {parameterLabel(parameter.name)}：{parameter.value}
                   </li>
                 ))}
               </ul>
+              </details>
             </dd>
           </div>
         )}

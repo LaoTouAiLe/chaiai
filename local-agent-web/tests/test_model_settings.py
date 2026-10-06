@@ -623,7 +623,23 @@ def _service(
 
     def build_fake() -> Any:
         if tool_calls:
-            return model_factory(decision="tool", reply="好的", tool_calls=tool_calls)
+            model = model_factory(decision="tool", reply="好的", tool_calls=tool_calls)
+            original_generate = model._generate
+
+            def generate(messages, **kwargs):
+                # 恢复会重建客户端；根据当前轮的工具结果收尾，不再次提出已经执行的调用。
+                current_results = []
+                for message in reversed(messages):
+                    if message.type == "human":
+                        break
+                    if message.type == "tool":
+                        current_results.append(message.tool_call_id)
+                if any(call["id"] in current_results for call in tool_calls):
+                    model.tool_calls = []
+                return original_generate(messages, **kwargs)
+
+            model._generate = generate
+            return model
         return model_factory(decision="chat", reply="假回答")
 
     def factory(config: LlmConfig, api_key: str) -> Any:
@@ -1065,6 +1081,7 @@ def test_settings_v2_upgrade_adds_the_grants_table_without_touching_older_rows(
     store.save(_draft(api_key_env="LEGACY_KEY"), api_key=None)
     # 造一个"上一次运行留下的 v1 库"：撤掉 v2 的痕迹再升级。
     connection.execute("DROP TABLE external_path_grants")
+    connection.execute("DROP TABLE app_preferences")
     connection.execute("DELETE FROM schema_migrations WHERE version >= 2")
     connection.commit()
 

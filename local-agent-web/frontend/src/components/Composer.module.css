@@ -77,6 +77,52 @@
   padding: 0 var(--law-space-xs);
 }
 
+.modeSelector {
+  position: relative;
+  min-width: 0;
+}
+
+.modeMenu {
+  position: absolute;
+  z-index: 30;
+  bottom: calc(100% + var(--law-space-sm));
+  left: 0;
+  width: min(300px, calc(100vw - 32px));
+  padding: var(--law-space-sm);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+  background: var(--law-bg-layer-1);
+  box-shadow: var(--law-shadow-lv2);
+}
+
+.modeHint {
+  margin: 0;
+  padding: var(--law-space-sm);
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+}
+
+.modeMenu button {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--law-space-xs);
+  padding: var(--law-space-sm) var(--law-space-lg);
+  border-radius: var(--law-radius-md);
+  text-align: left;
+}
+
+.modeMenu button:hover,
+.modeMenu button[aria-checked='true'] {
+  background: var(--law-surface-selector);
+}
+
+.modeMenu button span {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+}
+
 /* 折行后仍靠右。宽窗空闲空间先被 `.spacer` 吃掉，所以分组前的像素不受影响。 */
 .right {
   display: flex;

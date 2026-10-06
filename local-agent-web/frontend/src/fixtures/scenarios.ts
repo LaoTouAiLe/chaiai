@@ -366,7 +366,9 @@ export const toolsScenario: ConversationScenario = {
   sessionId: 's-tools',
   purpose: '其余工具卡：读取窗口 / 搜索两种形状 / 终端非零退出 / 待办 / 未知工具回退',
   session: {
-    title: '定位构建失败原因',
+    // 长标题，且必须与 `fixtures/sidebar.ts` 里 `s-tools` 那一行逐字一致：
+    // 会话头与侧栏是同一份数据的两个视图，fixture 各写一套就迟早会自相矛盾。
+    title: '定位构建失败原因：pnpm 与 vitest 两套门槛、可选依赖口径与 Windows 路径差异',
     workspace: 'local-agent-web',
     status: 'completed',
     modelLabel: '模型 B · 上下文 200k',
@@ -566,7 +568,7 @@ export const toolsScenario: ConversationScenario = {
         card: {
           kind: 'generic',
           headline: '工具返回了结构化结果',
-          detail: '该工具没有专用视图，按通用渲染器显示返回摘要；完整结果保存在工具事件中。',
+          detail: '这项操作只提供简要结果。',
         },
       }),
     },
@@ -1370,12 +1372,48 @@ export const errorCodesScenario: ConversationScenario = {
   modelMenu: null,
 }
 
+/**
+ * 长文案场景：专门压 `nowrap` 缺 `min-width` 这类**只在真浏览器里才暴露**的溢出。
+ *
+ * 其余每个场景的文案都是短句（计划步骤 ≤ 9 字、会话标题 ≤ 15 字），所以"一句话把卡片撑破、
+ * 再把整页顶宽"这类缺陷一个都照不到——2026-09-30 用户实测撞到的正是它。这里把每个会
+ * `nowrap` 的位置都塞满一整句，让 640 宽的项目有机会把它拦下来。
+ */
+export const longTextScenario: ConversationScenario = {
+  ...toolsScenario,
+  id: 'long-text',
+  // 刻意沿用 `tools` 的 sessionId：侧栏行是按 id 命中的，编一个新的会让"表头与侧栏选中行同步"
+  // 这条既有断言以为出现了第二个"没有会话"的场景。
+  purpose: '长文案压测：目标 / 步骤标题 / 会话标题只允许在自己那一格里省略，不得撑破容器或整页',
+  plan: {
+    goal: '我们需要这个工作区中有类似项目吗？若没有，就先以当前项目为参照记录一份可比对特征，再决定后续步骤',
+    steps: [
+      {
+        id: 's1',
+        title: '确认相似判断的参照对象：读取当前工作区根目录与当前项目标识；若用户未指定参照项目，则以当前项目为参照，并记录用途、技术栈、依赖、目录结构等可比对特征',
+        status: 'failed',
+      },
+      {
+        id: 's2',
+        title: '先获取完整目录清单：对被截断的 list_dir 做分页或按名称前缀分批遍历，必要时请求未展示的字段；随后从完整清单里筛出顶层项目目录',
+        status: 'completed',
+      },
+      {
+        id: 's3',
+        title: '暂停相似性结论，先把"证据不足"与"工具失败"分开陈述，并给出用户可执行的下一步',
+        status: 'running',
+      },
+    ],
+  },
+}
+
 export const scenarios: readonly ConversationScenario[] = [
   shellScenario,
   diffScenario,
   errorsScenario,
   toolsScenario,
   traceScenario,
+  longTextScenario,
   approvalScenario,
   approvalExpiredScenario,
   settingsModelsScenario,

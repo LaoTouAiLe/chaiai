@@ -815,14 +815,19 @@ def test_blocked_patterns_keep_substring_fallback() -> None:
     assert match_blocked_patterns(["echo", "hi"], "echo hi", ["rm -rf"]) is None
 
 
-def test_registry_exposes_no_tools_in_chat_mode(app_config: AppConfig, tmp_path: Path) -> None:
+def test_registry_exposes_only_read_tools_in_chat_mode(app_config: AppConfig, tmp_path: Path) -> None:
     policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
     registry = ToolRegistry.build(policy)
 
-    assert registry.tools_for_mode("chat") == []
+    assert [tool.name for tool in registry.tools_for_mode("chat")] == ["list_dir", "read_file"]
     assert [tool.name for tool in registry.tools_for_mode("tool")] == [
+        "update_plan",
         "list_dir",
         "read_file",
+        # 2026-09-30 新增检索工具：在此之前工具集**没有任何检索能力**，而 Shell 兜底也不可用
+        # （白名单要求参数完全匹配，搜索类命令一律落到"需人工审批"）。
+        "grep",
+        "glob",
         "edit_file",
         "write_file",
         "delete_file",
@@ -874,8 +879,11 @@ def test_tool_mode_binds_registered_tools(
     )
 
     assert model.bound_tools == [
+        "update_plan",
         "list_dir",
         "read_file",
+        "grep",
+        "glob",
         "edit_file",
         "write_file",
         "delete_file",

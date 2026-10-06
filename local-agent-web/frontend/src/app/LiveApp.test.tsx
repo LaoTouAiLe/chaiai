@@ -73,11 +73,14 @@ const editToolMessage = {
 
 vi.mock('../api/queries', () => ({
   queryKeys: {
+    sessions: (id: string | null) => ['sessions', id],
+    workspaces: ['workspaces'],
     snapshot: (id: string) => ['snapshot', id],
     modelConnections: ['model-connections'],
     health: ['health'],
   },
   useHealth: () => ({ data: { model_configured: true } }),
+  useArchivedSessions: () => ({ data: [], isLoading: false, isError: false }),
   useWorkspaces: () => ({ data: [{ workspace_id: 'w1', display_name: '工作区' }] }),
   useSessions: () => ({
     data: [{
@@ -156,6 +159,12 @@ describe('LiveApp pending approval', () => {
     <QueryClientProvider client={new QueryClient()}><LiveApp /></QueryClientProvider>,
   )
 
+  it('恢复已打开会话时校准工作区，不让新会话沿用错误目标', () => {
+    useUiStore.setState({ workspaceId: 'outdated-workspace', activeSessionId: 's1' })
+    renderApp()
+    expect(useUiStore.getState().workspaceId).toBe('w1')
+  })
+
   it('reports a failed workspace registration after a directory was chosen', () => {
     mock.sessionState = 'idle'
     mock.pickMutate.mockImplementation((_input, options) => options.onSuccess({ path: 'C:\\missing' }))
@@ -208,7 +217,7 @@ describe('LiveApp pending approval', () => {
 
     // 侧栏与卡片都会说"等待审批"，所以这里按卡片自己的内容断言。
     expect(screen.getByText('删除 dist（递归删除）')).toBeInTheDocument()
-    expect(screen.getByText('delete_file')).toBeInTheDocument()
+    expect(screen.getByText('删除文件')).toBeInTheDocument()
     expect(screen.getByText('dist')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '进入二次确认' })).toBeInTheDocument()
     // 有待决审批时输入区被审批卡接管；草稿留在 store 里，没有被吞掉。
@@ -275,7 +284,7 @@ describe('LiveApp pending approval', () => {
 
     // 收起时只有一行摘要：结构化 diff 不在 DOM 里，也就没有机会被读成"已经确认过"。
     expect(screen.queryByText('已批准的新内容')).not.toBeInTheDocument()
-    const row = screen.getByRole('button', { name: /edit_file/ })
+    const row = screen.getByRole('button', { name: /修改文件/ })
     expect(row).toHaveAttribute('aria-expanded', 'false')
 
     fireEvent.click(row)
@@ -335,7 +344,12 @@ describe('LiveApp pending approval', () => {
   it('explains a failed empty answer even when the snapshot has no error row', () => {
     mock.sessionState = 'failed'
     renderApp()
-    expect(screen.getByRole('alert')).toHaveTextContent('没有生成可展示的最终回答')
+    // 2026-09-30：旧文案断言"请检查模型连接状态"，而这一支最常见的成因是**本轮达到调用上限**
+    // 或模型调用失败，把用户引向"模型连接"是错误的归因（实测：模型完全正常、也已给出收尾回答）。
+    // 这里只钉住"页面必须解释这一轮为什么没给出回答"，措辞可再改。
+    const notice = screen.getByRole('alert')
+    expect(notice).toHaveTextContent('这轮在给出最终回答前就结束了')
+    expect(notice).not.toHaveTextContent('请检查模型连接状态')
   })
 
   it('keeps a running turn pinned without pretending to know its model name', () => {

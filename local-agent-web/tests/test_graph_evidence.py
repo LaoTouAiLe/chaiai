@@ -42,8 +42,24 @@ def test_file_content_is_visible_not_only_metadata() -> None:
     assert "line_count=349" in line
     assert "content=第 1 行" in line  # 正文片段
     assert "truncated=false" in line
-    # 截断标注必须出现（否则模型会把片段当成完整输出）
+    # 2026-09-30：配额由 600 提到 4000 后，这份 payload 已能整段放下，所以**不该**出现截断标注
+    # （"放得下就原样展示"是既定口径）。"截断必须标注"由下面那条按小额度单独守住。
+    assert "原文片段" not in line
+
+
+def test_truncation_note_and_continue_hint_when_content_is_cut() -> None:
+    """截断时必须标注，并给出该工具的续读方式（否则模型只能整文件重读）。
+
+    配额提高只改变"多大才会被截"，不取消这条保证：模型把"片段被截断"读成"工具没返回内容"
+    是本项目实测过的空转根因（架构 §5.4）。
+    """
+    line = tool_evidence_text("read_file", "ok", _read_file_payload(), limit=600)
+
+    assert len(line) <= 600
+    assert "content=第 1 行" in line
     assert "原文片段" in line and "原文共" in line
+    # read_file 有 start_line/end_line，必须把续读方式写进去
+    assert "start_line" in line
 
 
 def test_multi_line_content_keeps_its_line_breaks() -> None:

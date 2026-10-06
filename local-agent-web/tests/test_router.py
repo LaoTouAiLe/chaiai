@@ -357,6 +357,7 @@ def test_graph_nodes_match_plan() -> None:
         "reflection_node",
         "completion_router",
         "memory_write_node",
+        "task_memory_node",
         "chat_node",
         "final_response_node",
         "__end__",
@@ -374,6 +375,46 @@ def test_chat_request_is_answered_by_chat_node(
     assert result["mode"] == "chat"
     assert result["final_response"] == "你好，我在"
     assert not result.get("tool_events")
+
+
+def test_fixed_chat_session_reads_a_file_without_write_tools(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    (tmp_path / "note.txt").write_text("已核实的内容", encoding="utf-8")
+    model = model_factory(
+        decision="tool",
+        reply="文件写着：已核实的内容",
+        tool_calls=[{"name": "read_file", "args": {"path": "note.txt"}, "id": "read_1"}],
+    )
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "note.txt 写了什么", "session_mode": "chat"},
+        context=_context_with(tmp_path, model, app_config),
+    )
+
+    assert result["mode"] == "chat"
+    assert model.bound_tools == ["list_dir", "read_file"]
+    assert [event.tool_name for event in result["tool_events"]] == ["read_file"]
+    assert result["tool_results"][0]["status"] == "ok"
+    assert result["final_response"] == "文件写着：已核实的内容"
+
+
+def test_fixed_chat_session_rejects_a_hallucinated_write_call(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    model = model_factory(
+        reply="闲聊会话不能创建文件",
+        tool_calls=[
+            {"name": "write_file", "args": {"path": "blocked.txt", "content": "bad"}, "id": "write_1"}
+        ],
+    )
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "创建文件", "session_mode": "chat"},
+        context=_context_with(tmp_path, model, app_config),
+    )
+
+    assert not (tmp_path / "blocked.txt").exists()
+    assert result["tool_results"][0]["status"] == "denied"
+    assert result["final_response"] == "闲聊会话不能创建文件"
 
 
 def test_tool_call_is_executed_and_verified(
@@ -394,7 +435,7 @@ def test_tool_call_is_executed_and_verified(
     assert result["mode"] == "tool"
     # T17：反思判完成后走 finish，最终回答由反射节点那次不绑定工具的合成调用给出，
     # 不再回到 planner 再取一次决策（因此只有 1 轮工具循环）
-    assert result["loop_count"] == 1
+    assert result["loop_count"] == 2
     assert [event.status for event in result["tool_events"]] == ["ok"]
     assert result["tool_results"][0]["status"] == "ok"
     assert "文件内容甲" in result["tool_results"][0]["output_preview"]
@@ -410,6 +451,7 @@ def test_tool_call_is_executed_and_verified(
 
 
 def test_unfinished_tool_task_asks_user_with_visible_question(
+    legacy_loop,
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     """工具被拒 + 反思自称完成 → 被机械压制为 ask_user，页面上必须看到追问而不是空回答。
@@ -519,6 +561,7 @@ def test_loop_limit_blocks_continue_on_the_last_round(
 
 
 def test_loop_limit_does_not_block_finish_on_the_last_round(
+    legacy_loop,
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     """上限轮已经拿到 verified + finish：正常终止不能被上限改成"失败"。
@@ -548,6 +591,7 @@ def test_loop_limit_does_not_block_finish_on_the_last_round(
 
 
 def test_loop_limit_does_not_block_ask_user_on_the_last_round(
+    legacy_loop,
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     """上限轮判定需要用户补充：追问优先于"循环上限失败"。"""
@@ -575,6 +619,7 @@ def test_loop_limit_does_not_block_ask_user_on_the_last_round(
 
 
 def test_stall_guard_stops_the_loop_when_the_model_has_nothing_to_do(
+    legacy_loop,
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     """空转保护（实测）：计划还有步骤、模型连续只回"任务已完成" → 循环必须在两三轮内停下。
@@ -602,11 +647,16 @@ def test_stall_guard_stops_the_loop_when_the_model_has_nothing_to_do(
     assert result["reflection_result"].next_action == "ask_user"
     assert result["task_status"] != "completed"  # 计划没走完不冒充完成
     assert result["final_response"] and "连续 2 轮没有产生可执行的动作" in result["final_response"]
-    # 当前步骤标为 blocked（交给用户），后面没轮到的步骤仍是 pending
-    assert [step.status for step in result["plan"]] == ["blocked", "pending"]
+    # 被卡住的是**第二步**（「总结内容」——模型只回了一句客套话，没产出总结），不是第一步：
+    # 第一步「读取 note.txt」的工具证据是 ``verified``，机械校验确认它确实做完了，所以标 ``completed``
+    # （2026-09-30：多步计划的中间步骤不再每一步都问模型，完成度在证据通过校验时由机械结论给出，§5.4）。
+    # 这条期望原先写的是 ``["blocked", "pending"]``——那是在"每一步的推进都必须等模型判 goal_achieved"
+    # 的口径下写的，后果是把一个**已经成功**的步骤标成 ``blocked``（用户会以为读文件也失败了）。
+    assert [step.status for step in result["plan"]] == ["completed", "blocked"]
 
 
 def test_final_synthesis_stays_within_budget_with_large_tool_output(
+    legacy_loop,
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     """工具输出很大时，``finish`` 的收尾合成不能把整段窗口直接发出去。
@@ -650,6 +700,7 @@ def test_final_synthesis_stays_within_budget_with_large_tool_output(
 
 
 def test_final_synthesis_skips_the_model_when_the_prompt_does_not_fit(
+    legacy_loop,
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     """连"系统提示 + 指令"都放不下时不发请求：改用确定性摘要并记一条降级事件。"""
@@ -808,9 +859,9 @@ def test_finish_without_candidates_writes_no_memory(
 
 
 def test_rejected_candidate_records_error_without_writing(
-    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, legacy_loop: None
 ) -> None:
-    """非法候选（``entity_fact`` 的 content 不是规范 JSON）被拒绝：记事件、不写库。"""
+    """恢复的旧循环仍由写入层逐条拒绝非法候选；新提取的有限重试另测。"""
     (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
     model = model_factory(
         decision="tool",
@@ -1546,9 +1597,9 @@ def test_chat_write_failure_is_disclosed_in_the_answer(
 
 
 def test_multiple_rejections_are_all_kept(
-    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, legacy_loop: None
 ) -> None:
-    """同一轮的多个拒绝都要保留（事件 ID 曾因 stage/轮次相同而互相覆盖）。"""
+    """旧循环写入层的多个拒绝都要保留（事件 ID 曾因相同 stage/轮次互相覆盖）。"""
     (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
     memory_path = tmp_path / "data" / "memories.sqlite"
     model = model_factory(
@@ -1912,7 +1963,7 @@ def test_system_prompt_contains_mode_workspace_and_rules(
     assert "## 项目规则" in prompt.system_prompt
     assert "规则乙" in prompt.system_prompt
     assert tmp_path.as_posix() in prompt.system_prompt
-    assert "不假设已经读取或修改了任何本地文件" in prompt.system_prompt
+    assert "先调用 list_dir 或 read_file 取证" in prompt.system_prompt
     assert prompt.estimated_tokens > 0
 
 
@@ -2261,6 +2312,7 @@ def _plan_state(
 
 
 def test_multi_step_plan_continues_after_the_first_step(
+    legacy_loop,
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     """T20：计划有多步时，**完成第一步不等于完成整个任务**，三步必须真的走完。
@@ -2704,12 +2756,16 @@ def _node_runtime(context: RuntimeContext) -> Any:
 def test_retrieve_code_node_passes_through_when_disabled(
     tmp_path: Path, app_config: AppConfig, model_factory: ModelFactory, monkeypatch
 ) -> None:
-    """``rag.enabled=false`` 时不访问文件系统、不探测 ``rg``、不记错误事件（架构 §5.3）。"""
+    """**显式**关掉 ``rag.enabled`` 时不访问文件系统、不探测 ``rg``、不记错误事件（架构 §5.3）。
+
+    2026-10-01：``rag.enabled`` 的默认值由 ``false`` 改为 ``true``，这条不再靠默认值——
+    改成显式关闭，测的是**关闭这一支的行为**本身（默认值由配置层用例钉）。
+    """
     def boom(*args: object, **kwargs: object) -> object:
         raise AssertionError("关闭时不应调用检索")
 
     monkeypatch.setattr(nodes, "retrieve_code", boom)
-    context = _context(tmp_path, model_factory, app_config)
+    context = _context(tmp_path, model_factory, _rag_enabled(app_config, enabled=False))
 
     update = nodes.retrieve_code_node(
         {"run_id": "run-1", "normalized_request": "看看 routers.py"}, _node_runtime(context)
@@ -2826,12 +2882,16 @@ def test_system_prompt_distinguishes_failed_retrieval_from_no_results(
     assert "不代表" in failed
 
 
-def test_system_prompt_marks_code_retrieval_disabled_by_default(
+def test_system_prompt_marks_code_retrieval_disabled_when_switched_off(
     tmp_path: Path, app_config: AppConfig, model_factory: ModelFactory
 ) -> None:
-    """默认配置下 ``rag.enabled=false``：段落必须说明"没有检索结果是因为没启用"，
-    不能写成"没有检索到匹配片段"（那会诱导模型宣称"我检索了但没找到"）。"""
-    context = _context(tmp_path, model_factory, app_config)
+    """显式关掉 ``rag.enabled`` 时：段落必须说明"没有检索结果是因为没启用"，
+    不能写成"没有检索到匹配片段"（那会诱导模型宣称"我检索了但没找到"）。
+
+    2026-10-01：这条原来测的是"默认就是关"，默认改成开之后必须显式关闭——否则它测的其实是
+    别的东西，而且会随默认值变化莫名其妙地红。
+    """
+    context = _context(tmp_path, model_factory, _rag_enabled(app_config, enabled=False))
 
     prompt = nodes._snapshot_text({"run_id": "run-1"}, context)
 

@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import { Copy } from '../../components/icons'
 import type { FileDiffView } from '../../fixtures/types'
+import { copyText } from '../conversation/clipboard'
 import styles from './DiffCard.module.css'
 
 interface DiffCardProps {
@@ -22,6 +24,12 @@ const SIGN: Record<'context' | 'add' | 'del', string> = {
  *   header can never disagree with the body.
  */
 export function DiffCard({ diff }: DiffCardProps) {
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const copyLabel = copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : `复制 ${diff.path} 的 diff`
+  const diffText = [`--- a/${diff.path}`, `+++ b/${diff.path}`, ...diff.hunks.flatMap((hunk) => [
+    hunk.header,
+    ...hunk.lines.map((line) => `${line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}${line.text}`),
+  ])].join('\n')
   return (
     <figure className={styles.card}>
       <figcaption className={styles.header}>
@@ -31,7 +39,9 @@ export function DiffCard({ diff }: DiffCardProps) {
           <span className={styles.deletions}>−{diff.deletions}</span>
           <span className={styles.fileCount}>· 1 file</span>
         </span>
-        <button type="button" className={styles.copy} aria-label={`复制 ${diff.path} 的 diff`}>
+        <button type="button" className={styles.copy} aria-label={copyLabel} title={copyLabel} onClick={() => {
+          void copyText(diffText).then((ok) => setCopyState(ok ? 'copied' : 'failed'))
+        }}>
           <Copy />
         </button>
       </figcaption>

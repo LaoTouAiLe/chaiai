@@ -78,6 +78,8 @@ export type ToolCardView =
     groups: readonly SearchGroupView[]
     paths: readonly string[]
     total: number
+    /** Content-search totals count matching lines, not files. */
+    totalUnit?: 'matches'
     truncated: boolean
   }
   | {
@@ -133,7 +135,7 @@ export interface ToolRowView {
   name: string
   /** Short human summary of what the call is doing. */
   summary: string
-  status: 'running' | 'succeeded' | 'failed'
+  status: 'pending' | 'running' | 'succeeded' | 'failed'
   /** Pre-formatted duration; measuring timings is T34's job. */
   durationLabel: string
   target: string | null
@@ -217,6 +219,25 @@ export interface TurnStatsView {
   inputTokens: number | null
   outputTokens: number | null
   elapsedLabel: string
+  /**
+   * 模型耗时 / 工具耗时 / 首 token / 输出吞吐 / 缓存是否上报（2026-09-30）。
+   *
+   * 这些值**契约里本来就有**（`TurnRecordView.model_elapsed_ms` / `tool_elapsed_ms` /
+   * `time_to_first_token_ms` / `cache_metrics_reported`），只是视图模型此前没搬过来，页面因此
+   * 只能显示一个笼统的整轮耗时。
+   *
+   * 与 `elapsedLabel` 同一口径：拿不到就是空串，页面显示"未知"，不伪造 0。
+   *
+   * **可选**的原因与 `ModelCallView.schemaFingerprint` 相同：原型 fixture 早于这几个字段存在，
+   * 而原型本来就没有计时数据——给它编一组数字会变成"看起来像实测"。真会话由 `mapUsage` 一律填。
+   */
+  modelElapsedLabel?: string
+  toolElapsedLabel?: string
+  firstTokenLabel?: string
+  /** 输出吞吐（token/秒），由实际输出 token ÷ 模型耗时算得；分母缺失时为 `null`。 */
+  throughput?: number | null
+  /** 供应商是否上报了缓存字段。`false` 时页面说"未上报"，不显示 0%。 */
+  cacheReported?: boolean
   /** `true` when the token numbers are local estimates rather than provider facts. */
   estimated: boolean
   /** One entry per model call in this turn, for the expanded breakdown. */
@@ -253,7 +274,7 @@ export interface TraceRowView {
   id: string
   /** Type column: the tool name as the user sees it. */
   toolName: string
-  status: 'running' | 'succeeded' | 'failed'
+  status: ToolRowView['status']
   /** Pre-formatted duration; empty when the contract did not report one. */
   durationLabel: string
   target: string | null
@@ -436,7 +457,8 @@ export interface ModelMenuView {
 
 export type MessageView =
   | { kind: 'user'; id: string; text: string; at: string }
-  | { kind: 'assistant'; id: string; text: string; at: string }
+  | { kind: 'assistant'; id: string; text: string; at: string; reasoning?: string;
+      reasoningTruncated?: boolean; streaming?: boolean; reasoningRunning?: boolean }
   | { kind: 'tool'; id: string; tool: ToolRowView }
   | { kind: 'error'; id: string; notice: ErrorNoticeView }
   | { kind: 'memory'; id: string; memory: MemoryRowView }
@@ -502,6 +524,16 @@ export interface ComposerStateView {
   meterOpen?: boolean
 }
 
+/** Safe activity summary from the current snapshot, never model reasoning. */
+export interface RunActivityView {
+  id: string
+  label: string
+  detail: string
+  active: boolean
+  /** Persisted submission time; null means the elapsed duration is unknown. */
+  startedAt: string | null
+}
+
 export interface ConversationScenario {
   id: string
   /** What this prototype exists to check. Shown in the prototype banner. */
@@ -529,6 +561,7 @@ export interface ConversationScenario {
   loading?: LoadingStateView | null
   /** Composer overrides. Omitted means: enabled, no running phase. */
   composer?: ComposerStateView
+  activity?: RunActivityView | null
   /** Renders the sidebar as a narrow rail (matrix 24). */
   sidebarCollapsed?: boolean
   /** Which top-bar tab this scenario opens on. Omitted means `conversation`. */

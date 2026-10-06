@@ -10,6 +10,20 @@
   margin-top: var(--law-space-md);
 }
 
+.root {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.root :is(table, pre) {
+  max-width: 100%;
+}
+
+.root table {
+  display: block;
+  overflow-x: auto;
+}
+
 .root :is(ul, ol) {
   padding-left: var(--law-space-2xl);
 }
@@ -26,6 +40,7 @@
 }
 
 .inline {
+  overflow-wrap: anywhere;
   padding: 0 4px;
   border-radius: var(--law-radius-xs);
   background: var(--law-surface-inline-code);

@@ -47,6 +47,70 @@ class ReadFileResult(BaseModel):
     is_binary: bool = False
     content: str = ""
     note: str | None = None
+    #: 本次**实际返回**的行区间（1 基，含）与是否有后续（2026-09-30 新增）。
+    #:
+    #: 加它的原因是一个实测出来的工具缺陷：此前只有 ``line_count``（文件总行数）与
+    #: ``truncated``（被截断了）。模型因此**知道"读不全"，却不知道这次读到了第几行**，
+    #: 也就算不出下一次的 ``start_line``——它只能重猜或整篇重读。实测同一文件在一轮里被读了
+    #: 两次（一次 ``truncated=false``、一次 ``true``），并自述"两个文件的内容均因长度限制只显示了
+    #: 截断片段"，进而把"证据被截断"误当成"任务未完成"而反复空转。
+    #:
+    #: 补上区间之后，"继续读"变成一个**可执行动作**：下一次传
+    #: ``start_line=next_start_line`` 即可，不需要猜。
+    first_line: int = 0
+    last_line: int = 0
+    has_more: bool = False
+    next_start_line: int | None = None
+
+
+#: ``grep`` 的输出模式：正文命中 / 只列文件名 / 只给计数。
+GrepOutputMode = Literal["content", "files_with_matches", "count"]
+
+
+class GrepMatch(BaseModel):
+    """一条正文命中（``content`` 模式专用）。"""
+
+    path: str
+    line_number: int
+    text: str
+
+
+class GrepFileHits(BaseModel):
+    """一个文件的命中汇总；三种输出模式都会给。"""
+
+    path: str
+    count: int
+
+
+class GrepResult(BaseModel):
+    """``grep`` 的返回结构（2026-09-30 新增）。
+
+    ``hits`` 三种模式下都填（按命中数降序），``matches`` 只有 ``content`` 模式才填。这样模型可以
+    先用 ``files_with_matches`` 判断"该读哪几个文件"、再用 ``read_file`` 定点读，而不是把整个仓库
+    的命中行塞进上下文——这正是"项目多大都能读"与"成本可控"能同时成立的原因。
+    """
+
+    pattern: str
+    path: str = "."
+    glob: str | None = None
+    output_mode: GrepOutputMode = "content"
+    matches: list[GrepMatch] = Field(default_factory=list)
+    hits: list[GrepFileHits] = Field(default_factory=list)
+    total_matches: int = 0
+    files_scanned: int = 0
+    truncated: bool = False
+    note: str | None = None
+
+
+class GlobResult(BaseModel):
+    """``glob`` 的返回结构（2026-09-30 新增）。"""
+
+    pattern: str
+    path: str = "."
+    files: list[str] = Field(default_factory=list)
+    total_files: int = 0
+    truncated: bool = False
+    note: str | None = None
 
 
 class EditFileResult(BaseModel):

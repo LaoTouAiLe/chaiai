@@ -294,6 +294,44 @@ class CompressionConfig(_StrictModel):
     #: 轮次保底对"一个用户请求内的长工具循环"无效（只有 1 个人类轮次），靠这条才能收缩单个长任务。
     #: ``0`` 表示**所有工具步都被省略**（窗口里只剩人类消息与那条说明占位）。
     preserve_recent_tool_steps: int = Field(default=3, ge=0)
+    #: 窗口里"工具步内容"的**字符预算**（2026-09-30 新增）。
+    #:
+    #: 加这条的原因是实测到的一个成本漏洞：原来只按**条数**省略（``preserve_recent_tool_steps``），
+    #: 于是一个 20 步的工具循环从第 4 步起就要每步重写窗口中段——而窗口一旦不是"追加式"，
+    #: 供应商的前缀缓存就整段失效。实测那次命中率只有 **19.9%**（对比同类工具 67.6%），
+    #: 未命中输入 635,714 token，折合约 ¥1.6/次提问；逐次记录显示同一轮内
+    #: ``system_prompt_fingerprint`` 有 17 个不同值，正是"每步重写中段"留下的痕迹。
+    #:
+    #: 改成预算驱动后，**短循环一个字都不省**：历史保持追加式，前缀稳定因而可缓存；只有真正
+    #: 超预算的长循环才从**最早的**步骤开始省。``preserve_recent_tool_steps`` 保留为**下限**
+    #: （预算再紧也至少留这么多步），两条一起用。
+    #:
+    #: **取值规则（2026-10-01 补，回答"设多少最普适"）**：这个数不是手感值，它夹在两个界之间，
+    #: **换模型必须按窗口重算**：
+    #: - **下界**：必须大于一道普通任务的工具步内容，否则边界每步都移动——而"移动边界"就是缓存杀手。
+    #:   实测"梳理架构"这类提问会读到 17~26 条工具结果，按压中段后的体型（头 :data:`~local_agent.memory.short_term.TOOL_RESULT_HEAD_CHARS`
+    #:   + 尾 :data:`~local_agent.memory.short_term.TOOL_RESULT_TAIL_CHARS` + 标记）约 4k 字符/条，
+    #:   即 **70k~105k 字符**。
+    #: - **上界**：token 那一层压缩在 ``trigger_ratio × (context_window_tokens − max_tokens)`` 处接管
+    #:   （本机 ``0.8 × 61,440 = 49,152`` token）；减去系统提示/快照/工具定义后，按本仓库内容的换算
+    #:   （实测约 1.6~2.2 字符/token，**没有精确测量**）折算。
+    #: - 两个界很靠近，所以默认取**"让字符层只做兜底"**（``160_000``）：忘记交给 token 层的轮次摘要
+    #:   （摘要保留内容，比整步丢弃损失小）。实测这一组（160k + 3072/768）一轮 17 次调用只在交界处
+    #:   回落 **1 次**；而卡在临界点的取法（120k + 4096/1024）一轮回落 **5 次**，单次缓存读从
+    #:   48,512 塌到 3,456。
+    #: - **验收观测量**：逐调用缓存读的**回落次数**（目标 0~1 次）——不是命中率。
+    tool_step_budget_chars: int = Field(default=160_000, gt=0)
+    #: **单条工具结果**的字符阈值（2026-09-30 新增，成本修复）：超过它的结果无条件压成
+    #: 「头 :data:`~local_agent.memory.short_term.TOOL_RESULT_HEAD_CHARS` + 中段标记 +
+    #: 尾 :data:`~local_agent.memory.short_term.TOOL_RESULT_TAIL_CHARS`」（当前 3072 / 768），
+    #: ``0`` 表示不压。
+    #:
+    #: 为什么要有它（而不是只靠上面的预算）：实测一次真实对话，未命中的大头正是"大工具结果**第一次**
+    #: 进历史"那几次——单个 2 万字符的读取约 1.2 万 token，全价未命中，那一跳的命中率只有 **22.6%**；
+    #: 而窗口当时才约 45k token，**远没到 80k 的预算线**，按预算触发的裁剪一次都没跑，机制等于不存在。
+    #: 阈值改成**按单条结果**判定后，一条结果在被发出去之前就已经是压过的形态，因而**不破坏前缀**
+    #: （同一输入每次都压成同一份字节）。取值对标 dsh 的 ``compaction-tool-result-pruner``（8192）。
+    tool_result_keep_chars: int = Field(default=8_192, ge=0)
     summary_max_chars: int = Field(default=12_000, gt=0)
 
 
@@ -388,7 +426,17 @@ class RagConfig(_StrictModel):
     所有限额都必须有界：一个常见查询词就能命中整棵树，没有上限会同时吃掉内存与 Prompt。
     """
 
-    enabled: bool = False
+    #: 是否启用按需代码检索。**默认打开（2026-10-01 由 ``False`` 改为 ``True``）**。
+    #:
+    #: 关闭时工具集里**没有任何定位代码的手段**：只有 ``list_dir`` / ``read_file`` / ``edit_file`` /
+    #: ``write_file`` / ``delete_file`` / ``run_shell``。实测代价是一个"梳理架构"的请求在 **14 次
+    #: ``list_dir``** 之后用尽循环预算（既烧钱又没做完），而且计划里写出"先用 grep 搜索定位"这种
+    #: 本机并不存在的工具——模型在描述一个自己没有的能力。
+    #:
+    #: 打开后按需注入**带路径与行号**的片段（不建持久索引，每次直接读磁盘现状，见类文档），
+    #: 模型据此定向读取。节点本身在关闭时是纯透传（不访问文件系统、不探测 ``rg``、不记错误事件），
+    #: 所以这个开关不存在"打开才有副作用"的问题。
+    enabled: bool = True
     max_results: int = Field(default=8, gt=0)
     #: 单次检索的超时秒数；`rg` 与 Python 扫描共用同一上限。
     timeout_seconds: int = Field(default=10, gt=0)
@@ -411,7 +459,13 @@ class RagConfig(_StrictModel):
 class AgentConfig(_StrictModel):
     """Agent 循环与证据要求。"""
 
-    max_tool_loops: int = Field(default=20, gt=0)
+    #: 工具循环上限（架构 §11.5 的全局兜底）。
+    #:
+    #: 2026-09-30 由 ``20`` 提到 ``60``：20 步实测**不够做完一个跨文件任务**——一个"梳理架构"的
+    #: 请求在 14 次 list_dir 之后就用尽了预算，被 :data:`~local_agent.graph.routers.LOOP_LIMIT_REPLY`
+    #: 硬停在 1/5 步，用户看到的是"任务没做完就断了"。同类实现（DSH）主循环甚至没有步数硬上限，
+    #: 靠工具超时、重复调用提醒与目标轮次来收敛。60 仍是有界兜底，配合空转保护与步级重试上限。
+    max_tool_loops: int = Field(default=60, gt=0)
     max_retries_per_step: int = Field(default=2, ge=0)
     require_evidence_for_completion: bool = True
 

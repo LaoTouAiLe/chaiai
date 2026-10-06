@@ -14,10 +14,7 @@ interface TopBarProps {
 }
 
 /**
- * Session header: title, the conversation/trace switch and the session-log entry.
- *
- * 「轨迹」自 T31 起接上了真实视图（表格 + 检查器）。`Session log` 仍是惰性按钮：v0.4 没有
- * 事件日志页，也没有它的接口，留着是为了不隐藏这个入口（缺口记在 T37 验收记录里）。
+ * Session header: title and conversation/trace switch.
  */
 export function TopBar({ title, workspace, activeTab, onSelectTab }: TopBarProps) {
   return (
@@ -51,9 +48,6 @@ export function TopBar({ title, workspace, activeTab, onSelectTab }: TopBarProps
             轨迹
           </button>
         </div>
-        <button type="button" className={styles.log}>
-          Session log
-        </button>
       </div>
     </header>
   )

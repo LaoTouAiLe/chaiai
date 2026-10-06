@@ -9,8 +9,8 @@
 import { useState } from 'react'
 
 import type { TraceRowView, TraceView as TraceViewModel } from '../../fixtures/types'
-import { TOOL_STATUS_LABEL } from '../tool/ToolRow'
-import { parameterSummary, resultSummary } from './adapters'
+import { TOOL_STATUS_LABEL, toolLabel } from '../tool/display'
+import { resultSummary } from './adapters'
 import { TraceInspector } from './TraceInspector'
 import styles from './TraceView.module.css'
 
@@ -18,6 +18,7 @@ import styles from './TraceView.module.css'
 const UNKNOWN = '未知'
 
 const STATUS_CLASS: Record<TraceRowView['status'], string> = {
+  pending: styles.statusPending ?? '',
   running: styles.statusRunning ?? '',
   succeeded: styles.statusSucceeded ?? '',
   failed: styles.statusFailed ?? '',
@@ -37,23 +38,23 @@ export function TraceView({ trace }: TraceViewProps) {
       <div className={styles.tablePane} role="region" aria-label="轨迹">
         {trace.rows.length === 0 ? (
           <p className={styles.empty}>
-            这个会话还没有工具调用记录。轨迹只来自会话事件，不会为了看着完整补造内容。
+            这个会话还没有操作记录。
           </p>
         ) : (
           <table className={styles.table}>
             <caption className={styles.caption}>
-              按发生次序排列的工具调用；点一行在右侧查看检查器详情。
+              按发生顺序记录的操作。选择一行查看结果和证据。
             </caption>
             <thead>
               <tr>
                 <th scope="col" className={styles.colType}>
-                  类型
+                  操作
                 </th>
                 <th scope="col" className={styles.colPayload}>
-                  参数
+                  目标
                 </th>
                 <th scope="col" className={styles.colResult}>
-                  结果摘要
+                  结果
                 </th>
                 <th scope="col" className={styles.colTime}>
                   耗时
@@ -80,18 +81,18 @@ export function TraceView({ trace }: TraceViewProps) {
                         type="button"
                         className={styles.typeButton}
                         aria-pressed={isSelected}
-                        aria-label={`查看 ${row.toolName}（${TOOL_STATUS_LABEL[row.status]}）的检查器详情`}
+                        aria-label={`查看${toolLabel(row.toolName)}（${TOOL_STATUS_LABEL[row.status]}）的详情`}
                         onClick={(event) => {
                           event.stopPropagation()
                           setSelectedId(row.id)
                         }}
                       >
                         <span className={`${styles.status} ${STATUS_CLASS[row.status]}`} aria-hidden="true" />
-                        {row.toolName}
+                        {toolLabel(row.toolName)}
                       </button>
                     </td>
                     <td className={styles.payloadCell}>
-                      {row.parameters.length === 0 ? UNKNOWN : parameterSummary(row.parameters)}
+                      {row.target ?? UNKNOWN}
                     </td>
                     <td className={styles.resultCell}>
                       {summary === '' ? UNKNOWN : summary}
@@ -108,9 +109,9 @@ export function TraceView({ trace }: TraceViewProps) {
 
       <div className={styles.inspectorPane}>
         {selected === null ? (
-          <p className={styles.hint}>选择左侧任一工具调用，右侧显示它的 Summary / Payload / Result / Schema / Timing。</p>
+          <p className={styles.hint}>选择左侧操作，查看结果和证据。</p>
         ) : (
-          <TraceInspector row={selected} calls={trace.calls} />
+          <TraceInspector row={selected} />
         )}
       </div>
     </div>

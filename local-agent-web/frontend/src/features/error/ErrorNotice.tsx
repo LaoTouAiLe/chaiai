@@ -22,9 +22,9 @@ const CATEGORY_LABEL: Record<ErrorNoticeView['category'], string> = {
  * Contract this prototype must demonstrate:
  * - a severity treatment that is visibly different from normal output;
  * - an actionable hint, always present (never "something went wrong");
- * - a stable code plus a safe correlation id, and **no** raw provider payload,
+ * - a stable code plus a safe correlation id behind an explicit details control, and **no** raw provider payload,
  *   key material or absolute private path;
- * - retry offered only when the failure is actually retryable.
+ * - retry guidance without an action that could repeat a tool side effect.
  */
 export function ErrorNotice({ notice }: ErrorNoticeProps) {
   const severityClass = notice.severity === 'warning' ? styles.warning : styles.error
@@ -35,24 +35,22 @@ export function ErrorNotice({ notice }: ErrorNoticeProps) {
           <WarningTriangle />
         </span>
         <h2 className={styles.title}>{notice.title}</h2>
-        <span className={styles.code}>{notice.code}</span>
       </div>
       <p className={styles.message}>{notice.message}</p>
       <p className={styles.hint}>{notice.hint}</p>
       <div className={styles.foot}>
-        <span className={styles.meta}>
-          {CATEGORY_LABEL[notice.category]} · 诊断编号 {notice.diagnosticId}
-        </span>
         {notice.retryable ? (
-          <button type="button" className={styles.retry}>
-            重新发送
-          </button>
+          <span className={styles.notRetryable}>检查后可在输入框重新发送</span>
         ) : (
           // Per-notice, not per-component: a busy session and a broken key block a
           // retry for different reasons (plan §6.4).
           <span className={styles.notRetryable}>{notice.blockedReason ?? '不能自动重试'}</span>
         )}
       </div>
+      <details className={styles.diagnostics}>
+        <summary>诊断信息</summary>
+        <span className={styles.meta}>{notice.code} · {notice.diagnosticId}</span>
+      </details>
     </section>
   )
 }

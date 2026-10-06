@@ -94,7 +94,11 @@ _STOPWORDS = frozenset(
 )
 
 #: 扫描时直接跳过的目录（不区分大小写）；隐藏目录另有一层判断。
-_SKIPPED_DIRS = frozenset(
+#:
+#: 2026-09-30 起**公开**：``tools/search_tools.py`` 的 ``grep`` / ``glob`` 复用同一份清单。
+#: 两处各留一份必然悄悄分叉（本模块开头的注释警告过同类漂移），而"跳过哪些目录"直接决定检索
+#: 结果是否可信，不能有两套。
+SKIPPED_DIRS = frozenset(
     {
         ".git",
         ".hg",
@@ -546,7 +550,7 @@ def _walk_files(
         dirnames[:] = sorted(
             name
             for name in dirnames
-            if not name.startswith(".") and name.casefold() not in _SKIPPED_DIRS
+            if not name.startswith(".") and name.casefold() not in SKIPPED_DIRS
         )
         for filename in sorted(filenames):
             if len(files) >= config.max_files:

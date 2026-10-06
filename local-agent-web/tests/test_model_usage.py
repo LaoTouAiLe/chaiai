@@ -49,7 +49,7 @@ RUN = "run-1"
 #: 产品级用途词表（§15.4：用途不得泄露内部节点名）。
 PURPOSES = frozenset(
     {"chat", "tool_decision", "final_answer", "summarize", "planning", "reflection",
-     "memory_intent", "retrieval", "routing"}
+     "memory_intent", "memory_extraction", "retrieval", "routing"}
 )
 
 
@@ -460,9 +460,12 @@ def test_turn_summary_is_the_sum_of_its_details() -> None:
     assert usage.model_elapsed_ms == 140
     # 首 Token 取最早的一次。
     assert usage.time_to_first_token_ms == 12
-    # write 字段两边都未知 → 汇总未知 → 命中率不显示（§15.6）。
+    # 2026-09-30：只缺**写缓存**不再算"未知"——DeepSeek 这类隐式缓存供应商没有这个桶（缓存写入
+    # 由服务端自动完成，计费只有命中/未命中）。原来要求三项齐全会让命中率在 DeepSeek 上恒为
+    # 未知（页面一直显示"缓存命中 未知"）。字段本身仍**如实留空**，只有分母改用 未命中+命中。
     assert usage.actual_cache_write_tokens is None
-    assert usage.cache_hit_ratio is None
+    assert usage.cache_hit_ratio is not None
+    assert abs(usage.cache_hit_ratio - 700 / 1300) < 1e-9
     assert usage.cache_metrics_reported is True
 
 
@@ -481,6 +484,69 @@ def test_one_unknown_detail_makes_the_total_unknown() -> None:
     assert usage.actual_output_tokens is None
     # 两次都报了、且都有的字段照常加总。
     assert usage.actual_cache_read_tokens == 800
+
+
+def test_failed_attempt_does_not_poison_the_turn_total() -> None:
+    """**失败的尝试不参与加总**（§15.6，2026-09-30）。
+
+    与上一条的区别是"没成功"和"成功了但供应商没上报某字段"不是一回事：被端点拒绝的请求没计费，
+    它的"缺"是**已知的零**；而成功但字段缺失才是"未上报 ≠ 0"，仍按未知处理。
+
+    这条规则是被实测逼出来的：客户端以为端点支持原生 JSON Schema，真实调用**每次**都被 400 拒
+    （`OpenAIInvalidRequestError`）后降级重试。那条失败记录没有任何实际用量，`_sum_optional` 把它
+    当未知，于是**整轮**的输入/命中率/输出全部塌成未知——页面上的"缓存命中 未知"就是这么来的，
+    而且每次运行都会发生。T34 基线曾把这个行为当预期写进结论（"有一次调用失败且没拿到用量，
+    整轮汇总就是未知"），现已按 §15.6 的新增条款推翻。
+    """
+    state = _state(
+        model_call_records=[
+            _record(model_call_id=f"{RUN}:model:1"),
+            # 被拒绝的尝试：没成功、也没有任何实际用量。
+            _record(
+                model_call_id=f"{RUN}:model:2",
+                status="error",
+                retry_of=f"{RUN}:model:1",
+                actual_uncached_input_tokens=None,
+                actual_cache_read_tokens=None,
+                actual_output_tokens=None,
+                actual_reasoning_tokens=None,
+                model_elapsed_ms=5,
+            ),
+        ]
+    )
+
+    usage = proj.project_usage(state)
+
+    assert usage is not None
+    # 汇总仍是"计费的那些调用"的加总，不因失败尝试塌成未知。
+    assert usage.actual_uncached_input_tokens == 600
+    assert usage.actual_output_tokens == 20
+    assert usage.cache_hit_ratio is not None
+    # 失败尝试**仍在明细里**：记录里没有错误种类，无法区分"被拒绝"与"生成中途失败"（后者若供应商
+    # 不回报用量会被低估），所以它必须可见，页面不得把它当作不存在的调用。
+    assert usage.model_call_ids == [f"{RUN}:model:1", f"{RUN}:model:2"]
+
+
+def test_failed_attempt_that_reported_usage_still_counts() -> None:
+    """反向：失败但**报告了用量**的调用照常计入——那种情况确实消耗了 token。"""
+    state = _state(
+        model_call_records=[
+            _record(model_call_id=f"{RUN}:model:1"),
+            _record(
+                model_call_id=f"{RUN}:model:2",
+                status="error",
+                actual_uncached_input_tokens=100,
+                actual_cache_read_tokens=50,
+                actual_output_tokens=5,
+            ),
+        ]
+    )
+
+    usage = proj.project_usage(state)
+
+    assert usage is not None
+    assert usage.actual_uncached_input_tokens == 700
+    assert usage.actual_output_tokens == 25
 
 
 def test_records_do_not_leak_across_turns() -> None:

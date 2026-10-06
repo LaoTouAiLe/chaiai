@@ -66,6 +66,13 @@ export default defineConfig({
       name: '1280x800',
       use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 } },
     },
+    {
+      // 窄窗必须有**自己的项目**：两处已修的溢出（`Composer` 的 `.chip`、`ApprovalCard`）
+      // 都只在 640 宽度下越界，而上面两个桌面宽度根本照不到。缺了这一档，"横向不溢出"
+      // 的 guard 只覆盖了产品最容易出问题的宽度之外的场景。
+      name: '640x800',
+      use: { ...devices['Desktop Chrome'], viewport: { width: 640, height: 800 } },
+    },
   ],
   webServer: {
     command: `npm run build && npx vite preview --host ${HOST} --port ${PORT} --strictPort`,

@@ -2,7 +2,7 @@
 
 职责边界：
 
-- 只维护 ``sessions`` 表（新建、列表、切换、重命名、最后活动时间与 Checkpoint 指针），
+- 维护 ``sessions`` 索引及 ``workspaces`` 登记（显示名称、移除标记），
   不写 Checkpoint，也不碰挂起中的审批状态。
 - 会话事实来源是数据库，不是浏览器：刷新页面或重启服务后按 ``sessions`` 表恢复，
   ``st.session_state`` 只放页面临时状态。
@@ -48,9 +48,9 @@ STATUS_IDLE = "idle"
 #: 查询列顺序与 :class:`Session` 字段顺序严格一致。
 _COLUMNS = (
     "session_id, thread_id, title, workspace_root, project_id, "
-    "created_at, updated_at, last_checkpoint_id, status"
+    "created_at, updated_at, last_checkpoint_id, status, mode, archived"
 )
-_PLACEHOLDERS = ", ".join("?" * 9)
+_PLACEHOLDERS = ", ".join("?" * 11)
 
 
 @dataclass(frozen=True)
@@ -66,6 +66,8 @@ class Session:
     updated_at: str
     last_checkpoint_id: str | None
     status: str
+    mode: str
+    archived: bool = False
 
     @property
     def is_active(self) -> bool:
@@ -109,6 +111,8 @@ def _row_to_session(row: tuple[object, ...]) -> Session:
         updated_at=str(row[6]),
         last_checkpoint_id=str(row[7]) if row[7] is not None else None,
         status=str(row[8]),
+        mode=str(row[9]),
+        archived=bool(row[10]),
     )
 
 
@@ -131,7 +135,9 @@ class SessionStore:
 
     # ------------------------------------------------------------------ 查询
 
-    def list_sessions(self, *, workspace_root: Path | None = None) -> list[Session]:
+    def list_sessions(
+        self, *, workspace_root: Path | None = None, archived: bool = False
+    ) -> list[Session]:
         """列出会话，按最后活动时间倒序（最近使用的在前面）。
 
         Args:
@@ -142,29 +148,59 @@ class SessionStore:
         """
         if workspace_root is None:
             rows = self._connection.execute(
-                f"SELECT {_COLUMNS} FROM sessions ORDER BY updated_at DESC, created_at DESC"
+                f"SELECT {_COLUMNS} FROM sessions WHERE archived = ? "
+                "ORDER BY updated_at DESC, created_at DESC",
+                (int(archived),),
             ).fetchall()
         else:
             rows = self._connection.execute(
-                f"SELECT {_COLUMNS} FROM sessions WHERE workspace_root = ? "
+                f"SELECT {_COLUMNS} FROM sessions WHERE workspace_root = ? AND archived = ? "
                 "ORDER BY updated_at DESC, created_at DESC",
-                (normalize_path(workspace_root),),
+                (normalize_path(workspace_root), int(archived)),
             ).fetchall()
         return [_row_to_session(row) for row in rows]
 
     def list_workspaces(self) -> list[str]:
         """已使用过的工作区（规范化路径，去重，最近使用的在前）。
 
-        T14C 起工作区与会话绑定，列表直接从 ``sessions.workspace_root`` 去重生成：不另建表，
-        也不新增 State 字段（架构 §10.6）。
+        T39 起独立登记。移除只改变登记的可见性，不改会话绑定与磁盘目录。
         """
         rows = self._connection.execute(
-            "SELECT workspace_root, MAX(updated_at) AS last_used, "
+            "SELECT w.workspace_root, MAX(s.updated_at) AS last_used, "
             "MAX(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS is_active "
-            "FROM sessions GROUP BY workspace_root "
-            "ORDER BY last_used DESC, is_active DESC, workspace_root ASC"
+            "FROM workspaces w LEFT JOIN sessions s ON s.workspace_root = w.workspace_root "
+            "WHERE w.removed = 0 GROUP BY w.workspace_root "
+            "ORDER BY last_used DESC, is_active DESC, w.workspace_root ASC"
         ).fetchall()
         return [str(row[0]) for row in rows]
+
+    def workspace_title(self, workspace_root: Path) -> str | None:
+        row = self._connection.execute(
+            "SELECT title FROM workspaces WHERE workspace_root = ?",
+            (normalize_path(workspace_root),),
+        ).fetchone()
+        return str(row[0]) if row is not None and row[0] is not None else None
+
+    def rename_workspace(self, workspace_root: Path, title: str) -> None:
+        with self._connection:
+            self._connection.execute(
+                "UPDATE workspaces SET title = ? WHERE workspace_root = ? AND removed = 0",
+                (_clean_title(title), normalize_path(workspace_root)),
+            )
+
+    def remove_workspace(self, workspace_root: Path) -> None:
+        with self._connection:
+            self._connection.execute(
+                "UPDATE workspaces SET removed = 1 WHERE workspace_root = ?",
+                (normalize_path(workspace_root),),
+            )
+
+    def _register_workspace(self, workspace_root: Path) -> None:
+        self._connection.execute(
+            "INSERT INTO workspaces (workspace_root) VALUES (?) "
+            "ON CONFLICT(workspace_root) DO UPDATE SET removed = 0",
+            (normalize_path(workspace_root),),
+        )
 
     def get(self, session_id: str) -> Session | None:
         """按 ``session_id`` 取一条记录；不存在返回 ``None``。"""
@@ -241,6 +277,7 @@ class SessionStore:
         title: str | None = None,
         thread_id: str | None = None,
         workspace_root: Path | None = None,
+        mode: str = "agent",
     ) -> Session:
         """新建会话并切换过去（原来的当前会话变为 ``idle``）。
 
@@ -253,6 +290,8 @@ class SessionStore:
         Returns:
             新建的会话记录。
         """
+        if mode not in ("chat", "agent"):
+            raise SessionStoreError(f"未知会话模式：{mode}")
         root = self.workspace_root if workspace_root is None else Path(workspace_root).resolve()
         session_id = uuid4().hex[:12]
         now = _now()
@@ -266,8 +305,10 @@ class SessionStore:
             updated_at=now,
             last_checkpoint_id=None,
             status=STATUS_ACTIVE,
+            mode=mode,
         )
         with self._connection:
+            self._register_workspace(root)
             self._deactivate_all()
             self._connection.execute(
                 f"INSERT INTO sessions ({_COLUMNS}) VALUES ({_PLACEHOLDERS})",
@@ -281,6 +322,8 @@ class SessionStore:
                     record.updated_at,
                     record.last_checkpoint_id,
                     record.status,
+                    record.mode,
+                    int(record.archived),
                 ),
             )
         return record
@@ -288,6 +331,8 @@ class SessionStore:
     def switch(self, session_id: str) -> Session:
         """把指定会话设为当前会话，并记下这次使用（随后按其 ``thread_id`` 读图）。"""
         target = self._require(session_id)
+        if target.archived:
+            raise SessionStoreError("请先恢复已归档的会话")
         if target.is_active:
             return target
         with self._connection:
@@ -313,8 +358,10 @@ class SessionStore:
             切换后的当前会话。
         """
         root = Path(workspace_root).resolve()
+        with self._connection:
+            self._register_workspace(root)
         row = self._connection.execute(
-            f"SELECT {_COLUMNS} FROM sessions WHERE workspace_root = ? "
+            f"SELECT {_COLUMNS} FROM sessions WHERE workspace_root = ? AND archived = 0 "
             "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
             (normalize_path(root),),
         ).fetchone()
@@ -330,6 +377,23 @@ class SessionStore:
             "UPDATE sessions SET title = ? WHERE session_id = ?", (cleaned, session_id)
         )
         self._connection.commit()
+        return self._require(session_id)
+
+    def set_archived(self, session_id: str, archived: bool) -> Session:
+        current = self._require(session_id)
+        with self._connection:
+            self._connection.execute(
+                "UPDATE sessions SET archived = ?, status = CASE WHEN ? THEN 'idle' "
+                "ELSE status END WHERE session_id = ?",
+                (int(archived), int(archived), session_id),
+            )
+            if archived and current.is_active:
+                remaining = self.list_sessions()
+                if remaining:
+                    self._connection.execute(
+                        "UPDATE sessions SET status = 'active' WHERE session_id = ?",
+                        (remaining[0].session_id,),
+                    )
         return self._require(session_id)
 
     def touch(

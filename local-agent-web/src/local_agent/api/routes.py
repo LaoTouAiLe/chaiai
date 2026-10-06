@@ -34,6 +34,7 @@ from local_agent.api.schemas import (
     ModelConnectionRequest,
     PermissionsModeRequest,
     PickDirectoryView,
+    RenameRequest,
     SelectDefaultConnectionRequest,
     SelectionExpectation,
     SelectSessionModelRequest,
@@ -53,6 +54,12 @@ from local_agent.application.models import (
 )
 from local_agent.exceptions import SessionStoreError
 from local_agent.model_settings import ConnectionDraft, SelectionRef
+from local_agent.model_settings.preferences import (
+    MemoryProbeRequest,
+    MemoryProbeResult,
+    PreferencesRequest,
+    PreferencesView,
+)
 
 #: 公开错误码 → HTTP 状态码。**显式列出**；表里没有的一律 500。
 #: 409 用于"服务端状态决定了这次不能做"（忙碌、冲突、需要人工核对、审批失效）。
@@ -236,12 +243,38 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
             ) from None
         return PickDirectoryView(path=path)
 
+    @router.patch("/workspaces/{workspace_id}", response_model=WorkspaceRef, responses=_NOT_FOUND)
+    def rename_workspace(workspace_id: str, payload: RenameRequest) -> WorkspaceRef:
+        return service.rename_workspace(workspace_id, payload.title)
+
+    @router.delete("/workspaces/{workspace_id}", status_code=204, responses=_STATE_CONFLICT)
+    def remove_workspace(workspace_id: str) -> None:
+        """仅移除工作区登记，保留磁盘目录与全部会话。"""
+        service.remove_workspace(workspace_id)
+
     @router.get("/sessions", response_model=list[SessionSummaryView], summary="会话列表")
     def list_sessions(
         workspace_id: str | None = Query(default=None, min_length=1, max_length=128),
+        archived: bool = Query(default=False),
     ) -> list[SessionSummaryView]:
         """`workspace_id` 缺省表示列出全部会话。"""
-        return service.list_sessions(workspace_id=workspace_id)
+        return service.list_sessions(workspace_id=workspace_id, archived=archived)
+
+    @router.patch("/sessions/{session_id}", response_model=SessionSummaryView, responses=_NOT_FOUND)
+    def rename_session(session_id: str, payload: RenameRequest) -> SessionSummaryView:
+        return service.rename_session(session_id, payload.title)
+
+    @router.post("/sessions/{session_id}/select", response_model=SessionSummaryView, responses=_NOT_FOUND)
+    def select_session(session_id: str) -> SessionSummaryView:
+        return service.select_session(session_id)
+
+    @router.post("/sessions/{session_id}/archive", response_model=SessionSummaryView, responses=_STATE_CONFLICT)
+    def archive_session(session_id: str) -> SessionSummaryView:
+        return service.archive_session(session_id)
+
+    @router.post("/sessions/{session_id}/restore", response_model=SessionSummaryView, responses=_NOT_FOUND)
+    def restore_session(session_id: str) -> SessionSummaryView:
+        return service.restore_session(session_id)
 
     @router.post(
         "/sessions",
@@ -252,7 +285,9 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     def create_session(payload: CreateSessionRequest | None = None) -> SessionSummaryView:
         """新建会话并切换过去；`workspace_id` 缺省表示沿用库的启动默认工作区。"""
         options = payload or CreateSessionRequest()
-        return service.create_session(title=options.title, workspace_id=options.workspace_id)
+        return service.create_session(
+            title=options.title, workspace_id=options.workspace_id, mode=options.mode
+        )
 
     @router.get(
         "/sessions/{session_id}",
@@ -455,5 +490,22 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         URL 编码；重复调用同一条不会产生第二种结果。
         """
         return service.revoke_external_path(path)
+
+    @router.get("/preferences", response_model=PreferencesView, summary="应用偏好与配置概览")
+    def get_preferences() -> PreferencesView:
+        return service.preferences_view()
+
+    @router.put("/preferences", response_model=PreferencesView, summary="保存应用偏好", responses={
+        409: {"model": ErrorResponse, "description": "设置版本已更新，草稿未覆盖现有设置"},
+        503: {"model": ErrorResponse, "description": "设置库不可用"},
+    })
+    def put_preferences(payload: PreferencesRequest) -> PreferencesView:
+        return service.save_preferences(payload)
+
+    @router.post("/preferences/memory/test", response_model=MemoryProbeResult,
+                 summary="测试 Embedding 与已有向量集合（不保存草稿、不写入记忆）",
+                 responses={409: {"model": ErrorResponse, "description": "设置版本已更新"}})
+    def test_memory_preferences(payload: MemoryProbeRequest) -> MemoryProbeResult:
+        return service.test_memory_preferences(payload)
 
     return router

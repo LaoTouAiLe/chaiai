@@ -5,6 +5,8 @@
 }
 
 .row {
+  position: relative;
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: var(--law-space-sm);
@@ -16,6 +18,23 @@
   line-height: var(--law-leading-xs);
   text-align: left;
   transition: background var(--law-duration-fast) var(--law-ease);
+}
+
+/* DSH ToolRow's running sweep: confined to an operation that is actually active. */
+.wrapper[data-state='running'] .row::after {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 180px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--law-bg-base) 65%, transparent), transparent);
+  animation: sweep 2.6s ease-out infinite;
+  pointer-events: none;
+}
+
+@keyframes sweep { from { left: -180px; } 90%, to { left: 100%; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .wrapper[data-state='running'] .row::after { display: none; }
 }
 
 .row:hover {
@@ -35,6 +54,9 @@
 .statusSucceeded {
   color: var(--law-state-success);
 }
+
+.statusPending { color: var(--law-text-caption); }
+.pendingDot { width: 6px; height: 6px; border: 1px solid currentColor; border-radius: 50%; }
 
 .statusFailed {
   color: var(--law-state-error);

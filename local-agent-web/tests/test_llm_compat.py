@@ -10,7 +10,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+    message_chunk_to_message,
+)
 
 from local_agent.llm.compat import (
     REASONING_CONTENT_KEY,
@@ -19,6 +26,45 @@ from local_agent.llm.compat import (
 )
 
 REASONING = "先看 routers.py 再回答：用户问的是 decide_mode。"
+
+
+def test_stream_reasoning_survives_aggregation_and_memory_followup() -> None:
+    model = _model()
+    aggregate = AIMessageChunk(content="")
+    for delta in [
+        {"role": "assistant", "content": "", "reasoning_content": "先看 "},
+        {"reasoning_content": "routers.py。"},
+        {"content": "最终回答"},
+    ]:
+        chunk = model._convert_chunk_to_generation_chunk(
+            {"choices": [{"index": 0, "delta": delta}]}, AIMessageChunk, None
+        )
+        assert chunk is not None
+        aggregate += chunk.message
+    message = message_chunk_to_message(aggregate)
+    assert message.text == "最终回答"
+    assert message.additional_kwargs[REASONING_CONTENT_KEY] == "先看 routers.py。"
+    payload = model._get_request_payload(
+        [HumanMessage(content="问"), message, SystemMessage(content="只提取任务记忆")]
+    )
+    assert payload["messages"][1][REASONING_CONTENT_KEY] == "先看 routers.py。"
+
+
+def test_stream_empty_reasoning_is_retained_without_fabricating_absent_fields() -> None:
+    model = _model()
+    for delta, expected in [({"content": "答"}, None), ({"reasoning_content": ""}, "")]:
+        chunk = model._convert_chunk_to_generation_chunk(
+            {"choices": [{"index": 0, "delta": delta}]}, AIMessageChunk, None
+        )
+        assert chunk is not None
+        assert chunk.message.additional_kwargs.get(REASONING_CONTENT_KEY) == expected
+    usage_chunk = model._convert_chunk_to_generation_chunk(
+        {"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+        AIMessageChunk,
+        None,
+    )
+    assert usage_chunk is not None
+    assert REASONING_CONTENT_KEY not in usage_chunk.message.additional_kwargs
 
 
 def _model() -> ChatOpenAIWithReasoning:

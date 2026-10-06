@@ -15,6 +15,8 @@ const started = (messageId = 'a-1', role: 'user' | 'assistant' = 'assistant') =>
   message_id: messageId,
   model_call_id: 'call-1',
   role,
+  reset: false,
+  chunk_sequence: 0,
 })
 
 const delta = (sequence: number, text: string, messageId = 'a-1') => ({
@@ -23,6 +25,8 @@ const delta = (sequence: number, text: string, messageId = 'a-1') => ({
   role: 'assistant' as const,
   chunk_sequence: sequence,
   text_delta: text,
+  channel: 'text' as const,
+  reasoning_truncated: false,
 })
 
 const completed = (messageId = 'a-1') => ({
@@ -31,6 +35,8 @@ const completed = (messageId = 'a-1') => ({
   role: 'assistant' as const,
   complete: true,
   text: '你好',
+  reasoning: null,
+  reasoning_truncated: false,
 })
 
 /** `reconcile` 只读 `messages`；其余字段与本用例无关，按真实契约的必填项造最小对象。 */
@@ -39,6 +45,15 @@ function snapshotWith(messages: unknown[]): Snapshot {
 }
 
 describe('startTail', () => {
+  it('ignores a boundary-overlapping start and only clears both channels for a newer reset', () => {
+    const current = { messageId: 'a-1', modelCallId: 'call-1', text: '正文', reasoning: '思考', sequence: 4 }
+    expect(startTail(current, started())).toEqual(current)
+    const reset = { ...started(), reset: true, chunk_sequence: 5 }
+    const cleared = startTail(current, reset)
+    expect(cleared).toEqual({ messageId: 'a-1', modelCallId: 'call-1', text: '', sequence: 5 })
+    const newer = applyDelta(cleared, delta(6, '重试正文')).tail
+    expect(startTail(newer, reset)).toEqual(newer)
+  })
   it('ignores a user message: only the assistant answer streams', () => {
     expect(startTail(null, started('u-1', 'user'))).toBeNull()
   })
@@ -54,6 +69,18 @@ describe('startTail', () => {
 })
 
 describe('applyDelta', () => {
+  it('reconstructs reasoning after reconnect and does not duplicate overlap or mix it into prose', () => {
+    const snapshot = snapshotWith([{ kind: 'assistant', message_id: 'a-1', model_call_id: 'call-1',
+      complete: false, text: '', reasoning: '正在分析。', chunk_sequence: 2, stream_channel: 'reasoning' }])
+    const restored = reconcile(null, snapshot)
+    expect(restored?.reasoning).toBe('正在分析。')
+    expect(applyDelta(restored, { ...delta(2, '正在分析。'), channel: 'reasoning' }).duplicate).toBe(true)
+    const thought = applyDelta(restored, { ...delta(3, '查看证据。'), channel: 'reasoning' }).tail
+    const body = applyDelta(thought, delta(4, '这是回答。')).tail
+    expect(body?.reasoning).toBe('正在分析。查看证据。')
+    expect(body?.text).toBe('这是回答。')
+    expect(body?.channel).toBe('text')
+  })
   it('appends chunks in order', () => {
     const first = applyDelta(null, delta(1, '你'))
     const second = applyDelta(first.tail, delta(2, '好'))

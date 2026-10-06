@@ -103,8 +103,8 @@ def _open(
     )
 
 
-def _session(harness: Harness, *, title: str = "新会话") -> str:
-    summary = harness.service.create_session(title=title, workspace_root=harness.workspace)
+def _session(harness: Harness, *, title: str = "新会话", mode: str = "agent") -> str:
+    summary = harness.service.create_session(title=title, workspace_root=harness.workspace, mode=mode)
     return summary.session_id
 
 
@@ -167,7 +167,7 @@ def test_chat_turn_returns_a_stable_command_result(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     harness = _harness(tmp_path, model_factory, app_config, decision="chat", reply="假回答")
-    session_id = _session(harness)
+    session_id = _session(harness, mode="chat")
 
     result = harness.service.submit_message(session_id, "你好", "req-1")
 
@@ -588,7 +588,7 @@ def test_final_answer_stream_reaches_sse_with_the_checkpoint_message_id(
         reply="第一句回答。第二句回答。最后不该泄露 sk-test-secret。",
         stream_chunks=8,
     )
-    session_id = _session(harness)
+    session_id = _session(harness, mode="chat")
     subscription = harness.service.subscribe_events(session_id)
     subscription.poll()
 
@@ -609,6 +609,76 @@ def test_final_answer_stream_reaches_sse_with_the_checkpoint_message_id(
     harness.service.unsubscribe_events(subscription)
 
 
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+@pytest.mark.parametrize("reopen", [False, True])
+def test_streaming_approval_resume_keeps_the_original_run_and_executes_once(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig,
+    decision: str, reopen: bool,
+) -> None:
+    data = app_config.model_dump()
+    data["llm"]["streaming"] = True
+    config = AppConfig.model_validate(data)
+    harness = _delete_harness(tmp_path, model_factory, config)
+    session_id = _session(harness)
+    target = harness.workspace / "note.txt"
+    pending = harness.service.submit_message(session_id, "删除 note.txt", "req-stream-submit")
+    assert pending.status == "awaiting_approval"
+    before = harness.service.get_session_snapshot(session_id)
+    assert before.approval is not None and before.current_task is not None
+    original_run = before.current_task.run_id
+    approval_id = before.approval.approval_id
+    assert target.is_file()
+
+    if reopen:
+        harness.database.connection.close()
+        harness = _open(tmp_path, model_factory, config, harness.database_path,
+                        decision="tool", reply="已处理审批。", stream_chunks=4)
+
+    subscription = harness.service.subscribe_events(session_id)
+    subscription.poll()
+    result = harness.service.resolve_approval(session_id, approval_id, decision, "req-stream-resume")
+    assert result.status == "completed"
+    assert target.exists() is (decision == "reject")
+    after = harness.service.get_session_snapshot(session_id)
+    assert after.session_state == "completed"
+    assert after.current_task is not None and after.current_task.run_id == original_run
+    entry = harness.ledger.get("req-stream-resume")
+    assert entry is not None and entry["status"] == STATUS_COMPLETED and entry["run_id"] == original_run
+    events = subscription.poll()
+    started = [event for event in events if event.event_type == "message_started"]
+    deltas = [event for event in events if event.event_type == "message_delta"]
+    completed = [event for event in events if event.event_type == "message_completed"]
+    assert len(completed) == 1
+    assert all(event.run_id == original_run for event in events)
+    if decision == "approve":
+        assert len(started) == 1 and deltas
+        assert started[0].payload.message_id == completed[0].payload.message_id
+        assert "".join(event.payload.text_delta for event in deltas) == completed[0].payload.text
+    else:
+        # Rejection is acknowledged mechanically, without a new model answer.
+        assert started == deltas == []
+    assert any(row.kind == "assistant" and row.message_id == completed[0].payload.message_id for row in after.messages)
+    assert events[-1].event_type == "task_completed"
+
+    calls_before_replay = harness.model.decision_calls
+    rows_before_replay = _business_rows(harness)
+    replay = harness.service.resolve_approval(session_id, approval_id, decision, "req-stream-resume")
+    assert replay.replayed is True
+    assert harness.service.get_session_snapshot(session_id).messages == after.messages
+    assert _business_rows(harness) == rows_before_replay
+    assert harness.model.decision_calls == calls_before_replay
+    assert subscription.poll() == []
+
+    # A later submission must bind its fresh run, never inherit the resumed run.
+    next_result = harness.service.submit_message(session_id, "说一句话", "req-after-resume")
+    assert next_result.status == "completed"
+    following = harness.service.get_session_snapshot(session_id)
+    assert following.current_task is not None and following.current_task.run_id != original_run
+    next_events = subscription.poll()
+    assert next_events and all(event.run_id == following.current_task.run_id for event in next_events)
+    harness.service.unsubscribe_events(subscription)
+
+
 def test_streaming_failure_discards_the_partial_tail_without_resubmitting(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
@@ -619,7 +689,7 @@ def test_streaming_failure_discards_the_partial_tail_without_resubmitting(
         decision="chat", reply="第一段。第二段。完整回答。", stream_chunks=4,
         fail_stream_after_chunks=2,
     )
-    session_id = _session(harness)
+    session_id = _session(harness, mode="chat")
     subscription = harness.service.subscribe_events(session_id)
     subscription.poll()
     harness.service.submit_message(session_id, "你好", "req-fallback")
@@ -628,7 +698,7 @@ def test_streaming_failure_discards_the_partial_tail_without_resubmitting(
     completed = [event for event in events if event.event_type == "message_completed"]
     assert len(started) == 2  # 第二次同 id 的开始帧把前端半句清空
     assert started[0].payload.message_id == started[1].payload.message_id == completed[0].payload.message_id
-    assert harness.model.decision_calls == 2  # 流式尝试 + 普通回答降级，而非重放整轮用户消息
+    assert harness.model.decision_calls == 3  # 只读工具决策 + 流式尝试 + 普通回答降级
     assert len([row for row in _messages(harness, session_id) if row.kind == "user"]) == 1
     harness.service.unsubscribe_events(subscription)
 
@@ -638,7 +708,7 @@ def test_long_answer_is_readable_after_reopening_the_service(
 ) -> None:
     reply = "长回答。" * 3000
     harness = _harness(tmp_path, model_factory, app_config, decision="chat", reply=reply)
-    session_id = _session(harness)
+    session_id = _session(harness, mode="chat")
     harness.service.submit_message(session_id, "请详细回答", "req-long")
     original = harness.service.get_session_snapshot(session_id)
     assert any(row.kind == "assistant" and row.text == reply for row in original.messages)
@@ -656,7 +726,7 @@ def test_empty_answer_and_model_failure_do_not_become_a_false_success(
     empty_root = tmp_path / "empty"
     empty_root.mkdir()
     empty = _harness(empty_root, model_factory, app_config, decision="chat", reply="")
-    empty_id = _session(empty)
+    empty_id = _session(empty, mode="chat")
     empty.service.submit_message(empty_id, "空回答", "req-empty")
     empty_snapshot = empty.service.get_session_snapshot(empty_id)
     assert not any(row.kind == "assistant" and row.text for row in empty_snapshot.messages)
@@ -665,7 +735,7 @@ def test_empty_answer_and_model_failure_do_not_become_a_false_success(
     error_root = tmp_path / "error"
     error_root.mkdir()
     failed = _harness(error_root, model_factory, app_config, decision="chat", fail_answer=True)
-    failed_id = _session(failed)
+    failed_id = _session(failed, mode="chat")
     with pytest.raises(RuntimeError, match="模型回答失败"):
         failed.service.submit_message(failed_id, "会失败", "req-error")
     assert len([row for row in _messages(failed, failed_id) if row.kind == "user"]) == 1
@@ -860,7 +930,7 @@ def test_a_later_turn_does_not_repeat_the_previous_turns_events(
 ) -> None:
     """增量投影不重复播：第二轮订阅者拿不到第一轮的事实（它们已经在快照里）。"""
     harness = _harness(tmp_path, model_factory, app_config, decision="chat", reply="假回答")
-    session_id = _session(harness)
+    session_id = _session(harness, mode="chat")
     harness.service.submit_message(session_id, "第一句", "req-1")
 
     subscription = harness.service.subscribe_events(session_id)
@@ -889,7 +959,7 @@ def test_the_turn_announces_a_boundary_snapshot_as_soon_as_it_is_accepted(
     `task_status` 也已是 `running`，所以它必须已经带着这条用户消息和 `running`。
     """
     harness = _harness(tmp_path, model_factory, app_config, decision="chat", reply="假回答")
-    session_id = _session(harness)
+    session_id = _session(harness, mode="chat")
     subscription = harness.service.subscribe_events(session_id)
     subscription.poll()  # 丢掉订阅时的边界快照
 
@@ -1121,7 +1191,7 @@ def test_service_projects_a_long_term_memory_hit_after_reopening(
         tmp_path, model_factory, config,
         decision="chat", reply="好的，我记住了", memory_requested=True, memory_intent=intent,
     )
-    first_id = _session(writer)
+    first_id = _session(writer, mode="chat")
     writer.service.submit_message(first_id, "请记住：我习惯用 pytest", "req-write")
     written = writer.service.get_session_snapshot(first_id)
     assert written.memory is not None
@@ -1129,7 +1199,7 @@ def test_service_projects_a_long_term_memory_hit_after_reopening(
     writer.database.connection.close()
 
     reader = _open(tmp_path, model_factory, config, writer.database_path, decision="chat", reply="用 pytest")
-    second_id = _session(reader)
+    second_id = _session(reader, mode="chat")
     reader.service.submit_message(second_id, "我习惯用什么跑测试？", "req-recall")
     recalled = reader.service.get_session_snapshot(second_id)
     assert recalled.memory is not None
@@ -1142,6 +1212,11 @@ def test_service_projects_memory_write_failure_without_a_false_promise(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _with_long_term_memory(app_config, tmp_path / "data" / "memories.sqlite")
+    # **显式关掉代码检索**（2026-10-01）：``MemoryUseView.retrieval_outcome`` 统计的 `sources`
+    # **同时包含工作区检索来源**（``projection.py`` 里那一支还看 ``STAGE_RETRIEVE_CODE``），所以
+    # 检索一开，这一轮就会因为"检索到了 note.txt"而报 `hit`。本用例要验证的是**长期记忆召回
+    # 未命中**，必须把另一条来源关掉，否则它测的不再是记忆。
+    config = config.model_copy(update={"rag": config.rag.model_copy(update={"enabled": False})})
 
     original_store = nodes.long_term_store
     opens = 0
@@ -1181,3 +1256,123 @@ def test_service_projects_memory_write_failure_without_a_false_promise(
     assert opens >= 2
     assert any(error.code == app_errors.MEMORY_WRITE_FAILED for error in snapshot.errors)
     assert not snapshot.memory.write_detail or "已保存" not in snapshot.memory.write_detail
+
+
+@pytest.mark.parametrize("mode", ["agent", "chat"])
+def test_thinking_is_live_recoverable_read_only_and_then_persisted(
+    tmp_path, model_factory, app_config, monkeypatch, mode,
+):
+    data = app_config.model_dump()
+    data["llm"]["streaming"] = True
+    harness = _harness(tmp_path, model_factory, AppConfig.model_validate(data),
+                       reply="这是回答。", reasoning="分析证据。sk-test-secret。", stream_chunks=1)
+    session_id = _session(harness, mode=mode)
+    ready, release = threading.Event(), threading.Event()
+    original = type(harness.model)._stream
+
+    def blocked(model, *args, **kwargs):
+        for chunk in original(model, *args, **kwargs):
+            yield chunk
+            if chunk.message.additional_kwargs.get("reasoning_content"):
+                ready.set()
+                assert release.wait(10)
+
+    monkeypatch.setattr(type(harness.model), "_stream", blocked)
+    subscription = harness.service.subscribe_events(session_id)
+    subscription.poll()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(harness.service.submit_message, session_id, "你好", "live-think")
+        try:
+            assert ready.wait(10)
+            calls = harness.model.decision_calls
+            # 图的异步 Checkpoint 写入可能仍在收尾；不能拿跨线程行数变化误判只读请求。
+            reader_thread = threading.get_ident()
+            reader_writes = []
+            checkpointer = harness.database.checkpointer
+            for name in ("put", "put_writes"):
+                original_write = getattr(checkpointer, name)
+                def track_write(*args, _write=original_write, **kwargs):
+                    if threading.get_ident() == reader_thread:
+                        reader_writes.append(True)
+                    return _write(*args, **kwargs)
+                monkeypatch.setattr(checkpointer, name, track_write)
+            progress = harness.service.get_session_snapshot(session_id)
+            partial = [message for message in progress.messages if message.kind == "assistant" and not message.complete]
+            assert len(partial) == 1 and partial[0].reasoning and not partial[0].text
+            assert "sk-test-secret" not in partial[0].reasoning
+            assert partial[0].chunk_sequence > 0 and partial[0].stream_channel == "reasoning"
+            reconnected = harness.service.subscribe_events(session_id)
+            boundary = reconnected.poll()[0].payload
+            assert boundary.messages == progress.messages
+            assert reader_writes == []
+            assert harness.model.decision_calls == calls
+            live = subscription.poll()
+            assert any(event.event_type == "message_delta" and event.payload.channel == "reasoning" for event in live)
+            assert not any(event.event_type == "message_completed" for event in live)
+        finally:
+            release.set()
+        assert future.result(timeout=10).status == "completed"
+    final = harness.service.get_session_snapshot(session_id)
+    complete = [message for message in final.messages if message.kind == "assistant" and message.message_id == partial[0].message_id]
+    assert len(complete) == 1 and complete[0].complete and complete[0].text == "这是回答。"
+    assert complete[0].reasoning.startswith(partial[0].reasoning)
+    assert session_id not in harness.service._streams
+    assert len({message.message_id for message in final.messages}) == len(final.messages)
+    harness.database.connection.close()
+    reopened = _open(tmp_path, model_factory, app_config, harness.database_path)
+    restored = reopened.service.get_session_snapshot(session_id)
+    assert restored.messages == final.messages
+
+
+@pytest.mark.parametrize("reopen", [False, True])
+def test_thinking_before_approval_is_not_overwritten_by_resumed_answer(
+    tmp_path, model_factory, app_config, reopen,
+):
+    data = app_config.model_dump()
+    data["llm"]["streaming"] = True
+    config = AppConfig.model_validate(data)
+    harness = _delete_harness(tmp_path, model_factory, config)
+    harness.model.reasoning = "先确认删除范围。"
+    session_id = _session(harness)
+    harness.service.submit_message(session_id, "删除 note.txt", "think-submit")
+    before = harness.service.get_session_snapshot(session_id)
+    thought = next(message for message in before.messages if message.kind == "assistant" and message.reasoning)
+    assert before.approval is not None
+    if reopen:
+        harness.database.connection.close()
+        harness = _open(tmp_path, model_factory, config, harness.database_path, reasoning="核对操作结果。")
+    harness.service.resolve_approval(session_id, before.approval.approval_id, "approve", "think-resume")
+    after = harness.service.get_session_snapshot(session_id)
+    assert thought in after.messages
+    assistants = [message for message in after.messages if message.kind == "assistant"]
+    assert len({message.message_id for message in assistants}) == len(assistants)
+    assert len(assistants) >= 2
+    raw = harness.service._read(harness.service._session_or_raise(session_id)).values["messages"]
+    assert any(isinstance(message, AIMessage) and message.id == thought.message_id and message.tool_calls for message in raw)
+
+
+def test_thought_sink_redacts_split_values_caps_display_and_resets_both_channels():
+    bus = app_service.EventBus(max_pending=100)
+    subscription = bus.subscribe("s", boundary=lambda: None)
+    sink = app_service._StreamingAnswerSink(session_id="s", bus=bus, secrets=("very long configured secret",))
+    sink.bind_run("r")
+    sink.begin()
+    for piece in ("查看 very long ", "configured secret 与 C:/Us", "ers/me/private.txt。", " 证据。" * 5000):
+        sink.push_reasoning(piece)
+    sink.flush()
+    sink.push("正文。")
+    sink.flush()
+    view = sink.partial_view("r")
+    assert view is not None and view.reasoning_truncated
+    assert len(view.reasoning) == app_service.proj.REASONING_DISPLAY_LIMIT
+    assert view.text == "正文。" and view.stream_channel == "text"
+    events = subscription.poll()
+    thought = "".join(event.payload.text_delta for event in events
+                      if event.event_type == "message_delta" and event.payload.channel == "reasoning")
+    assert "configured secret" not in thought and "private.txt" not in thought
+    assert thought == view.reasoning
+    sink.discard()
+    reset = subscription.poll()[0]
+    assert reset.payload.reset and reset.payload.chunk_sequence == view.chunk_sequence + 1
+    empty = sink.partial_view("r")
+    assert not empty.text and not empty.reasoning and not empty.reasoning_truncated

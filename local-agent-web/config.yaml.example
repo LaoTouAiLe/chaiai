@@ -11,7 +11,10 @@ llm:
   model: "deepseek-flash"          # 该 key 实测可用：deepseek-flash、deepseek-v4-pro
   # 必填：模型的上下文窗口（token），必须按所连模型的实际窗口填写——压缩触发比
   # memory.compression.trigger_ratio 以“窗口 − max_tokens”为分母，填错会让压缩过早或过晚触发。
-  context_window_tokens: 65536     # 示例值，按模型文档替换
+  # 示例值必须与上面 `model` 对得上（2026-10-01 修正）：`deepseek-flash` 是 DeepSeek-V4-Flash，
+  # 窗口 **1M**，触发点 = 0.8×(1048576−4096) = 835,584 token；填成 65536 会让触发点掉到
+  # 49,152 token——长会话被过早摘要、窗口被过早重写，既丢原文又断前缀缓存。
+  context_window_tokens: 1048576   # 示例值：对应 deepseek-flash 的 1M 窗口
   temperature: 0.2
   max_tokens: 4096                 # 输出预留：输入 Prompt 的可用预算 = 上下文窗口 − 这个值
   timeout_seconds: 120
@@ -90,7 +93,18 @@ memory:
     enabled: true                  # 默认启用 Prompt 窗口压缩；Checkpoint 原始 messages 不删
     trigger_ratio: 0.8
     preserve_recent_turns: 8
-    preserve_recent_tool_steps: 3  # 窗口最多保留的最近完整工具步，更早的整步省略
+    # 窗口里「工具步内容」的字符预算：从最新一步往回累计，超预算的**更早**步骤才整步省略。
+    # 短循环因此一个字都不省 → 历史保持追加式 → 供应商的前缀缓存可复用（成本相关，别随手调小：
+    # 只按条数省略会让窗口每步重写中段，实测把缓存命中率从可用的七成打到 19.9%）。
+    # 这是**安全网**，不是日常裁剪手段：触发一次就断一次前缀缓存，重新付满整窗（实测一次约多花
+    # 9 万未命中 token，缓存读从 48,512 塌到 3,456）。**必须留足余量**——卡在临界点时触发与否由
+    # "模型这次多读了几份文件"随机决定，而代价极高（2026-10-01 由 120000 提到 160000）。
+    # 注意这是**字符**预算、不是 token 预算：中文内容按字符折算会大得多。
+    tool_step_budget_chars: 160000
+    preserve_recent_tool_steps: 3  # 下限：预算再紧也至少保留这么多最近完整工具步
+    # 单条工具结果的字符阈值：超过就压成「头 + 中段标记 + 尾」，0 表示不压。
+    # 按**单条结果**判定（不是等窗口超预算）：结果在被发出去之前就压好了，因此不破坏前缀缓存。
+    tool_result_keep_chars: 8192
     summary_max_chars: 12000
 
 security:
@@ -152,13 +166,23 @@ security:
     redact_environment_values: true
     block_known_secret_files: true
 
-# 可选按需代码检索（T21）：不建持久索引，每次查询直接读当前工作区。
-# rag.enabled=false 时不访问文件系统、不探测 rg、不加载解析器。
+# 按需代码检索（T21）：不建持久索引，每次查询直接读当前工作区。
+# enabled=false 时不访问文件系统、不探测 rg、不加载解析器（纯透传，无副作用）。
+#
+# **2026-10-01 默认由 false 改为 true**：关闭时工具集里没有任何定位代码的手段（只有
+# list_dir / read_file / edit_file / write_file / delete_file / run_shell），实测一个"梳理架构"
+# 的请求在 14 次 list_dir 之后用尽循环预算——既烧钱又没做完，而且计划里写出"先用 grep 搜索定位"
+# 这种本机并不存在的工具（模型在描述自己没有的能力）。打开后注入带路径与行号的片段，模型据此
+# 定向读取。这一条对"回答质量"的影响大于对成本的影响。
 rag:
-  enabled: false
+  enabled: true
   max_results: 8
   timeout_seconds: 10
-  max_files: 200
+  # 候选发现最多检查的文件数：达到上限即停止，并在结果说明里标注"已截断"。
+  # **必须大于工作区文件数**，否则检索存在**系统性盲区**（只看得到遍历顺序靠前的那一部分，
+  # 而不是随机采样）。实测：599 个文件的工作区在 200 时会漏掉 routers.py / config.py 这类
+  # 核心文件；提到 2000 后召回正常，Python 退化扫描耗时 0.66s（上限 timeout_seconds=10）。
+  max_files: 2000
   max_file_bytes: 262144
   max_terms: 4
   max_matches_per_term: 20

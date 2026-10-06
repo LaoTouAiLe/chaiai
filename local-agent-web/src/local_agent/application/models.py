@@ -70,7 +70,7 @@ class WorkspaceRef(_Dto):
 class TaskRef(_Dto):
     """任务引用。v0.4 一次用户提交就是一个任务；`task_id` 与 `run_id` 复用同一底层标识。"""
 
-    task_id: str = Field(min_length=1)
+    task_id: str | None = Field(default=None, min_length=1, exclude=True)
     run_id: str = Field(min_length=1)
 
 
@@ -221,7 +221,7 @@ class PlanView(_Dto):
 
 ToolStatus = Literal["pending", "running", "ok", "error", "denied"]
 
-ToolOutcomeKind = Literal["read", "list", "edit", "write", "delete", "shell"]
+ToolOutcomeKind = Literal["read", "list", "search", "edit", "write", "delete", "shell"]
 
 FileDiffLineKind = Literal["context", "add", "del"]
 
@@ -261,6 +261,14 @@ class FileDiffView(_Dto):
     hunks: list[FileDiffHunkView] = Field(default_factory=list)
 
 
+class SearchMatchView(_Dto):
+    """A bounded, sanitized content match with its real source line."""
+
+    path: str
+    line_number: int = Field(ge=1)
+    text: str
+
+
 class ToolOutcomeView(_Dto):
     """工具结果的**结构化、有界**展示分区（§15.8 工具行）。
 
@@ -283,6 +291,7 @@ class ToolOutcomeView(_Dto):
     diff: FileDiffView | None = None
     #: 路径列表（目录清单等）；有界。
     paths: list[str] = Field(default_factory=list)
+    matches: list[SearchMatchView] = Field(default_factory=list)
     #: 总条目数或文件总行数；未知为 `None`。
     total: int | None = Field(default=None, ge=0)
     stdout: str | None = None
@@ -298,7 +307,7 @@ class ToolEvidenceView(_Dto):
     `summary` 是**已脱敏**的可读摘要；`verified` 来自反思层的机械校验，不是模型的自我评价。
     """
 
-    evidence_type: str = Field(min_length=1)
+    evidence_type: str | None = Field(default=None, min_length=1, exclude=True)
     summary: str = Field(min_length=1)
     verified: bool
 
@@ -319,7 +328,7 @@ class ToolUseView(_Dto):
     redacted_arguments: dict[str, str] = Field(default_factory=dict)
     approval_id: str | None = None
     output_preview: str | None = None
-    output_digest: str | None = None
+    output_digest: str | None = Field(default=None, exclude=True)
     truncated: bool = False
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -350,7 +359,7 @@ class ApprovalView(_Dto):
     tool_call_id: str = Field(min_length=1)
     tool_name: str = Field(min_length=1)
     #: 动作指纹（已哈希）：用于说明"这次批准只对这一份参数有效"。
-    action_fingerprint: str = Field(min_length=1)
+    action_fingerprint: str | None = Field(default=None, min_length=1, exclude=True)
     redacted_arguments: dict[str, str] = Field(default_factory=dict)
     edited_arguments: dict[str, str] = Field(default_factory=dict)
     #: 规范化展示目标：工作区相对路径或命令 cwd；投影层给不出时为空。
@@ -420,6 +429,11 @@ class AssistantMessageView(_Dto):
     kind: Literal["assistant"] = "assistant"
     message_id: str = Field(min_length=1)
     text: str
+    #: 只投影供应商实际返回的 reasoning_content；不合成、不回写模型历史。
+    reasoning: str | None = None
+    reasoning_truncated: bool = False
+    chunk_sequence: int = Field(default=0, ge=0)
+    stream_channel: Literal["text", "reasoning"] = "text"
     #: 与 `UserMessageView.created_at` 同理：没有时间戳就是 `None`。
     created_at: datetime | None = None
     #: 产生这段回答的模型调用；流式未完成时 `complete=False`，由 Checkpoint 的稳定消息 id 接管终态。
@@ -470,16 +484,22 @@ def cache_hit_ratio(
 ) -> float | None:
     """命中率 = 读缓存 /（未缓存输入 + 读缓存 + 写缓存）。
 
-    分母为零或任一字段未知时返回 `None`：**不显示百分比**，也不写成 0（§15.6）。
-    明确返回零才算 0.0。
+    2026-09-30 修正一处**让这个比率在 DeepSeek 上恒为未知**的判定。
+
+    原来要求三个字段全部非空，否则返回 `None`。但 DeepSeek 是**隐式缓存**：缓存写入由服务端自动
+    完成，根本不存在"写缓存"这个上报项（计费只有"命中"与"未命中"两个桶）。于是
+    ``cache_write_tokens`` 恒为 `None`，比率**永远**算不出来——实测页面一直显示"缓存命中 未知"，
+    而后台明明有命中数据。这不是"未上报"，是"这个供应商没有这个概念"，两者必须分开。
+
+    正确口径（§15.6「未上报 ≠ 0」反过来读）：
+    - 连**缓存读**都没上报（``None``）→ 这个供应商没有缓存概念，返回 `None`（显示"未知"）；
+    - `cache_read` 已知、只缺 `cache_write` → 按 0 计入分母（隐式缓存没有独立写桶，分母就是
+      供应商实际计费的输入量＝未命中 + 命中）；**不是**把未知当成 0，而是该桶本就不存在；
+    - 分母为零仍返回 `None`（不显示 0%）。
     """
-    if (
-        uncached_input_tokens is None
-        or cache_read_tokens is None
-        or cache_write_tokens is None
-    ):
+    if uncached_input_tokens is None or cache_read_tokens is None:
         return None
-    total = uncached_input_tokens + cache_read_tokens + cache_write_tokens
+    total = uncached_input_tokens + cache_read_tokens + (cache_write_tokens or 0)
     if total <= 0:
         return None
     return cache_read_tokens / total
@@ -506,7 +526,7 @@ class ModelCallRecordView(_Dto):
     provider: str = Field(min_length=1)
     model_id: str = Field(min_length=1)
     #: 端点安全指纹（不含密钥），用于确认"缓存基线可比"。
-    endpoint_fingerprint: str = Field(min_length=1)
+    endpoint_fingerprint: str | None = Field(default=None, min_length=1, exclude=True)
     retry_of: str | None = None
     started_at: datetime
     first_token_at: datetime | None = None
@@ -524,10 +544,10 @@ class ModelCallRecordView(_Dto):
     time_to_first_token_ms: int | None = Field(default=None, ge=0)
     context_window_tokens: int | None = Field(default=None, gt=0)
     context_used_tokens: int | None = Field(default=None, ge=0)
-    tools_schema_fingerprint: str | None = None
-    system_prompt_fingerprint: str | None = None
-    history_prefix_fingerprint: str | None = None
-    dynamic_context_fingerprint: str | None = None
+    tools_schema_fingerprint: str | None = Field(default=None, exclude=True)
+    system_prompt_fingerprint: str | None = Field(default=None, exclude=True)
+    history_prefix_fingerprint: str | None = Field(default=None, exclude=True)
+    dynamic_context_fingerprint: str | None = Field(default=None, exclude=True)
 
     @field_validator("started_at", "first_token_at", "finished_at")
     @classmethod
@@ -701,7 +721,7 @@ class SessionSnapshot(_Dto):
     model_calls: list[ModelCallRecordView] = Field(default_factory=list)
     turn_usages: list[TurnUsageView] = Field(default_factory=list)
     context: ContextMeterView = Field(default_factory=ContextMeterView)
-    runtime_context: RuntimeContextSnapshotView | None = None
+    runtime_context: RuntimeContextSnapshotView | None = Field(default=None, exclude=True)
     final_result: FinalResultView | None = None
     created_at: datetime
 
@@ -719,14 +739,16 @@ class SessionSummaryView(_Dto):
     """
 
     session_id: str = Field(min_length=1)
-    thread_id: str = Field(min_length=1)
+    thread_id: str = Field(default="（未记录）", min_length=1, exclude=True)
     title: str
     workspace: WorkspaceRef
+    mode: Literal["chat", "agent"] = "agent"
     #: 是否是"当前打开的会话"（`sessions.status='active'` 全库唯一）。
     is_active: bool = False
+    archived: bool = False
     created_at: datetime
     updated_at: datetime
-    last_checkpoint_id: str | None = None
+    last_checkpoint_id: str | None = Field(default=None, exclude=True)
 
     @field_validator("created_at", "updated_at")
     @classmethod

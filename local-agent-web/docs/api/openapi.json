@@ -220,11 +220,6 @@
       "ApprovalView": {
         "description": "审批的**派生视图状态**。\n\n底层只有 `pending_approval` 与 `approval_history`（决定值 `approve`/`edit`/`reject`），没有状态机字段。\n映射规则（T28 实现）：运行活跃且存在待决请求 → `pending`；决定已被接受、工具仍在跑 → `executing`；\n`approve` → `approved`；`reject` → `rejected`；运行在待决期间结束 → `expired`。\n`edit` 目前归入 `approved`，被改写的参数通过 `edited_arguments` 携带，不新增页面状态。",
         "properties": {
-          "action_fingerprint": {
-            "minLength": 1,
-            "title": "Action Fingerprint",
-            "type": "string"
-          },
           "approval_id": {
             "minLength": 1,
             "title": "Approval Id",
@@ -330,7 +325,6 @@
           "run_id",
           "tool_call_id",
           "tool_name",
-          "action_fingerprint",
           "impact_summary",
           "risk",
           "state",
@@ -341,6 +335,12 @@
       },
       "AssistantMessageView": {
         "properties": {
+          "chunk_sequence": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Chunk Sequence",
+            "type": "integer"
+          },
           "complete": {
             "default": true,
             "title": "Complete",
@@ -379,6 +379,31 @@
               }
             ],
             "title": "Model Call Id"
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning"
+          },
+          "reasoning_truncated": {
+            "default": false,
+            "title": "Reasoning Truncated",
+            "type": "boolean"
+          },
+          "stream_channel": {
+            "default": "text",
+            "enum": [
+              "text",
+              "reasoning"
+            ],
+            "title": "Stream Channel",
+            "type": "string"
           },
           "text": {
             "title": "Text",
@@ -563,6 +588,15 @@
         "additionalProperties": false,
         "description": "新建会话；两项都可以缺省（沿用库的启动默认工作区、自动命名）。",
         "properties": {
+          "mode": {
+            "default": "agent",
+            "enum": [
+              "chat",
+              "agent"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
           "title": {
             "anyOf": [
               {
@@ -590,6 +624,58 @@
           }
         },
         "title": "CreateSessionRequest",
+        "type": "object"
+      },
+      "EmbeddingPreferences": {
+        "additionalProperties": false,
+        "properties": {
+          "allow_plaintext_http": {
+            "default": false,
+            "title": "Allow Plaintext Http",
+            "type": "boolean"
+          },
+          "api_key_env": {
+            "default": "",
+            "pattern": "^(?:[A-Za-z_][A-Za-z0-9_]*|)$",
+            "title": "Api Key Env",
+            "type": "string"
+          },
+          "base_url": {
+            "default": "",
+            "title": "Base Url",
+            "type": "string"
+          },
+          "cache_dir": {
+            "default": "",
+            "title": "Cache Dir",
+            "type": "string"
+          },
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "local_files_only": {
+            "default": false,
+            "title": "Local Files Only",
+            "type": "boolean"
+          },
+          "model": {
+            "default": "",
+            "title": "Model",
+            "type": "string"
+          },
+          "provider": {
+            "default": "onnx_local",
+            "enum": [
+              "onnx_local",
+              "openai_compatible"
+            ],
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "title": "EmbeddingPreferences",
         "type": "object"
       },
       "ErrorMessageView": {
@@ -820,6 +906,39 @@
           }
         ]
       },
+      "ExecutionPreferences": {
+        "additionalProperties": false,
+        "properties": {
+          "max_retries_per_step": {
+            "minimum": 0.0,
+            "title": "Max Retries Per Step",
+            "type": "integer"
+          },
+          "max_tool_loops": {
+            "exclusiveMinimum": 0.0,
+            "title": "Max Tool Loops",
+            "type": "integer"
+          },
+          "shell_max_output_chars": {
+            "exclusiveMinimum": 0.0,
+            "title": "Shell Max Output Chars",
+            "type": "integer"
+          },
+          "shell_timeout_seconds": {
+            "exclusiveMinimum": 0.0,
+            "title": "Shell Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_tool_loops",
+          "max_retries_per_step",
+          "shell_timeout_seconds",
+          "shell_max_output_chars"
+        ],
+        "title": "ExecutionPreferences",
+        "type": "object"
+      },
       "ExternalPathGrantRequest": {
         "additionalProperties": false,
         "description": "新增 / 改写一条外部路径授权（T38）。\n\n只校验**形状**（非空、长度上限）：路径的规范化（大小写、分隔符、符号链接）与\"是不是受保护\n位置\"都在服务层裁定——那需要真实文件系统，不是传输层能替它做主的。\n`access` 只允许 `read` / `read_write`：\"不给访问\"用撤销表达，不另立一个级别。",
@@ -1033,6 +1152,52 @@
         "title": "FinalResultView",
         "type": "object"
       },
+      "GeneralPreferences": {
+        "additionalProperties": false,
+        "properties": {
+          "animations": {
+            "default": true,
+            "title": "Animations",
+            "type": "boolean"
+          },
+          "font_size": {
+            "default": "standard",
+            "enum": [
+              "small",
+              "standard",
+              "large"
+            ],
+            "title": "Font Size",
+            "type": "string"
+          },
+          "reasoning_expanded": {
+            "default": false,
+            "title": "Reasoning Expanded",
+            "type": "boolean"
+          },
+          "send_shortcut": {
+            "default": "enter",
+            "enum": [
+              "enter",
+              "ctrl_enter"
+            ],
+            "title": "Send Shortcut",
+            "type": "string"
+          },
+          "theme": {
+            "default": "light",
+            "enum": [
+              "light",
+              "dark",
+              "system"
+            ],
+            "title": "Theme",
+            "type": "string"
+          }
+        },
+        "title": "GeneralPreferences",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1107,6 +1272,78 @@
         "title": "HealthView",
         "type": "object"
       },
+      "LongTermPreferences": {
+        "additionalProperties": false,
+        "properties": {
+          "aging_enabled": {
+            "title": "Aging Enabled",
+            "type": "boolean"
+          },
+          "confidence_threshold": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Confidence Threshold",
+            "type": "number"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "forget_after_days": {
+            "exclusiveMinimum": 0.0,
+            "title": "Forget After Days",
+            "type": "integer"
+          },
+          "importance_threshold": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Importance Threshold",
+            "type": "number"
+          }
+        },
+        "required": [
+          "enabled",
+          "confidence_threshold",
+          "importance_threshold",
+          "aging_enabled",
+          "forget_after_days"
+        ],
+        "title": "LongTermPreferences",
+        "type": "object"
+      },
+      "MediumTermPreferences": {
+        "additionalProperties": false,
+        "properties": {
+          "decay_half_life_days": {
+            "exclusiveMinimum": 0.0,
+            "title": "Decay Half Life Days",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "min_score": {
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Min Score",
+            "type": "number"
+          },
+          "top_k": {
+            "exclusiveMinimum": 0.0,
+            "title": "Top K",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "top_k",
+          "min_score",
+          "decay_half_life_days"
+        ],
+        "title": "MediumTermPreferences",
+        "type": "object"
+      },
       "MemoryMessageView": {
         "properties": {
           "kind": {
@@ -1129,6 +1366,109 @@
           "memory"
         ],
         "title": "MemoryMessageView",
+        "type": "object"
+      },
+      "MemoryProbeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "values": {
+            "$ref": "#/components/schemas/PreferenceValues"
+          }
+        },
+        "required": [
+          "expected_version",
+          "values"
+        ],
+        "title": "MemoryProbeRequest",
+        "type": "object"
+      },
+      "MemoryProbeResult": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "dimension": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dimension"
+          },
+          "error_category": {
+            "anyOf": [
+              {
+                "enum": [
+                  "restart_required",
+                  "timeout",
+                  "network",
+                  "authentication",
+                  "request",
+                  "model_or_endpoint",
+                  "rate_limit",
+                  "provider",
+                  "local_load",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Category"
+          },
+          "http_status": {
+            "anyOf": [
+              {
+                "maximum": 599.0,
+                "minimum": 400.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Http Status"
+          },
+          "records": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Records"
+          },
+          "state": {
+            "enum": [
+              "passed",
+              "disabled",
+              "not_ready",
+              "incompatible",
+              "failed"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "state",
+          "detail"
+        ],
+        "title": "MemoryProbeResult",
         "type": "object"
       },
       "MemoryRecalledEvent": {
@@ -1200,6 +1540,66 @@
           "memory"
         ],
         "title": "MemoryRecalledPayload",
+        "type": "object"
+      },
+      "MemoryResourcesView": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "title": "Backend",
+            "type": "string"
+          },
+          "collection": {
+            "title": "Collection",
+            "type": "string"
+          },
+          "embedding_detail": {
+            "title": "Embedding Detail",
+            "type": "string"
+          },
+          "embedding_state": {
+            "enum": [
+              "disabled",
+              "unavailable",
+              "not_ready",
+              "ready"
+            ],
+            "title": "Embedding State",
+            "type": "string"
+          },
+          "key_configured": {
+            "title": "Key Configured",
+            "type": "boolean"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "restart_required": {
+            "default": false,
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "vector_available": {
+            "title": "Vector Available",
+            "type": "boolean"
+          },
+          "vector_initialized": {
+            "title": "Vector Initialized",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "backend",
+          "path",
+          "collection",
+          "vector_available",
+          "vector_initialized",
+          "embedding_state",
+          "embedding_detail",
+          "key_configured"
+        ],
+        "title": "MemoryResourcesView",
         "type": "object"
       },
       "MemoryUseView": {
@@ -1424,6 +1824,23 @@
             "default": null,
             "title": "Model Call Id"
           },
+          "reasoning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reasoning"
+          },
+          "reasoning_truncated": {
+            "default": false,
+            "title": "Reasoning Truncated",
+            "type": "boolean"
+          },
           "role": {
             "enum": [
               "user",
@@ -1506,6 +1923,15 @@
       },
       "MessageDeltaPayload": {
         "properties": {
+          "channel": {
+            "default": "text",
+            "enum": [
+              "text",
+              "reasoning"
+            ],
+            "title": "Channel",
+            "type": "string"
+          },
           "chunk_sequence": {
             "minimum": 0,
             "title": "Chunk Sequence",
@@ -1520,6 +1946,11 @@
             "minLength": 1,
             "title": "Model Call Id",
             "type": "string"
+          },
+          "reasoning_truncated": {
+            "default": false,
+            "title": "Reasoning Truncated",
+            "type": "boolean"
           },
           "role": {
             "enum": [
@@ -1605,6 +2036,12 @@
       },
       "MessageStartedPayload": {
         "properties": {
+          "chunk_sequence": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Chunk Sequence",
+            "type": "integer"
+          },
           "message_id": {
             "minLength": 1,
             "title": "Message Id",
@@ -1621,6 +2058,11 @@
             ],
             "default": null,
             "title": "Model Call Id"
+          },
+          "reset": {
+            "default": false,
+            "title": "Reset",
+            "type": "boolean"
           },
           "role": {
             "enum": [
@@ -1849,22 +2291,6 @@
             ],
             "title": "Context Window Tokens"
           },
-          "dynamic_context_fingerprint": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Dynamic Context Fingerprint"
-          },
-          "endpoint_fingerprint": {
-            "minLength": 1,
-            "title": "Endpoint Fingerprint",
-            "type": "string"
-          },
           "estimated_prompt_tokens": {
             "anyOf": [
               {
@@ -1900,17 +2326,6 @@
               }
             ],
             "title": "First Token At"
-          },
-          "history_prefix_fingerprint": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "History Prefix Fingerprint"
           },
           "model_call_id": {
             "minLength": 1,
@@ -1975,17 +2390,6 @@
             "title": "Status",
             "type": "string"
           },
-          "system_prompt_fingerprint": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "System Prompt Fingerprint"
-          },
           "time_to_first_token_ms": {
             "anyOf": [
               {
@@ -1997,17 +2401,6 @@
               }
             ],
             "title": "Time To First Token Ms"
-          },
-          "tools_schema_fingerprint": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Tools Schema Fingerprint"
           }
         },
         "required": [
@@ -2018,7 +2411,6 @@
           "config_version",
           "provider",
           "model_id",
-          "endpoint_fingerprint",
           "started_at",
           "status"
         ],
@@ -2743,6 +3135,179 @@
         "title": "PlanView",
         "type": "object"
       },
+      "PreferenceValues": {
+        "additionalProperties": false,
+        "properties": {
+          "embedding": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EmbeddingPreferences"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution": {
+            "$ref": "#/components/schemas/ExecutionPreferences"
+          },
+          "general": {
+            "$ref": "#/components/schemas/GeneralPreferences"
+          },
+          "medium_term": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MediumTermPreferences"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "memory": {
+            "$ref": "#/components/schemas/LongTermPreferences"
+          },
+          "retrieval": {
+            "$ref": "#/components/schemas/RetrievalPreferences"
+          }
+        },
+        "required": [
+          "execution",
+          "retrieval",
+          "memory"
+        ],
+        "title": "PreferenceValues",
+        "type": "object"
+      },
+      "PreferencesRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_version": {
+            "minimum": 0.0,
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "values": {
+            "$ref": "#/components/schemas/PreferenceValues"
+          }
+        },
+        "required": [
+          "expected_version",
+          "values"
+        ],
+        "title": "PreferencesRequest",
+        "type": "object"
+      },
+      "PreferencesView": {
+        "additionalProperties": false,
+        "properties": {
+          "advanced": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ]
+            },
+            "title": "Advanced",
+            "type": "object"
+          },
+          "defaults": {
+            "$ref": "#/components/schemas/PreferenceValues"
+          },
+          "resources": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryResourcesView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "values": {
+            "$ref": "#/components/schemas/PreferenceValues"
+          },
+          "version": {
+            "title": "Version",
+            "type": "integer"
+          },
+          "writable": {
+            "title": "Writable",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "version",
+          "writable",
+          "values",
+          "defaults",
+          "advanced"
+        ],
+        "title": "PreferencesView",
+        "type": "object"
+      },
+      "RenameRequest": {
+        "additionalProperties": false,
+        "description": "会话与工作区的显示名称；不改变目录名或会话绑定。",
+        "properties": {
+          "title": {
+            "maxLength": 60,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "RenameRequest",
+        "type": "object"
+      },
+      "RetrievalPreferences": {
+        "additionalProperties": false,
+        "properties": {
+          "context_lines": {
+            "minimum": 0.0,
+            "title": "Context Lines",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "max_files": {
+            "exclusiveMinimum": 0.0,
+            "title": "Max Files",
+            "type": "integer"
+          },
+          "max_results": {
+            "exclusiveMinimum": 0.0,
+            "title": "Max Results",
+            "type": "integer"
+          },
+          "timeout_seconds": {
+            "exclusiveMinimum": 0.0,
+            "title": "Timeout Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "max_files",
+          "max_results",
+          "timeout_seconds",
+          "context_lines"
+        ],
+        "title": "RetrievalPreferences",
+        "type": "object"
+      },
       "RetrievalSourceView": {
         "description": "安全引用：只给定位与用途，**不给正文、向量或内部评分**。",
         "properties": {
@@ -2850,6 +3415,31 @@
           "version"
         ],
         "title": "RuntimeSourceVersionView",
+        "type": "object"
+      },
+      "SearchMatchView": {
+        "description": "A bounded, sanitized content match with its real source line.",
+        "properties": {
+          "line_number": {
+            "minimum": 1.0,
+            "title": "Line Number",
+            "type": "integer"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "line_number",
+          "text"
+        ],
+        "title": "SearchMatchView",
         "type": "object"
       },
       "SelectDefaultConnectionRequest": {
@@ -3107,16 +3697,6 @@
               }
             ]
           },
-          "runtime_context": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/RuntimeContextSnapshotView"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
           "schema_version": {
             "default": 1,
             "title": "Schema Version",
@@ -3255,6 +3835,11 @@
       "SessionSummaryView": {
         "description": "会话列表里的一行。\n\n**不含运行状态**：运行中/等待审批/已完成要从该会话线程的 Checkpoint 推出来，逐行读所有线程的\nCheckpoint 不属于列表用例。T30 的列表工作要么按需读、要么落一份会话级摘要；本节不伪造状态。",
         "properties": {
+          "archived": {
+            "default": false,
+            "title": "Archived",
+            "type": "boolean"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -3265,25 +3850,18 @@
             "title": "Is Active",
             "type": "boolean"
           },
-          "last_checkpoint_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+          "mode": {
+            "default": "agent",
+            "enum": [
+              "chat",
+              "agent"
             ],
-            "title": "Last Checkpoint Id"
+            "title": "Mode",
+            "type": "string"
           },
           "session_id": {
             "minLength": 1,
             "title": "Session Id",
-            "type": "string"
-          },
-          "thread_id": {
-            "minLength": 1,
-            "title": "Thread Id",
             "type": "string"
           },
           "title": {
@@ -3301,7 +3879,6 @@
         },
         "required": [
           "session_id",
-          "thread_id",
           "title",
           "workspace",
           "created_at",
@@ -3648,15 +4225,9 @@
             "minLength": 1,
             "title": "Run Id",
             "type": "string"
-          },
-          "task_id": {
-            "minLength": 1,
-            "title": "Task Id",
-            "type": "string"
           }
         },
         "required": [
-          "task_id",
           "run_id"
         ],
         "title": "TaskRef",
@@ -3736,18 +4307,6 @@
             "default": null,
             "title": "Elapsed Ms"
           },
-          "output_digest": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "title": "Output Digest"
-          },
           "status": {
             "enum": [
               "pending",
@@ -3775,11 +4334,6 @@
       "ToolEvidenceView": {
         "description": "一次工具调用的机械校验证据（§4.3、§6.7）。\n\n`summary` 是**已脱敏**的可读摘要；`verified` 来自反思层的机械校验，不是模型的自我评价。",
         "properties": {
-          "evidence_type": {
-            "minLength": 1,
-            "title": "Evidence Type",
-            "type": "string"
-          },
           "summary": {
             "minLength": 1,
             "title": "Summary",
@@ -3791,7 +4345,6 @@
           }
         },
         "required": [
-          "evidence_type",
           "summary",
           "verified"
         ],
@@ -3850,6 +4403,7 @@
             "enum": [
               "read",
               "list",
+              "search",
               "edit",
               "write",
               "delete",
@@ -3857,6 +4411,13 @@
             ],
             "title": "Kind",
             "type": "string"
+          },
+          "matches": {
+            "items": {
+              "$ref": "#/components/schemas/SearchMatchView"
+            },
+            "title": "Matches",
+            "type": "array"
           },
           "paths": {
             "items": {
@@ -4166,17 +4727,6 @@
                 "type": "null"
               }
             ]
-          },
-          "output_digest": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Output Digest"
           },
           "output_preview": {
             "anyOf": [
@@ -5155,6 +5705,128 @@
         "summary": "新增外部路径授权"
       }
     },
+    "/api/preferences": {
+      "get": {
+        "operationId": "get_preferences_api_preferences_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferencesView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "应用偏好与配置概览"
+      },
+      "put": {
+        "operationId": "put_preferences_api_preferences_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreferencesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferencesView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "设置版本已更新，草稿未覆盖现有设置"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "设置库不可用"
+          }
+        },
+        "summary": "保存应用偏好"
+      }
+    },
+    "/api/preferences/memory/test": {
+      "post": {
+        "operationId": "test_memory_preferences_api_preferences_memory_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MemoryProbeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryProbeResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "设置版本已更新"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "测试 Embedding 与已有向量集合（不保存草稿、不写入记忆）"
+      }
+    },
     "/api/sessions": {
       "get": {
         "description": "`workspace_id` 缺省表示列出全部会话。",
@@ -5176,6 +5848,16 @@
                 }
               ],
               "title": "Workspace Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "archived",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Archived",
+              "type": "boolean"
             }
           }
         ],
@@ -5310,6 +5992,63 @@
           }
         },
         "summary": "会话快照"
+      },
+      "patch": {
+        "operationId": "rename_session_api_sessions__session_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSummaryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Session"
       }
     },
     "/api/sessions/{session_id}/approvals/{approval_id}": {
@@ -5388,6 +6127,65 @@
           }
         },
         "summary": "提交审批决定"
+      }
+    },
+    "/api/sessions/{session_id}/archive": {
+      "post": {
+        "operationId": "archive_session_api_sessions__session_id__archive_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSummaryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Archive Session"
       }
     },
     "/api/sessions/{session_id}/events": {
@@ -5569,6 +6367,104 @@
         "summary": "选择会话下一轮模型"
       }
     },
+    "/api/sessions/{session_id}/restore": {
+      "post": {
+        "operationId": "restore_session_api_sessions__session_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSummaryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Session"
+      }
+    },
+    "/api/sessions/{session_id}/select": {
+      "post": {
+        "operationId": "select_session_api_sessions__session_id__select_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSummaryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Select Session"
+      }
+    },
     "/api/workspaces": {
       "get": {
         "operationId": "list_workspaces_api_workspaces_get",
@@ -5670,6 +6566,116 @@
           }
         },
         "summary": "选择工作区"
+      }
+    },
+    "/api/workspaces/{workspace_id}": {
+      "delete": {
+        "description": "仅移除工作区登记，保留磁盘目录与全部会话。",
+        "operationId": "remove_workspace_api_workspaces__workspace_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Workspace"
+      },
+      "patch": {
+        "operationId": "rename_workspace_api_workspaces__workspace_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspaceRef"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Workspace"
       }
     }
   }

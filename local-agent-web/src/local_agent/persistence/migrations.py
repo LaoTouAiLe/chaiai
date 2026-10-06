@@ -21,13 +21,13 @@ import sqlite3
 from datetime import datetime, timezone
 
 #: 聊天库（Checkpoint + 会话索引 + 请求台账）当前代码期望的结构版本（等于最后一个迁移的编号）。
-CHAT_SCHEMA_VERSION = 3
+CHAT_SCHEMA_VERSION = 5
 
 #: 长期记忆库当前代码期望的结构版本。
 LONG_TERM_SCHEMA_VERSION = 2
 
-#: 模型连接设置库当前代码期望的结构版本（T29A；契约 §6.8）。v2 = T38 外部路径授权。
-SETTINGS_SCHEMA_VERSION = 2
+#: 设置库当前结构版本：v2 = 外部路径授权；v3 = 非秘密应用偏好。
+SETTINGS_SCHEMA_VERSION = 3
 
 #: 兼容既有调用：未加前缀的 ``SCHEMA_VERSION`` 指聊天库。
 SCHEMA_VERSION = CHAT_SCHEMA_VERSION
@@ -42,6 +42,7 @@ SETTINGS_TABLES: tuple[str, ...] = (
     "model_selection",
     "settings_meta",
     "external_path_grants",
+    "app_preferences",
 )
 
 _SESSIONS_SQL = """
@@ -260,6 +261,19 @@ _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SESSIONS_SQL),
     (2, _CHAT_V2_SQL),
     (3, _CHAT_V3_SQL),
+    (4, ("ALTER TABLE sessions ADD COLUMN mode TEXT NOT NULL DEFAULT 'agent' "
+         "CHECK (mode IN ('chat', 'agent'));")),
+    (5, """
+        ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0
+            CHECK (archived IN (0, 1));
+        CREATE TABLE workspaces (
+            workspace_root TEXT PRIMARY KEY,
+            title TEXT,
+            removed INTEGER NOT NULL DEFAULT 0 CHECK (removed IN (0, 1))
+        );
+        INSERT INTO workspaces (workspace_root)
+            SELECT DISTINCT workspace_root FROM sessions;
+    """),
 )
 
 #: 长期记忆库的迁移；规则同上（独立文件、独立版本号）。
@@ -272,6 +286,9 @@ _LONG_TERM_MIGRATIONS: tuple[tuple[int, str], ...] = (
 _SETTINGS_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SETTINGS_V1_SQL),
     (2, _SETTINGS_V2_SQL),
+    # The table may already exist if the process exited before recording version 3.
+    (3, ("CREATE TABLE IF NOT EXISTS app_preferences (id INTEGER PRIMARY KEY CHECK(id=1), "
+         "version INTEGER NOT NULL CHECK(version>0), values_json TEXT NOT NULL);")),
 )
 
 _SCHEMA_MIGRATIONS_SQL = (

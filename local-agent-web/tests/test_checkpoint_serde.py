@@ -167,8 +167,13 @@ def _exercise(
     tool_model = model_factory(
         decision="tool",
         reply="读完了",
-        tool_calls=[{"name": "read_file", "args": {"path": "note.txt"}, "id": "call-1"}],
-        plan_steps=["读取 note.txt", "总结内容"],
+        tool_calls=[
+            {"name": "update_plan", "id": "plan-1", "args": {"plan": [
+                {"step": "读取 note.txt", "status": "in_progress"},
+                {"step": "总结内容", "status": "pending"},
+            ]}},
+            {"name": "read_file", "args": {"path": "note.txt"}, "id": "call-1"},
+        ],
     )
     tool_graph = builder.build_chat_graph(checkpointer(database))
     tool_context = _context(workspace, tool_model, app_config)

@@ -16,6 +16,7 @@ import { Composer } from '../components/Composer'
 import { Sidebar } from '../components/Sidebar'
 import { TopBar } from '../components/TopBar'
 import { Conversation } from '../features/conversation/Conversation'
+import { toolLabel } from '../features/tool/display'
 import {
   mapApproval,
   mapCall,
@@ -33,13 +34,14 @@ import { ModelSettingsDialog } from '../features/settings/ModelSettingsDialog'
 import { parseSelectionVersion, selectionExpectation, toModelMenu } from '../features/settings/modelMenuAdapter'
 import { traceFromMessages } from '../features/trace/adapters'
 import { TraceView } from '../features/trace/TraceView'
-import { ApiError } from '../api/client'
+import { ApiError, archiveSession, listSessions, removeWorkspace, renameSession, renameWorkspace, restoreSession, selectSession } from '../api/client'
 import { queryKeys, useHealth, useModelConnections, useSessions, useSnapshot, useSubmitMessage, useWorkspaces, useCreateSession, useSelectWorkspace, useSelectSessionModel, useResolveApproval, usePickWorkspaceDirectory } from '../api/queries'
 import { useSessionStream } from '../api/useSessionStream'
 import { useStreamTail } from '../stores/stream'
 import { useUiStore } from '../stores/ui'
 import type { ConversationScenario, MessageView } from '../fixtures/types'
 import styles from './App.module.css'
+import { useArchivedSessions } from '../api/queries'
 
 /**
  * 低于这个宽度侧栏自动收成 56px 窄轨。
@@ -78,6 +80,9 @@ export function LiveApp() {
   const sidebarCollapsed = collapsedPref ?? narrowViewport
 
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [archivedOpen, setArchivedOpen] = useState(false)
+  // 上下文详情面板的展开态：**界面状态**，不入服务端契约（刷新后回到收起）。
+  const [meterOpen, setMeterOpen] = useState(false)
   const [modelMenuOpen, setModelMenuOpen] = useState(false)
   const [modelError, setModelError] = useState<string | null>(null)
   const [workspaceActionError, setWorkspaceActionError] = useState<string | null>(null)
@@ -90,7 +95,8 @@ export function LiveApp() {
 
   const health = useHealth()
   const workspaces = useWorkspaces()
-  const sessions = useSessions(workspaceId)
+  const sessions = useSessions(null)
+  const archivedSessions = useArchivedSessions(archivedOpen)
   const snapshotQuery = useSnapshot(activeSessionId)
   const connections = useModelConnections()
   const createSession = useCreateSession()
@@ -106,6 +112,7 @@ export function LiveApp() {
   // 稳定引用：`?? []` 每次渲染都会产生新数组，会让下面的 effect/memo 每次都重跑。
   const sessionList = useMemo(() => sessions.data ?? [], [sessions.data])
   const snapshot = snapshotQuery.data ?? null
+  const currentMode = sessionList.find((item) => item.session_id === activeSessionId)?.mode ?? 'agent'
 
   // 刷新恢复：本地没有选中项时，按服务端的 `is_active` 回填（全库唯一 active）。
   useEffect(() => {
@@ -113,16 +120,28 @@ export function LiveApp() {
     const active = sessionList.find((item) => item.is_active === true)
     if (active === undefined) return
     openSession(active.session_id)
-    setWorkspace(active.workspace?.workspace_id ?? null)
-  }, [activeSessionId, openSession, sessionList, setWorkspace])
+    setWorkspace(workspaces.data?.some((item) => item.workspace_id === active.workspace.workspace_id)
+      ? active.workspace.workspace_id : null)
+  }, [activeSessionId, openSession, sessionList, setWorkspace, workspaces.data])
 
   // 没有显式工作区时跟随第一个：服务端可能已经有启动默认工作区。
   useEffect(() => {
-    if (workspaceId !== null) return
+    if (workspaceId !== null || activeSessionId !== null || sessionList.some((item) => item.is_active)) return
     const first = (workspaces.data ?? [])[0]
     if (first === undefined) return
     setWorkspace(first.workspace_id)
-  }, [setWorkspace, workspaceId, workspaces.data])
+  }, [setWorkspace, workspaceId, workspaces.data, activeSessionId, sessionList])
+
+  // 两份查询可能先后返回。始终按打开的会话与登记表对齐新会话的绑定目标。
+  // 移除的目录保留历史，但不再成为侧栏的登记工作区。
+  useEffect(() => {
+    if (workspaces.data === undefined) return
+    const selected = sessionList.find((item) => item.session_id === activeSessionId)
+    if (selected === undefined) return
+    const next = workspaces.data.some((item) => item.workspace_id === selected.workspace.workspace_id)
+      ? selected.workspace.workspace_id : null
+    if (workspaceId !== next) setWorkspace(next)
+  }, [workspaceId, workspaces.data, setWorkspace, activeSessionId, sessionList])
 
   const modelLabel = snapshot === null ? '' : modelLabelFor(snapshot, connections.data ?? [])
   const modelMenu = snapshot === null || !modelMenuOpen
@@ -179,7 +198,24 @@ export function LiveApp() {
       )
 
     // 安全阶段摘要（§6.7）：只表达"现在在做什么"，不暴露节点名或隐藏推理。
-    const toolInFlight = messages.some((message) => message.kind === 'tool' && message.tool.status === 'running')
+    const toolInFlight = [...messages].reverse().find((message) => message.kind === 'tool' && message.tool.status === 'running')
+    // Model-call start events currently arrive with completion. Only the snapshot's
+    // running state, actual tool states and safe answer tail can describe activity.
+    const activity = submit.isPending && !running && !awaitingApproval ? {
+      id: `submitting-${activeSessionId ?? 'pending'}`, active: true, startedAt: null,
+      label: '正在提交请求', detail: '正在等待服务端确认。',
+    } : running || awaitingApproval ? {
+      id: snapshot?.current_task?.run_id ?? activeSessionId ?? 'pending',
+      active: running,
+      startedAt: snapshot?.usage?.run_id === snapshot?.current_task?.run_id ? snapshot?.usage?.submitted_at ?? null : null,
+      label: awaitingApproval ? '等待你确认'
+        : toolInFlight?.kind === 'tool' ? `正在${toolLabel(toolInFlight.tool.name)}`
+          : tail !== null && tail.text !== '' ? '正在接收回答'
+            : tail?.channel === 'reasoning' ? '正在思考' : '正在处理请求',
+      detail: awaitingApproval ? '下方有一项操作需要你的决定，确认前不会执行。'
+        : toolInFlight?.kind === 'tool' && toolInFlight.tool.target !== null ? toolInFlight.tool.target
+          : '任务仍在运行，你可以继续写下一条消息的草稿。',
+    } : null
 
     return {
       id: 'live',
@@ -187,10 +223,11 @@ export function LiveApp() {
       sessionId: activeSessionId,
       session: session ?? { title: '新会话', workspace: null, status: 'idle', modelLabel: '' },
       messages,
+      activity,
       plan: snapshot === null ? null : mapPlan(snapshot.plan),
-      stats: snapshot === null || (snapshot.turn_usages ?? []).some((turn) => turn.usage.run_id === snapshot.usage?.run_id)
+      stats: snapshot === null || running || awaitingApproval || (snapshot.turn_usages ?? []).some((turn) => turn.usage.run_id === snapshot.usage?.run_id)
         ? null : mapStats(snapshot),
-      turnStats: snapshot === null ? [] : mapTurnStats(snapshot, messages),
+      turnStats: snapshot === null ? [] : mapTurnStats(snapshot, messages, running || awaitingApproval),
       context: snapshot === null ? { usedTokens: null, windowTokens: null, scope: 'unknown' } : mapContext(snapshot),
       takeover: approvalView === null ? { kind: 'none' } : { kind: 'approval', approval: approvalView },
       settings: null,
@@ -199,12 +236,20 @@ export function LiveApp() {
         disabledReason:
           createSession.isPending
             ? '正在创建会话，请稍候。'
+            : activeSessionId === null
+              ? '先新建或打开一个会话，再发送消息。'
             : health.data?.model_configured === false
               ? '还没有可用的模型连接：点左下角「设置」加一条，保存后就能直接对话。'
               : null,
-        phase: running ? (toolInFlight ? '正在调用工具…' : '正在生成回答…') : null,
+        phase: null,
+        meterOpen,
       },
-      empty: messages.length === 0 ? empty : null,
+      empty: messages.length === 0 && !running && !awaitingApproval && !submit.isPending ? empty ?? {
+        title: '开始一个新会话',
+        description: currentMode === 'chat'
+          ? '可以直接提问，也可以让我读取工作区文件并解释内容。'
+          : '让我解释项目、定位问题或修改文件。需要确认的操作会先交给你决定。',
+      } : null,
       // `isFetching`（不是 `isPending`）：没有会话时这个查询是**未启用**的，`isPending` 会长期为真，
       // 那会让"还没有会话"的空态被骨架盖住（实测）。
       loading:
@@ -215,14 +260,18 @@ export function LiveApp() {
   }, [
     activeSessionId,
     approvalView,
+    awaitingApproval,
     createSession.isPending,
+    currentMode,
     expandedTools,
     health.data?.model_configured,
+    meterOpen,
     modelMenu,
     running,
     session,
     snapshot,
     snapshotQuery.isFetching,
+    submit.isPending,
     tail,
   ])
 
@@ -321,12 +370,47 @@ export function LiveApp() {
   // 选已有工作区、弹出目录选择器和登记新目录共用这处就地错误提示；成功/重试时清除旧错误。
   // 取消目录选择器是正常响应（path=null），不显示错误。
 
+  const refreshCatalog = async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['sessions'] }),
+      queryClient.invalidateQueries({ queryKey: queryKeys.workspaces }),
+      queryClient.invalidateQueries({ queryKey: ['snapshot'] }),
+    ])
+  }
+
+  const openSelected = (selected: Awaited<ReturnType<typeof selectSession>>) => {
+    openSession(selected.session_id)
+    setWorkspace(workspaces.data?.some((item) => item.workspace_id === selected.workspace.workspace_id)
+      ? selected.workspace.workspace_id : null)
+  }
+
   return (
     <div className={styles.app} data-scenario="live">
       <Sidebar
         workspaces={sidebar}
         collapsed={sidebarCollapsed}
         addWorkspace={{ pending: pickWorkspace.isPending, error: workspaceActionError }}
+        management={{
+          renameSession: async (id, title) => { await renameSession(id, title); await refreshCatalog() },
+          renameWorkspace: async (id, title) => { await renameWorkspace(id, title); await refreshCatalog() },
+          removeWorkspace: async (id) => { await removeWorkspace(id); await refreshCatalog() },
+          archiveSession: async (id) => {
+            await archiveSession(id)
+            if (id === useUiStore.getState().activeSessionId) {
+              const remaining = await listSessions()
+              queryClient.setQueryData(queryKeys.sessions(null), remaining)
+              const next = remaining.find((item) => item.is_active)
+              if (next !== undefined) openSelected(next)
+              else { openSession(null); setWorkspace(null) }
+            }
+            await refreshCatalog()
+          },
+          restoreSession: async (id) => { await restoreSession(id); await refreshCatalog() },
+          archivedOpen, onToggleArchived: () => setArchivedOpen(!archivedOpen),
+          archivedSessions: (archivedSessions.data ?? []).map((item) => ({ id: item.session_id, title: item.title })),
+          archivedLoading: archivedSessions.isLoading,
+          archivedError: archivedSessions.isError ? '归档列表暂时无法读取，收起后重新打开可重试。' : null,
+        }}
         actions={{
           onSelectWorkspace: (id) => {
             setWorkspaceActionError(null)
@@ -375,11 +459,24 @@ export function LiveApp() {
               },
             })
           },
-          onSelectSession: (id) => openSession(id),
+          onSelectSession: (id) => {
+            setWorkspaceActionError(null)
+            void selectSession(id).then(async (selected) => {
+              openSelected(selected)
+              await queryClient.invalidateQueries({ queryKey: ['sessions'] })
+            }).catch((error: unknown) => setWorkspaceActionError(error instanceof ApiError
+              ? error.message : '没能打开会话，请重试。'))
+          },
           onNewSession: () => {
             if (createSession.isPending) return
-            createSession.mutate(workspaceId, {
-              onSuccess: (created) => openSession(created.session_id),
+            setWorkspaceActionError(null)
+            createSession.mutate({ workspaceId, mode: currentMode }, {
+              onSuccess: (created) => {
+                openSession(created.session_id)
+                setWorkspace(created.workspace?.workspace_id ?? null)
+              },
+              onError: (error) => setWorkspaceActionError(error instanceof ApiError
+                ? error.message : '没能新建会话，请重试。'),
             })
           },
           onOpenSettings: () => setSettingsOpen(true),
@@ -396,7 +493,9 @@ export function LiveApp() {
         {stream.notices.length === 0 ? null : (
           // 传输层提示（超限/空闲超时/无法解析的帧）如实显示：它们不代表数据损坏，但用户有权知道。
           <p className={styles.notice} role="status">
-            事件流提示：{stream.notices.join('、')}
+            {stream.notices.includes('snapshot_refresh_failed')
+              ? '暂时没能更新会话状态，正在恢复连接。请等待状态恢复后再操作。'
+              : '实时连接需要重新同步，正在重新读取会话状态。不会自动重发请求。'}
           </p>
         )}
         {approvalErrorMessage === null ? null : (
@@ -422,9 +521,13 @@ export function LiveApp() {
               : '这次提交的执行结果尚不能确认。请先刷新会话核对状态；若可能涉及工具副作用，不要直接重复执行。'}
           </p>
         ) : null}
+        {createSession.isError ? (
+          <p className={styles.notice} role="alert">没能新建会话。请检查工作区状态后重试。</p>
+        ) : null}
         {failedWithoutDetail ? (
           <p className={styles.notice} role="alert">
-            这轮没有生成可展示的最终回答。请检查模型连接状态后再发起新请求。
+            这轮在给出最终回答前就结束了。可能是本轮达到了调用上限，或模型调用失败；
+            请查看本轮记录后再发起新请求。
           </p>
         ) : null}
         {modelError === null ? null : (
@@ -444,6 +547,7 @@ export function LiveApp() {
         )}
         {/* 轨迹视图只替换对话区；输入区留在这里，两个页签下都能继续写草稿。 */}
         <Composer
+          mode={currentMode}
           session={session ?? { title: '新会话', workspace: null, status: 'idle', modelLabel: '' }}
           plan={scenario.plan}
           meter={scenario.context}
@@ -475,6 +579,16 @@ export function LiveApp() {
             onToggleModelMenu: () => {
               setModelError(null)
               setModelMenuOpen((open) => !open)
+            },
+            onToggleMeter: () => setMeterOpen((open) => !open),
+            onSelectMode: (mode) => {
+              if (mode === currentMode || createSession.isPending) return
+              createSession.mutate({ workspaceId, mode }, {
+                onSuccess: (created) => {
+                  openSession(created.session_id)
+                  setTab('conversation')
+                },
+              })
             },
             // 任务进行中**允许继续写**，但不让发（T30 裁定）：草稿留在输入框里等这一轮结束。
             canSend: activeSessionId !== null && draft.trim() !== '' && !running && !awaitingApproval && !submit.isPending && !createSession.isPending,

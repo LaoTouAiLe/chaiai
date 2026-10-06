@@ -7,11 +7,11 @@
  * spacing come from the measured values in that document's §7 because the
  * reference has no tokens for them.
  *
- * Only the light theme is in scope for v0.4, so each token is declared once
- * here instead of splitting into theme layers.
+ * 浅色保持原始基线；设置页通过语义 token 切换深色和文字比例。
  */
 
 :root {
+  --law-font-scale: 1;
   /* ---- palette: neutral-bluish -------------------------------------- */
   --law-blue-grey-00: #ffffff;
   --law-blue-grey-50: #f9fafb;
@@ -129,20 +129,20 @@
   --law-font-mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono', Menlo, Courier,
     'PingFang SC', 'Microsoft YaHei';
 
-  --law-text-xxs: 11px;
-  --law-leading-xxs: 14px;
-  --law-text-xs: 12px;
-  --law-leading-xs: 18px;
-  --law-text-sm: 13px;
-  --law-leading-sm: 20px;
-  --law-text-md: 14px;
-  --law-leading-md: 22px;
-  --law-text-base: 16px;
-  --law-leading-base: 24px;
-  --law-text-lg: 16px;
-  --law-leading-lg: 28px;
-  --law-text-xl: 20px;
-  --law-leading-xl: 28px;
+  --law-text-xxs: calc(11px * var(--law-font-scale));
+  --law-leading-xxs: calc(14px * var(--law-font-scale));
+  --law-text-xs: calc(12px * var(--law-font-scale));
+  --law-leading-xs: calc(18px * var(--law-font-scale));
+  --law-text-sm: calc(13px * var(--law-font-scale));
+  --law-leading-sm: calc(20px * var(--law-font-scale));
+  --law-text-md: calc(14px * var(--law-font-scale));
+  --law-leading-md: calc(22px * var(--law-font-scale));
+  --law-text-base: calc(16px * var(--law-font-scale));
+  --law-leading-base: calc(24px * var(--law-font-scale));
+  --law-text-lg: calc(16px * var(--law-font-scale));
+  --law-leading-lg: calc(28px * var(--law-font-scale));
+  --law-text-xl: calc(20px * var(--law-font-scale));
+  --law-leading-xl: calc(28px * var(--law-font-scale));
   --law-weight-regular: 400;
   --law-weight-medium: 500;
   --law-weight-semibold: 600;
@@ -186,4 +186,53 @@
   --law-duration-fast: 0.1s;
   --law-duration-base: 0.2s;
   --law-duration-slow: 0.3s;
+}
+
+:root[data-font-size='small'] { --law-font-scale: .9; }
+:root[data-font-size='large'] { --law-font-scale: 1.125; }
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --law-blue-grey-00: #181a1f;
+  --law-blue-grey-50: #202228;
+  --law-blue-grey-60: #25272e;
+  --law-blue-grey-75: #2a2d35;
+  --law-blue-grey-100: #343741;
+  --law-blue-grey-150: #3a3e49;
+  --law-blue-grey-200: #464b58;
+  --law-blue-grey-400: #939aaa;
+  --law-blue-grey-500: #a0a7b5;
+  --law-blue-grey-600: #adb4c2;
+  --law-blue-grey-700: #c1c6d0;
+  --law-blue-grey-750: #d7dbe3;
+  --law-blue-grey-1000: #f2f4f8;
+  --law-accent-50: #202f4b;
+  --law-accent-100: #263a5b;
+  --law-accent-700: #a7c4ff;
+  --law-red-50: #3d2228;
+  --law-red-100: #482730;
+  --law-red-600: #ff8b92;
+  --law-green-100: #213b2f;
+  --law-amber-100: #403321;
+  --law-amber-600: #f4c078;
+  --law-text-caption: #939aaa;
+  --law-bg-mask: #00000080;
+  --law-bg-skeleton: #ffffff12;
+  --law-border-l1: #ffffff12;
+  --law-border-l2: #ffffff26;
+  --law-border-l3: #ffffff33;
+  --law-border-l4: #ffffff40;
+  --law-hover: #ffffff0d;
+  --law-active: #ffffff1a;
+  --law-active-accent: #ffffff24;
+  --law-scrollbar: #464b58;
+  --law-scrollbar-hover: #616b7e;
+  --law-diff-add-text: #85d9a9;
+  --law-diff-del-text: #ff9fa6;
+}
+:root[data-motion='reduced'] *,
+:root[data-motion='reduced'] *::before,
+:root[data-motion='reduced'] *::after {
+  animation: none !important;
+  transition: none !important;
+  scroll-behavior: auto !important;
 }

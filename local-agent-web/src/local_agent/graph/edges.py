@@ -12,10 +12,11 @@ agent_decision_node --有工具调用--> safety_gate_node
 safety_gate_node --有放行调用--> tool_execution_node → reflection_node → completion_router
 safety_gate_node --全部被拒-->   reflection_node → completion_router
 agent_decision_node --无工具调用--> final_response_node
-completion_router --continue--> planner_node（§5.3 要求继续时重新规划）
+completion_router --continue--> planner_node（新循环设置预算；旧协议重新规划）
 completion_router --retry-->    compression_node
 completion_router --ask_user/finish/loop_limit--> final_response_node
 completion_router --有记忆候选的 finish--> memory_write_node → final_response_node
+completion_router --新循环 finish--> task_memory_node → [memory_write_node] → final_response_node
 ```
 """
 
@@ -37,6 +38,7 @@ from local_agent.graph.nodes import (
     REFLECTION_NODE,
     RETRIEVE_CODE_NODE,
     SAFETY_GATE_NODE,
+    TASK_MEMORY_NODE,
     TOOL_EXECUTION_NODE,
 )
 from local_agent.graph.routers import (
@@ -63,6 +65,8 @@ from local_agent.graph.routers import (
     route_after_compression,
     route_after_decision,
     route_after_safety,
+    route_after_task_memory,
+    route_after_tool_execution,
     route_by_mode,
 )
 from local_agent.graph.state import AgentState, RuntimeContext
@@ -98,7 +102,8 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
         {
             ROUTE_WITH_TOOLS: SAFETY_GATE_NODE,
             ROUTE_WITHOUT_TOOLS: FINAL_RESPONSE_NODE,
-            # 计划还没走完时先去反思（多步任务的第二步不能直接收尾）
+            ROUTE_CHAT: CHAT_NODE,
+            # 新循环做机械收口；旧协议判断计划是否完成。
             ROUTE_REFLECT: REFLECTION_NODE,
         },
     )
@@ -108,6 +113,7 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
         {
             ROUTE_EXECUTE: TOOL_EXECUTION_NODE,
             ROUTE_REFLECT: REFLECTION_NODE,
+            ROUTE_CHAT: COMPRESSION_NODE,
             ROUTE_TO_APPROVAL: APPROVAL_INTERRUPT_NODE,
         },
     )
@@ -120,7 +126,11 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
             ROUTE_REJECT: FINAL_RESPONSE_NODE,
         },
     )
-    graph.add_edge(TOOL_EXECUTION_NODE, REFLECTION_NODE)
+    graph.add_conditional_edges(
+        TOOL_EXECUTION_NODE,
+        route_after_tool_execution,
+        {ROUTE_CHAT: COMPRESSION_NODE, ROUTE_TOOL: REFLECTION_NODE},
+    )
     graph.add_edge(REFLECTION_NODE, COMPLETION_ROUTER)
     graph.add_conditional_edges(
         COMPLETION_ROUTER,
@@ -129,12 +139,16 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
             ROUTE_CONTINUE: PLANNER_NODE,
             ROUTE_RETRY: COMPRESSION_NODE,
             ROUTE_ASK_USER: FINAL_RESPONSE_NODE,
-            ROUTE_FINISH: FINAL_RESPONSE_NODE,
+            ROUTE_FINISH: TASK_MEMORY_NODE,
             ROUTE_LOOP_LIMIT: FINAL_RESPONSE_NODE,
             ROUTE_MEMORY_WRITE: MEMORY_WRITE_NODE,
         },
     )
     graph.add_edge(MEMORY_WRITE_NODE, FINAL_RESPONSE_NODE)
+    graph.add_conditional_edges(
+        TASK_MEMORY_NODE, route_after_task_memory,
+        {ROUTE_MEMORY_WRITE: MEMORY_WRITE_NODE, ROUTE_FINISH: FINAL_RESPONSE_NODE},
+    )
 
     # 闲聊也要过一次反思校验：按架构 §5.2，识别到用户要求记住时 chat_node 只产生
     # memory_write_intent，**转入现有 reflection_node 校验**，再由 completion_router 决定是否

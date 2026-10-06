@@ -37,7 +37,7 @@ from typing import Any
 
 from local_agent.config import MediumTermMemoryConfig
 from local_agent.exceptions import MemoryDisabledError, MemoryStoreError, MemoryUnavailableError
-from local_agent.llm.embedding import EmbeddingFunction
+from local_agent.llm.embedding import EmbeddingFunction, EmbeddingInfo
 from local_agent.memory.schemas import MEDIUM_TERM_STATUS_ACTIVE, MediumTermRecord
 from local_agent.scope import MemoryScope
 
@@ -351,7 +351,7 @@ def open_store(
             f"确认无用后请删除该 collection 或整个数据目录（{path.as_posix()}）后重建索引。"
         ) from exc
     # 已存在的 collection 不会被 metadata 覆盖（实测），所以这里必须自己比对
-    _check_compatibility(collection, expected, path=path, embedding=embedding_function)
+    _check_compatibility(collection, expected, path=path)
     return MediumTermStore(
         client=client,
         collection=collection,
@@ -366,7 +366,6 @@ def _check_compatibility(
     expected: dict[str, str | int | bool],
     *,
     path: Path,
-    embedding: EmbeddingFunction,
 ) -> None:
     """比对 collection 里记录的 Embedding 兼容信息与**实际生效**的距离度量，不一致就拒绝读写。"""
     actual = dict(collection.metadata or {})
@@ -388,8 +387,34 @@ def _check_compatibility(
         f"中期记忆 collection「{collection.name}」与当前 embedding 配置不兼容：{detail}。"
         "同一个 collection 不能混用不同模型、不同维度或不同距离度量的向量（会得到伪相关结果）。"
         f"请删除该 collection 或整个数据目录（{path.as_posix()}）后重建索引"
-        f"（当前 embedding：{embedding.info.provider}/{embedding.info.model}）。"
+        f"（当前 embedding：{expected.get('embedding_provider')}/"
+        f"{expected.get('embedding_model')}）。"
     )
+
+
+def check_existing_collection(
+    config: MediumTermMemoryConfig, info: EmbeddingInfo
+) -> int | None:
+    """Check an existing collection without creating a collection or probing a model.
+
+    Unknown dimensions are omitted for static save checks; the explicit connection
+    test supplies the measured dimension. Normal runtime opens still check all fields.
+    """
+    path = Path(config.path)
+    # Chroma's persisted SQLite filename (also used by our existing memory tests).
+    if not (path / "chroma.sqlite3").is_file():
+        return None
+    chromadb = _import_chromadb()
+    client = chromadb.PersistentClient(path=str(path))
+    try:
+        collection = client.get_collection(name=config.collection, embedding_function=None)
+    except chromadb.errors.NotFoundError:
+        return None
+    expected = dict(info.collection_metadata())
+    expected["memory_schema_version"] = MEMORY_SCHEMA_VERSION
+    expected[CHROMA_SPACE_METADATA_KEY] = DISTANCE_SPACE
+    _check_compatibility(collection, expected, path=path)
+    return int(collection.count())
 
 
 def configured_distance_space(collection: Any) -> str:

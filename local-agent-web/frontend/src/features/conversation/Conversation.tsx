@@ -1,6 +1,8 @@
 import { Fragment, useEffect, useRef } from 'react'
 
 import { IconCopyButton, MarkdownMessage } from './MarkdownMessage'
+import { RunActivity } from './RunActivity'
+import { ReasoningRow } from './ReasoningRow'
 import { ErrorNotice } from '../error/ErrorNotice'
 import { MemoryRow } from '../memory/MemoryRow'
 import { ToolRow } from '../tool/ToolRow'
@@ -34,18 +36,21 @@ function UserMessage({ text, at }: { text: string; at: string }) {
   )
 }
 
-function AssistantMessage({ text, at }: { text: string; at: string }) {
+function AssistantMessage({ text, at, reasoning, reasoningTruncated, reasoningRunning, streaming }:
+  Extract<MessageView, { kind: 'assistant' }>) {
   return (
     <div className={styles.assistantRow}>
+      {reasoning ? <ReasoningRow text={reasoning} running={reasoningRunning ?? false} truncated={reasoningTruncated} /> : null}
       {/* 正文按 Markdown 渲染（T30）：**不**解析原始 HTML，代码块自带复制。
           用 div 而不是 p：Markdown 会输出自己的块级元素，p 里嵌 p 是非法结构。 */}
-      <div className={styles.assistantText}>
+      {text !== '' ? <div className={styles.assistantText} data-streaming={streaming || undefined}>
         <MarkdownMessage text={text} />
-      </div>
-      <div className={styles.actions}>
-        <IconCopyButton text={text} className={styles.action} />
+      </div> : null}
+      {/* 复制按钮已上移到"每轮一组"（`TurnActions`）：原来每个助手段落各一个，一轮下来七八个
+          重复按钮。这里只留时间。 */}
+      {at !== '' ? <div className={styles.actions}>
         <span className={styles.assistantTime}>{at}</span>
-      </div>
+      </div> : null}
     </div>
   )
 }
@@ -81,38 +86,50 @@ function aggregate(stats: TurnStatsView): { input: number | null; output: number
 /**
  * Per-turn statistics line.
  *
+ * 2026-09-30 改为**紧凑单行**：原来是一个折叠块，标题只写"本轮记录 · 耗时 Xs"，模型/工具耗时、
+ * 首 token、吞吐这些本来就在契约里的数字（`TurnRecordView.model_elapsed_ms` /
+ * `tool_elapsed_ms` / `time_to_first_token_ms`）根本没显示；而且统计块按锚点各渲染一份，一轮里
+ * 会出现两三次。现在关键数字直接摊在一行，明细降到二级折叠，且一轮只渲染一份。
+ *
  * Unknown values print as unknown — never as `0` — because the provider either
  * reports cache usage or it does not. Estimated token numbers are labelled.
  */
 function TurnStats({ stats }: { stats: TurnStatsView }) {
   const { input, output } = aggregate(stats)
+  const unknown = '未知'
+  // 五个新字段类型上是可选的（原型 fixture 早于它们存在），这里统一归一，别让 `undefined`
+  // 掉进 `=== null` 的判断里被当成"有值"。
+  const throughput = stats.throughput ?? null
+  // 缓存：**有比率就显示比率**（它本身就是事实）；只有比率缺失时才去区分"供应商上报了但没给
+  // 命中率"（未知）与"这个供应商根本没有缓存字段"（未上报）。反过来先用 `cacheReported` 当门
+  // 会把已有的比率藏掉——原型 fixture 没有该标记，页面就会把 62% 显示成"未上报"。
+  const cache =
+    stats.cacheHitRatio !== null
+      ? `${String(Math.round(stats.cacheHitRatio * 100))}%`
+      : (stats.cacheReported ?? false)
+        ? unknown
+        : '未上报'
   return (
-    <div className={styles.stats}>
-      <span>
-        {stats.turns} 轮 · {stats.steps} 步
-      </span>
-      <span className={styles.statsDivider} aria-hidden="true">
-        |
-      </span>
-      <span>耗时 {stats.elapsedLabel}</span>
-      <span className={styles.statsDivider} aria-hidden="true">
-        |
-      </span>
-      <span>
-        缓存命中{' '}
-        {stats.cacheHitRatio === null ? '未知' : `${String(Math.round(stats.cacheHitRatio * 100))}%`}
-      </span>
-      <span className={styles.statsDivider} aria-hidden="true">
-        |
-      </span>
-      <span>
-        输入 {input === null ? '未知' : formatTokens(input)} · 输出 {output === null ? '未知' : formatTokens(output)}
-        {stats.estimated ? <span className={styles.estimated}>估算</span> : null}
-      </span>
+    <details className={styles.stats}>
+      <summary className={styles.statsSummary}>
+        <span>本轮记录 · 整轮 {stats.elapsedLabel || unknown}</span>
+        <span>缓存命中 {cache}</span>
+      </summary>
+      <div className={styles.statsDetails}>
+        <span>{stats.turns} 轮 · {stats.steps} 步</span>
+        <span>LLM {stats.modelElapsedLabel || unknown}</span>
+        <span>工具 {stats.toolElapsedLabel || unknown}</span>
+        <span>首 token {stats.firstTokenLabel || unknown}</span>
+        <span>{throughput === null ? `吞吐 ${unknown}` : `${String(throughput)} tok/s`}</span>
+        <span>
+          输入 {input === null ? unknown : formatTokens(input)} · 输出 {output === null ? unknown : formatTokens(output)}
+          {stats.estimated ? <span className={styles.estimated}>估算</span> : null}
+        </span>
+      </div>
 
       {stats.calls.length > 0 ? (
         <details className={styles.breakdown}>
-          <summary>明细（{stats.calls.length} 次模型调用）</summary>
+          <summary>明细（{stats.calls.length} 次模型调用 · 整轮 {stats.elapsedLabel || unknown}）</summary>
           <ul className={styles.callList}>
             {stats.calls.map((call) => (
               <li key={call.id} className={styles.callRow}>
@@ -128,7 +145,7 @@ function TurnStats({ stats }: { stats: TurnStatsView }) {
           </ul>
         </details>
       ) : null}
-    </div>
+    </details>
   )
 }
 
@@ -143,7 +160,7 @@ function Message({
     case 'user':
       return <UserMessage text={message.text} at={message.at} />
     case 'assistant':
-      return <AssistantMessage text={message.text} at={message.at} />
+      return <AssistantMessage {...message} />
     case 'tool':
       return (
         <div className={styles.toolSlot}>
@@ -170,6 +187,42 @@ function Message({
   }
 }
 
+/** 一轮：一条用户消息到下一次用户消息之前（列首/列尾也各算一轮）。 */
+interface Turn {
+  /** React key：轮首消息 id。 */
+  id: string
+  rows: MessageView[]
+  /** 该轮全部助手正文，供"复制整轮回答"用。 */
+  answerParts: string[]
+  /** 该轮最后一条消息 id：统计行按它锚定（`mapTurnStats` 用的是同一口径）。 */
+  lastId: string
+}
+
+/** 按用户轮次保留消息顺序；工具行各自折叠，不跨助手正文挪动动作。 */
+function partitionTurns(messages: readonly MessageView[]): Turn[] {
+  const turns: Turn[] = []
+  for (const message of messages) {
+    if (turns.length === 0 || message.kind === 'user') {
+      turns.push({ id: message.id, rows: [], answerParts: [], lastId: message.id })
+    }
+    const turn = turns.at(-1)!
+    turn.lastId = message.id
+    if (message.kind === 'assistant') turn.answerParts.push(message.text)
+    turn.rows.push(message)
+  }
+  return turns
+}
+
+/** 每轮**一组**操作按钮（不再每个助手段落一个）。整轮没有正文时不渲染。 */
+function TurnActions({ text }: { text: string }) {
+  if (text.trim() === '') return null
+  return (
+    <div className={styles.actions}>
+      <IconCopyButton text={text} className={styles.action} />
+    </div>
+  )
+}
+
 /**
  * The conversation column: message flow plus the closing statistics line.
  *
@@ -191,7 +244,7 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool }: Con
     if (!autoFollow || !followRef.current) return
     const element = scrollRef.current
     if (element !== null) element.scrollTop = element.scrollHeight
-  }, [autoFollow, scenario.messages])
+  }, [autoFollow, scenario.messages, scenario.activity?.id, scenario.activity?.label])
 
   return (
     <div
@@ -227,13 +280,22 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool }: Con
 
         {loading === null && empty === null ? (
           <>
-            {scenario.messages.map((message) => (
-              <Fragment key={message.id}>
-                <Message message={message} onToggleTool={onToggleTool} />
-                {turnStats.has(message.id) ? <TurnStats stats={turnStats.get(message.id)!} /> : null}
-              </Fragment>
-            ))}
+            {partitionTurns(scenario.messages).map((turn) => {
+              const stats = turnStats.get(turn.lastId)
+              return (
+                <Fragment key={turn.id}>
+                  {turn.rows.map((row) => (
+                    <Fragment key={row.id}>
+                      <Message message={row} onToggleTool={onToggleTool} />
+                    </Fragment>
+                  ))}
+                  <TurnActions text={turn.answerParts.join('\n\n')} />
+                  {stats === undefined ? null : <TurnStats stats={stats} />}
+                </Fragment>
+              )
+            })}
             {scenario.stats === null ? null : <TurnStats stats={scenario.stats} />}
+            {scenario.activity == null ? null : <RunActivity key={scenario.activity.id} activity={scenario.activity} />}
           </>
         ) : null}
       </div>

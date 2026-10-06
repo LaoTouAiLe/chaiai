@@ -43,21 +43,23 @@ export function relativeTime(value: string | null | undefined, now: number = Dat
 /** 按工作区分组，并把当前会话标记成选中行。 */
 export function mapSidebar(inputs: SidebarInputs, now: number = Date.now()): SidebarWorkspaceFixture[] {
   const { workspaces, sessions, activeSessionId, activeStatus } = inputs
-  return workspaces.map((workspace) => ({
+  const group = (items: readonly SessionSummary[]) => items.map((session) => {
+    const selected = session.session_id === activeSessionId
+    return {
+      id: session.session_id, title: session.title,
+      status: selected ? (activeStatus ?? 'idle') : 'idle' as const,
+      timeLabel: relativeTime(session.updated_at, now), selected,
+    }
+  })
+  const result: SidebarWorkspaceFixture[] = workspaces.map((workspace) => ({
     id: workspace.workspace_id,
     title: workspace.display_name,
-    sessions: sessions
-      .filter((session) => session.workspace?.workspace_id === workspace.workspace_id)
-      .map((session) => {
-        const selected = session.session_id === activeSessionId
-        return {
-          id: session.session_id,
-          title: session.title,
-          // 只有选中的那一行有权威状态；其余行按契约"列表不含运行状态"显示为空闲。
-          status: selected ? (activeStatus ?? 'idle') : 'idle',
-          timeLabel: relativeTime(session.updated_at, now),
-          selected,
-        }
-      }),
+    sessions: group(sessions.filter((session) => session.workspace?.workspace_id === workspace.workspace_id)),
   }))
+  const ids = new Set(workspaces.map((workspace) => workspace.workspace_id))
+  const ungrouped = sessions.filter((session) => !ids.has(session.workspace.workspace_id))
+  if (ungrouped.length > 0) result.push({
+    id: 'ungrouped', title: '未分组会话', managed: false, sessions: group(ungrouped),
+  })
+  return result
 }

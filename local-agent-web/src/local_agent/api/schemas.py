@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from local_agent.application.errors import ErrorView
 from local_agent.application.models import (
@@ -35,6 +35,20 @@ class _Request(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class RenameRequest(_Request):
+    """会话与工作区的显示名称；不改变目录名或会话绑定。"""
+
+    title: str = Field(min_length=1, max_length=60)
+
+    @field_validator("title")
+    @classmethod
+    def _nonblank(cls, value: str) -> str:
+        title = " ".join(value.split())
+        if not title:
+            raise ValueError("名称不能为空")
+        return title
+
+
 class SelectWorkspaceRequest(_Request):
     """选择工作区：`workspace_id`（已列出的工作区）与 `path`（新目录）二选一。"""
 
@@ -54,6 +68,7 @@ class CreateSessionRequest(_Request):
 
     title: str | None = Field(default=None, max_length=TITLE_MAX_CHARS)
     workspace_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)
+    mode: Literal["chat", "agent"] = "agent"
 
 
 class SubmitMessageRequest(_Request):

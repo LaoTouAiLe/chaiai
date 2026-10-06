@@ -42,6 +42,7 @@ const userMessage = (id: string, text: string) => ({
 })
 
 const assistantMessage = (id: string, text: string, complete: boolean) => ({
+  chunk_sequence: 0, stream_channel: 'text' as const, reasoning_truncated: false,
   kind: 'assistant' as const,
   message_id: id,
   text,
@@ -98,8 +99,8 @@ describe('mapTool', () => {
     expect(mapTool(toolMessage('ok').tool).status).toBe('succeeded')
   })
 
-  it('shows a queued call as in progress', () => {
-    expect(mapTool(toolMessage('pending').tool).status).toBe('running')
+  it('keeps a queued call distinct from an executing call', () => {
+    expect(mapTool(toolMessage('pending').tool).status).toBe('pending')
   })
 
   it('carries the redacted arguments, the duration and the truncated output', () => {
@@ -116,7 +117,6 @@ describe('mapTool', () => {
       toolMessage('ok', {
         redacted_arguments: { command: 'pytest -q', cwd: '.' },
         output_preview: 'first line\nsecond line',
-        output_digest: 'sha256:abc123',
         truncated: true,
         started_at: '2026-09-27T10:02:00+00:00',
         finished_at: '2026-09-27T10:02:02+00:00',
@@ -132,7 +132,7 @@ describe('mapTool', () => {
     // 有 outcome 时预览不再进卡片，但轨迹仍要能显示它，所以这里单独保留。
     expect(row.resultPreview).toBe('first line\nsecond line')
     expect(row.resultTruncated).toBe(true)
-    expect(row.resultDigest).toBe('sha256:abc123')
+    expect(row.resultDigest).toBeNull()
     expect(row.toolCallId).toBe('call-9')
     expect(row.startedLabel).not.toBe('')
     expect(row.finishedLabel).not.toBe('')
@@ -267,11 +267,11 @@ describe('mapTool', () => {
   it('carries the mechanical evidence once the reflection layer settled the call', () => {
     const row = mapTool(
       toolMessage('ok', {
-        evidence: { evidence_type: 'file_hash', summary: 'read_file → ok', verified: true },
+        evidence: { summary: '读取结果已记录', verified: true },
       }).tool,
     )
 
-    expect(row.evidence).toEqual({ evidenceType: 'file_hash', summary: 'read_file → ok', verified: true })
+    expect(row.evidence).toEqual({ evidenceType: '', summary: '读取结果已记录', verified: true })
   })
 
   it('leaves evidence null while the call is still unsettled', () => {
@@ -310,7 +310,6 @@ describe('mapApproval', () => {
     run_id: 'run-1',
     tool_call_id: 't1',
     tool_name: 'delete_file',
-    action_fingerprint: 'fp-1',
     redacted_arguments: { path: 'dist', recursive: 'True' },
     edited_arguments: {},
     target: 'dist',
@@ -561,6 +560,13 @@ describe('mapStats', () => {
       inputTokens: 600,
       outputTokens: 20,
       elapsedLabel: '5.0s',
+      // 2026-09-30 新增的四项耗时/吞吐：这一支的 `turn()` 没有给这些字段，所以标签是空串、
+      // 吞吐是 `null`（缺分母就不算），而不是 0。
+      modelElapsedLabel: '',
+      toolElapsedLabel: '',
+      firstTokenLabel: '',
+      throughput: null,
+      cacheReported: true,
       estimated: false,
       calls: [
         {
@@ -583,6 +589,35 @@ describe('mapStats', () => {
         },
       ],
     })
+  })
+
+  it('derives model/tool/first-token labels and throughput from the contract numbers', () => {
+    // 2026-09-30：这四项**契约里本来就有**（§15.6 的 `TurnRecordView`），此前视图模型把它们丢了。
+    const stats = mapStats(
+      snapshot({
+        usage: turn({
+          model_elapsed_ms: 2000,
+          tool_elapsed_ms: 1500,
+          time_to_first_token_ms: 800,
+          actual_output_tokens: 500,
+        }),
+      }),
+    )
+
+    expect(stats?.modelElapsedLabel).toBe('2.0s')
+    expect(stats?.toolElapsedLabel).toBe('1.5s')
+    expect(stats?.firstTokenLabel).toBe('800ms')
+    expect(stats?.throughput).toBe(250) // 500 tok ÷ 2s
+  })
+
+  it('leaves throughput unknown when the model time is missing', () => {
+    // 分母缺失就不猜：算不出吞吐不是"0 tok/s"。
+    const stats = mapStats(
+      snapshot({ usage: turn({ model_elapsed_ms: null, actual_output_tokens: 500 }) }),
+    )
+
+    expect(stats?.throughput).toBeNull()
+    expect(stats?.modelElapsedLabel).toBe('')
   })
 
   it('keeps unreported numbers unknown instead of zero', () => {
@@ -619,10 +654,10 @@ describe('mapStats', () => {
     expect(stats?.calls).toEqual([])
   })
 
-  it('shows an unfamiliar purpose verbatim instead of guessing a category', () => {
+  it('uses a public fallback for unfamiliar model purposes', () => {
     const stats = mapStats(snapshot({ usage: turn(), model_calls: [call({ purpose: 'brand_new' })] }))
 
-    expect(stats?.calls[0].purpose).toBe('brand_new')
+    expect(stats?.calls[0].purpose).toBe('模型调用')
   })
 
   it('places persisted turn summaries after their own assistant messages', () => {
@@ -640,6 +675,23 @@ describe('mapStats', () => {
     })
 
     expect(mapTurnStats(snap, mapMessages(snap)).map((item) => item.afterMessageId)).toEqual(['a1', 'a3'])
+  })
+
+  it('keeps previous turn statistics while withholding the active turn until it finishes', () => {
+    const snap = snapshot({
+      current_task: { run_id: 'run-2' },
+      messages: [userMessage('u1', 'first'), assistantMessage('a1', 'one', true), userMessage('u2', 'second')],
+      turn_usages: [
+        { user_message_id: 'u1', usage: turn(), model_calls: [] },
+        { user_message_id: 'u2', usage: turn({ run_id: 'run-2', final_state: 'running' }), model_calls: [] },
+      ],
+    })
+    expect(mapTurnStats(snap, mapMessages(snap), true).map((item) => item.afterMessageId)).toEqual(['a1'])
+    expect(mapTurnStats(snap, mapMessages(snap), false).map((item) => item.afterMessageId)).toEqual(['a1', 'u2'])
+  })
+
+  it('does not render an empty plan as zero of zero completed', () => {
+    expect(mapPlan({ goal: 'answer directly', steps: [] })).toBeNull()
   })
 })
 

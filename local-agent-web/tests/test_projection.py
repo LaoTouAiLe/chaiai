@@ -239,8 +239,7 @@ def test_pending_and_approval_arguments_are_sanitized_before_display() -> None:
     request["arguments"] = {"api_key": "sk-abcdefgh", "target": "C:\\Users\\me\\.env"}
     approval = proj.project_approval(_state(pending_approval=request), has_live_interrupt=True)
     assert approval is not None
-    assert approval.redacted_arguments["api_key"] == "***"
-    assert approval.redacted_arguments["target"] == "[已隐藏的绝对路径]"
+    assert approval.redacted_arguments == {}
 
 
 def test_display_text_from_tools_approval_plan_and_result_is_sanitized() -> None:
@@ -274,6 +273,24 @@ def test_display_text_from_tools_approval_plan_and_result_is_sanitized() -> None
     assert snapshot.final_result is not None and "***" in snapshot.final_result.summary
     tool = proj.project_tools(state, secrets=(configured_secret,))[0]
     assert tool.output_preview == "返回 *** 和 ***，见 [已隐藏的绝对路径]"
+
+
+def test_provider_reasoning_is_visible_but_secrets_and_metadata_stay_private() -> None:
+    state = _state(messages=[
+        HumanMessage(content="你好", id="u1"),
+        AIMessage(
+            content="你好，我可以帮你读文件。",
+            id="a1",
+            additional_kwargs={"reasoning_content": "私有思考 sk-hidden-secret C:/Users/me/private.txt"},
+        ),
+    ])
+    dumped = canonical_json(_snapshot(state))
+    assert "你好，我可以帮你读文件。" in dumped
+    assert "reasoning_content" not in dumped
+    assert "私有思考" in dumped
+    assert "sk-hidden-secret" not in dumped
+    assert "C:/Users/me/private.txt" not in dumped
+    assert state["messages"][1].additional_kwargs["reasoning_content"].endswith("private.txt")
 
 
 def test_reply_overrides_are_applied_before_rendering() -> None:
@@ -564,6 +581,92 @@ def test_no_approval_means_no_row() -> None:
     assert proj.project_approval(_state(), has_live_interrupt=False) is None
 
 
+def test_browser_arguments_are_bounded_and_allowlisted_without_changing_execution_input() -> None:
+    arguments = {
+        "path": "notes.txt", "old_text": "x" * 5000,
+        "expected_sha256": "private-file-hash", "prompt": "private-prompt",
+        "reasoning_content": "private-reasoning", "api_key": "private-key",
+    }
+    state = _state(pending_approval=_pending_request() | {"tool_name": "edit_file", "arguments": arguments})
+    view = proj.project_approval(state, has_live_interrupt=True)
+    assert view is not None
+    assert set(view.redacted_arguments) == {"path", "old_text"}
+    assert len(view.redacted_arguments["old_text"]) < 2100
+    assert "已截断" in view.redacted_arguments["old_text"]
+    assert state["pending_approval"]["arguments"] == arguments
+    text = canonical_json(view)
+    for forbidden in ("private-file-hash", "private-prompt", "private-reasoning", "private-key", "action_fingerprint"):
+        assert forbidden not in text
+
+
+def test_inside_workspace_approval_uses_relative_target_and_impact(tmp_path: Path) -> None:
+    view = proj.project_approval(
+        _state(pending_approval=_pending_request() | {
+            "tool_name": "edit_file", "arguments": {"path": "notes.txt"},
+            "impact_summary": f"修改 {tmp_path.as_posix()}/notes.txt：202 行（T10）",
+        }), has_live_interrupt=True, workspace_root=tmp_path,
+    )
+    assert view is not None
+    assert view.target == "notes.txt"
+    assert view.impact_summary == "修改 notes.txt：202 行"
+
+
+def test_grep_browser_view_retains_source_lines_and_omits_unstructured_internal_fields() -> None:
+    payload = {
+        "path": ".", "output_mode": "content", "total_matches": 1,
+        "matches": [{"path": "src/app.py", "line_number": 72, "text": "token=sk-12345678"}],
+        "reasoning_content": "private-reasoning", "sha256": "private-hash",
+    }
+    tool = _only_tool(_tool_state("grep", payload))
+    assert tool.outcome is not None and tool.outcome.kind == "search"
+    assert tool.outcome.matches[0].line_number == 72
+    assert tool.outcome.matches[0].path == "src/app.py"
+    assert tool.outcome.matches[0].text == "token=***"
+    assert tool.output_preview == "找到 1 处匹配"
+    text = canonical_json(tool)
+    for forbidden in ("private-hash", "private-reasoning", "sk-12345678"):
+        assert forbidden not in text
+
+
+def test_approval_without_recorded_ids_does_not_break_the_session_view() -> None:
+    """缺 ``run_id`` / ``tool_call_id`` 的审批记录只能"如实说未记录"，**不能把会话详情接口弄 500**。
+
+    实测过一个会话因此**完全打不开**（``GET /api/sessions/{id}`` → ``project_approval`` →
+    ``ApprovalView`` 校验失败：DTO 要求这两个字段非空）。这类记录来自旧 Checkpoint——决定记录早于
+    这两个字段，或 ``pending_approval`` 已被清掉。把空串直接塞进 DTO，等于**把一个字段缺失升级成
+    整页不可用**；这与这一层既有的 ``_NOT_RECORDED`` 口径（"如实说没有记录，不猜一个合理的值"）一致。
+    """
+    decided = proj.project_approval(
+        _state(
+            pending_approval=None,
+            approval_history=[
+                {
+                    "approval_id": "ap-1",
+                    "run_id": "",
+                    "tool_call_id": "",
+                    "action_fingerprint": "fp-1",
+                    "decision": "approve",
+                    "edited_arguments": None,
+                    "reason": None,
+                    "created_at": LATER,
+                }
+            ],
+        ),
+        has_live_interrupt=False,
+    )
+    assert decided is not None
+    assert decided.run_id == proj._NOT_RECORDED
+    assert decided.tool_call_id == proj._NOT_RECORDED
+
+    request = _pending_request()
+    request["run_id"] = ""
+    request["tool_call_id"] = ""
+    pending = proj.project_approval(_state(pending_approval=request), has_live_interrupt=True)
+    assert pending is not None
+    assert pending.run_id == proj._NOT_RECORDED
+    assert pending.tool_call_id == proj._NOT_RECORDED
+
+
 # ---- 错误 ------------------------------------------------------------------
 
 
@@ -611,8 +714,9 @@ def test_errors_are_deduplicated_and_carry_actionable_text() -> None:
     event = _error_event("tool_execution")
     views = proj.project_errors(_state(error_events=[event, dict(event)]))
     assert len(views) == 1
-    # 公开诊断编号保留轮次与作用域，但不含节点名。
-    assert views[0].diagnostic_id == "TOOL_CALL_FAILED:run-1:0::"
+    # 公开诊断编号稳定，但不携带内部轮次或节点名。
+    assert views[0].diagnostic_id.startswith("TOOL_CALL_FAILED:")
+    assert "run-1" not in views[0].diagnostic_id
     assert "tool_execution" not in views[0].diagnostic_id
     assert len(views[0].hint) > 10
     assert views[0].retryable is False
@@ -643,6 +747,16 @@ def test_error_rows_in_the_flow_match_the_error_index() -> None:
     assert flow_errors[0].message_id == snapshot.errors[0].diagnostic_id  # type: ignore[union-attr]
     # 行 id 也不得携带内部节点名。
     assert "tool_execution" not in flow_errors[0].message_id
+
+
+def test_public_failure_text_keeps_reason_without_raw_operation_or_machine_path() -> None:
+    event = _error_event("safety_gate", "工具被安全策略拒绝：read_file；目标不是文件或不存在：E:/project/private/missing.txt")
+    view = proj.project_errors(_state(error_events=[event]))[0]
+    assert "读取文件" in view.message
+    assert "目标不是文件或不存在" in view.message
+    assert "read_file" not in view.message
+    assert "E:/project" not in view.message
+    assert "[已隐藏的绝对路径]" in view.message
 
 
 def test_other_runs_errors_are_not_shown_in_this_turn() -> None:
@@ -1152,6 +1266,24 @@ def test_forward_slash_windows_path_is_hidden_in_untrusted_text() -> None:
     assert proj.sanitize_text("错误位于 C:/Users/someone/private.txt") == "错误位于 [已隐藏的绝对路径]"
 
 
+@pytest.mark.parametrize("status", ["error", "denied"])
+def test_failed_tool_preview_keeps_reason_without_machine_path(status: str) -> None:
+    reason = "read_file：目标不是文件或不存在：E:/project/private/missing.txt"
+    state = _tool_state("read_file", reason, preview=reason)
+    state["tool_events"][0]["status"] = status
+    state["tool_results"][0]["status"] = status
+    view = proj.project_tools(state)[0]
+    assert "读取文件" in (view.output_preview or "")
+    assert "目标不是文件或不存在" in (view.output_preview or "")
+    assert "E:/project" not in (view.output_preview or "")
+
+
+def test_project_path_is_visible_but_private_path_with_spaces_is_fully_hidden() -> None:
+    assert proj.sanitize_text("目标 E:/pylianxi/other project/main.py") == "目标 E:/pylianxi/other project/main.py"
+    assert proj.sanitize_text('目标 "C:/Users/Some Name/private.txt"') == '目标 "[已隐藏的绝对路径]"'
+    assert proj.sanitize_text("用户输入 C:/Users/Some Name/private.txt", hide_private_paths=False) == "用户输入 C:/Users/Some Name/private.txt"
+
+
 def test_approval_target_is_sanitized_and_absent_after_the_request_is_gone() -> None:
     pending = proj.project_approval(
         _state(
@@ -1275,3 +1407,15 @@ def test_each_run_gets_its_own_payload_when_a_call_id_is_reused() -> None:
         "first.txt",
         "second.txt",
     ]
+
+
+def test_reasoning_display_limit_and_missing_field_do_not_modify_model_history():
+    thought = "证据。" * 6000
+    message = AIMessage(content="回答", id="a", additional_kwargs={"reasoning_content": thought, "private_metadata": "隐藏"})
+    state = _state(messages=[message])
+    view = proj.project_messages_view(state)[0]
+    assert view.reasoning_truncated and len(view.reasoning) == proj.REASONING_DISPLAY_LIMIT
+    assert message.additional_kwargs["reasoning_content"] == thought
+    assert "private_metadata" not in canonical_json(_snapshot(state))
+    missing = proj.project_messages_view(_state(messages=[AIMessage(content="回答", id="b")]))[0]
+    assert missing.reasoning is None and not missing.reasoning_truncated

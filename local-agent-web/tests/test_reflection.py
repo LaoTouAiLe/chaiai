@@ -650,6 +650,82 @@ def test_reflection_follows_llm_decision_when_evidence_is_verified(
     assert not update.get("error_events")
 
 
+#: 反思提示的固定标记（``reflector.REFLECTION_INSTRUCTION`` 的开头），用来判断"这一步到底调没调模型"。
+_REFLECTION_MARKER = "你在为本机 Agent 做**任务反思**"
+
+
+def test_reflection_skips_the_model_call_on_a_middle_step(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """多步计划的**中间步骤**：机械结论已定，不必花这次模型调用（2026-09-30 成本，§5.4）。
+
+    为什么这一支可以跳过：这里有后续未完成步骤，``_advance_plan`` 必然把 ``finish`` 压回
+    ``continue``，所以**调用模型也改变不了** ``next_action``；剩下的只有"重规划"，而重规划真正需要
+    模型的时候（计划不适用、工具反复失败）会先产生异常，那时立刻恢复调用。
+
+    这条测试同时钉住两件事：模型**确实没被调用**，以及**跳过必须在轨迹里可见**——否则"没调模型"和
+    "调了但没记录"长得一样。
+    """
+    model = model_factory(decision="tool", reply="第一步读完了")
+    state = _verified_state(
+        plan=[
+            PlanStep(id="s1", description="读取配置", status="running"),
+            PlanStep(id="s2", description="汇总说明", status="pending"),
+        ]
+    )
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    assert not any(_REFLECTION_MARKER in prompt for prompt in model.structured_prompts)
+    # 机械结论照常推进计划（这一步做完、下一步开始），并要求继续。
+    assert [step.status for step in update["plan"]] == ["completed", "running"]
+    assert update["reflection_result"].next_action == "continue"
+    assert any(
+        nodes.REFLECTION_SKIPPED_NOTE in record["summary"] for record in update["decision_trace"]
+    )
+
+
+def test_reflection_still_calls_the_model_on_the_last_step(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """**最后一步**不跳过：那一支会让整个任务收尾，完成度判断必须由模型给出。
+
+    第一版漏了这条约束，把 11 个用例一次打红（含固定集里的验收基线）——因为机械层判不了"任务目标
+    真的达成了吗"，而在最后一步判错就等于**替用户结束了任务**。
+    """
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": True, "next_action": "finish"}
+    )
+    state = _verified_state(
+        plan=[PlanStep(id="s1", description="读取配置", status="running")]
+    )
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    assert any(_REFLECTION_MARKER in prompt for prompt in model.structured_prompts)
+    assert update["reflection_result"].goal_achieved is True
+
+
+def test_reflection_still_calls_the_model_when_evidence_is_not_verified(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """证据没过校验时不跳过：那时"要不要重试 / 要不要问用户"必须由模型判断。"""
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": False, "next_action": "ask_user"}
+    )
+    state = _failed_state(
+        plan=[
+            PlanStep(id="s1", description="读取配置", status="running"),
+            PlanStep(id="s2", description="汇总说明", status="pending"),
+        ]
+    )
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    assert any(_REFLECTION_MARKER in prompt for prompt in model.structured_prompts)
+    assert update["reflection_result"].result_trust == "failed"
+
+
 def test_reflection_suppresses_completion_without_verified_evidence(
     tmp_path: Path, app_config: AppConfig, model_factory
 ) -> None:
@@ -914,6 +990,70 @@ def test_reflection_facts_mark_a_missing_answer_and_cap_a_long_one() -> None:
     assert len(capped) < len(long_answer)
 
 
+def test_reflection_messages_extend_the_main_prefix() -> None:
+    """反思消息序列 = **主对话前缀原样** + 反思指令 + 事实；不传前缀时退化为原来的两条。"""
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from local_agent.reflection import reflector
+
+    prefix = [SystemMessage(content="稳定系统前缀"), HumanMessage(content="历史消息")]
+    messages = reflector.build_reflection_messages(
+        prefix=prefix, task_goal="读取配置", trust="verified"
+    )
+
+    assert messages[: len(prefix)] == prefix  # 前缀逐字节原样，一个字符都不改
+    assert isinstance(messages[len(prefix)], SystemMessage)
+    assert "任务反思" in str(messages[len(prefix)].content)
+    assert isinstance(messages[-1], HumanMessage)
+
+    bare = reflector.build_reflection_messages(task_goal="读取配置", trust="verified")
+    assert len(bare) == 2  # 老调用方（无前缀）行为不变
+
+
+class _PayloadRecorder:
+    """只记录"这次请求实际发出去的消息序列"，并按反思结构回一个合法 JSON。
+
+    为什么不用 ``model_factory``：反思走的是**结构化输出降级链**，替身模型对反思提示是按
+    ``with_structured_output`` 那条路分派的；这里要看的恰恰是**降级路径**（Prompt JSON）下
+    消息的**顺序**，所以直接记录 payload 最直接。
+    """
+
+    def __init__(self) -> None:
+        self.payloads: list[list[Any]] = []
+
+    def invoke(self, messages: Any) -> AIMessage:
+        self.payloads.append(list(messages))
+        return AIMessage(content='{"goal_achieved": false, "next_action": "continue"}')
+
+
+def test_reflection_request_puts_the_json_envelope_at_the_tail() -> None:
+    """反思请求必须**以主对话前缀开头**、且 JSON 外层指令在**末尾**（2026-09-30，缓存）。
+
+    这是"反思能不能吃到前缀缓存"的完整判据：供应商从**第一个 token** 开始比对最长公共前缀，所以
+    两件事都要成立——① 前缀那段逐字节在最前面；② 约束 JSON 的那条指令挪到末尾（放头部会把前缀
+    整体往后挤一格，等于没接）。改前实测：65 次反思只命中 **14.8%**，却占整轮未命中输入的 37%。
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from local_agent.reflection import reflector
+
+    prefix = [SystemMessage(content="稳定系统前缀"), HumanMessage(content="历史消息")]
+    recorder = _PayloadRecorder()
+
+    reflector.reflect(recorder, prefix=prefix, task_goal="读取配置", trust="verified")
+
+    payload = recorder.payloads[-1]
+    assert [str(message.content) for message in payload[:2]] == ["稳定系统前缀", "历史消息"]  # 前缀原样在最前
+    assert "任务反思" in str(payload[2].content)  # 反思指令
+    assert "只输出一个 JSON 对象" in str(payload[-1].content)  # JSON 外层指令在末尾
+
+    # 对照：不传前缀时保持原有顺序（指令在前），不为一条缓存优化去改与本项目缓存无关的调用形状。
+    recorder = _PayloadRecorder()
+    reflector.reflect(recorder, task_goal="读取配置", trust="verified")
+    without_prefix = recorder.payloads[-1]
+    assert "只输出一个 JSON 对象" in str(without_prefix[0].content)
+
+
 def test_reflection_prompt_shows_content_not_only_metadata(
     tmp_path: Path, app_config: AppConfig, model_factory
 ) -> None:
@@ -926,15 +1066,20 @@ def test_reflection_prompt_shows_content_not_only_metadata(
     model = model_factory(
         decision="tool", reflection={"goal_achieved": True, "next_action": "finish"}
     )
+    #: 行数刻意让正文**超过** ``TOOL_EVIDENCE_CHARS``（4000）：这条用例要同时守住"正文可见"与
+    #: "截断必须标注"，而 79 行的 payload 在配额提高后已经整段放得下，只会走整段渲染那条分支
+    #: （2026-09-30 提到 4000 时暴露）。
     payload = json.dumps(
         {
             "path": "a.py",
             "encoding": "utf-8",
             "sha256": "z" * 64,
-            "line_count": 79,
+            "line_count": 400,
             "truncated": False,
             "is_binary": False,
-            "content": "\n".join(f"第 {index} 行" for index in range(1, 80)),
+            "content": "\n".join(
+                f"第 {index} 行：def decide_mode(): ..." for index in range(1, 401)
+            ),
         },
         ensure_ascii=False,
     )
@@ -1006,6 +1151,122 @@ def test_stall_guard_stops_rounds_without_any_action(
     assert "连续 2 轮没有产生可执行的动作" in question
     assert "请确认下一步要做什么" in question
     assert any("空转保护" in record["summary"] for record in update["decision_trace"])
+
+
+def test_plan_remaining_steps_do_not_override_a_delivered_answer(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """模型一次做完整个任务并给出结论时，计划记账不得把它改写成"继续执行"（2026-09-30 修）。
+
+    ``goal_achieved`` 问的是"**当前任务目标**是否真的达成"，却被 ``_advance_plan`` 当成"当前步骤
+    完成了"来驱动计划推进。两种含义压在一个字段上，于是：模型一次性做完、写出完整答案，反思如实
+    回报"目标已达成"，却因计划还剩几步被改成 ``continue`` → 下一轮无事可做 → 空转 → 用户最终拿到
+    的是"请确认下一步要做什么"。实测被精度层用例 ``locate_all`` 抓到。
+    """
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": True, "next_action": "finish"}
+    )
+    state = _verified_state(
+        plan=[
+            PlanStep(id="s1", description="读取配置", status="running"),
+            PlanStep(id="s2", description="汇总上限", status="pending"),
+            PlanStep(id="s3", description="给出结论", status="pending"),
+        ],
+        current_step_index=0,
+        messages=[
+            AIMessage(content="我先确认配置里的实际取值。"),
+            AIMessage(
+                content=(
+                    "结论：Prompt 窗口预算在 config.yaml 第 75-77 行，工具步预算 120000 字符、"
+                    "条数下限 3 步。依据是对工作区做正则检索后逐文件确认，窗口条数上限 100。"
+                )
+            ),
+        ],
+    )
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    result = update["reflection_result"]
+    assert result.goal_achieved is True
+    assert result.next_action == "finish"  # 不再被"计划还有步骤"改写成 continue
+    # 剩余步骤一次性作废：标成 skipped，而不是留在那里当"仍在执行"
+    assert [step.status for step in update["plan"]] == ["completed", "skipped", "skipped"]
+
+
+def test_plan_still_continues_when_no_answer_was_delivered(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """没交付结论时，"完成一步 ≠ 完成整个任务"的硬语义**必须保持**（别把上面那条修过头）。"""
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": True, "next_action": "finish"}
+    )
+    state = _verified_state(
+        plan=[
+            PlanStep(id="s1", description="读取配置", status="running"),
+            PlanStep(id="s2", description="汇总上限", status="pending"),
+        ],
+        current_step_index=0,
+        messages=[AIMessage(content="已完成")],
+    )
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    result = update["reflection_result"]
+    assert result.next_action == "continue"
+    assert result.goal_achieved is False
+    assert [step.status for step in update["plan"]] == ["completed", "running"]
+
+
+def test_stall_guard_delivers_the_answer_that_was_already_written(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """空转但**结论已经写出来了** → 交付它，而不是把决策推回用户（2026-09-30 修）。
+
+    修复前的形态（被精度层用例 ``locate_all`` 实测抓到）：模型在前几轮已经给出完整、带行号的
+    答案，只因计划记账还差几步，空转保护最终交付给用户的却是"请确认下一步要做什么"——结论明明
+    已经在会话里，用户却拿不到它。
+
+    与上一条用例的分界就是"有没有可交付的结论"：上一例的模型只回了"已完成 / 无新指令"（没有内容），
+    所以仍然回到 ``ask_user``。
+    """
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": False, "next_action": "continue"}
+    )
+    answer = (
+        "结论：MAX_BETA 的值是 42，定义在 pkg/beta.py 第 5 行；MAX_ALPHA 的值是 7，"
+        "定义在 pkg/alpha.py 第 3 行。依据是先对工作区做正则检索、再逐文件确认："
+        "pkg/beta.py 全文 9 行，第 5 行是赋值定义，第 9 行是引用。"
+    )
+    state = _two_step_state(
+        messages=[AIMessage(content="我先确认工作区里的实际情况。"), AIMessage(content=answer)]
+    )
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    result = update["reflection_result"]
+    assert result.next_action == "finish"  # 交付，而不是 ask_user
+    assert result.goal_achieved is True  # 机械证据通过校验才允许声称完成（§5.4）
+    # 交付分支不把当前步骤标 blocked：它没有被"交给用户"
+    assert [step.status for step in update["plan"]] == ["completed", "running"]
+    assert any("直接交付" in record["summary"] for record in update["decision_trace"])
+
+
+def test_stall_guard_does_not_deliver_a_bare_platitude(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """只有一句客套话时**不许**交付：短于门槛的回答没有可交付的内容，仍应回到 ``ask_user``。"""
+    model = model_factory(
+        decision="tool", reflection={"goal_achieved": False, "next_action": "continue"}
+    )
+    state = _two_step_state(
+        messages=[AIMessage(content="好的"), AIMessage(content="任务已完成，无新指令")]
+    )
+
+    update = nodes.reflection_node(state, _runtime(_context(tmp_path, app_config, model), state))
+
+    result = update["reflection_result"]
+    assert result.next_action == "ask_user"
+    assert [step.status for step in update["plan"]] == ["completed", "blocked"]
 
 
 def test_one_text_round_is_not_treated_as_stalling(

@@ -13,7 +13,8 @@ are **not** extracted or preserved"，并建议对 DeepSeek 这类端点改用 p
 
 两处改动，都很窄：
 
-1. **响应侧**（``_create_chat_result``）：把原始响应里的 ``reasoning_content`` 收进
+1. **响应侧**（``_create_chat_result`` / ``_convert_chunk_to_generation_chunk``）：把原始响应
+   或流式 delta 里的 ``reasoning_content`` 收进
    ``AIMessage.additional_kwargs``。它随 Checkpoint 一起保存，恢复后的历史才拼得回原请求
    （否则一恢复就又缺字段，工具循环照样 400）。
 2. **请求侧**（``_get_request_payload``）：把**凡是有这个字段的 assistant 消息**都补回 payload
@@ -39,8 +40,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from langchain_core.language_models import LanguageModelInput
-from langchain_core.messages import AIMessage
-from langchain_core.outputs import ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 from pydantic import PrivateAttr
 
@@ -54,9 +55,26 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
     只影响 OpenAI 兼容端点的供应商扩展字段；官方 OpenAI 模型上等价于原类。
     """
 
-    #: 这个供应商**确实会用**该字段（见过一次非流式响应带它）。流式路径要用它决定
+    #: 这个供应商**确实会用**该字段（见过一次响应或流式 delta 带它）。流式路径要用它决定
     #: "要不要补一个空值占位"——`stream_placeholder_fields` 只用它，不猜供应商名字。
     _uses_reasoning_content: bool = PrivateAttr(default=False)
+
+    def _convert_chunk_to_generation_chunk(
+        self,
+        chunk: dict,
+        default_chunk_class: type,
+        base_generation_info: dict | None,
+    ) -> ChatGenerationChunk | None:
+        result = super()._convert_chunk_to_generation_chunk(
+            chunk, default_chunk_class, base_generation_info
+        )
+        choices = chunk.get("choices") or chunk.get("chunk", {}).get("choices", [])
+        if result is not None and choices and isinstance(result.message, AIMessageChunk):
+            reasoning = _field(choices[0].get("delta"), REASONING_CONTENT_KEY)
+            if isinstance(reasoning, str):
+                self._uses_reasoning_content = True
+                result.message.additional_kwargs[REASONING_CONTENT_KEY] = reasoning
+        return result
 
     def _create_chat_result(
         self, response: Any, generation_info: dict[str, Any] | None = None
@@ -98,8 +116,8 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
 def stream_placeholder_fields(model: Any) -> dict[str, str]:
     """流式回答需要补齐的供应商字段占位（不需要时返回空字典）。
 
-    为什么需要：**真增量流式时框架不会把 ``reasoning_content`` 装进块里**（它只在非流式的响应
-    解析路径上被本模块提取），于是流式回答落库后会缺这个字段，下一轮请求被服务端 400 拒绝
+    原始流式 delta 现在由本类保留；此函数兼容已确认支持该字段、但旧流式适配器没有提供字段的
+    路径，避免回答落库后缺字段而使下一轮请求被服务端 400 拒绝
     （T23 真实模型冒烟实测：`The reasoning_content in the thinking mode must be passed back`）。
 
     规则：只有"这个供应商确实用过该字段"（见过一次非流式响应带它）才补一个**空值**占位——

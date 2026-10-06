@@ -204,16 +204,22 @@ class MessageRefPayload(BaseModel):
 
 class MessageStartedPayload(MessageRefPayload):
     model_call_id: str | None = None
+    reset: bool = False
+    chunk_sequence: int = Field(default=0, ge=0)
 
 
 class MessageDeltaPayload(MessageRefPayload):
     model_call_id: str = Field(min_length=1)
     chunk_sequence: int = Field(ge=0)
     text_delta: str
+    channel: Literal["text", "reasoning"] = "text"
+    reasoning_truncated: bool = False
 
 
 class MessageCompletedPayload(MessageRefPayload):
     text: str
+    reasoning: str | None = None
+    reasoning_truncated: bool = False
     model_call_id: str | None = None
     complete: bool = True
 
@@ -252,7 +258,7 @@ class ToolCompletedPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
     tool_call_id: str = Field(min_length=1)
     status: ToolStatus
-    output_digest: str | None = None
+    output_digest: str | None = Field(default=None, exclude=True)
     elapsed_ms: int | None = Field(default=None, ge=0)
 
 

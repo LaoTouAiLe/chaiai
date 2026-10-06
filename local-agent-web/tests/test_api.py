@@ -134,6 +134,306 @@ def _submit(client: TestClient, session_id: str, text: str, request_id: str):
 # ---- 健康检查与会话 ---------------------------------------------------------
 
 
+def test_preferences_save_conflict_validation_and_safe_overview(api: tuple[TestClient, ApiRuntime]) -> None:
+    client, runtime = api
+    initial = client.get("/api/preferences").json()
+    assert initial["writable"] and initial["version"] == 0
+    assert initial["values"]["execution"]["max_tool_loops"] == runtime.service._app_config.agent.max_tool_loops
+    assert initial["values"]["retrieval"]["max_files"] == runtime.service._app_config.rag.max_files
+    assert "path" not in json.dumps(initial["advanced"])
+    values = initial["values"]
+    values["general"]["theme"] = "dark"
+    values["retrieval"]["max_results"] = 3
+    saved = client.put("/api/preferences", json={"values": values, "expected_version": 0})
+    assert saved.status_code == 200
+    assert saved.json()["version"] == 1
+    assert client.put("/api/preferences", json={"values": values, "expected_version": 0}).status_code == 409
+    assert client.get("/api/preferences").json()["values"]["retrieval"]["max_results"] == 3
+    assert runtime.service._app_config.rag.max_results == initial["defaults"]["retrieval"]["max_results"]
+    values["memory"]["confidence_threshold"] = 2
+    assert client.put("/api/preferences", json={"values": values, "expected_version": 1}).status_code == 422
+    values["memory"]["confidence_threshold"] = .8
+    values["advanced"] = {"compression_enabled": False}
+    assert client.put("/api/preferences", json={"values": values, "expected_version": 1}).status_code == 422
+
+
+def test_memory_cache_change_can_be_saved_but_requires_restart_before_probe(
+    api: tuple[TestClient, ApiRuntime], tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_agent.llm import embedding
+    from local_agent.memory import medium_term
+
+    client, _ = api
+    monkeypatch.setattr(embedding, "_hf_constants", lambda: SimpleNamespace(HF_HOME=str(tmp_path / "cache-a")))
+    monkeypatch.setattr(embedding, "fastembed_available", lambda: True)
+    monkeypatch.setattr(medium_term, "chromadb_available", lambda: True)
+    monkeypatch.setattr(embedding, "build_embedding_function",
+                        lambda *args, **kwargs: pytest.fail("must not load while restart is pending"))
+    values = client.get("/api/preferences").json()["values"]
+    values["embedding"] = {"enabled": True, "provider": "onnx_local", "model": "test",
+                           "cache_dir": str(tmp_path / "cache-b"), "local_files_only": True}
+    values["medium_term"]["enabled"] = True
+    saved = client.put("/api/preferences", json={"values": values, "expected_version": 0})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["resources"]["restart_required"] is True
+    assert saved.json()["resources"]["embedding_state"] == "not_ready"
+    assert client.get("/api/preferences").json()["resources"]["restart_required"] is True
+    tested = client.post("/api/preferences/memory/test", json={"values": values, "expected_version": 1})
+    assert tested.status_code == 200
+    assert tested.json()["error_category"] == "restart_required"
+    assert client.get("/api/preferences").json()["version"] == 1
+    assert not (tmp_path / "cache-b").exists()
+
+
+def test_memory_settings_dependencies_legacy_client_and_readonly_paths(
+    api: tuple[TestClient, ApiRuntime]
+) -> None:
+    client, _ = api
+    view = client.get("/api/preferences").json()
+    assert view["values"]["medium_term"] and view["resources"]["backend"] == "chroma"
+    values = view["values"]
+    values["medium_term"]["enabled"] = True
+    assert client.put("/api/preferences", json={"values": values, "expected_version": 0}).status_code == 422
+    values["medium_term"]["enabled"] = False
+    values["medium_term"]["top_k"] = 17
+    values["medium_term"]["min_score"] = .555
+    values["embedding"]["model"] = "configured-for-later"
+    result = client.put("/api/preferences", json={"values": values, "expected_version": 0})
+    assert result.status_code == 200, result.text
+    legacy = {k: v for k, v in values.items() if k not in {"medium_term", "embedding"}}
+    legacy["general"]["theme"] = "dark"
+    updated = client.put("/api/preferences", json={"values": legacy, "expected_version": 1})
+    assert updated.status_code == 200
+    assert updated.json()["values"]["medium_term"]["top_k"] == 17
+    assert updated.json()["values"]["embedding"]["model"] == "configured-for-later"
+    values["medium_term"]["path"] = "somewhere-else"
+    assert client.put("/api/preferences", json={"values": values, "expected_version": 2}).status_code == 422
+
+
+@pytest.mark.parametrize("base_url", ["file:///tmp", "https://user:password@example.com", "https://example.com?key=x", "http://example.com"])
+def test_embedding_endpoint_validation(api: tuple[TestClient, ApiRuntime], base_url: str) -> None:
+    client, _ = api
+    values = client.get("/api/preferences").json()["values"]
+    values["embedding"] = {"enabled": True, "provider": "openai_compatible", "model": "test",
+                           "base_url": base_url, "api_key_env": "TEST_EMBEDDING_KEY"}
+    assert client.put("/api/preferences", json={"values": values, "expected_version": 0}).status_code == 422
+
+
+def test_memory_probe_is_explicit_versioned_nonwriting_and_redacts_failures(
+    api: tuple[TestClient, ApiRuntime], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from local_agent.llm import embedding
+    from local_agent.model_settings import memory_settings
+
+    client, _ = api
+    calls: list[dict[str, Any]] = []
+    secret = "fake-secret-must-not-leak"
+    monkeypatch.setenv("TEST_EMBEDDING_KEY", secret)
+    adapter = SimpleNamespace(
+        info=embedding.EmbeddingInfo(provider="openai_compatible", model="unit-test", dimension=None,
+                                     normalized=True, cache_dir=None, local_files_only=False,
+                                     endpoint="https://example.com/v1"),
+        embed_query=lambda text: [[1.0, 0.0, 0.0]],
+    )
+    def factory(config, **kwargs):
+        calls.append(kwargs)
+        return adapter
+    monkeypatch.setattr(embedding, "build_embedding_function", factory)
+    monkeypatch.setattr(memory_settings.medium_term, "chromadb_available", lambda: True)
+    monkeypatch.setattr(memory_settings.medium_term, "check_existing_collection", lambda config, info: None)
+    initial = client.get("/api/preferences").json()
+    assert calls == []
+    values = json.loads(json.dumps(initial["values"]))
+    values["embedding"] = {"enabled": True, "provider": "openai_compatible", "model": "unit-test",
+                           "base_url": "https://example.com/v1", "api_key_env": "TEST_EMBEDDING_KEY"}
+    payload = {"values": values, "expected_version": 0}
+    result = client.post("/api/preferences/memory/test", json=payload)
+    assert result.status_code == 200 and result.json()["state"] == "passed"
+    assert result.json()["dimension"] == 3
+    assert len(calls) == 1 and calls[0]["api_key"] == secret
+    assert calls[0]["request_timeout_seconds"] == 30 and calls[0]["max_retries"] == 0
+    assert client.get("/api/preferences").json()["values"] == initial["values"]
+    adapter.embed_query = lambda text: (_ for _ in ()).throw(RuntimeError(secret))
+    failure = client.post("/api/preferences/memory/test", json=payload)
+    assert failure.json()["state"] == "failed" and secret not in failure.text
+    saved = client.put("/api/preferences", json={"values": initial["values"], "expected_version": 0})
+    assert saved.status_code == 200
+    assert client.post("/api/preferences/memory/test", json=payload).status_code == 409
+    assert len(calls) == 2
+
+
+def test_preferences_pin_across_approval_then_apply_to_new_task(open_api: OpenApi, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, runtime = open_api(decision="tool", reply="好的", tool_calls=[
+        {"name": "delete_file", "args": {"path": "note.txt"}, "id": "pref-call"},
+    ])
+    contexts: list[Any] = []
+    original = runtime.service._context
+    def capture(session, env):
+        contexts.append(env)
+        return original(session, env)
+    monkeypatch.setattr(runtime.service, "_context", capture)
+    session_id = _create_session(client)
+    initial = client.get("/api/preferences").json()
+    assert _submit(client, session_id, "删除 note.txt", "pref-submit").json()["status"] == "awaiting_approval"
+    old_limit = contexts[-1].app_config.agent.max_tool_loops
+    values = initial["values"]
+    values["execution"]["max_tool_loops"] = old_limit + 7
+    values["medium_term"]["top_k"] = 11
+    values["embedding"]["model"] = "next-task-model"
+    values["retrieval"]["enabled"] = False
+    assert client.put("/api/preferences", json={"values": values, "expected_version": 0}).status_code == 200
+    approval = client.get(f"/api/sessions/{session_id}").json()["approval"]
+    response = client.post(f"/api/sessions/{session_id}/approvals/{approval['approval_id']}", json={
+        "decision": "reject", "client_request_id": "pref-resume", "reason": "测试取消",
+    })
+    assert response.status_code == 200, response.text
+    assert contexts[-1].app_config.agent.max_tool_loops == old_limit
+    assert contexts[-1].preference_binding.version == 0
+    assert contexts[-1].app_config.memory.medium_term.top_k == initial["defaults"]["medium_term"]["top_k"]
+    assert contexts[-1].app_config.embedding.model == initial["defaults"]["embedding"]["model"]
+    assert contexts[-1].app_config.rag.enabled == initial["defaults"]["retrieval"]["enabled"]
+    _submit(client, session_id, "继续", "pref-next")
+    assert contexts[-1].app_config.agent.max_tool_loops == old_limit + 7
+    assert contexts[-1].app_config.rag.enabled is False
+    assert contexts[-1].preference_binding.version == 1
+    assert contexts[-1].app_config.memory.medium_term.top_k == 11
+    assert contexts[-1].app_config.embedding.model == "next-task-model"
+
+
+def test_preferences_approval_snapshot_survives_process_restart(open_api: OpenApi, monkeypatch: pytest.MonkeyPatch) -> None:
+    kwargs = {"decision": "tool", "reply": "好的", "tool_calls": [
+        {"name": "delete_file", "args": {"path": "note.txt"}, "id": "restart-pref"},
+    ]}
+    client, runtime = open_api(**kwargs)
+    session_id = _create_session(client)
+    view = client.get("/api/preferences").json()
+    view["values"]["execution"]["max_tool_loops"] = 13
+    view["values"]["retrieval"]["max_results"] = 4
+    view["values"]["medium_term"]["top_k"] = 12
+    view["values"]["embedding"]["model"] = "pinned-model"
+    assert client.put("/api/preferences", json={"values": view["values"], "expected_version": 0}).status_code == 200
+    assert _submit(client, session_id, "删除 note.txt", "restart-submit").json()["status"] == "awaiting_approval"
+    view["values"]["execution"]["max_tool_loops"] = 37
+    view["values"]["medium_term"]["top_k"] = 21
+    view["values"]["embedding"]["model"] = "new-model"
+    assert client.put("/api/preferences", json={"values": view["values"], "expected_version": 1}).status_code == 200
+    runtime.close()
+    client, reopened = open_api(**kwargs)
+    assert client.get("/api/preferences").json()["values"]["execution"]["max_tool_loops"] == 37
+    contexts: list[Any] = []
+    original = reopened.service._context
+    def capture(session, env):
+        contexts.append(env)
+        return original(session, env)
+    monkeypatch.setattr(reopened.service, "_context", capture)
+    approval = client.get(f"/api/sessions/{session_id}").json()["approval"]
+    result = client.post(f"/api/sessions/{session_id}/approvals/{approval['approval_id']}", json={
+        "decision": "reject", "client_request_id": "restart-resume", "reason": "测试取消",
+    })
+    assert result.status_code == 200, result.text
+    assert contexts[-1].preference_binding.version == 1
+    assert contexts[-1].app_config.agent.max_tool_loops == 13
+    assert contexts[-1].app_config.rag.max_results == 4
+    assert contexts[-1].app_config.memory.medium_term.top_k == 12
+    assert contexts[-1].app_config.embedding.model == "pinned-model"
+
+
+def test_preferences_unavailable_store_is_read_only(api: tuple[TestClient, ApiRuntime], monkeypatch: pytest.MonkeyPatch) -> None:
+    client, runtime = api
+    monkeypatch.setattr(runtime.service, "_preferences", None)
+    view = client.get("/api/preferences").json()
+    assert view["writable"] is False
+    assert view["values"] == view["defaults"]
+    assert client.put("/api/preferences", json={"values": view["values"], "expected_version": 0}).status_code == 503
+
+
+def test_catalog_rename_archive_restore_preserves_history(api: tuple[TestClient, ApiRuntime]) -> None:
+    client, runtime = api
+    first = _create_session(client, title="第一段")
+    assert _submit(client, first, "你好", "catalog-history").status_code == 200
+    before = client.get(f"/api/sessions/{first}").json()
+    second = _create_session(client, title="第二段")
+    assert client.post(f"/api/sessions/{first}/select").status_code == 200
+    assert next(row for row in client.get("/api/sessions").json() if row["is_active"])["session_id"] == first
+    stale = runtime.database.sessions.get(first)
+    assert client.patch(f"/api/sessions/{first}", json={"title": "  新名称  "}).json()["title"] == "新名称"
+    assert runtime.service._snapshot(stale, runtime.service._read(stale)).title == "新名称"
+    assert client.post(f"/api/sessions/{first}/archive").json()["archived"] is True
+    remaining = client.get("/api/sessions").json()
+    assert [row["session_id"] for row in remaining] == [second]
+    assert remaining[0]["is_active"] is True
+    assert client.get(f"/api/sessions/{first}").status_code == 404
+    assert client.post(f"/api/sessions/{first}/select").status_code == 404
+    assert _submit(client, first, "不能执行", "catalog-blocked").status_code == 404
+    assert [row["session_id"] for row in client.get("/api/sessions?archived=true").json()] == [first]
+    assert client.post(f"/api/sessions/{first}/restore").json()["archived"] is False
+    after = client.get(f"/api/sessions/{first}").json()
+    assert after["title"] == "新名称"
+    assert after["messages"] == before["messages"]
+    assert after["usage"] == before["usage"]
+    assert runtime.database.connection.execute("SELECT COUNT(*) FROM request_ledger").fetchone()[0] == 1
+    assert client.post(f"/api/sessions/{second}/archive").status_code == 200
+    assert client.post(f"/api/sessions/{first}/archive").status_code == 200
+    assert client.get("/api/sessions").json() == []
+
+
+def test_workspace_removal_keeps_history_and_directory(api: tuple[TestClient, ApiRuntime]) -> None:
+    client, runtime = api
+    session_id = _create_session(client)
+    root = Path(runtime.database.sessions.get(session_id).workspace_root)
+    (root / "note.txt").write_text("保留我", encoding="utf-8")
+    workspace_id = client.get("/api/workspaces").json()[0]["workspace_id"]
+    renamed = client.patch(f"/api/workspaces/{workspace_id}", json={"title": "我的项目"})
+    assert renamed.status_code == 200
+    assert client.get(f"/api/sessions/{session_id}").json()["workspace"]["display_name"] == "我的项目"
+    assert client.delete(f"/api/workspaces/{workspace_id}").status_code == 204
+    assert client.get("/api/workspaces").json() == []
+    assert client.get("/api/sessions").json()[0]["session_id"] == session_id
+    assert client.get(f"/api/sessions/{session_id}").status_code == 200
+    assert client.post(f"/api/sessions/{session_id}/select").status_code == 200
+    assert client.get("/api/workspaces").json() == []  # 选择历史会话不重新登记目录
+    assert (root / "note.txt").read_text(encoding="utf-8") == "保留我"
+    assert client.post("/api/workspaces/select", json={"path": str(root)}).json()["session_id"] == session_id
+    assert client.get("/api/workspaces").json()[0]["display_name"] == "我的项目"
+
+
+@pytest.mark.parametrize("kind", ["sessions", "workspaces"])
+@pytest.mark.parametrize("title", [" ", "x" * 61])
+def test_catalog_title_validation(api: tuple[TestClient, ApiRuntime], kind: str, title: str) -> None:
+    client, _ = api
+    session_id = _create_session(client)
+    identity = session_id if kind == "sessions" else client.get("/api/workspaces").json()[0]["workspace_id"]
+    assert client.patch(f"/api/{kind}/{identity}", json={"title": title}).status_code == 422
+
+
+def test_catalog_busy_guard_keeps_session_and_workspace(api: tuple[TestClient, ApiRuntime]) -> None:
+    client, runtime = api
+    session_id = _create_session(client)
+    workspace_id = client.get("/api/workspaces").json()[0]["workspace_id"]
+    lock = runtime.service._lock_for(session_id)
+    with lock:
+        for response in (
+            client.post(f"/api/sessions/{session_id}/archive"),
+            client.delete(f"/api/workspaces/{workspace_id}"),
+        ):
+            assert response.status_code == 409
+            assert response.json()["error"]["code"] == SESSION_BUSY
+    assert len(client.get("/api/sessions").json()) == 1
+    assert len(client.get("/api/workspaces").json()) == 1
+
+
+def test_catalog_pending_approval_cannot_be_hidden(open_api: OpenApi) -> None:
+    client, _ = open_api(decision="tool", reply="好的", tool_calls=[
+        {"name": "delete_file", "args": {"path": "note.txt"}, "id": "catalog-call"},
+    ])
+    session_id = _create_session(client)
+    workspace_id = client.get("/api/workspaces").json()[0]["workspace_id"]
+    assert _submit(client, session_id, "删除 note.txt", "catalog-pending").json()["status"] == "awaiting_approval"
+    assert client.post(f"/api/sessions/{session_id}/archive").status_code == 409
+    assert client.delete(f"/api/workspaces/{workspace_id}").status_code == 409
+    assert client.get(f"/api/sessions/{session_id}").json()["approval"]["state"] == "pending"
+
+
 def test_health_reports_readiness_without_paths_or_secrets(api: tuple[TestClient, ApiRuntime]) -> None:
     client, _runtime = api
     response = client.get("/api/health")
@@ -264,7 +564,7 @@ def test_recursive_delete_requires_two_http_decisions_and_exposes_stage(
     first = client.get(url).json()["approval"]
     assert first["state"] == "pending"
     assert first["confirmation_stage"] == 1
-    assert first["target"] == folder.as_posix()
+    assert first["target"] == "delete-me"
     assert first["outside_workspace"] is False
     approval_url = f"{url}/approvals/{first['approval_id']}"
 
@@ -1424,8 +1724,12 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/workspaces",
         "/api/workspaces/pick",
         "/api/workspaces/select",
+        "/api/workspaces/{workspace_id}",
         "/api/sessions",
         "/api/sessions/{session_id}",
+        "/api/sessions/{session_id}/select",
+        "/api/sessions/{session_id}/archive",
+        "/api/sessions/{session_id}/restore",
         "/api/sessions/{session_id}/events",
         "/api/sessions/{session_id}/messages",
         "/api/sessions/{session_id}/approvals/{approval_id}",
@@ -1435,6 +1739,8 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/model-connections/{connection_id}/test",
         "/api/model-connections/default",
         "/api/permissions",
+        "/api/preferences",
+        "/api/preferences/memory/test",
         "/api/permissions/grants",
     }
     text = json.dumps(schema, ensure_ascii=False)

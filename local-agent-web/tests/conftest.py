@@ -27,6 +27,34 @@ from local_agent.reflection.reflector import MEMORY_INTENT_MARKER, PLAN_DRAFT_MA
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+def build_legacy_graph(*args: Any, **kwargs: Any) -> Any:
+    """构造旧运行的恢复回归图，保留旧判官/自动推进契约断言。"""
+    from unittest.mock import patch
+
+    from local_agent.graph import builder
+
+    original = builder.prepare_context_node
+
+    def legacy_prepare(state):  # type: ignore[no-untyped-def]
+        return {**original(state), "agent_loop_version": 0}
+
+    with patch.object(builder, "prepare_context_node", legacy_prepare):
+        return builder.build_chat_graph(*args, **kwargs)
+
+
+@pytest.fixture
+def legacy_loop(monkeypatch):  # type: ignore[no-untyped-def]
+    """只有显式请求此夹具的旧协议用例才切换；其余用例均运行新循环。"""
+    from local_agent.graph import builder
+
+    original = builder.prepare_context_node
+
+    def legacy_prepare(state):  # type: ignore[no-untyped-def]
+        return {**original(state), "agent_loop_version": 0}
+
+    monkeypatch.setattr(builder, "prepare_context_node", legacy_prepare)
+
+
 class RoutingFakeModel(GenericFakeChatModel):
     """按提示区分“路由分类”“工具调用”“文本回答”的假模型。
 
@@ -66,6 +94,9 @@ class RoutingFakeModel(GenericFakeChatModel):
     memory_requested: bool = False
     #: 流式测试用：把回答切成几块（确定性均分；``<=1`` 表示整段一块）。
     stream_chunks: int = 3
+    #: 模拟供应商实际返回的独立思考字段；默认缺失，兼容无思考的模型。
+    reasoning: str = ""
+    reasoning_by_input: dict[str, str] = Field(default_factory=dict)
     #: 端到端观察中间态时可放慢假模型；默认不改变已有测试的速度。
     stream_delay_seconds: float = 0.0
     #: 流式测试用：产出第 N 块之后就抛错（模拟"中途失败"）；``None`` 表示不失败。
@@ -123,6 +154,11 @@ class RoutingFakeModel(GenericFakeChatModel):
                         "memory_candidates": self.memory_intent,
                     }
                 )
+            if schema.__name__ == "TaskMemoryDecision":
+                # 既有工具任务夹具的候选数据保留；新协议只把候选交给独立记忆提取。
+                return schema.model_validate({
+                    "memory_candidates": self.reflection.get("memory_candidates", []),
+                })
             if schema.__name__ == "PlanDraft":  # T20：计划拆步（空列表 → 退化单步）
                 return schema.model_validate({"steps": self.plan_steps})
             if self.fail_classification:
@@ -148,6 +184,11 @@ class RoutingFakeModel(GenericFakeChatModel):
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[no-untyped-def]
         text = "\n".join(message.text for message in messages)
         self.seen_prompts.append(text)
+
+        if "这不是完成度反思，不决定继续/重试" in text:
+            content = json.dumps({"memory_candidates": self.reflection.get("memory_candidates", [])},
+                                 ensure_ascii=False)
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
         if SUMMARIZE_INSTRUCTION in text:  # T16：摘要请求（与路由分类/回答分开）
             if self.fail_summary:
@@ -198,6 +239,8 @@ class RoutingFakeModel(GenericFakeChatModel):
 
         self.decision_calls += 1
         latest_user = next((message.text for message in reversed(messages) if isinstance(message, HumanMessage)), "")
+        reasoning = self.reasoning_by_input.get(latest_user, self.reasoning)
+        provider_fields = {"reasoning_content": reasoning} if reasoning else {}
         if self.fail_answer or latest_user in self.fail_on_input:
             raise RuntimeError("模型回答失败（测试故意触发）")
         scripted = self.tool_calls_by_input.get(latest_user)
@@ -209,15 +252,17 @@ class RoutingFakeModel(GenericFakeChatModel):
                 generations=[
                     ChatGeneration(
                         message=AIMessage(
-                            content="", tool_calls=[dict(call) for call in scripted]
+                            content="", tool_calls=[dict(call) for call in scripted], additional_kwargs=provider_fields,
                         )
                     )
                 ]
             )
         if self.tool_calls and (self.repeated_tool_calls or self.decision_calls == 1):
-            message = AIMessage(content="", tool_calls=self._materialize_calls())
+            message = AIMessage(content="", tool_calls=self._materialize_calls(), additional_kwargs=provider_fields)
             return ChatResult(generations=[ChatGeneration(message=message)])
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=self.response_by_input.get(latest_user, self.reply)))])
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(
+            content=self.response_by_input.get(latest_user, self.reply), additional_kwargs=provider_fields,
+        ))])
 
     def _stream(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[no-untyped-def]
         """按 ``_generate`` 的同一套脚本产出**增量块**（真实模型是 token 级，这里按块）。
@@ -233,6 +278,18 @@ class RoutingFakeModel(GenericFakeChatModel):
             self.decision_calls = calls + 1
             del self.seen_prompts[prompts:]
         message = result.generations[0].message
+        provider_fields = dict(message.additional_kwargs)
+        reasoning = provider_fields.pop("reasoning_content", "")
+        for piece in _split_chunks(reasoning, self.stream_chunks):
+            if self.stream_delay_seconds > 0:
+                time.sleep(self.stream_delay_seconds)
+            yield ChatGenerationChunk(message=AIMessageChunk(content="", additional_kwargs={"reasoning_content": piece}))
+        if message.tool_calls:
+            yield ChatGenerationChunk(message=AIMessageChunk(
+                content=message.content, tool_calls=message.tool_calls,
+                additional_kwargs=provider_fields, id=message.id,
+            ))
+            return
         for index, piece in enumerate(_split_chunks(str(message.content), self.stream_chunks)):
             if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
                 raise RuntimeError("流式中途失败（测试故意触发）")
@@ -242,7 +299,7 @@ class RoutingFakeModel(GenericFakeChatModel):
             yield ChatGenerationChunk(
                 message=AIMessageChunk(
                     content=piece,
-                    additional_kwargs=dict(message.additional_kwargs),
+                    additional_kwargs=provider_fields,
                     id=message.id,
                 )
             )

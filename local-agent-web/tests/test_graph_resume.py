@@ -53,7 +53,7 @@ class EchoHistoryModel(GenericFakeChatModel):
     """把收到的人类消息条数写进回答，用来证明历史确实进入了模型输入。
 
     T35 起出站请求里多了一条**运行上下文快照**数据块（它也是 HumanMessage，只存在于出站请求、
-    不进 State）。它不是用户轮次，计数时必须排除，否则"模型看到几条用户消息"这条断言全部偏 1。
+    不进 State）。覆盖历史后的摘要也以数据块注入。它们不是用户轮次，计数时必须排除。
     """
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs) -> ChatResult:  # type: ignore[no-untyped-def]
@@ -68,8 +68,8 @@ class EchoHistoryModel(GenericFakeChatModel):
 
 
 def _is_context_snapshot(message: AnyMessage) -> bool:
-    """是否为注入的运行上下文快照块（§15.7）：按它的来源标记抬头识别（不是用户轮次）。"""
-    return message.text.startswith("[运行时上下文快照")
+    """按来源标记识别注入的快照或已覆盖历史摘要；它们不是用户轮次。"""
+    return message.text.startswith(("[运行时上下文快照", "[已覆盖历史的摘要"))
 
 
 def _model() -> EchoHistoryModel:
@@ -1060,6 +1060,7 @@ def test_compression_summarises_the_corrected_reply(
 
 
 def test_plan_progress_survives_restart(
+    legacy_loop,
     tmp_path: Path, model_factory: ModelFactory
 ) -> None:
     """T20：重启恢复后**计划与完成记录都还在**，不重新拆步、也不重做已完成步骤。
@@ -1924,6 +1925,7 @@ def _compression_config(
     prompt_window_messages: int = 100,
     preserve_recent_turns: int = 1,
     preserve_recent_tool_steps: int = 3,
+    tool_step_budget_chars: int = 80_000,
     max_tool_loops: int | None = None,
     context_window_tokens: int = 4096,
     max_tokens: int = 1024,
@@ -1952,6 +1954,7 @@ def _compression_config(
                             "trigger_ratio": trigger_ratio,
                             "preserve_recent_turns": preserve_recent_turns,
                             "preserve_recent_tool_steps": preserve_recent_tool_steps,
+                            "tool_step_budget_chars": tool_step_budget_chars,
                         }
                     ),
                 }
@@ -2028,7 +2031,13 @@ def test_long_tool_loop_window_omits_older_tool_steps(
     context = _context_for(
         tmp_path,
         model,
-        _compression_config(preserve_recent_tool_steps=2, max_tool_loops=4),
+        _compression_config(
+            preserve_recent_tool_steps=2,
+            # 2026-09-30：窗口收缩现在是**预算驱动**的（``tool_step_budget_chars``），
+            # 条数只是下限。本用例验证的就是"还能收缩"，所以把预算压到必然超出的程度。
+            tool_step_budget_chars=1,
+            max_tool_loops=4,
+        ),
     )
 
     result = _run(graph, context, "列出目录")
@@ -2052,6 +2061,153 @@ def test_long_tool_loop_window_omits_older_tool_steps(
     assert len(result["tool_results"]) == len(calls)
     # 循环中途的窗口已经按"工具步"收缩（更早的调用与结果整步省略）
     assert any("省略了" in prompt for prompt in model.seen_prompts)
+
+
+def test_ask_user_text_never_leaks_internal_self_audit() -> None:
+    """面向用户的追问里不得出现反思模型的自审原文（2026-09-30 修）。
+
+    ``anomaly_explanation`` 是给**内部判断**用的第三人称自审（字段说明就是"异常原因解释；
+    没有异常时留空"），却被 ``_ask_user_text`` 原样拼进了用户可见的追问。实测原文：
+
+        "当前情况：问题出在模型回答的行为：它把本应执行的最后一步（汇总并输出架构说明）
+         替换成了「你想看哪一块」的选项追问，实际未产出任何完整架构说明。"
+
+    用户看到的是"这个程序在向我解释自己哪一步没做对"——不可执行、含内部术语，还暴露了 §15.8
+    只展示"可验证的执行过程"摘要这条约束想避免的形态。
+    """
+    decision = nodes.ReflectionDecision(
+        goal_achieved=False,
+        next_action="ask_user",
+        ask_user_reason="计划里还有 3 步没有完成，请确认下一步要做什么。",
+        anomaly_explanation="问题出在模型回答的行为：它把最后一步替换成了选项追问。",
+    )
+
+    text = nodes._ask_user_text(decision, trust="uncertain")
+
+    # 面向用户的那一句必须在。
+    assert "请确认下一步要做什么" in text
+    # 自审原文一个字都不能出现。
+    assert "问题出在模型回答的行为" not in text
+    assert "选项追问" not in text
+
+
+def test_deterministic_summary_does_not_leak_internal_self_audit() -> None:
+    """兜底摘要里同样不得出现反思模型的自审原文（2026-09-30 修，与追问文本同一口径）。
+
+    它虽然只在"模型不可用"时才用上，但那时它是**用户唯一能看到的东西**，把内部自审塞进去同样是
+    §15.8 要避免的形态。需要的事实由 ``检查出的问题`` 那行承担——它是代码产生的，可核对。
+    （那一行 2026-09-30 由「机械校验异常」改名，理由同上：内部术语不外显。）
+    """
+    decision = nodes.ReflectionDecision(
+        goal_achieved=False,
+        next_action="ask_user",
+        anomaly_explanation="问题出在模型回答的行为：它把最后一步替换成了选项追问。",
+    )
+
+    text = nodes._deterministic_summary(
+        {}, decision=decision, trust="uncertain", anomalies=("read_file: 输出为空",)
+    )
+
+    assert "问题出在模型回答的行为" not in text
+    assert "选项追问" not in text
+    assert "read_file: 输出为空" in text  # 机械异常照旧如实列出
+
+
+def test_ask_user_text_has_a_default_and_a_trust_note() -> None:
+    """``ask_user_reason`` 为空时要有可读的默认句；证据未过校验时必须如实说明。"""
+    decision = nodes.ReflectionDecision(goal_achieved=False, next_action="ask_user")
+
+    text = nodes._ask_user_text(decision, trust="uncertain")
+    assert "需要你补充信息或确认结果" in text
+    assert "不会声称任务已经完成" in text
+
+    verified = nodes._ask_user_text(decision, trust="verified")
+    assert "不会声称任务已经完成" not in verified
+
+
+def test_user_facing_text_avoids_internal_jargon() -> None:
+    """应用自己写给用户的收尾文字不得出现内部术语（2026-09-30）。
+
+    此前两处都在外泄：追问里写「没有通过**机械校验**」，兜底摘要里写「**机械证据等级**：verified」
+    ——既是内部概念，又顺手抛了英文枚举值。用户需要的是"这个结论能不能当依据"，不是我们的评级名。
+
+    这条测试与精度层的 ``LEAK_MARKERS`` 是同一口径的两端：那边防**模型自审**外显，这边防**应用
+    自己的文案**退回去。两处都必要——精度层此前正因为"应用自己在用这两个词"而把它们从标记里排除，
+    于是谁都不会发现文案又变回去了。
+    """
+    decision = nodes.ReflectionDecision(
+        goal_achieved=False, next_action="ask_user", ask_user_reason="请确认是否继续"
+    )
+    banned = ("机械", "证据等级", "verified", "uncertain", "failed", "anomaly")
+
+    for trust in ("verified", "uncertain", "failed"):
+        ask_user = nodes._ask_user_text(decision, trust=trust)
+        summary = nodes._deterministic_summary(
+            {}, decision=decision, trust=trust, anomalies=("read_file: 输出为空",)
+        )
+        for label, text in (("追问", ask_user), ("兜底摘要", summary)):
+            for word in banned:
+                assert word not in text, f"{trust} 的{label}里出现了内部术语：{word}"
+        # 反向：不能为了"去术语"把该说的事实也删掉。
+        if trust != "verified":
+            assert "不会声称任务已经完成" in ask_user
+
+
+def test_reflection_evidence_is_bounded_to_recent_summaries() -> None:
+    """反思提示里的可读证据按预算只保留**最近**的几条，不随步数线性增长。
+
+    2026-09-30 的成本修复。此前 ``reflection_node`` 把整个任务的 ``tool_events`` **全量**渲染进
+    反思提示，于是提示每步都更长，整轮成本按**平方**增长——实测 8 次反思分别带 7k–12k token，
+    且**全部未命中缓存**（反思请求只有 ``[系统提示, facts]`` 两条消息、不含对话历史），合计
+    65,254 未命中输入，占该轮 53%。
+    """
+    small = ["x" * 1_000 for _ in range(3)]
+    assert nodes._bounded_summaries(small) == small  # 装得下就不动
+
+    big = [f"summary-{index}" + "y" * (nodes.REFLECTION_EVIDENCE_CHARS // 2)
+           for index in range(4)]
+    kept = nodes._bounded_summaries(big)
+    # 超预算：只留最近的若干条，且**最后一条（当前步）必须在**。
+    assert kept[-1] == big[-1]
+    assert len(kept) < len(big)
+    assert sum(len(text) for text in kept) <= nodes.REFLECTION_EVIDENCE_CHARS + len(big[-1])
+
+
+def test_tool_loop_within_budget_omits_nothing(
+    tmp_path: Path, model_factory: ModelFactory
+) -> None:
+    """预算装得下就**一个字都不省**：窗口保持追加式，前缀稳定因而可被供应商缓存。
+
+    2026-09-30 的成本修复。原来只按条数省（``preserve_recent_tool_steps=3``），于是一个 20 步的
+    工具循环从第 4 步起**每步都重写窗口的中段**——窗口一旦不是追加式，前缀缓存就整段失效。实测
+    那次命中率只有 19.9%（只有开头 ``[system]`` 那段还能复用），未命中输入 635,714 token，折合
+    约 ¥1.6/次提问；逐次记录里同一轮内 ``system_prompt_fingerprint`` 有 17 个不同值是同一现象。
+    改成预算驱动后，短循环不省，只有真正超预算的长循环才从最早的步骤开始省。
+    """
+    graph = _graph(_database(tmp_path))
+    model = model_factory(
+        decision="tool",
+        reply="已经列完了",
+        tool_calls=[{"name": "list_dir", "args": {"path": "."}, "id": "call_1"}],
+        reflection={"goal_achieved": False, "next_action": "continue"},
+        repeated_tool_calls=True,
+    )
+    context = _context_for(
+        tmp_path,
+        model,
+        _compression_config(
+            # 条数下限压到 1：如果还按条数省，这里必然出现省略占位。
+            preserve_recent_tool_steps=1,
+            # 预算远大于实际内容 → 一步都不该省。
+            tool_step_budget_chars=80_000,
+            max_tool_loops=4,
+        ),
+    )
+
+    result = _run(graph, context, "列出目录")
+
+    assert result["loop_count"] >= 3
+    assert not any("省略了" in prompt for prompt in model.seen_prompts)
 
 
 def test_chat_turn_records_context_budget(tmp_path: Path, model_factory: ModelFactory) -> None:

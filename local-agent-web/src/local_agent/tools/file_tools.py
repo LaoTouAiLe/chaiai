@@ -152,7 +152,7 @@ def read_file_content(
     policy: SecurityPolicy,
     start_line: int | None = None,
     end_line: int | None = None,
-    max_chars: int = 50000,
+    max_chars: int = 20000,
 ) -> ReadFileResult:
     """读取工作区内的文本文件。
 
@@ -193,6 +193,7 @@ def read_file_content(
 
     line_count = len(text.splitlines())
     selected = _select_lines(text, start_line=start_line, end_line=end_line)
+    first_line = max(1, int(start_line)) if start_line else 1
     truncated = False
     if len(selected) > max_chars:
         selected = selected[:max_chars]
@@ -201,6 +202,19 @@ def read_file_content(
     if size_limited:
         truncated = True
         note_parts.append(f"文件超过 {max_bytes} 字节，只读取了前 {len(data)} 字节")
+
+    # 本次**实际返回**的行区间：让模型能直接算出下一次的 ``start_line``，而不是重猜或整篇重读
+    # （见 :class:`ReadFileResult` 的字段说明）。
+    returned = selected.splitlines()
+    last_line = first_line + len(returned) - 1 if returned else first_line - 1
+    has_more = bool(text) and last_line < line_count
+    next_start_line: int | None = None
+    if has_more:
+        next_start_line = last_line + 1
+        note_parts.append(
+            f"已返回第 {first_line}–{last_line} 行，共 {line_count} 行；"
+            f"需要后续内容请传 start_line={next_start_line}"
+        )
 
     return ReadFileResult(
         path=_display_path(resolved, policy.workspace_root),
@@ -211,6 +225,10 @@ def read_file_content(
         is_binary=is_binary,
         content=selected,
         note="；".join(note_parts) if note_parts else None,
+        first_line=first_line,
+        last_line=max(last_line, 0),
+        has_more=has_more,
+        next_start_line=next_start_line,
     )
 
 
@@ -539,15 +557,23 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
         path: str,
         start_line: int | None = None,
         end_line: int | None = None,
-        max_chars: int = 50000,
+        max_chars: int = 20000,
     ) -> str:
-        """读取某个文本文件的内容，返回内容、编码、Hash 与行数。
+        """读取某个文本文件的内容，返回内容、编码、Hash、行数与**本次返回的行区间**。
+
+        返回里的 ``has_more`` / ``next_start_line`` 用来继续读：**读大文件时不要指望一次读完**，
+        看 ``has_more`` 为真就再用 ``start_line=next_start_line`` 读下一段，直到读完。一次读不完
+        不是失败，不要因此判定"证据被截断、任务没完成"。
 
         Args:
             path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径（工作区外操作需要人工审批），且不能是密钥文件。
             start_line: 起始行（1 基，含）；省略表示从头开始。
             end_line: 结束行（1 基，含）；省略表示到文件末尾。
             max_chars: 返回内容的最大字符数，超出时截断。
+                **默认值 2026-09-30 从 50000 降到 20000**：工具结果会原样进历史并被后续每一轮
+                重发，一次 5 万字符的读取（约 1.2 万 token）就能吃掉整轮的工具步预算，进而触发
+                窗口省略、打掉前缀缓存——实测一次提问因此花掉 63.5 万未命中输入 token。
+                需要更多内容时**显式传更大的值**，或按 ``start_line``/``end_line`` 分两次读。
         """
         return read_file_content(
             path,

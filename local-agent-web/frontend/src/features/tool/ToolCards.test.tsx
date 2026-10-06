@@ -62,13 +62,22 @@ describe('ToolCard', () => {
     expect(screen.getAllByRole('listitem')).toHaveLength(5)
   })
 
+  it('keeps content match totals separate from the number of files', () => {
+    render(<ToolCard card={{ kind: 'search', shape: 'matches', paths: [], total: 100,
+      totalUnit: 'matches', truncated: true,
+      groups: [{ path: 'notes.txt', matches: [{ line: 2, text: 'line 2' }, { line: 20, text: 'line 20' }] }],
+    }} />)
+    expect(screen.getByText('显示 2 处匹配 / 共 100 处匹配 · 1 个文件')).toBeInTheDocument()
+    expect(screen.getByText(/结果已截断，仅显示前 2 处匹配/)).toBeInTheDocument()
+  })
+
   it('separates the terminal exit code from the output body', () => {
     render(<ToolCard card={cardOf('terminal')} />)
     expect(screen.getByText('pnpm run check')).toBeInTheDocument()
     expect(screen.getByText('退出码 1')).toBeInTheDocument()
     // The exit marker belongs to the card, not to the captured text.
     expect(screen.getByText(/1 of 4 checks failed/)).toBeInTheDocument()
-    expect(screen.getByText(/输出较长，已折叠 8 行/)).toBeInTheDocument()
+    expect(screen.getByText(/当前省略了 8 行/)).toBeInTheDocument()
   })
 
   it('counts todo progress and labels every state', () => {
@@ -97,14 +106,14 @@ describe('ToolCard', () => {
   it('keeps unknown tools on the generic renderer', () => {
     render(<ToolCard card={cardOf('generic')} />)
     expect(screen.getByText('工具返回了结构化结果')).toBeInTheDocument()
-    expect(screen.getByText('通用渲染器')).toBeInTheDocument()
+    expect(screen.getByText('结果详情')).toBeInTheDocument()
   })
 })
 
 describe('ToolRow', () => {
   it('renders the specialised card for a known tool and never a generic one', () => {
     render(<ToolCard card={cardOf('read')} />)
-    expect(screen.queryByText('通用渲染器')).not.toBeInTheDocument()
+    expect(screen.queryByText('结果详情')).not.toBeInTheDocument()
   })
 
   it('routes a file mutation to the diff card', () => {
@@ -130,6 +139,6 @@ describe('ToolRow', () => {
     // The path shows in the row and again inside the diff card it expands into.
     expect(screen.getAllByText('notes/demo.txt')).toHaveLength(2)
     expect(screen.getByRole('figure')).toBeInTheDocument()
-    expect(screen.queryByText('通用渲染器')).not.toBeInTheDocument()
+    expect(screen.queryByText('结果详情')).not.toBeInTheDocument()
   })
 })

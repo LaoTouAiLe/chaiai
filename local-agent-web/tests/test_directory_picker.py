@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,6 +26,53 @@ def _completed(
 
 
 # ---- 子进程协议 -------------------------------------------------------------
+
+
+def test_ask_directory_hosts_the_dialog_in_a_visible_topmost_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """宿主窗口必须**可见且置顶**，并且被当作 parent 传给对话框（实测 2026-09-30）。
+
+    子进程没有前台窗口，若宿主被 ``withdraw()`` 成不可见窗口，它落在 z 序最底，对话框会跟着
+    沉到浏览器下面——用户看不见窗，以为卡住了。这里用一个假 `tkinter` 钉住三条：**没有**
+    withdraw、设了 `-topmost`、把宿主交给了 `askdirectory(parent=...)`。
+    """
+    calls: list[tuple[Any, ...]] = []
+    asked: list[dict[str, Any]] = []
+
+    class FakeRoot:
+        def overrideredirect(self, flag: bool) -> None:
+            calls.append(("overrideredirect", flag))
+
+        def geometry(self, spec: str) -> None:
+            calls.append(("geometry", spec))
+
+        def attributes(self, name: str, value: Any = None) -> None:
+            calls.append(("attributes", name, value))
+
+        def withdraw(self) -> None:  # 回归点：这里被调用过，对话框就会沉底
+            calls.append(("withdraw",))
+
+        def destroy(self) -> None:
+            calls.append(("destroy",))
+
+    host = FakeRoot()
+    fake_filedialog = SimpleNamespace(
+        askdirectory=lambda **kwargs: (asked.append(kwargs), r"D:\projects\demo")[1]
+    )
+    fake_tkinter = SimpleNamespace(Tk=lambda: host, filedialog=fake_filedialog)
+    monkeypatch.setitem(sys.modules, "tkinter", fake_tkinter)
+    monkeypatch.setitem(sys.modules, "tkinter.filedialog", fake_filedialog)
+
+    assert directory_picker._ask_directory() == r"D:\projects\demo"
+
+    assert ("withdraw",) not in calls
+    assert ("overrideredirect", True) in calls
+    assert ("attributes", "-topmost", True) in calls
+    assert asked == [
+        {"title": directory_picker._DIALOG_TITLE, "mustexist": True, "parent": host}
+    ]
+    assert calls[-1] == ("destroy",)  # 选完就销毁宿主，不留残留窗口
 
 
 def test_main_requires_the_flag(capsys: pytest.CaptureFixture[str]) -> None:

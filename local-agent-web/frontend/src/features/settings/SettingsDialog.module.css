@@ -156,8 +156,10 @@
   min-width: 0;
 }
 
+/* 连接名是用户自己填的，可能很长：缺 `min-width: 0` 会把右侧的标签挤出去。 */
 .cardName {
   flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -391,7 +393,12 @@
 /* ---- section switcher (T38: both sections are real) --------------------- */
 
 .tabs {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--law-bg-layer-1);
   display: flex;
+  flex-wrap: wrap;
   gap: var(--law-space-sm);
   border-bottom: 1px solid var(--law-border-l1);
 }

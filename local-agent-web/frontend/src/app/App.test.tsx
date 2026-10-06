@@ -63,6 +63,6 @@ describe('App sidebar state', () => {
     const rows = screen.getAllByRole('listitem')
     const current = rows.filter((row) => row.getAttribute('aria-current') === 'true')
     expect(current).toHaveLength(1)
-    expect(within(current[0] as HTMLElement).getByText('定位构建失败原因')).toBeInTheDocument()
+    expect(within(current[0] as HTMLElement).getByText(/^定位构建失败原因/)).toBeInTheDocument()
   })
 })

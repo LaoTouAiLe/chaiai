@@ -19,7 +19,7 @@ from local_agent.security import shell_guard
 from local_agent.security.approval import action_fingerprint
 from local_agent.security.diff_guard import parse_patch
 from local_agent.security.policy import SecurityPolicy
-from local_agent.tools import file_tools
+from local_agent.tools import file_tools, search_tools
 from local_agent.tools.file_tools import (
     MAX_RECURSIVE_DEPTH,
     build_file_tools,
@@ -51,6 +51,148 @@ def _config_with_large_edit(app_config: AppConfig, max_changed_lines: int) -> Ap
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+# --------------------------------------------------------------------------- grep / glob
+#
+# 2026-09-30 新增。在它们之前，tool 模式**没有任何检索能力**，Shell 兜底也不可用
+# （shell_guard 的白名单要求参数完全匹配，搜索类命令一律落到"需人工审批"），模型只能枚举目录 +
+# 通读文件；实测一次"梳理架构"的提问做了 30 次 list_dir + 26 次 read_file。这些用例钉住的是
+# "先定位再定点读"这件事本身，以及它与 read_file / 按需 RAG 相同的边界口径。
+
+
+def test_grep_finds_content_with_line_numbers(tmp_path: Path, policy: SecurityPolicy) -> None:
+    (tmp_path / "a.py").write_text("alpha\nbeta target\ngamma\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("target on first line\n", encoding="utf-8")
+    (tmp_path / "c.md").write_text("target\n", encoding="utf-8")
+
+    result = search_tools.grep_content("target", policy=policy, glob="*.py")
+
+    # 行号是"能定位"的最小条件：没有它模型只能整篇读。
+    assert [(match.path, match.line_number) for match in result.matches] == [
+        ("a.py", 2),
+        ("b.py", 1),
+    ]
+    assert result.total_matches == 2
+    assert result.truncated is False
+    assert "没有匹配" not in (result.note or "")
+
+
+def test_grep_files_with_matches_lists_without_content(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """``files_with_matches`` 只给文件名与计数：模型据此决定读哪几个，而不是把命中行全读进来。"""
+    (tmp_path / "a.py").write_text("hit\nhit\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("hit\n", encoding="utf-8")
+
+    result = search_tools.grep_content("hit", policy=policy, output_mode="files_with_matches")
+
+    assert result.matches == []
+    assert [(hit.path, hit.count) for hit in result.hits] == [("a.py", 2), ("b.py", 1)]
+    assert result.total_matches == 3
+
+
+def test_grep_skips_sensitive_dependency_and_binary_files(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """密钥文件、依赖目录与二进制都不进结果——与 read_file / 按需 RAG 同一口径。"""
+    (tmp_path / ".env").write_text("SECRET=hit\n", encoding="utf-8")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "dep.py").write_text("hit\n", encoding="utf-8")
+    (tmp_path / "blob.bin").write_bytes(b"hit\x00\x01")
+    (tmp_path / "a.py").write_text("hit\n", encoding="utf-8")
+
+    result = search_tools.grep_content("hit", policy=policy)
+
+    assert [hit.path for hit in result.hits] == ["a.py"]
+
+
+def test_grep_accepts_a_single_file_as_the_search_root(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """``path`` 指向**文件**时只搜那个文件（``rg pattern file.py`` 的语义）。
+
+    实测缺陷（2026-09-30）：此前要求必须是目录，于是模型最自然的用法——``path='README.md'``
+    ——被拒，界面弹出"工具被安全策略拒绝: grep"，文案还误说成"改为在工作区内操作"（路径其实就在
+    工作区内）。一轮里被这样拒了 4 次，模型只好改写成 ``glob='README.md'`` 绕过去。
+    """
+    (tmp_path / "a.py").write_text("target one\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("target two\n", encoding="utf-8")
+
+    result = search_tools.grep_content("target", policy=policy, path="a.py")
+
+    assert [hit.path for hit in result.hits] == ["a.py"]
+    assert [(match.path, match.line_number) for match in result.matches] == [("a.py", 1)]
+
+
+def test_grep_on_a_sensitive_file_as_root_returns_nothing(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """把密钥文件当检索根同样不返回内容：跳过规则在"单文件"这条路径上照旧生效。"""
+    (tmp_path / ".env").write_text("SECRET=target\n", encoding="utf-8")
+
+    result = search_tools.grep_content("target", policy=policy, path=".env")
+
+    assert result.hits == []
+    assert result.matches == []
+
+
+def test_grep_missing_path_is_a_parameter_error_not_a_policy_denial(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """不存在的路径是**参数问题**、不是策略问题：抛 ``ValueError``（映射成"工具执行失败／检查工具
+    参数"），不要抛 ``SecurityError``——后者会显示成"被安全策略拦截"，把用户引到策略设置上去。"""
+    with pytest.raises(ValueError):
+        search_tools.grep_content("x", policy=policy, path="nope.py")
+
+
+def test_grep_refuses_outside_workspace_and_bad_regex(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    with pytest.raises(WorkspaceBoundaryError):
+        search_tools.grep_content("x", policy=policy, path="..")
+    with pytest.raises(ValueError):
+        search_tools.grep_content("([unclosed", policy=policy)
+
+
+def test_grep_reports_truncation_instead_of_silently_cutting(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """到上限要**如实标注**，让模型知道"还有更多"，而不是以为结果就这些。"""
+    (tmp_path / "a.py").write_text("hit\n" * 50, encoding="utf-8")
+
+    result = search_tools.grep_content("hit", policy=policy, max_matches=3)
+
+    assert result.total_matches == 3
+    assert result.truncated is True
+    assert "命中上限" in (result.note or "")
+
+
+def test_glob_matches_nested_and_zero_level_paths(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """``src/**/*.py`` 必须也能匹配 ``src/a.py``：``**/`` 的语义是"零个或多个目录"。"""
+    (tmp_path / "src" / "deep").mkdir(parents=True)
+    (tmp_path / "src" / "a.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "deep" / "b.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "c.md").write_text("", encoding="utf-8")
+
+    result = search_tools.glob_files("src/**/*.py", policy=policy)
+
+    assert result.files == ["src/a.py", "src/deep/b.py"]
+
+
+def test_glob_refuses_outside_workspace(tmp_path: Path, policy: SecurityPolicy) -> None:
+    with pytest.raises(WorkspaceBoundaryError):
+        search_tools.glob_files("*.py", policy=policy, path="..")
+
+
+def test_search_tools_are_registered_as_read_only() -> None:
+    """两个工具必须登记进只读白名单：否则安全门会把它们当未知工具拒掉。"""
+    from local_agent.security.policy import KNOWN_TOOLS, READ_ONLY_TOOLS
+
+    assert "grep" in READ_ONLY_TOOLS and "glob" in READ_ONLY_TOOLS
+    assert "grep" in KNOWN_TOOLS and "glob" in KNOWN_TOOLS
 
 
 # --------------------------------------------------------------------------- list_dir

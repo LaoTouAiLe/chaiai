@@ -10,9 +10,13 @@
 
 .left {
   min-width: 0;
+  overflow: hidden;
 }
 
 .breadcrumb {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--law-text-caption);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
@@ -29,6 +33,7 @@
 
 .right {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: var(--law-space-md);
 }
@@ -61,19 +66,4 @@
   color: var(--law-text-primary);
   font-weight: var(--law-weight-medium);
   box-shadow: var(--law-shadow-lv1);
-}
-
-.log {
-  height: 32px;
-  padding: 0 var(--law-space-lg);
-  border-radius: var(--law-radius-md);
-  border: 1px solid var(--law-border-l2);
-  color: var(--law-text-secondary);
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
-}
-
-.log:hover {
-  background: var(--law-button-ghost-hover);
-  color: var(--law-text-primary);
 }

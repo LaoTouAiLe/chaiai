@@ -46,6 +46,14 @@ export function useSessions(workspaceId: string | null) {
   })
 }
 
+export function useArchivedSessions(enabled: boolean) {
+  return useQuery({
+    queryKey: ['sessions', 'archived'],
+    queryFn: () => listSessions(undefined, true),
+    enabled,
+  })
+}
+
 /** 模型连接列表：页面用它把"会话选中的连接 id"翻成可读的模型标签。 */
 export function useModelConnections() {
   return useQuery({
@@ -106,10 +114,11 @@ export function useSelectWorkspace() {
 export function useCreateSession() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (workspaceId: string | null) =>
-      createSession(workspaceId === null ? {} : { workspace_id: workspaceId }),
+    mutationFn: ({ workspaceId, mode }: { workspaceId: string | null; mode: 'chat' | 'agent' }) =>
+      createSession(workspaceId === null ? { mode } : { workspace_id: workspaceId, mode }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.workspaces })
     },
   })
 }

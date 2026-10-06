@@ -43,6 +43,7 @@ from local_agent.model_settings.models import (
     ModelConnection,
     validate_draft,
 )
+from local_agent.model_settings.preferences import PreferenceStore
 from local_agent.persistence import migrations
 from local_agent.security.path_guard import (
     ExternalPathPolicy,
@@ -229,6 +230,7 @@ class SettingsDatabase:
     connection: sqlite3.Connection
     connections: ConnectionStore
     permissions: PermissionStore
+    preferences: PreferenceStore
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -262,6 +264,7 @@ def open_settings_database(
         connection=connection,
         connections=ConnectionStore(connection, credentials=credentials),
         permissions=PermissionStore(connection, default_mode=default_external_paths_mode),
+        preferences=PreferenceStore(connection),
     )
 
 
