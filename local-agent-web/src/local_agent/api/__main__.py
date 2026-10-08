@@ -7,6 +7,13 @@
 只弹一个原生选择窗并把结果打到 stdout（见 `local_agent.directory_picker`）。源码模式经
 `python -m local_agent.api` 进入；打包后 exe 通过 `sys.executable` 自启动。
 
+打包形态（T40）只换**路径来源**，不换流程：``--config`` / ``--env`` 默认落在用户数据目录
+（``%LOCALAPPDATA%\\chaiai``），前端产物从只读资源目录（``sys._MEIPASS``）取。口径与理由见
+:mod:`local_agent.app_paths`；源码形态下这两项都是原来的相对路径，行为不变。
+
+服务就绪后默认用本机默认浏览器打开页面（:mod:`local_agent.browser_open`）：没参与开发的人双击
+exe 时唯一期望就是"页面自己出来"，而不是先复制一段地址。自动化场景用 ``--no-open-browser`` 关掉。
+
 多 worker 属于**不受支持配置**，所以这里硬编 ``workers=1``；配套的排他文件锁会让第二个进程
 在启动时就失败——进程内广播、每会话互斥与幂等台账都以"只有一个进程在写"为前提（§15.1）。
 """
@@ -21,8 +28,8 @@ from pathlib import Path
 
 import uvicorn
 
+from local_agent import app_paths, browser_open, directory_picker
 from local_agent import config as config_module
-from local_agent import directory_picker
 from local_agent.api.app import create_app
 from local_agent.api.container import open_runtime
 from local_agent.config import ConfigError
@@ -42,13 +49,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--config",
-        default=str(config_module.DEFAULT_CONFIG_PATH),
-        help="配置文件路径（默认 config.yaml，相对当前目录）",
+        default=str(app_paths.default_config_path()),
+        help="配置文件路径（源码默认 config.yaml；打包后默认用户数据目录里的 config.yaml）",
     )
     parser.add_argument(
         "--env",
-        default=str(config_module.DEFAULT_ENV_PATH),
-        help=".env 路径（默认 .env，只用来取 API Key）",
+        default=str(app_paths.default_env_path()),
+        help=".env 路径（只用来取 API Key；默认与 --config 同目录）",
+    )
+    parser.add_argument(
+        "--no-open-browser",
+        action="store_true",
+        help="启动后不用默认浏览器打开页面（自动化、只想看日志时用）",
     )
     args = parser.parse_args(argv)
     config_path = Path(args.config)
@@ -61,7 +73,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         # 设置页仍然可用，提交会得到 `MODEL_CONNECTION_REQUIRED` / `MODEL_AUTH_FAILED` 这类
         # 可执行提示——而不是"服务起不来，只能去翻终端"。
         # 相对路径按**配置文件所在目录**解析：从哪个目录启动都得到同一个库。
-        runtime = open_runtime(app_config, base_dir=config_path.resolve().parent)
+        # 打包形态的前端产物在**只读资源目录**里（不在数据目录），显式交给装配；源码形态拿到
+        # None，继续按 `web.static_dir` 相对配置文件目录解析——行为不变（§T40）。
+        runtime = open_runtime(
+            app_config,
+            base_dir=config_path.resolve().parent,
+            static_dir=app_paths.bundled_static_dir(),
+        )
     except (ConfigError, RuntimeError, SessionStoreError, sqlite3.Error) as exc:
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1
@@ -83,11 +101,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         if runtime.service.model_configured()
         else "\n还没有可用的模型连接：打开设置页添加一条（不需要重启服务）。"
     )
+    # 打包形态把"用户数据在哪"直接打出来：朋友用不到命令行，但排障和备份都得知道这个目录。
+    data_dir = app_paths.data_dir()
+    data_hint = "" if data_dir is None else f"\n数据目录：{data_dir}"
     print(
         f"local-agent-web v0.4 已启动：http://{web.host}:{web.port}（单进程、单 worker）"
-        f"\n{frontend}{setup_hint}",
+        f"\n{frontend}{data_hint}{setup_hint}",
         flush=True,
     )
+    if not args.no_open_browser:
+        # 后台线程等端口真的可连再打开：抢在服务就绪之前打开会得到一张连接失败的页面。
+        probe_host, page_url = browser_open.page_target(web.host, web.port)
+        print(f"正在用本机默认浏览器打开：{page_url}", flush=True)
+        browser_open.open_when_ready(page_url, host=probe_host, port=web.port)
     try:
         uvicorn.run(
             create_app(runtime),

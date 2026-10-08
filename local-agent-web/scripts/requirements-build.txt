@@ -1,0 +1,10 @@
+# 构建 Windows 试用包（T40）用的**构建工具链**，不是运行依赖。
+#
+# 装进项目 venv（不会改动 uv.lock，也不进入运行时依赖）：
+#   uv pip install --python .venv/Scripts/python.exe -r scripts/requirements-build.txt
+#
+# 版本在第一次成功构建后锁定（计划 §T40：跑通后锁定工具版本与构建脚本）。
+# pyinstaller-hooks-contrib 单独钉住：它决定第三方包的收集规则，跟 PyInstaller 各自发布，
+# 不钉住的话同一份代码在不同时间构建出的包内容会不一致。
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.8
