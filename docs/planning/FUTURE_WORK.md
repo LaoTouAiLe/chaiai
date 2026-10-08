@@ -327,7 +327,7 @@ v0.4 的受支持部署拓扑固定为单个 Python 进程、单个 Uvicorn work
 
 #### v0.5｜Agent Profile 与业务能力扩展
 
-**目标**：让不同 Agent 拥有不同工具、Prompt 和权限，但仍采用静态注册，不实现动态插件安装。v0.5 在 v0.4 的 T38、T39、T40 与朋友试用复验完成后开始；目前尚无独立 v0.5 实施计划。
+**目标**：让不同 Agent 拥有不同工具、Prompt 和权限，但仍采用静态注册，不实现动态插件安装。v0.5 在 v0.4 的收口与朋友试用完成后开始；**已于 2026-10-08 立项**，实施顺序与逐任务验收见 [V0_5_DEVELOPMENT_PLAN.md](../../V0_5_DEVELOPMENT_PLAN.md)。
 
 主要工作：
 
@@ -612,7 +612,7 @@ OpenManus `app/sandbox/core/sandbox.py:105-121` 只显示工作目录和额外�
 
 ### 13. 当前下一步
 
-**现在只按 [V0_4_DEVELOPMENT_PLAN.md](../../V0_4_DEVELOPMENT_PLAN.md) 推进：T38 → T39 → T40 → T37 朋友试用复验。** [OPTIMIZATION_BACKLOG.md](FUTURE_WORK.md#backlog) 是候选资料，不决定当前任务；v0.5 是此后才立项的能力阶段。契约变动仍须先修订 `ARCHITECTURE.md`。
+**v0.4 的 T38 → T39 → T40 → T37 已按 [V0_4_DEVELOPMENT_PLAN.md](../../V0_4_DEVELOPMENT_PLAN.md) 走完（T37 记录含人工批准的豁免项），v0.5 已于 2026-10-08 立项，现按 [V0_5_DEVELOPMENT_PLAN.md](../../V0_5_DEVELOPMENT_PLAN.md) 推进。** [候选优化清单](FUTURE_WORK.md#backlog) 是候选资料，不决定当前任务。契约变动仍须先修订 `ARCHITECTURE.md`。
 
 以下是 v0.4 规划时的实施顺序记录，不代表这些任务仍待开工：
 
@@ -658,7 +658,7 @@ v0.4 的停止条件：页面原型不能覆盖一次完整安全任务、应用
 **与既有文档的关系：**
 
 - 本文件不替代 `PRODUCT_EVOLUTION_ROADMAP.md`（方向）与各阶段计划（任务）。
-- 本文件对 v0.5 及以后只给**阶段建议**，不构成任务拆分；v0.5 目前没有独立实施计划。
+- 本文件对 v0.5 及以后只给**阶段建议**，不构成任务拆分；v0.5 的任务拆分见 [V0_5_DEVELOPMENT_PLAN.md](../../V0_5_DEVELOPMENT_PLAN.md)（2026-10-08 立项）。
 - 条目里的"阶段建议"在立计划时必须重新判定——触发条件可能已经不成立。
 - **§1–§6 从工程侧切入**（记忆、检索、CI）；**§7 从"用户点下去会怎样"切入**。两节不重叠，需要各自排期。
 
