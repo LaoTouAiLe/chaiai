@@ -16,10 +16,12 @@
 
 from __future__ import annotations
 
+import gzip
 import ipaddress
 import re
 import socket
-from collections.abc import Callable, Sequence
+import zlib
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from html import unescape
 from urllib.error import HTTPError, URLError
@@ -33,7 +35,50 @@ from local_agent.tools.result_types import WebFetchResult, WebSearchHit, WebSear
 
 #: 搜索端点是**本模块的常量**（不由模型给），因此只做 scheme 校验、不做 DNS 解析：
 #: 解析它会把"测试能不能离线跑"绑到"这个域名当时能不能解析"上。
-SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
+_DDG_LINK = re.compile(
+    r'<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL | re.IGNORECASE
+)
+#: Bing 结果页的标题链接（``<h2><a href="...">标题</a>``）。2026-10-08 实测：直链、无跳转包装。
+_BING_LINK = re.compile(r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', re.DOTALL | re.IGNORECASE)
+
+#: 未显式指定 provider 时用的那个（与 `config.WebAccessConfig.provider` 的默认值一致）。
+DEFAULT_PROVIDER = "bing_html"
+
+
+@dataclass(frozen=True)
+class SearchProvider:
+    """一个搜索 provider：端点、结果链接规则、是否需要解包跳转（架构 §16.3）。"""
+
+    name: str
+    endpoint: str
+    link_pattern: re.Pattern[str]
+    unwrap_redirect: bool
+
+
+#: provider 闭集（与 `config.WebAccessProvider` 一一对应）：**可配置的单实现，不是自动回退链**。
+#: 选定的那个不可达或被反爬挡住时如实失败，由用户改配置换另一个。
+SEARCH_PROVIDERS: Mapping[str, SearchProvider] = {
+    "bing_html": SearchProvider(
+        name="bing_html",
+        endpoint="https://www.bing.com/search",
+        link_pattern=_BING_LINK,
+        unwrap_redirect=False,
+    ),
+    "duckduckgo_html": SearchProvider(
+        name="duckduckgo_html",
+        endpoint="https://html.duckduckgo.com/html/",
+        link_pattern=_DDG_LINK,
+        unwrap_redirect=True,
+    ),
+}
+
+
+def provider_for(name: str) -> SearchProvider:
+    """按配置取 provider；未知名字抛错（配置层已用闭集校验，这里是最后一道）。"""
+    try:
+        return SEARCH_PROVIDERS[name]
+    except KeyError as exc:  # pragma: no cover - 配置层已经拦住
+        raise WebAccessError(f"未知的搜索 provider：{name}") from exc
 
 #: 单次响应体上限（字节）：超过即截断，避免一个超大页面把内存与上下文一起吃掉。
 MAX_RESPONSE_BYTES = 2_000_000
@@ -182,15 +227,19 @@ def unwrap_search_link(href: str) -> str:
     return text
 
 
-def parse_search_results(html: str, *, max_results: int) -> list[WebSearchHit]:
+def parse_search_results(
+    html: str, *, max_results: int, provider: SearchProvider | None = None
+) -> list[WebSearchHit]:
     """从搜索结果页解析出结构化来源（标题、URL、来源站点）。
 
-    解析不到就返回空列表：调用方据此如实报告"没有解析出结果"，而不是伪造一条。
+    链接规则来自 provider（Bing 给直链、DDG 需要解包 ``uddg``）。解析不到就返回空列表：调用方据此
+    如实报告"没有解析出结果"，而不是伪造一条。
     """
+    spec = provider or SEARCH_PROVIDERS[DEFAULT_PROVIDER]
     hits: list[WebSearchHit] = []
     seen: set[str] = set()
-    for href, raw_title in _RESULT_LINK.findall(html):
-        url = unwrap_search_link(href)
+    for href, raw_title in spec.link_pattern.findall(html):
+        url = unwrap_search_link(href) if spec.unwrap_redirect else unescape(href.strip())
         title = " ".join(unescape(_ANY_TAG.sub("", raw_title)).split())
         if not url or not title or url in seen:
             continue
@@ -212,6 +261,8 @@ def _default_transport(url: str, timeout: float, user_agent: str) -> WebResponse
         headers={
             "User-Agent": user_agent,
             "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
+            # 同 provider 的两套结果页都吃这个头：中文环境拿到的标题才会是中文（实测 Bing）
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         },
     )
     try:
@@ -219,6 +270,8 @@ def _default_transport(url: str, timeout: float, user_agent: str) -> WebResponse
             final_url = str(response.geturl())
             check_url(final_url)
             content_type = str(response.headers.get("Content-Type", ""))
+            # 在 with 里取全部 header：出了作用域再碰 response 属性属于依赖实现细节
+            content_encoding = str(response.headers.get("Content-Encoding", ""))
             payload = response.read(MAX_RESPONSE_BYTES + 1)
             status = int(getattr(response, "status", 200))
     except HTTPError as exc:
@@ -231,17 +284,51 @@ def _default_transport(url: str, timeout: float, user_agent: str) -> WebResponse
     for chunk in content_type.split(";")[1:]:
         if "charset=" in chunk:
             charset = chunk.split("charset=", 1)[1].strip() or charset
-    truncated_note = payload[:MAX_RESPONSE_BYTES]
-    try:
-        text = truncated_note.decode(charset, errors="replace")
-    except LookupError:  # 未知 charset
-        text = truncated_note.decode("utf-8", errors="replace")
+    text = decode_body(payload, content_encoding=content_encoding, charset=charset)
     return WebResponse(url=final_url, status=status, content_type=content_type, text=text)
 
 
 def _is_text_like(content_type: str) -> bool:
     lowered = content_type.lower()
     return any(item in lowered for item in TEXT_CONTENT_TYPES)
+
+
+def decode_body(payload: bytes, *, content_encoding: str, charset: str) -> str:
+    """按 ``Content-Encoding`` 解压、再按 ``charset`` 解码正文。
+
+    为什么必须自己解压（2026-10-08 实测）：有的站点**无视 ``Accept-Encoding: identity`` 恒返回 gzip**
+    （`www.python.org` 就是），把它按文本解码会得到满屏乱码——而模型很可能忠实地把乱码当正文读进去。
+    只支持 stdlib 能解的 ``gzip`` / ``deflate``；``br`` 之类如实失败，不为它引第三方依赖。
+
+    Raises:
+        WebAccessError: 压缩方式不支持，或解压失败（截断、损坏）。
+    """
+    encoding = (content_encoding or "").strip().lower()
+    raw = payload
+    if encoding in ("gzip", "x-gzip"):
+        try:
+            raw = gzip.decompress(payload)
+        except OSError as exc:
+            raise WebAccessError(f"响应声明 gzip 但解压失败（可能是压缩流被截断）：{exc}") from exc
+    elif encoding == "deflate":
+        try:
+            raw = zlib.decompress(payload)
+        except zlib.error:
+            try:  # 有些服务端给的是裸 deflate（没有 zlib 头）
+                raw = zlib.decompress(payload, -zlib.MAX_WBITS)
+            except zlib.error as exc:
+                raise WebAccessError(f"响应声明 deflate 但解压失败：{exc}") from exc
+    elif encoding not in ("", "identity"):
+        raise WebAccessError(
+            f"不支持的响应压缩方式：{encoding}（只支持 gzip/deflate；未引入第三方依赖）"
+        )
+    # 解压后的上限：防"压缩炸弹"（几 KB 的 gzip 能膨胀成几百 MB）
+    if len(raw) > MAX_RESPONSE_BYTES * 4:
+        raw = raw[: MAX_RESPONSE_BYTES * 4]
+    try:
+        return raw.decode(charset, errors="replace")
+    except LookupError:
+        return raw.decode("utf-8", errors="replace")
 
 
 def search(
@@ -262,11 +349,12 @@ def search(
     if not config.enabled:
         raise WebAccessError("外部访问未启用（web_access.enabled=false）")
     limit = max(1, min(int(max_results or config.max_results), HARD_MAX_RESULTS))
-    endpoint = f"{check_url(SEARCH_ENDPOINT, resolve=False)}?q={_quote(text)}"
+    spec = provider_for(config.provider)
+    endpoint = f"{check_url(spec.endpoint, resolve=False)}?q={_quote(text)}"
     response = (transport or _default_transport)(
         endpoint, float(config.timeout_seconds), config.user_agent
     )
-    hits = parse_search_results(response.text, max_results=limit)
+    hits = parse_search_results(response.text, max_results=limit, provider=spec)
     note: str | None = None
     if not hits:
         # 如实报告：解析不出来就是解析不出来，不说成"没有相关结果"

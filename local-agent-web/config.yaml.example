@@ -212,7 +212,10 @@ profiles:
 # 安全边界（§6.10）：只允许 http/https，拒绝本机与内网地址，并且**重定向后再次校验**（防 SSRF）。
 web_access:
   enabled: false
-  provider: "duckduckgo_html"   # 目前只有这一个**免密钥**实现；被反爬挡住或页面改版时如实失败
+  # 免密钥的 HTML 检索，二选一（不是自动回退）：bing_html（默认）| duckduckgo_html
+  # 默认值来自 2026-10-08 本机实测：DuckDuckGo 被 DNS 污染到 Meta 的地址段并超时，Bing 0.5 秒返回。
+  # 换网络环境后可以重新测一次再决定用哪个；两个都不可达时工具会如实报失败。
+  provider: "bing_html"
   timeout_seconds: 15
   max_results: 5
   max_chars: 8000

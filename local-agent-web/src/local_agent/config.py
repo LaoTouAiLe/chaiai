@@ -544,8 +544,11 @@ class ModelSettingsConfig(_StrictModel):
     credential_store: Literal["auto", "memory"] = "auto"
 
 
-#: 外部内容访问（v0.5 T53）的 provider 闭集。目前只有一个**免密钥**实现。
-WebAccessProvider = Literal["duckduckgo_html"]
+#: 外部内容访问（v0.5 T53）的 provider 闭集：**只有免密钥的 HTML 检索**。
+#:
+#: 默认 `bing_html` 来自 2026-10-08 的本机实测：`html.duckduckgo.com` 被 DNS 污染到 Meta 的地址段并
+#: 连接超时，而 `www.bing.com/search` 0.5 秒返回。这是**环境事实**，换网络后应重新测量（架构 §16.3）。
+WebAccessProvider = Literal["bing_html", "duckduckgo_html"]
 
 
 class WebAccessConfig(_StrictModel):
@@ -560,7 +563,7 @@ class WebAccessConfig(_StrictModel):
     """
 
     enabled: bool = False
-    provider: WebAccessProvider = "duckduckgo_html"
+    provider: WebAccessProvider = "bing_html"
     timeout_seconds: int = Field(default=15, gt=0, le=120)
     max_results: int = Field(default=5, ge=1, le=20)
     #: 单次抓取的正文上限（字符）：超过即截断，并在结果 ``note`` 里写明。

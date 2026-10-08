@@ -12,10 +12,13 @@
 
 from __future__ import annotations
 
+import gzip
 import json
+import zlib
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from local_agent.capabilities import (
     PROFILES,
@@ -35,6 +38,14 @@ SEARCH_HTML = """
   </a>
   <a class="result__a" href="https://docs.example.org/ref">Docs Reference</a>
   <a class="other" href="https://ignored.example/">不该被当成结果</a>
+</body></html>
+"""
+
+BING_HTML = """
+<html><body>
+  <li class="b_algo"><h2><a href="https://www.python.org/downloads/">Download Python</a></h2></li>
+  <li class="b_algo"><h2><a href="https://docs.python.org/3/whatsnew/3.14.html">
+    <b>What's New</b> In Python 3.14</a></h2></li>
 </body></html>
 """
 
@@ -139,7 +150,9 @@ def test_fetch_checks_the_redirect_target() -> None:
 
 
 def test_search_returns_structured_sources() -> None:
-    result = web_tools.search("示例", config=_enabled(), transport=_transport(SEARCH_HTML))
+    # 这份固定装置是 DuckDuckGo 的 HTML（含 uddg 跳转包装）：显式选它，别依赖默认 provider
+    config = WebAccessConfig(enabled=True, provider="duckduckgo_html", max_results=3)
+    result = web_tools.search("示例", config=config, transport=_transport(SEARCH_HTML))
 
     assert [hit.title for hit in result.results] == ["Example Guide", "Docs Reference"]
     assert result.results[0].url == "https://example.com/guide"
@@ -147,6 +160,32 @@ def test_search_returns_structured_sources() -> None:
     assert result.results[1].source == "docs.example.org"
     # 结构化结果里**不含正文**：正文只能靠 web_fetch 取（先搜后取）
     assert all("正文" not in hit.title for hit in result.results)
+
+
+def test_search_parses_bing_results_with_the_configured_provider() -> None:
+    """第二个 provider（Bing，2026-10-08 起为默认）：直链、无需解包跳转。"""
+    seen: list[str] = []
+
+    def transport(url: str, timeout: float, user_agent: str) -> web_tools.WebResponse:
+        del timeout, user_agent
+        seen.append(url)
+        return web_tools.WebResponse(url=url, status=200, content_type="text/html", text=BING_HTML)
+
+    config = WebAccessConfig(enabled=True, provider="bing_html", max_results=2)
+    result = web_tools.search("python 3.14", config=config, transport=transport)
+
+    assert [hit.url for hit in result.results] == [
+        "https://www.python.org/downloads/",
+        "https://docs.python.org/3/whatsnew/3.14.html",
+    ]
+    assert result.results[1].title == "What's New In Python 3.14"
+    assert seen and seen[0].startswith("https://www.bing.com/search?q=")
+
+
+def test_unknown_provider_is_rejected_by_config() -> None:
+    """provider 是闭集：写错名字在配置阶段就失败，不留到请求时才炸。"""
+    with pytest.raises(ValidationError):
+        WebAccessConfig(provider="google_html")  # type: ignore[arg-type]
 
 
 def test_search_reports_unparsable_pages_instead_of_pretending_empty() -> None:
@@ -196,6 +235,32 @@ def test_fetch_truncates_with_a_note() -> None:
     assert result.truncated is True
     assert len(result.text) == 500
     assert result.note is not None and "截断" in result.note
+
+
+def test_decode_body_handles_gzip_and_deflate() -> None:
+    """真实实证（python.org）：有的站点**无视 `Accept-Encoding: identity` 恒返回 gzip**。
+
+    不解压就按文本解码，模型会忠实地把满屏乱码当正文读进去——所以这一步必须是显式实现。
+    """
+    raw = "<html><title>压缩页</title><p>正文在此</p></html>".encode()
+
+    assert "正文在此" in web_tools.decode_body(
+        gzip.compress(raw), content_encoding="gzip", charset="utf-8"
+    )
+    assert "正文在此" in web_tools.decode_body(
+        zlib.compress(raw), content_encoding="deflate", charset="utf-8"
+    )
+    assert "正文在此" in web_tools.decode_body(raw, content_encoding="", charset="utf-8")
+
+
+def test_decode_body_reports_unsupported_or_broken_compression() -> None:
+    with pytest.raises(web_tools.WebAccessError) as unsupported:
+        web_tools.decode_body(b"x", content_encoding="br", charset="utf-8")
+    assert "不支持的响应压缩方式" in str(unsupported.value)
+
+    with pytest.raises(web_tools.WebAccessError) as broken:
+        web_tools.decode_body(b"not-gzip", content_encoding="gzip", charset="utf-8")
+    assert "解压失败" in str(broken.value)
 
 
 def test_fetch_rejects_non_text_content_types() -> None:
