@@ -17,8 +17,13 @@ output、端点与工具 Schema 指纹，以及发生压缩的位置。T35 的�
 
     uv run python scripts/measure_usage_baseline.py --data E:/tmp/t34-baseline
     uv run python scripts/measure_usage_baseline.py            # 用临时目录
+    uv run python scripts/measure_usage_baseline.py --profile researcher   # T51：按 Profile 各跑一遍
 
-退出码：0 成功；2 缺密钥 / 缺配置；3 场景里出现了未预期的终态（见 stderr）。
+T51 起多了 ``--profile``：同一份固定场景在 ``coder`` / ``researcher`` / ``reviewer`` 上各跑一遍，
+再用 ``scripts/report_prefix_cache.py`` 看逐调用缓存回落与工具 Schema 指纹的变化。**换 Profile 就是换
+工具集、也就是换前缀**，所以跨 Profile 的两次运行之间不做增量比较，各自看自己那一份。
+
+退出码：0 成功；2 缺密钥 / 缺配置 / Profile 名不存在；3 场景里出现了未预期的终态（见 stderr）。
 """
 
 from __future__ import annotations
@@ -72,8 +77,8 @@ def _load_env(path: Path) -> None:
         os.environ.setdefault(key.strip(), value.strip())
 
 
-def _write_config(data_dir: Path) -> Path:
-    """由示例配置派生一份：llm 段换成真实 ``config.yaml`` 的，凭据存储改内存态。"""
+def _write_config(data_dir: Path, profile: str) -> Path:
+    """由示例配置派生一份：llm 段换成真实 ``config.yaml`` 的，凭据存储改内存态，Profile 按参数固定。"""
     example_path = ROOT / "config.yaml.example"
     real_path = ROOT / "config.yaml"
     if not real_path.is_file():
@@ -84,6 +89,8 @@ def _write_config(data_dir: Path) -> Path:
     text["llm"] = real["llm"]
     text["model_settings"] = dict(text.get("model_settings") or {})
     text["model_settings"]["credential_store"] = "memory"
+    # T51：Profile 与密钥无关，显式写进派生配置，跑出来的基线才有"这是哪一档"的出处。
+    text["profiles"] = {"active": profile}
     config_path = data_dir / "config.yaml"
     config_path.write_text(
         yaml.safe_dump(text, allow_unicode=True, sort_keys=False), encoding="utf-8"
@@ -120,6 +127,11 @@ def main() -> int:
         help="结果 JSON 的落盘路径；默认写到数据目录下的 baseline_result.json",
     )
     parser.add_argument(
+        "--profile",
+        default=None,
+        help="Agent Profile 名（coder/researcher/reviewer）；默认用产品默认档",
+    )
+    parser.add_argument(
         "--no-probe",
         action="store_true",
         help=(
@@ -139,14 +151,21 @@ def main() -> int:
         Path(args.data) if args.data is not None else Path(tempfile.mkdtemp(prefix="t34-baseline"))
     )
     data_dir.mkdir(parents=True, exist_ok=True)
-    config_path = _write_config(data_dir)
-    _seed_workspace(data_dir)
 
     # 放在这里 import：路径与依赖都就绪后再导入，`--help` 不需要装齐环境。
     from local_agent.api.container import open_runtime
+    from local_agent.capabilities import DEFAULT_PROFILE, PROFILES, profile_names, tool_names_for
     from local_agent.config import load_config
 
+    profile = args.profile or DEFAULT_PROFILE
+    if profile not in PROFILES:
+        print(f"未知 Profile：{profile}（可用：{'、'.join(profile_names())}）", file=sys.stderr)
+        return 2
+    tool_names = tool_names_for("tool", PROFILES[profile])
+    config_path = _write_config(data_dir, profile)
+    _seed_workspace(data_dir)
     config = load_config(config_path)
+    print(f"[profile] {profile} 可见工具：{'、'.join(tool_names)}", flush=True)
     runtime = open_runtime(config, base_dir=data_dir, instance_lock=False)
     try:
         service = runtime.service
@@ -209,6 +228,9 @@ def main() -> int:
             "base_url": config.llm.base_url if config.llm is not None else None,
             "streaming": config.llm.streaming if config.llm is not None else None,
             "workspace": str(data_dir),
+            # T51：Profile 与它实际绑给模型的工具名——报告要能解释"工具 Schema 指纹为什么变了"。
+            "profile": profile,
+            "profile_tool_names": list(tool_names),
             "capability": capability,
             "turns": turns,
             "turns_count": len(turns),

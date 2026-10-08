@@ -1759,6 +1759,10 @@ v0.4 管理的是**聊天模型连接**（`provider=openai_compatible`）。连�
   **切换 Profile 是有意的前缀变化**，必须能由事件指纹解释；同一轮内不因对话内容增删工具。
 - 新增能力（`git_read` / `git_write` / `web` / `skill`）由 T53–T55 各自开工前追加到 §6.9 闭集与本节；
   **未追加前不得出现在任何 Profile 里**（包括 `custom`），否则就是给模型一个不存在的承诺。
+- **验收工具（T51）**：`scripts/measure_usage_baseline.py --profile <名字>` 用同一份固定场景逐档跑真实基线
+  （结果里写明 Profile 与实际绑给模型的工具名；它是本节唯一会真实调用模型的入口）；`scripts/report_prefix_cache.py
+  --result <baseline_result.json>` 输出逐调用缓存读、**回落次数**与"哪一段指纹变了"的归因，`--max-fallbacks`
+  （默认 1）超限即返回非零。后者只读 JSON、不发模型调用。观测量是回落次数，不是命中率。
 
 ### 16.2 信任分级 `origin`（未冻结，T52）
 
