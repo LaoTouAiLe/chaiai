@@ -253,6 +253,8 @@ def route_after_decision(state: AgentState) -> str:
     ``task_status`` 还显示 ``running``，用户看到一个半截任务（复审实证）。
     先走反思，由 ``_advance_plan`` 的机械规则决定继续还是收尾（完成一步不等于完成整个任务）。
     """
+    if state.get("task_status") == "failed":
+        return ROUTE_WITHOUT_TOOLS
     if state.get("pending_tool_calls"):
         return ROUTE_WITH_TOOLS
     if state.get("session_mode") == "chat":

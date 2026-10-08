@@ -71,6 +71,19 @@ class RequestLedger:
             updated_at=str(row[9]),
         )
 
+    def executing(self, session_id: str) -> list[LedgerEntry]:
+        ids = self._connection.execute(
+            "SELECT request_id FROM request_ledger WHERE session_id=? AND status=? ORDER BY created_at",
+            (session_id, STATUS_EXECUTING),
+        ).fetchall()
+        return [entry for row in ids if (entry := self.get(str(row[0]))) is not None]
+
+    def has_executing(self, session_id: str) -> bool:
+        return self._connection.execute(
+            "SELECT 1 FROM request_ledger WHERE session_id=? AND status=? LIMIT 1",
+            (session_id, STATUS_EXECUTING),
+        ).fetchone() is not None
+
     def start(
         self,
         *,

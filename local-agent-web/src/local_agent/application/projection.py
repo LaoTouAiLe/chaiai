@@ -116,6 +116,10 @@ _NOT_RECORDED: Final[str] = "（未记录）"
 #: `RUN_STAGE_FAILED` 的"未分类异常"，把正常的降级与"证据不足"读成崩溃（复审实证，2026-09-28）。
 #: 一致性由 `tests/test_projection.py` 对照断言。
 _STAGE_ERRORS: Final[dict[str, tuple[str, ErrorCategory]]] = {
+    "agent_decision_node": (app_errors.MODEL_CALL_FAILED, "model"),
+    "chat_node": (app_errors.MODEL_CALL_FAILED, "model"),
+    "recovery": (app_errors.RUN_INTERRUPTED, "recovery"),
+    "interrupted_turn": (app_errors.RUN_INTERRUPTED, "recovery"),
     STAGE_RECALL_MEMORY: (app_errors.MEMORY_RETRIEVAL_FAILED, "system"),
     STAGE_RETRIEVE_CODE: (app_errors.RAG_RETRIEVAL_FAILED, "system"),
     STAGE_COMPRESSION: (app_errors.CONTEXT_COMPRESSION_FAILED, "system"),
@@ -142,6 +146,8 @@ _STAGE_ERRORS: Final[dict[str, tuple[str, ErrorCategory]]] = {
 
 #: 公开标题与可执行提示。与 `stage` 无关的通用兜底放在 `RUN_STAGE_FAILED`。
 _ERROR_TEXT: Final[dict[str, tuple[str, str]]] = {
+    app_errors.MODEL_CALL_FAILED: ("本轮模型调用失败", "检查模型连接后再提问；已执行的工具操作保留。"),
+    app_errors.RUN_INTERRUPTED: ("中断任务已结束", "已核对并结束本轮，可以继续提问；工具不会自动重跑。"),
     app_errors.MEMORY_RETRIEVAL_FAILED: (
         "记忆召回失败",
         "本轮没有查到记忆，也没有据此回答。稍后重新发送即可重试。",
@@ -874,6 +880,10 @@ def project_tool_rows(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) 
         )
         outcome = _tool_outcome(tool_name, _take_payload(payloads, call_id), secrets)
         verification = evidence.get(call_id) if run == current_run else None
+        status = _tool_status(event, result)
+        if status in {"pending", "running"} and _run_failed(state, run):
+            status = "unknown"
+            preview = "本轮已结束，工具执行结果未完整记录；请以核对的文件或命令结果为准。"
         if verification is not None and outcome is not None and outcome.summary:
             verification = verification.model_copy(update={"summary": outcome.summary})
         # The original JSON contains hashes and internal keys. Known operations
@@ -891,7 +901,7 @@ def project_tool_rows(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) 
             ToolUseView(
                 tool_call_id=call_id,
                 tool_name=tool_name,
-                status=_tool_status(event, result),
+                status=status,
                 redacted_arguments=_display_arguments(event.get("redacted_arguments"), secrets),
                 approval_id=_optional_str(event.get("approval_id")),
                 output_preview=sanitize_text(preview, secrets) if preview is not None else None,
@@ -946,9 +956,15 @@ def _tool_row_id(run_id: str, tool_call_id: str) -> str:
     return f"tool:{tool_scope_key(run_id, tool_call_id)}"
 
 
+def _run_failed(state: Mapping[str, Any], run_id: str) -> bool:
+    record = _as_mapping((state.get("turn_records") or {}).get(run_id)) or {}
+    return (record.get("final_state") == "failed" and record.get("final_at") is not None) or (
+        run_id == current_run_id(state) and state.get("task_status") == "failed")
+
+
 def _tool_status(event: Mapping[str, Any], result: Mapping[str, Any] | None) -> ToolStatus:
     """结果记录优先；没有结果时按事件的时间字段判断"还未开始/进行中"。"""
-    known = {"pending", "running", "ok", "error", "denied"}
+    known = {"pending", "running", "ok", "error", "denied", "unknown"}
     if result is not None:
         status = str(result.get("status") or "")
         if status in known:
@@ -1155,6 +1171,9 @@ def project_approval(
             )
             state_value = "approved" if finished else "executing"
             note = None
+            if not finished and _run_failed(state, run):
+                state_value = "interrupted"
+                note = "本轮已结束，工具执行结果未完整记录；请以核对的文件或命令结果为准。"
         target, outside = _approval_target(
             (request or {}).get("tool_name"), (request or {}).get("arguments"), secrets, workspace_root
         )

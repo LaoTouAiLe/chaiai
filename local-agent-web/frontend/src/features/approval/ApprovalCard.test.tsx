@@ -47,6 +47,13 @@ describe('ApprovalCard', () => {
     expect(screen.queryByText(/该审批已超时失效，未执行任何操作/)).not.toBeInTheDocument()
   })
 
+  it('labels interrupted execution without offering another approval', () => {
+    render(<ApprovalCard approval={{ ...approvalOf(approvalExpiredScenario), state: 'interrupted',
+      note: '本轮已结束，工具执行结果未完整记录；请以核对结果为准。' }} />)
+    expect(screen.getByText('执行已中断 · 结果需核对')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '允许一次' })).not.toBeInTheDocument()
+  })
+
   it('expands a finished decision back to the full card on demand', async () => {
     const user = userEvent.setup()
     render(<ApprovalCard approval={approvalOf(approvalExpiredScenario)} />)

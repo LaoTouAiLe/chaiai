@@ -183,6 +183,18 @@ export function selectSession(id: string): Promise<Schemas['SessionSummaryView']
   return request(`/api/sessions/${encodeURIComponent(id)}/select`, { method: 'POST' })
 }
 
+export function setSessionMode(id: string, mode: 'chat' | 'agent', expectedMode: 'chat' | 'agent'): Promise<Schemas['SessionSummaryView']> {
+  return request(`/api/sessions/${encodeURIComponent(id)}/mode`, {
+    method: 'PATCH', body: JSON.stringify({ mode, expected_mode: expectedMode }),
+  })
+}
+
+export function endInterruptedRequest(id: string, requestId: string, snapshotId: string): Promise<Schemas['SessionSnapshot']> {
+  return request(`/api/sessions/${encodeURIComponent(id)}/recovery`, {
+    method: 'POST', body: JSON.stringify({ request_id: requestId, expected_snapshot_id: snapshotId, confirm_reviewed: true }),
+  })
+}
+
 export function renameSession(id: string, title: string): Promise<Schemas['SessionSummaryView']> {
   return request(`/api/sessions/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) })
 }
@@ -220,11 +232,42 @@ export function submitMessage(
   sessionId: string,
   text: string,
   clientRequestId: string,
+  context: SubmissionContext = {},
 ): Promise<Schemas['CommandResultView']> {
   return request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
     method: 'POST',
-    body: JSON.stringify({ text, client_request_id: clientRequestId }),
+    body: JSON.stringify({ text, client_request_id: clientRequestId, ...context }),
   })
+}
+
+export type SubmissionContext = Pick<components['schemas']['SubmitMessageRequest'],
+  'parent_turn_id' | 'expected_branch_id' | 'expected_snapshot_id'>
+
+export function getConversationMap(sessionId: string, query = '') {
+  return request<components['schemas']['ConversationMapView']>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/conversation-map?query=${encodeURIComponent(query)}`,
+  )
+}
+
+export function getTurnSnapshot(sessionId: string, turnId: string, includeAncestors = false) {
+  return request<components['schemas']['SessionSnapshot']>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/turns/${encodeURIComponent(turnId)}?include_ancestors=${String(includeAncestors)}`,
+  )
+}
+
+export function selectBranch(sessionId: string, branchId: string) {
+  return request<components['schemas']['SessionSnapshot']>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/branches/${encodeURIComponent(branchId)}/select`,
+    { method: 'POST' },
+  )
+}
+
+export function arrangeBranch(sessionId: string, branchId: string,
+  payload: components['schemas']['ArrangeBranchRequest']) {
+  return request<components['schemas']['ConversationMapView']>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/branches/${encodeURIComponent(branchId)}`,
+    { method: 'PATCH', body: JSON.stringify(payload) },
+  )
 }
 
 /** 审批决定；`edit` 必须带 `edited_arguments`，非 `edit` 带参数会被服务端拒绝（§15.7）。 */
@@ -336,6 +379,20 @@ export function getPermissions(): Promise<PermissionsDto> {
 
 export function getPreferences(): Promise<PreferencesDto> {
   return request('/api/preferences')
+}
+
+export type MemoryFilters = NonNullable<paths['/api/data-center/memories']['get']['parameters']['query']>
+export type UsageFilters = NonNullable<paths['/api/data-center/usage']['get']['parameters']['query']>
+function filterQuery(filters: MemoryFilters | UsageFilters): string {
+  const params = new URLSearchParams()
+  Object.entries(filters).forEach(([key, value]) => { if (value !== undefined && value !== null && value !== '') params.set(key, String(value)) })
+  return params.toString()
+}
+export function getMemoryPage(filters: MemoryFilters): Promise<components['schemas']['MemoryPageView']> {
+  return request(`/api/data-center/memories?${filterQuery(filters)}`)
+}
+export function getUsagePage(filters: UsageFilters): Promise<components['schemas']['UsagePageView']> {
+  return request(`/api/data-center/usage?${filterQuery(filters)}`)
 }
 
 export function savePreferences(values: PreferenceValues, expectedVersion: number): Promise<PreferencesDto> {

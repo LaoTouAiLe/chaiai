@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useResolveApproval, useSubmitMessage } from './queries'
+import { ApiError } from './client'
 
 const mock = vi.hoisted(() => ({ submit: vi.fn(), resolve: vi.fn(), nextId: vi.fn() }))
 vi.mock('./client', async (importOriginal) => ({
@@ -55,6 +56,41 @@ describe('useSubmitMessage session boundary', () => {
     act(() => result.current.mutate('同一条'))
     await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(2))
     expect(mock.submit.mock.calls.map((call) => call[2])).toEqual(['req-1', 'req-1'])
+  })
+  it('keeps the original historical context after an uncertain network result', async () => {
+    mock.submit.mockRejectedValueOnce(new Error('network interrupted'))
+    mock.submit.mockResolvedValue({ status: 'completed' })
+    const { result, rerender } = renderHook(({ checkpoint, branch }) => useSubmitMessage('s1', {
+      parent_turn_id: 'u1', expected_branch_id: branch, expected_snapshot_id: checkpoint,
+    }), { initialProps: { checkpoint: 'cp1', branch: 'main' }, wrapper })
+    act(() => result.current.mutate('历史追问'))
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    rerender({ checkpoint: 'cp2', branch: 'main' })
+    act(() => result.current.mutate('历史追问'))
+    await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(2))
+    expect(mock.submit.mock.calls[1]?.slice(2)).toEqual(['req-1', {
+      parent_turn_id: 'u1', expected_branch_id: 'main', expected_snapshot_id: 'cp1',
+    }])
+    await waitFor(() => expect(result.current.isPending).toBe(false))
+    rerender({ checkpoint: 'cp3', branch: 'b1' })
+    act(() => result.current.mutate('历史追问'))
+    await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(3))
+    expect(mock.submit.mock.calls[2]?.[2]).toBe('req-2')
+  })
+  it('uses a refreshed context only after an explicit path rejection before execution', async () => {
+    mock.submit.mockRejectedValueOnce(new ApiError({ status: 409, code: 'CONVERSATION_CONFLICT', message: '路径已改变' }))
+    mock.submit.mockResolvedValue({ status: 'completed' })
+    const { result, rerender } = renderHook(({ checkpoint }) => useSubmitMessage('s1', {
+      expected_branch_id: 'main', expected_snapshot_id: checkpoint,
+    }), { initialProps: { checkpoint: 'cp1' }, wrapper })
+    act(() => result.current.mutate('追问'))
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    rerender({ checkpoint: 'cp2' })
+    act(() => result.current.mutate('追问'))
+    await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(2))
+    expect(mock.submit.mock.calls[1]?.slice(2)).toEqual(['req-2', {
+      expected_branch_id: 'main', expected_snapshot_id: 'cp2',
+    }])
   })
 })
 

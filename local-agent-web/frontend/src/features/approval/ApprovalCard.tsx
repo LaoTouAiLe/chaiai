@@ -61,6 +61,7 @@ const STATE_LABEL: Record<ApprovalView['state'], string> = {
   approved: '已批准',
   rejected: '已拒绝',
   expired: '审批已失效',
+  interrupted: '执行已中断 · 结果需核对',
 }
 
 /**

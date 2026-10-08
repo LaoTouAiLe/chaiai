@@ -54,27 +54,31 @@ test('两轮真实对话，刷新后内容一致', async ({ page }) => {
   await expect(menu).toHaveCount(0)
 })
 
-test('切换模式会创建并保持一个新的闲聊会话', async ({ page }) => {
+test('在当前会话切换模式，保留草稿并在刷新后恢复', async ({ page }) => {
   await page.goto('/')
   const firstCreated = page.waitForResponse((response) =>
     response.url().endsWith('/api/sessions') && response.request().method() === 'POST' && response.status() === 200)
   await page.getByRole('button', { name: '新建会话' }).click()
   const first = await (await firstCreated).json() as { session_id: string; mode: string }
   expect(first.mode).toBe('agent')
+  const before = await (await page.request.get('/api/sessions')).json() as { session_id: string }[]
+  await page.getByPlaceholder('给智能体发消息').fill('保留切换前草稿')
 
   await page.getByRole('button', { name: '选择会话模式' }).click()
   const modeMenu = page.getByRole('menu', { name: '会话模式' })
-  await expect(modeMenu).toContainText('切换会新建会话')
-  const chatCreated = page.waitForResponse((response) =>
-    response.url().endsWith('/api/sessions') && response.request().method() === 'POST' && response.status() === 200)
+  await expect(modeMenu).toContainText('历史记录保留')
+  const chatUpdated = page.waitForResponse((response) =>
+    response.url().endsWith(`/api/sessions/${first.session_id}/mode`) && response.request().method() === 'PATCH' && response.status() === 200)
   await modeMenu.getByRole('menuitemradio', { name: /闲聊/ }).click()
-  const chat = await (await chatCreated).json() as { session_id: string; mode: string }
-  expect(chat.session_id).not.toBe(first.session_id)
+  const chat = await (await chatUpdated).json() as { session_id: string; mode: string }
+  expect(chat.session_id).toBe(first.session_id)
   expect(chat.mode).toBe('chat')
   await expect(page.getByRole('button', { name: '选择会话模式' })).toContainText('闲聊')
+  await expect(page.getByPlaceholder('给智能体发消息')).toHaveValue('保留切换前草稿')
 
   await page.reload()
   await expect(page.getByRole('button', { name: '选择会话模式' })).toContainText('闲聊')
   const sessions = await (await page.request.get('/api/sessions')).json() as { session_id: string; mode: string }[]
   expect(sessions.find((item) => item.session_id === chat.session_id)?.mode).toBe('chat')
+  expect(sessions).toHaveLength(before.length)
 })

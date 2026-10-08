@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from local_agent.application import errors as app_errors
 from local_agent.application import events as app_events
@@ -152,6 +152,106 @@ def test_unknown_session_raises_session_not_found(
     assert caught.value.code == app_errors.SESSION_NOT_FOUND
 
 
+def test_mode_switch_keeps_history_and_changes_tool_permissions(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig,
+) -> None:
+    calls = {text: [{"name": "write_file", "args": {"path": name, "content": text}, "id": text}]
+             for text, name in [("聊天写入", "chat.txt"), ("Agent写入", "agent.txt")]}
+    h = _harness(tmp_path, model_factory, app_config, decision="tool", tool_calls_by_input=calls)
+    sid = _session(h, mode="agent")
+    h.service.submit_message(sid, "先讨论", "first")
+    before = h.service.get_session_snapshot(sid)
+    changed = h.service.set_session_mode(sid, "chat", "agent")
+    assert changed.session_id == sid and changed.mode == "chat"
+    assert len(h.service.list_sessions()) == 1
+    assert h.service.get_session_snapshot(sid).snapshot_id == before.snapshot_id
+    assert h.service.get_session_snapshot(sid).messages == before.messages
+    h.service.submit_message(sid, "聊天写入", "chat")
+    assert not (h.workspace / "chat.txt").exists()
+    h.service.set_session_mode(sid, "agent", "chat")
+    h.service.submit_message(sid, "Agent写入", "agent")
+    assert (h.workspace / "agent.txt").read_text(encoding="utf-8") == "Agent写入"
+    assert len([m for m in _messages(h, sid) if m.kind == "user"]) == 3
+    h.database.connection.close()
+    restored = _open(tmp_path, model_factory, app_config, h.database_path)
+    assert restored.service.list_sessions()[0].mode == "agent"
+    assert len(restored.service.get_conversation_map(sid).nodes) == 3
+    restored.database.connection.close()
+
+
+@pytest.mark.parametrize("mode", ["agent", "chat"])
+@pytest.mark.parametrize("streaming", [False, True])
+def test_model_failure_is_terminal_and_next_question_works(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, mode: str, streaming: bool,
+) -> None:
+    config = app_config.model_copy(update={"llm": app_config.llm.model_copy(update={"streaming": streaming})})
+    h = _harness(tmp_path, model_factory, config, decision="chat", fail_on_input=["故障"], stream_chunks=3)
+    sid = _session(h, mode=mode)
+    result = h.service.submit_message(sid, "故障", "bad")
+    snap = h.service.get_session_snapshot(sid)
+    assert result.status == snap.session_state == "failed"
+    assert snap.interrupted_request_id is None
+    assert snap.errors and snap.usage and snap.usage.final_at is not None
+    assert snap.model_calls and any(call.status == "error" for call in snap.model_calls)
+    assert h.service.submit_message(sid, "故障", "bad").replayed
+    assert h.service.submit_message(sid, "继续讨论", "good").status == "completed"
+    assert len([m for m in _messages(h, sid) if m.kind == "user"]) == 2
+    h.database.connection.close()
+
+
+def test_recovery_after_side_effect_never_replays_tool(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = builder.tool_execution_node
+    executions: list[str] = []
+
+    def crash_after_write(state: Any, runtime: Any) -> Any:
+        original(state, runtime)
+        executions.append("write")
+        raise RuntimeError("工具落盘后持久化失败")
+
+    monkeypatch.setattr(builder, "tool_execution_node", crash_after_write)
+    h = _harness(tmp_path, model_factory, app_config, decision="tool", tool_calls_by_input={
+        "写文件": [{"name": "write_file", "args": {"path": "created.txt", "content": "一次"}, "id": "write"}],
+    })
+    sid = _session(h)
+    with pytest.raises(RuntimeError, match="持久化失败"):
+        h.service.submit_message(sid, "写文件", "crash")
+    assert (h.workspace / "created.txt").read_text(encoding="utf-8") == "一次"
+    blocked = h.service.get_session_snapshot(sid)
+    assert blocked.interrupted_request_id == "crash" and blocked.session_state == "blocked"
+    with pytest.raises(app_errors.ApplicationError):
+        h.service.submit_message(sid, "继续", "premature")
+    with pytest.raises(app_errors.ApplicationError):
+        h.service.set_session_mode(sid, "chat", "agent")
+    with pytest.raises(app_errors.ApplicationError):
+        h.service.end_interrupted_request(sid, "crash", "stale")
+    # 重启后仍提供同一核对入口，不把中断伪装成正在运行。
+    h.database.connection.close()
+    h = _open(tmp_path, model_factory, app_config, h.database_path)
+    assert h.service.get_session_snapshot(sid).interrupted_request_id == "crash"
+    ended = h.service.end_interrupted_request(sid, "crash", blocked.snapshot_id)
+    assert ended.session_state == "failed" and ended.interrupted_request_id is None
+    assert ended.usage and ended.usage.final_state == "failed"
+    assert any(m.kind == "tool" and m.tool.status == "unknown" for m in ended.messages)
+    transcript = h.service._read(h.service._session_or_raise(sid)).values["messages"]
+    unanswered: set[str] = set()
+    for message in transcript:
+        if isinstance(message, AIMessage):
+            unanswered.update(call["id"] for call in message.tool_calls)
+        elif isinstance(message, ToolMessage):
+            unanswered.remove(message.tool_call_id)
+        elif isinstance(message, HumanMessage):
+            assert not unanswered
+    assert not unanswered  # 严格供应商也不会收到缺工具回复的对话。
+    assert h.service.end_interrupted_request(sid, "crash", blocked.snapshot_id).snapshot_id == ended.snapshot_id
+    assert h.service.submit_message(sid, "写文件", "crash").replayed
+    assert executions == ["write"]
+    assert h.service.submit_message(sid, "继续讨论", "next").status == "completed"
+    assert len(h.service.get_conversation_map(sid).nodes) == 2
+    h.database.connection.close()
+
+
 def test_empty_session_snapshot_has_no_task(tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig) -> None:
     harness = _harness(tmp_path, model_factory, app_config)
     snapshot = harness.service.get_session_snapshot(_session(harness))
@@ -243,6 +343,38 @@ def _delete_harness(tmp_path: Path, model_factory: ModelFactory, app_config: App
         reply="好的",
         tool_calls=[{"name": "delete_file", "args": {"path": "note.txt"}, "id": "call-1"}],
     )
+
+
+def test_approved_tool_crash_can_end_without_showing_execution_in_progress(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = builder.tool_execution_node
+
+    def crash(state: Any, runtime: Any) -> Any:
+        original(state, runtime)
+        raise RuntimeError("执行后中断")
+
+    monkeypatch.setattr(builder, "tool_execution_node", crash)
+    h = _delete_harness(tmp_path, model_factory, app_config)
+    sid = _session(h)
+    h.service.submit_message(sid, "删除 note.txt", "delete")
+    approval = h.service.get_session_snapshot(sid).approval
+    assert approval is not None
+    with pytest.raises(app_errors.ApplicationError):
+        h.service.set_session_mode(sid, "chat", "agent")
+    with pytest.raises(RuntimeError):
+        h.service.resolve_approval(sid, approval.approval_id, "approve", "approve")
+    assert not (h.workspace / "note.txt").exists()
+    blocked = h.service.get_session_snapshot(sid)
+    assert blocked.interrupted_request_id == "approve" and blocked.approval is None
+    ended = h.service.end_interrupted_request(sid, "approve", blocked.snapshot_id)
+    assert ended.approval is not None and ended.approval.state == "interrupted"
+    assert ended.approval.note and "未完整记录" in ended.approval.note
+    assert h.service.resolve_approval(sid, approval.approval_id, "approve", "approve").replayed
+    assert h.service.submit_message(sid, "继续讨论", "after").status == "completed"
+    after = h.service.get_session_snapshot(sid)
+    assert after.approval is not None and after.approval.state == "interrupted"
+    h.database.connection.close()
 
 
 def test_delete_waits_for_approval_then_executes_once(
@@ -736,12 +868,12 @@ def test_empty_answer_and_model_failure_do_not_become_a_false_success(
     error_root.mkdir()
     failed = _harness(error_root, model_factory, app_config, decision="chat", fail_answer=True)
     failed_id = _session(failed, mode="chat")
-    with pytest.raises(RuntimeError, match="模型回答失败"):
-        failed.service.submit_message(failed_id, "会失败", "req-error")
+    result = failed.service.submit_message(failed_id, "会失败", "req-error")
+    assert result.status == "failed"
     assert len([row for row in _messages(failed, failed_id) if row.kind == "user"]) == 1
-    with pytest.raises(app_errors.ApplicationError) as repeated:
-        failed.service.submit_message(failed_id, "会失败", "req-error")
-    assert repeated.value.view.code == app_errors.RECOVERY_REQUIRED
+    repeated = failed.service.submit_message(failed_id, "会失败", "req-error")
+    assert repeated.replayed and repeated.status == "failed"
+    assert failed.service.get_session_snapshot(failed_id).session_state == "failed"
 
 
 def test_approval_events_are_projected(tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig) -> None:

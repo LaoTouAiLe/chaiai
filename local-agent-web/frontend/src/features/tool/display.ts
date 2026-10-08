@@ -5,6 +5,7 @@ export const TOOL_STATUS_LABEL: Record<ToolRowView['status'], string> = {
   running: '执行中',
   succeeded: '成功',
   failed: '失败',
+  uncertain: '结果未确认',
 }
 
 /** Short labels for actions. Raw tool identifiers stay in the event contract. */

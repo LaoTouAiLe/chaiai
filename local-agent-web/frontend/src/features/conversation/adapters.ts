@@ -68,6 +68,7 @@ const TOOL_STATUS: Record<ToolUse['status'], ToolRowView['status']> = {
   ok: 'succeeded',
   error: 'failed',
   denied: 'failed',
+  unknown: 'uncertain',
 }
 
 /** 检索来源类型：契约用下划线，视图模型用连字符（两套拼写刻意分开，这里转一次）。 */
@@ -318,6 +319,19 @@ export function mapMemory(memory: Snapshot['memory']): MemoryRowView | null {
   return { retrieval, write }
 }
 
+/** 仅合并同一轮完全相同的错误提示；原始轨迹和诊断记录保留在服务端。 */
+export function collapseDuplicateErrors(messages: MessageView[]): MessageView[] {
+  const seen = new Set<string>()
+  return messages.filter((message) => {
+    if (message.kind === 'user') seen.clear()
+    if (message.kind !== 'error') return true
+    const key = JSON.stringify([message.notice.code, message.notice.message, message.notice.hint])
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 export function mapError(error: TransportError): ErrorNoticeView {
   // 与契约近乎同构（字段名按视图模型的拼写转一次），没有需要判断的地方。
   return {
@@ -432,6 +446,10 @@ const PURPOSE_LABEL: Record<string, string> = {
   routing: '意图路由',
 }
 
+export function modelPurposeLabel(purpose: string): string {
+  return PURPOSE_LABEL[purpose] ?? '模型调用'
+}
+
 /**
  * 一次模型调用 → 展示形状。
  *
@@ -441,7 +459,7 @@ const PURPOSE_LABEL: Record<string, string> = {
 export function mapCall(call: TransportCall): ModelCallView {
   return {
     id: call.model_call_id,
-    purpose: PURPOSE_LABEL[call.purpose] ?? '模型调用',
+    purpose: modelPurposeLabel(call.purpose),
     modelLabel: call.model_id,
     inputTokens: call.actual_uncached_input_tokens ?? null,
     outputTokens: call.actual_output_tokens ?? null,

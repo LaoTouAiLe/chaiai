@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -62,6 +65,8 @@ from local_agent.graph.scope import tool_scope_key
 from local_agent.graph.state import (
     AgentState,
     RuntimeContext,
+    ToolEvent,
+    make_error_event,
     merge_appended,
     model_call_key,
 )
@@ -119,6 +124,46 @@ def build_chat_graph(checkpointer: BaseCheckpointSaver | None = None) -> ChatGra
     return graph.compile(checkpointer=checkpointer)
 
 
+def close_interrupted_turn(graph: ChatGraph, config: RunnableConfig,
+                           state: Mapping[str, Any], request_id: str) -> None:
+    """核对后只写终态检查点；不执行节点、模型或工具。"""
+    run_id = str(state.get("run_id") or "run")
+    text = "本轮执行已中断，已由你核对后结束。已执行的工具操作保留，未继续或重复执行工具。"
+    missing: dict[str, Any] = {}
+    for message in state.get("messages") or []:
+        if isinstance(message, HumanMessage):
+            missing.clear()
+        elif isinstance(message, AIMessage):
+            missing.update((str(call["id"]), call) for call in message.tool_calls if call.get("id"))
+        elif isinstance(message, ToolMessage):
+            missing.pop(message.tool_call_id, None)
+    unknown = "工具执行结果未完整记录；本轮已由用户核对后结束，不要重放该工具。已发生的副作用保留。"
+    replies = [ToolMessage(content=unknown, tool_call_id=call_id, name=call.get("name"),
+                           id=f"{run_id}:interrupted-result:{call_id}") for call_id, call in missing.items()]
+    recorded = {tool_scope_key(event.run_id, event.tool_call_id) for event in state.get("tool_events") or []}
+    events = [ToolEvent(tool_call_id=call_id, tool_name=str(call.get("name") or ""),
+                       run_id=run_id, status="unknown", output_preview=unknown)
+              for call_id, call in missing.items() if tool_scope_key(run_id, call_id) not in recorded]
+    update: AgentState = {
+        "task_status": "failed", "pending_tool_calls": [], "pending_approval": None,
+        "final_response": text, "messages": [*replies, AIMessage(content=text)],
+        "tool_events": events,
+        "error_events": [make_error_event(run_id, stage="interrupted_turn",
+            message="执行结果曾需核对，用户确认核对后结束本轮；未重放任何工具。", salt=request_id)],
+    }
+    turn = (state.get("turn_records") or {}).get(run_id)
+    if turn is not None and turn.final_at is None:
+        now = datetime.now(timezone.utc)
+        update["turn_records"] = {run_id: replace(turn,
+            final_at=now, final_state="failed",
+            turn_elapsed_ms=max(0, round((now - turn.submitted_at).total_seconds() * 1000)),
+        )}
+    checkpoint_config = graph.get_state(config).config
+    # SQLite saver 读取根图时默认空命名空间，但 update_state 的写入要求显式携带它。
+    checkpoint_config["configurable"].setdefault("checkpoint_ns", "")
+    graph.update_state(checkpoint_config, update, as_node=FINAL_RESPONSE_NODE)
+
+
 def _usage_aware(name: str, node: Callable[..., Any]) -> Callable[..., Any]:
     """把节点包成"会记录用量"的版本（架构 §15.6）。
 
@@ -138,7 +183,24 @@ def _usage_aware(name: str, node: Callable[..., Any]) -> Callable[..., Any]:
         if isinstance(recorder, ModelCallRecorder):
             recorder.bind_dynamic_context(state)
         with use_model_recorder(recorder), use_model_purpose(purpose):
-            update = node(state, runtime) if takes_runtime else node(state)
+            try:
+                update = node(state, runtime) if takes_runtime else node(state)
+            except Exception as exc:
+                # 仅闭合不执行工具的两个模型节点；工具/持久化异常仍交应用层核对副作用。
+                if name not in {AGENT_DECISION_NODE, CHAT_NODE}:
+                    raise
+                text = "本轮模型调用失败，已结束本轮。请检查模型连接后再提问；此前已执行的工具操作保留。"
+                update = {
+                    "messages": [AIMessage(content=text)],
+                    "final_response": text,
+                    "task_status": "failed",
+                    "pending_tool_calls": [],
+                    "error_events": [make_error_event(
+                        str(state.get("run_id") or "run"), stage=name,
+                        message=f"模型调用失败（{type(exc).__name__}），未继续执行本次决策。",
+                        loop_count=int(state.get("loop_count", 0)),
+                    )],
+                }
         if not update or not isinstance(recorder, ModelCallRecorder):
             return update
         merged: dict[str, Any] = {**state, **update}

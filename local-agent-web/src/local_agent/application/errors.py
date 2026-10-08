@@ -46,9 +46,12 @@ ERROR_CATEGORIES: Final[tuple[ErrorCategory, ...]] = get_args(ErrorCategory)
 SESSION_BUSY: Final[str] = "SESSION_BUSY"
 IDEMPOTENCY_CONFLICT: Final[str] = "IDEMPOTENCY_CONFLICT"
 RECOVERY_REQUIRED: Final[str] = "RECOVERY_REQUIRED"
+CONVERSATION_CONFLICT: Final[str] = "CONVERSATION_CONFLICT"
 
 # 模型：与 v0.3 已有的供应商失败路径对齐（T26 原型已渲染过前三个）。
 MODEL_AUTH_FAILED: Final[str] = "MODEL_AUTH_FAILED"
+MODEL_CALL_FAILED: Final[str] = "MODEL_CALL_FAILED"
+RUN_INTERRUPTED: Final[str] = "RUN_INTERRUPTED"
 MODEL_RATE_LIMITED: Final[str] = "MODEL_RATE_LIMITED"
 MODEL_RETRY_EXHAUSTED: Final[str] = "MODEL_RETRY_EXHAUSTED"
 # 能力检测不通过（§15.9：进入需要工具的任务前明确拒绝，不静默换模型）。
@@ -107,7 +110,10 @@ _ERROR_CATEGORY_OF: Final[dict[str, ErrorCategory]] = {
     SESSION_BUSY: "system",
     IDEMPOTENCY_CONFLICT: "system",
     RECOVERY_REQUIRED: "recovery",
+    CONVERSATION_CONFLICT: "system",
     MODEL_AUTH_FAILED: "model",
+    MODEL_CALL_FAILED: "model",
+    RUN_INTERRUPTED: "recovery",
     MODEL_RATE_LIMITED: "model",
     MODEL_RETRY_EXHAUSTED: "model",
     MODEL_CAPABILITY_UNSUPPORTED: "model",
@@ -145,7 +151,10 @@ _RETRY_CONDITION: Final[dict[str, str]] = {
     SESSION_BUSY: "当前一轮结束后可原样重发；请求不会排队，也没有取消接口。",
     IDEMPOTENCY_CONFLICT: "需要生成新的请求 id，或修正请求内容后重发。",
     RECOVERY_REQUIRED: "需要先人工核对上一次运行的记录，不能自动重试。",
+    CONVERSATION_CONFLICT: "刷新会话地图并重新选择路径后，以新的请求提交；不能自动原样重试。",
     MODEL_AUTH_FAILED: "需要先更新该连接的密钥。",
+    MODEL_CALL_FAILED: "检查模型连接后发起新一轮，不自动重放已执行的工具。",
+    RUN_INTERRUPTED: "已核对并结束本轮，可以发起新一轮。",
     MODEL_RATE_LIMITED: "稍后可直接重发。",
     MODEL_RETRY_EXHAUSTED: "检查端点可达性或调小输出上限后重发。",
     MODEL_CAPABILITY_UNSUPPORTED: "需要改用支持该能力的连接，或去掉需要工具的任务。",

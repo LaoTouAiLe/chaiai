@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
 import type { SessionSummaryView } from '../fixtures/types'
-import { ChevronLeft, ChevronRight } from './icons'
+import { ChevronLeft, ChevronRight, Doc } from './icons'
 import styles from './Sidebar.module.css'
 import { SidebarItemMenu } from './SidebarItemMenu'
 
@@ -43,6 +43,7 @@ export interface SidebarActions {
   onSelectSession: (sessionId: string) => void
   onNewSession: () => void
   onOpenSettings: () => void
+  onOpenDataCenter?: () => void
   /** 展开态与窄轨态共用的同一个动作：收起 / 展开是同一枚开关。 */
   onToggleCollapse: () => void
 }
@@ -118,8 +119,9 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
       data-collapsed={collapsed ? 'true' : 'false'}
     >
       <div className={styles.brand}>
-        <span className={styles.brandMark} aria-hidden="true" />
-        {collapsed ? null : <span className={styles.brandName}>本地 Agent</span>}
+        <img className={styles.brandMark} src="/chaiai.svg" width={28} height={28}
+          alt={collapsed ? 'chaiai' : ''} title="chaiai" />
+        {collapsed ? null : <span className={styles.brandName}>chaiai</span>}
         {collapsed ? null : (
           <button
             type="button"
@@ -248,8 +250,13 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
       )}
 
       <div className={styles.footer}>
-        <button type="button" className={styles.footerButton} onClick={() => actions?.onOpenSettings()}>
-          设置
+        {actions?.onOpenDataCenter ? <button type="button" className={styles.footerButton} onClick={actions.onOpenDataCenter} aria-label="数据中台" title={collapsed ? '数据中台' : undefined}>
+          <Doc size={18} />{collapsed ? null : <span>数据中台</span>}
+        </button> : null}
+        <button type="button" className={styles.footerButton} onClick={() => actions?.onOpenSettings()} aria-label="设置" title={collapsed ? '设置' : undefined}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+            <path d="M4 6h16M4 12h16M4 18h16" /><circle cx="8" cy="6" r="2" /><circle cx="16" cy="12" r="2" /><circle cx="10" cy="18" r="2" />
+          </svg>{collapsed ? null : <span>设置</span>}
         </button>
       </div>
     </aside>

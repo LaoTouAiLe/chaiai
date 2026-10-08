@@ -153,5 +153,9 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
     # 闲聊也要过一次反思校验：按架构 §5.2，识别到用户要求记住时 chat_node 只产生
     # memory_write_intent，**转入现有 reflection_node 校验**，再由 completion_router 决定是否
     # 走 memory_write_node。普通闲聊在反思里得到空候选 → 直接进 final_response_node。
-    graph.add_edge(CHAT_NODE, REFLECTION_NODE)
+    graph.add_conditional_edges(
+        CHAT_NODE,
+        lambda state: ROUTE_WITHOUT_TOOLS if state.get("task_status") == "failed" else ROUTE_REFLECT,
+        {ROUTE_WITHOUT_TOOLS: FINAL_RESPONSE_NODE, ROUTE_REFLECT: REFLECTION_NODE},
+    )
     graph.add_edge(FINAL_RESPONSE_NODE, END)

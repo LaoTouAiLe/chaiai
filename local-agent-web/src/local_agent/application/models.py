@@ -219,7 +219,7 @@ class PlanView(_Dto):
     steps: list[PlanStepView] = Field(default_factory=list)
 
 
-ToolStatus = Literal["pending", "running", "ok", "error", "denied"]
+ToolStatus = Literal["pending", "running", "ok", "error", "denied", "unknown"]
 
 ToolOutcomeKind = Literal["read", "list", "search", "edit", "write", "delete", "shell"]
 
@@ -342,7 +342,7 @@ class ToolUseView(_Dto):
         return None if value is None else _require_timezone(value)
 
 
-ApprovalState = Literal["pending", "executing", "approved", "rejected", "expired"]
+ApprovalState = Literal["pending", "executing", "approved", "rejected", "expired", "interrupted"]
 
 
 class ApprovalView(_Dto):
@@ -702,7 +702,12 @@ class SessionSnapshot(_Dto):
     session_id: str = Field(min_length=1)
     workspace: WorkspaceRef
     title: str
+    branch_id: str = "main"
+    branch_title: str = "原讨论"
+    mode: Literal["chat", "agent"] = "agent"
     session_state: SessionState
+    #: 执行锁已释放但台账未收口；仅当前快照提供核对入口，历史快照不附加此信息。
+    interrupted_request_id: str | None = None
     #: 空会话没有当前任务，这里就是 `None`——不得用随机占位值填充（§15.4）。
     current_task: TaskRef | None = None
     messages: list[MessageView] = Field(default_factory=list)
@@ -729,6 +734,36 @@ class SessionSnapshot(_Dto):
     @classmethod
     def _tz(cls, value: datetime) -> datetime:
         return _require_timezone(value)
+
+
+class ConversationNodeView(_Dto):
+    turn_id: str
+    parent_turn_id: str | None = None
+    origin_branch_id: str
+    run_id: str | None = None
+    question: str
+    answer_preview: str
+    state: str
+    submitted_at: str | None = None
+    ordinal: int
+    can_continue: bool
+
+
+class ConversationBranchView(_Dto):
+    branch_id: str
+    title: str
+    fork_turn_id: str | None = None
+    tip_turn_id: str | None = None
+    position: int
+    active: bool
+
+
+class ConversationMapView(_Dto):
+    session_id: str
+    active_branch_id: str
+    nodes: list[ConversationNodeView]
+    branches: list[ConversationBranchView]
+    matched_turn_ids: list[str] = Field(default_factory=list)
 
 
 class SessionSummaryView(_Dto):

@@ -7,11 +7,14 @@ type Snapshot = components['schemas']['SessionSnapshot']
 type Connection = components['schemas']['ModelConnectionView']
 
 const snapshot = (overrides: Partial<Snapshot> = {}): Snapshot => ({
+  mode: 'agent',
   schema_version: 1,
   snapshot_id: 'snap-1',
   session_id: 's-1',
   workspace: { workspace_id: 'w-1', display_name: '工作区' },
   title: '测试',
+  branch_id: 'main',
+  branch_title: '原讨论',
   session_state: 'idle',
   created_at: '2026-09-27T00:00:00Z',
   ...overrides,

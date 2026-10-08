@@ -4,6 +4,40 @@
  */
 
 export interface paths {
+    "/api/data-center/memories": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 只读记忆列表 */
+        get: operations["memory_page_api_data_center_memories_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-center/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 去重后的实际调用用量 */
+        get: operations["usage_page_api_data_center_usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/health": {
         parameters: {
             query?: never;
@@ -294,6 +328,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/branches/{branch_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** 分支改名与展示排序 */
+        patch: operations["arrange_branch_api_sessions__session_id__branches__branch_id__patch"];
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/branches/{branch_id}/select": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 切换会话分支 */
+        post: operations["select_branch_api_sessions__session_id__branches__branch_id__select_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/conversation-map": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 会话地图 */
+        get: operations["conversation_map_api_sessions__session_id__conversation_map_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/events": {
         parameters: {
             query?: never;
@@ -331,6 +416,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/mode": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Set Session Mode */
+        patch: operations["set_session_mode_api_sessions__session_id__mode_patch"];
+        trace?: never;
+    };
     "/api/sessions/{session_id}/model": {
         parameters: {
             query?: never;
@@ -348,6 +450,23 @@ export interface paths {
          */
         put: operations["select_session_model_api_sessions__session_id__model_put"];
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** End Interrupted Request */
+        post: operations["end_interrupted_request_api_sessions__session_id__recovery_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -382,6 +501,23 @@ export interface paths {
         put?: never;
         /** Select Session */
         post: operations["select_session_api_sessions__session_id__select_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/turns/{turn_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 单轮问答与执行详情 */
+        get: operations["turn_detail_api_sessions__session_id__turns__turn_id__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -631,13 +767,20 @@ export interface components {
              * State
              * @enum {string}
              */
-            state: "pending" | "executing" | "approved" | "rejected" | "expired";
+            state: "pending" | "executing" | "approved" | "rejected" | "expired" | "interrupted";
             /** Target */
             target?: string | null;
             /** Tool Call Id */
             tool_call_id: string;
             /** Tool Name */
             tool_name: string;
+        };
+        /** ArrangeBranchRequest */
+        ArrangeBranchRequest: {
+            /** Position */
+            position: number;
+            /** Title */
+            title: string;
         };
         /** AssistantMessageView */
         AssistantMessageView: {
@@ -752,6 +895,57 @@ export interface components {
             used_tokens?: number | null;
             /** Window Tokens */
             window_tokens?: number | null;
+        };
+        /** ConversationBranchView */
+        ConversationBranchView: {
+            /** Active */
+            active: boolean;
+            /** Branch Id */
+            branch_id: string;
+            /** Fork Turn Id */
+            fork_turn_id?: string | null;
+            /** Position */
+            position: number;
+            /** Tip Turn Id */
+            tip_turn_id?: string | null;
+            /** Title */
+            title: string;
+        };
+        /** ConversationMapView */
+        ConversationMapView: {
+            /** Active Branch Id */
+            active_branch_id: string;
+            /** Branches */
+            branches: components["schemas"]["ConversationBranchView"][];
+            /** Matched Turn Ids */
+            matched_turn_ids?: string[];
+            /** Nodes */
+            nodes: components["schemas"]["ConversationNodeView"][];
+            /** Session Id */
+            session_id: string;
+        };
+        /** ConversationNodeView */
+        ConversationNodeView: {
+            /** Answer Preview */
+            answer_preview: string;
+            /** Can Continue */
+            can_continue: boolean;
+            /** Ordinal */
+            ordinal: number;
+            /** Origin Branch Id */
+            origin_branch_id: string;
+            /** Parent Turn Id */
+            parent_turn_id?: string | null;
+            /** Question */
+            question: string;
+            /** Run Id */
+            run_id?: string | null;
+            /** State */
+            state: string;
+            /** Submitted At */
+            submitted_at?: string | null;
+            /** Turn Id */
+            turn_id: string;
         };
         /**
          * CreateSessionRequest
@@ -1092,6 +1286,41 @@ export interface components {
             /** Top K */
             top_k: number;
         };
+        /** MemoryEntryView */
+        MemoryEntryView: {
+            /** Confidence */
+            confidence?: number | null;
+            /** Content */
+            content: string;
+            /** Created At */
+            created_at?: string | null;
+            /** Expires At */
+            expires_at?: string | null;
+            /** Id */
+            id: string;
+            /** Importance */
+            importance?: number | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "medium" | "fact" | "conclusion";
+            /** Scope */
+            scope: string;
+            /** Source */
+            source?: string | null;
+            /** Status */
+            status: string;
+            /** Title */
+            title: string;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+            /** Updated At */
+            updated_at?: string | null;
+        };
         /** MemoryMessageView */
         MemoryMessageView: {
             /**
@@ -1102,6 +1331,30 @@ export interface components {
             memory: components["schemas"]["MemoryUseView"];
             /** Message Id */
             message_id: string;
+        };
+        /** MemoryPageView */
+        MemoryPageView: {
+            /** Counts */
+            counts: {
+                [key: string]: number;
+            };
+            /** Entries */
+            entries: components["schemas"]["MemoryEntryView"][];
+            /**
+             * Incomplete
+             * @default false
+             */
+            incomplete: boolean;
+            /** Limit */
+            limit: number;
+            /** Notices */
+            notices?: string[];
+            /** Offset */
+            offset: number;
+            /** Resources */
+            resources: components["schemas"]["MemoryResourceView"][];
+            /** Total */
+            total: number;
         };
         /** MemoryProbeRequest */
         MemoryProbeRequest: {
@@ -1159,6 +1412,23 @@ export interface components {
         /** MemoryRecalledPayload */
         MemoryRecalledPayload: {
             memory: components["schemas"]["MemoryUseView"];
+        };
+        /** MemoryResourceView */
+        MemoryResourceView: {
+            /** Enabled */
+            enabled: boolean;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "medium" | "long";
+            /** Note */
+            note: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "available" | "missing" | "unavailable";
         };
         /** MemoryResourcesView */
         MemoryResourcesView: {
@@ -1915,6 +2185,18 @@ export interface components {
             /** Writable */
             writable: boolean;
         };
+        /** RecoveryRequest */
+        RecoveryRequest: {
+            /**
+             * Confirm Reviewed
+             * @constant
+             */
+            confirm_reviewed: true;
+            /** Expected Snapshot Id */
+            expected_snapshot_id: string;
+            /** Request Id */
+            request_id: string;
+        };
         /**
          * RenameRequest
          * @description 会话与工作区的显示名称；不改变目录名或会话绑定。
@@ -2054,6 +2336,19 @@ export interface components {
             /** Connection Id */
             connection_id: string | null;
         };
+        /** SessionModeRequest */
+        SessionModeRequest: {
+            /**
+             * Expected Mode
+             * @enum {string}
+             */
+            expected_mode: "chat" | "agent";
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "chat" | "agent";
+        };
         /**
          * SessionSnapshot
          * @description `session_snapshot` 事件的载荷，也是刷新恢复的权威展示状态。
@@ -2063,6 +2358,16 @@ export interface components {
          */
         SessionSnapshot: {
             approval?: components["schemas"]["ApprovalView"] | null;
+            /**
+             * Branch Id
+             * @default main
+             */
+            branch_id: string;
+            /**
+             * Branch Title
+             * @default 原讨论
+             */
+            branch_title: string;
             context?: components["schemas"]["ContextMeterView"];
             /**
              * Created At
@@ -2073,9 +2378,17 @@ export interface components {
             /** Errors */
             errors?: components["schemas"]["ErrorView"][];
             final_result?: components["schemas"]["FinalResultView"] | null;
+            /** Interrupted Request Id */
+            interrupted_request_id?: string | null;
             memory?: components["schemas"]["MemoryUseView"] | null;
             /** Messages */
             messages?: (components["schemas"]["UserMessageView"] | components["schemas"]["AssistantMessageView"] | components["schemas"]["ToolMessageView"] | components["schemas"]["MemoryMessageView"] | components["schemas"]["ErrorMessageView"])[];
+            /**
+             * Mode
+             * @default agent
+             * @enum {string}
+             */
+            mode: "chat" | "agent";
             /** Model Calls */
             model_calls?: components["schemas"]["ModelCallRecordView"][];
             model_selection?: components["schemas"]["ModelSelectionView"] | null;
@@ -2261,6 +2574,12 @@ export interface components {
         SubmitMessageRequest: {
             /** Client Request Id */
             client_request_id: string;
+            /** Expected Branch Id */
+            expected_branch_id?: string | null;
+            /** Expected Snapshot Id */
+            expected_snapshot_id?: string | null;
+            /** Parent Turn Id */
+            parent_turn_id?: string | null;
             /** Text */
             text: string;
         };
@@ -2378,7 +2697,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "pending" | "running" | "ok" | "error" | "denied";
+            status: "pending" | "running" | "ok" | "error" | "denied" | "unknown";
             /** Tool Call Id */
             tool_call_id: string;
         };
@@ -2554,7 +2873,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "pending" | "running" | "ok" | "error" | "denied";
+            status: "pending" | "running" | "ok" | "error" | "denied" | "unknown";
             /** Tool Call Id */
             tool_call_id: string;
             /** Tool Name */
@@ -2643,6 +2962,90 @@ export interface components {
             /** User Message Id */
             user_message_id: string;
         };
+        /** UsageBucketView */
+        UsageBucketView: {
+            /** Label */
+            label: string;
+            totals: components["schemas"]["UsageTotalsView"];
+        };
+        /** UsageCallView */
+        UsageCallView: {
+            call: components["schemas"]["ModelCallRecordView"];
+            /** Session Id */
+            session_id: string;
+            /** Session Title */
+            session_title: string;
+            /** Workspace Id */
+            workspace_id: string;
+        };
+        /** UsagePageView */
+        UsagePageView: {
+            /** Daily */
+            daily: components["schemas"]["UsageBucketView"][];
+            /** Entries */
+            entries: components["schemas"]["UsageCallView"][];
+            /**
+             * Generated At
+             * Format: date-time
+             */
+            generated_at: string;
+            /**
+             * Incomplete
+             * @default false
+             */
+            incomplete: boolean;
+            /** Limit */
+            limit: number;
+            /**
+             * Missing Record Sessions
+             * @default 0
+             */
+            missing_record_sessions: number;
+            /** Models */
+            models: components["schemas"]["UsageBucketView"][];
+            /** Notices */
+            notices?: string[];
+            /** Offset */
+            offset: number;
+            /** Purposes */
+            purposes: components["schemas"]["UsageBucketView"][];
+            /**
+             * Scanned Sessions
+             * @default 0
+             */
+            scanned_sessions: number;
+            /** Total */
+            total: number;
+            totals: components["schemas"]["UsageTotalsView"];
+        };
+        /** UsageTotalsView */
+        UsageTotalsView: {
+            /** Cache Hit Ratio */
+            cache_hit_ratio?: number | null;
+            /** Cache Read Tokens */
+            cache_read_tokens?: number | null;
+            /**
+             * Calls
+             * @default 0
+             */
+            calls: number;
+            /**
+             * Failed Calls
+             * @default 0
+             */
+            failed_calls: number;
+            /** Input Tokens */
+            input_tokens?: number | null;
+            /**
+             * Missing Usage Calls
+             * @default 0
+             */
+            missing_usage_calls: number;
+            /** Output Tokens */
+            output_tokens?: number | null;
+            /** Uncached Input Tokens */
+            uncached_input_tokens?: number | null;
+        };
         /** UserMessageView */
         UserMessageView: {
             /** Created At */
@@ -2693,6 +3096,78 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    memory_page_api_data_center_memories_get: {
+        parameters: {
+            query?: {
+                workspace_id?: string | null;
+                kind?: "all" | "medium" | "fact" | "conclusion";
+                query?: string;
+                status?: "all" | "active" | "expired" | "superseded" | "conflicted" | "deleted" | "unknown";
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryPageView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    usage_page_api_data_center_usage_get: {
+        parameters: {
+            query?: {
+                workspace_id?: string | null;
+                model?: string;
+                since?: string | null;
+                until?: string | null;
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UsagePageView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     health_api_health_get: {
         parameters: {
             query?: never;
@@ -3506,6 +3981,161 @@ export interface operations {
             };
         };
     };
+    arrange_branch_api_sessions__session_id__branches__branch_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                branch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArrangeBranchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationMapView"];
+                };
+            };
+            /** @description 会话不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    select_branch_api_sessions__session_id__branches__branch_id__select_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                branch_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSnapshot"];
+                };
+            };
+            /** @description 会话不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    conversation_map_api_sessions__session_id__conversation_map_get: {
+        parameters: {
+            query?: {
+                query?: string;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationMapView"];
+                };
+            };
+            /** @description 会话不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     session_events_api_sessions__session_id__events_get: {
         parameters: {
             query?: never;
@@ -3599,6 +4229,59 @@ export interface operations {
             };
         };
     };
+    set_session_mode_api_sessions__session_id__mode_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SessionModeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSummaryView"];
+                };
+            };
+            /** @description 会话不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     select_session_model_api_sessions__session_id__model_put: {
         parameters: {
             query?: never;
@@ -3625,6 +4308,59 @@ export interface operations {
             };
             /** @description 会话或工作区不存在 */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    end_interrupted_request_api_sessions__session_id__recovery_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecoveryRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSnapshot"];
+                };
+            };
+            /** @description 会话不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效 */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -3705,6 +4441,58 @@ export interface operations {
             };
             /** @description 会话或工作区不存在 */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    turn_detail_api_sessions__session_id__turns__turn_id__get: {
+        parameters: {
+            query?: {
+                include_ancestors?: boolean;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+                turn_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSnapshot"];
+                };
+            };
+            /** @description 会话不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效 */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

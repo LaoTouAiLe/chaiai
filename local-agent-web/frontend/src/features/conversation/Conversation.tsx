@@ -25,6 +25,7 @@ interface ConversationProps {
    * 直接写在数据里，真会话则由容器按被点过的行决定。省略即原型行为。
    */
   onToggleTool?: (messageId: string) => void
+  focusTurnId?: string | null
 }
 
 function UserMessage({ text, at }: { text: string; at: string }) {
@@ -229,7 +230,7 @@ function TurnActions({ text }: { text: string }) {
  * Loading and empty replace the flow rather than sitting above it: a skeleton
  * next to real messages would claim both are the same kind of thing.
  */
-export function Conversation({ scenario, autoFollow = false, onToggleTool }: ConversationProps) {
+export function Conversation({ scenario, autoFollow = false, onToggleTool, focusTurnId }: ConversationProps) {
   const loading = scenario.loading ?? null
   const empty = scenario.empty ?? null
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -245,6 +246,16 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool }: Con
     const element = scrollRef.current
     if (element !== null) element.scrollTop = element.scrollHeight
   }, [autoFollow, scenario.messages, scenario.activity?.id, scenario.activity?.label])
+
+  useEffect(() => {
+    if (!focusTurnId) return
+    const target = Array.from(scrollRef.current?.querySelectorAll<HTMLElement>('[data-turn-id]') ?? [])
+      .find((element) => element.dataset.turnId === focusTurnId)
+    if (target !== undefined) {
+      followRef.current = false
+      target.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+    }
+  }, [focusTurnId, scenario.messages])
 
   return (
     <div
@@ -283,7 +294,7 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool }: Con
             {partitionTurns(scenario.messages).map((turn) => {
               const stats = turnStats.get(turn.lastId)
               return (
-                <Fragment key={turn.id}>
+                <div key={turn.id} data-turn-id={turn.id} className={styles.turn}>
                   {turn.rows.map((row) => (
                     <Fragment key={row.id}>
                       <Message message={row} onToggleTool={onToggleTool} />
@@ -291,7 +302,7 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool }: Con
                   ))}
                   <TurnActions text={turn.answerParts.join('\n\n')} />
                   {stats === undefined ? null : <TurnStats stats={stats} />}
-                </Fragment>
+                </div>
               )
             })}
             {scenario.stats === null ? null : <TurnStats stats={scenario.stats} />}

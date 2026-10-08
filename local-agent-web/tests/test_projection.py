@@ -694,6 +694,9 @@ def test_internal_stages_map_to_public_codes_without_leaking_node_names() -> Non
         # "证据不足"读成崩溃（复审实证，2026-09-28）。
         "chat_node:stream": app_errors.RUN_DEGRADED,
         "agent_decision": app_errors.MODEL_CAPABILITY_UNSUPPORTED,
+        "agent_decision_node": app_errors.MODEL_CALL_FAILED,
+        "chat_node": app_errors.MODEL_CALL_FAILED,
+        "interrupted_turn": app_errors.RUN_INTERRUPTED,
         "reflection_node:mechanical": app_errors.EVIDENCE_NOT_VERIFIED,
         "reflection_node:llm": app_errors.RUN_DEGRADED,
         "reflection_node:final_answer": app_errors.RUN_DEGRADED,

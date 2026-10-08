@@ -21,7 +21,7 @@ import sqlite3
 from datetime import datetime, timezone
 
 #: 聊天库（Checkpoint + 会话索引 + 请求台账）当前代码期望的结构版本（等于最后一个迁移的编号）。
-CHAT_SCHEMA_VERSION = 5
+CHAT_SCHEMA_VERSION = 6
 
 #: 长期记忆库当前代码期望的结构版本。
 LONG_TERM_SCHEMA_VERSION = 2
@@ -273,6 +273,39 @@ _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
         );
         INSERT INTO workspaces (workspace_root)
             SELECT DISTINCT workspace_root FROM sessions;
+    """),
+    (6, """
+        CREATE TABLE conversation_branches (
+            session_id TEXT NOT NULL REFERENCES sessions(session_id),
+            branch_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            fork_turn_id TEXT,
+            tip_turn_id TEXT,
+            checkpoint_id TEXT,
+            position INTEGER NOT NULL,
+            active INTEGER NOT NULL CHECK(active IN (0, 1)),
+            PRIMARY KEY (session_id, branch_id)
+        );
+        CREATE UNIQUE INDEX conversation_active_branch
+            ON conversation_branches(session_id) WHERE active = 1;
+        CREATE TABLE conversation_turns (
+            session_id TEXT NOT NULL REFERENCES sessions(session_id),
+            turn_id TEXT NOT NULL,
+            parent_turn_id TEXT,
+            origin_branch_id TEXT NOT NULL,
+            run_id TEXT,
+            question TEXT NOT NULL,
+            answer_text TEXT NOT NULL,
+            state TEXT NOT NULL,
+            submitted_at TEXT,
+            checkpoint_id TEXT,
+            ordinal INTEGER NOT NULL,
+            PRIMARY KEY (session_id, turn_id),
+            FOREIGN KEY (session_id, parent_turn_id)
+                REFERENCES conversation_turns(session_id, turn_id)
+        );
+        CREATE INDEX conversation_turn_parent
+            ON conversation_turns(session_id, parent_turn_id, ordinal);
     """),
 )
 

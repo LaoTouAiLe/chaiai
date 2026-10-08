@@ -124,6 +124,44 @@ def _create_session(client: TestClient, *, title: str = "会话") -> str:
     return str(response.json()["session_id"])
 
 
+def test_switch_mode_keeps_session_and_checks_busy_conflict(api: tuple[TestClient, ApiRuntime]) -> None:
+    client, runtime = api
+    sid = _create_session(client)
+    _submit(client, sid, "历史问题", "history")
+    before = client.get(f"/api/sessions/{sid}").json()
+    response = client.patch(f"/api/sessions/{sid}/mode", json={"mode": "chat", "expected_mode": "agent"})
+    assert response.status_code == 200 and response.json()["session_id"] == sid
+    assert response.json()["mode"] == "chat"
+    assert len(client.get("/api/sessions").json()) == 1
+    assert client.get(f"/api/sessions/{sid}").json()["messages"] == before["messages"]
+    assert client.patch(f"/api/sessions/{sid}/mode", json={"mode": "agent", "expected_mode": "agent"}).status_code == 409
+    assert client.patch(f"/api/sessions/{sid}/mode", json={"mode": "unknown", "expected_mode": "chat"}).status_code == 422
+    lock = runtime.service._lock_for(sid)
+    lock.acquire()
+    try:
+        assert client.patch(f"/api/sessions/{sid}/mode", json={"mode": "agent", "expected_mode": "chat"}).status_code == 409
+    finally:
+        lock.release()
+
+
+def test_recovery_requires_review_and_never_runs_unbound_request(api: tuple[TestClient, ApiRuntime]) -> None:
+    client, runtime = api
+    sid = _create_session(client)
+    runtime.service._ledger.start(request_id="lost", session_id=sid, operation="submit_message", arguments_digest="test")
+    before = client.get(f"/api/sessions/{sid}").json()
+    assert before["interrupted_request_id"] == "lost"
+    payload = {"request_id": "lost", "expected_snapshot_id": before["snapshot_id"], "confirm_reviewed": False}
+    assert client.post(f"/api/sessions/{sid}/recovery", json=payload).status_code == 422
+    payload["confirm_reviewed"] = True
+    other = _create_session(client, title="其他会话")
+    assert client.post(f"/api/sessions/{other}/recovery", json=payload).status_code == 409
+    response = client.post(f"/api/sessions/{sid}/recovery", json=payload)
+    assert response.status_code == 200 and response.json()["interrupted_request_id"] is None
+    assert response.json()["messages"] == []
+    assert runtime.model.decision_calls == 0
+    assert _submit(client, sid, "继续", "new").status_code == 200
+
+
 def _submit(client: TestClient, session_id: str, text: str, request_id: str):
     return client.post(
         f"/api/sessions/{session_id}/messages",
@@ -132,6 +170,33 @@ def _submit(client: TestClient, session_id: str, text: str, request_id: str):
 
 
 # ---- 健康检查与会话 ---------------------------------------------------------
+
+
+def test_conversation_map_http_fork_detail_switch_and_arrange(api: tuple[TestClient, ApiRuntime]) -> None:
+    client, runtime = api
+    sid = _create_session(client)
+    for index in range(3):
+        assert _submit(client, sid, f"问题 {index + 1}", f"map-{index}").status_code == 200
+    url = f"/api/sessions/{sid}"
+    tree = client.get(f"{url}/conversation-map").json()
+    parent = tree["nodes"][0]["turn_id"]
+    assert "checkpoint_id" not in tree["nodes"][0]
+    detail = client.get(f"{url}/turns/{parent}").json()
+    assert [m["text"] for m in detail["messages"] if m["kind"] == "user"] == ["问题 1"]
+    old = client.get(url).json()
+    assert client.post(f"{url}/messages", json={"text": "新方向", "client_request_id": "map-fork",
+        "parent_turn_id": parent, "expected_branch_id": "main", "expected_snapshot_id": old["snapshot_id"]}).status_code == 200
+    forked = client.get(f"{url}/conversation-map").json()
+    branch = forked["active_branch_id"]
+    assert len(forked["branches"]) == 2 and forked["nodes"][-1]["parent_turn_id"] == parent
+    arranged = client.patch(f"{url}/branches/{branch}", json={"title": "方案 B", "position": 0})
+    assert arranged.status_code == 200 and arranged.json()["branches"][0]["title"] == "方案 B"
+    selected = client.post(f"{url}/branches/main/select").json()
+    assert [m["text"] for m in selected["messages"] if m["kind"] == "user"] == ["问题 1", "问题 2", "问题 3"]
+    bad = client.post(f"{url}/messages", json={"text": "不该执行", "client_request_id": "map-stale",
+        "expected_snapshot_id": "stale"})
+    assert bad.status_code == 409 and bad.json()["error"]["code"] == "CONVERSATION_CONFLICT"
+    assert runtime.service._ledger.get("map-stale") is None
 
 
 def test_preferences_save_conflict_validation_and_safe_overview(api: tuple[TestClient, ApiRuntime]) -> None:
@@ -1713,6 +1778,20 @@ def test_sse_over_a_real_server_streams_the_turn(open_api: OpenApi) -> None:
 # ---- 契约面与依赖方向 -------------------------------------------------------
 
 
+def test_data_center_read_only_api_and_filter_validation(api: tuple[TestClient, ApiRuntime]) -> None:
+    client, runtime = api
+    calls = runtime.model.decision_calls
+    assert client.get("/api/data-center/usage").status_code == 200
+    assert client.get("/api/data-center/memories").status_code == 200
+    assert client.get("/api/data-center/memories?workspace_id=unknown").status_code == 404
+    assert client.get("/api/data-center/usage?workspace_id=unknown").status_code == 404
+    for query in ("offset=-1", "limit=101", "since=2026-10-01T00:00:00", "since=2026-10-02T00:00:00Z&until=2026-10-01T00:00:00Z"):
+        assert client.get(f"/api/data-center/usage?{query}").status_code == 422
+    assert client.get("/api/data-center/memories?kind=bad").status_code == 422
+    assert client.post("/api/data-center/memories", json={}).status_code == 405
+    assert runtime.model.decision_calls == calls
+
+
 def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> None:
     client, _runtime = api
     response = client.get("/api/openapi.json")
@@ -1728,10 +1807,16 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/sessions",
         "/api/sessions/{session_id}",
         "/api/sessions/{session_id}/select",
+        "/api/sessions/{session_id}/mode",
+        "/api/sessions/{session_id}/recovery",
         "/api/sessions/{session_id}/archive",
         "/api/sessions/{session_id}/restore",
         "/api/sessions/{session_id}/events",
         "/api/sessions/{session_id}/messages",
+        "/api/sessions/{session_id}/conversation-map",
+        "/api/sessions/{session_id}/turns/{turn_id}",
+        "/api/sessions/{session_id}/branches/{branch_id}",
+        "/api/sessions/{session_id}/branches/{branch_id}/select",
         "/api/sessions/{session_id}/approvals/{approval_id}",
         "/api/sessions/{session_id}/model",
         "/api/model-connections",
@@ -1741,6 +1826,8 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/permissions",
         "/api/preferences",
         "/api/preferences/memory/test",
+        "/api/data-center/memories",
+        "/api/data-center/usage",
         "/api/permissions/grants",
     }
     text = json.dumps(schema, ensure_ascii=False)
@@ -1822,7 +1909,10 @@ def test_entry_point_starts_in_setup_mode_without_a_config_file(
     """缺 `config.yaml` **不再是**启动失败（§15.9 初始设置模式）：服务起来、设置页可用。"""
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: None)
 
-    code = api_main.main(["--config", str(tmp_path / "missing.yaml"), "--env", str(tmp_path / ".env")])
+    # `--no-open-browser`：测试不该在跑的时候弹出真实浏览器（T40 的默认行为是打开）。
+    code = api_main.main(
+        ["--config", str(tmp_path / "missing.yaml"), "--env", str(tmp_path / ".env"), "--no-open-browser"]
+    )
 
     assert code == 0
 
@@ -1848,7 +1938,12 @@ def test_entry_point_pins_a_single_worker(
     captured: dict[str, Any] = {}
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: captured.update(kwargs))
 
-    assert api_main.main(["--config", str(config_path), "--env", str(tmp_path / ".env")]) == 0
+    assert (
+        api_main.main(
+            ["--config", str(config_path), "--env", str(tmp_path / ".env"), "--no-open-browser"]
+        )
+        == 0
+    )
 
     assert captured["workers"] == 1
     assert captured["host"] == "127.0.0.1"  # 默认只绑回环

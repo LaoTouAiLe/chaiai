@@ -37,8 +37,9 @@ export interface ComposerActions {
    * `ContextMeter` 那句"the ring's click target"变成真的唯一入口。
    */
   onToggleMeter?: () => void
-  /** Changing mode creates another session; the current session's mode never changes. */
+  /** 当前会话的下一轮模式；运行、审批或切换请求中禁止改变。 */
   onSelectMode?: (mode: 'chat' | 'agent') => void
+  modeDisabled?: boolean
 }
 
 interface ComposerProps {
@@ -180,6 +181,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                       type="button"
                       className={styles.chip}
                       aria-label="选择会话模式"
+                      disabled={actions.modeDisabled}
                       aria-expanded={modeMenuOpen}
                       aria-haspopup="menu"
                       onClick={() => setModeMenuOpen((open) => !open)}
@@ -189,7 +191,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                   )}
                   {modeMenuOpen && actions?.onSelectMode !== undefined ? (
                     <div className={styles.modeMenu} role="menu" aria-label="会话模式">
-                      <p className={styles.modeHint}>每个会话固定一种模式。切换会新建会话。</p>
+                      <p className={styles.modeHint}>切换当前会话的模式，从下一轮生效，历史记录保留。</p>
                       <button type="button" role="menuitemradio" aria-checked={mode === 'chat'} onClick={() => {
                         setModeMenuOpen(false)
                         if (mode !== 'chat') actions.onSelectMode?.('chat')

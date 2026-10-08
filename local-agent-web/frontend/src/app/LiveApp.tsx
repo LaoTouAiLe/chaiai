@@ -23,6 +23,7 @@ import {
   mapContext,
   mapError,
   mapMessages,
+  collapseDuplicateErrors,
   mapPlan,
   mapSession,
   mapStats,
@@ -34,8 +35,11 @@ import { ModelSettingsDialog } from '../features/settings/ModelSettingsDialog'
 import { parseSelectionVersion, selectionExpectation, toModelMenu } from '../features/settings/modelMenuAdapter'
 import { traceFromMessages } from '../features/trace/adapters'
 import { TraceView } from '../features/trace/TraceView'
+import { ConversationMapPanel } from '../features/conversation-map/ConversationMapPanel'
+import { DataCenter } from '../features/data-center/DataCenter'
+import type { components } from '../api/schema.gen'
 import { ApiError, archiveSession, listSessions, removeWorkspace, renameSession, renameWorkspace, restoreSession, selectSession } from '../api/client'
-import { queryKeys, useHealth, useModelConnections, useSessions, useSnapshot, useSubmitMessage, useWorkspaces, useCreateSession, useSelectWorkspace, useSelectSessionModel, useResolveApproval, usePickWorkspaceDirectory } from '../api/queries'
+import { queryKeys, useHealth, useModelConnections, useSessions, useSnapshot, useSubmitMessage, useWorkspaces, useCreateSession, useSelectWorkspace, useSelectSessionModel, useResolveApproval, usePickWorkspaceDirectory, useSetSessionMode, useEndInterruptedRequest } from '../api/queries'
 import { useSessionStream } from '../api/useSessionStream'
 import { useStreamTail } from '../stores/stream'
 import { useUiStore } from '../stores/ui'
@@ -80,6 +84,7 @@ export function LiveApp() {
   const sidebarCollapsed = collapsedPref ?? narrowViewport
 
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [dataCenterOpen, setDataCenterOpen] = useState(false)
   const [archivedOpen, setArchivedOpen] = useState(false)
   // 上下文详情面板的展开态：**界面状态**，不入服务端契约（刷新后回到收起）。
   const [meterOpen, setMeterOpen] = useState(false)
@@ -87,7 +92,12 @@ export function LiveApp() {
   const [modelError, setModelError] = useState<string | null>(null)
   const [workspaceActionError, setWorkspaceActionError] = useState<string | null>(null)
   // 顶部页签：对话 / 轨迹。纯界面状态，刷新后回到对话页（不猜用户上次看的是哪一页）。
-  const [tab, setTab] = useState<'conversation' | 'trace'>('conversation')
+  const [tab, setTab] = useState<'conversation' | 'trace' | 'map'>('conversation')
+  const [followup, setFollowup] = useState<{
+    sessionId: string; turnId: string; question: string; ordinal: number;
+    context: components['schemas']['SessionSnapshot']; baseSnapshotId: string; branchId: string;
+  } | null>(null)
+  const [focusTurn, setFocusTurn] = useState<{ sessionId: string; turnId: string } | null>(null)
   // 工具行的展开态：**纯界面状态**，不来自快照。T32 的结构化 diff 就在展开后才可见
   // （`ToolRow` 收起时只有一行摘要），所以真会话必须能让用户按需展开。
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(() => new Set())
@@ -100,9 +110,12 @@ export function LiveApp() {
   const snapshotQuery = useSnapshot(activeSessionId)
   const connections = useModelConnections()
   const createSession = useCreateSession()
+  const setSessionMode = useSetSessionMode()
+  const endInterrupted = useEndInterruptedRequest()
+  const [modeError, setModeError] = useState<{ sessionId: string; message: string } | null>(null)
+  const [recoveryConfirm, setRecoveryConfirm] = useState(false)
   const selectWorkspace = useSelectWorkspace()
   const pickWorkspace = usePickWorkspaceDirectory()
-  const submit = useSubmitMessage(activeSessionId)
   const selectSessionModel = useSelectSessionModel(activeSessionId)
   const approvalDecision = useResolveApproval(activeSessionId)
 
@@ -112,7 +125,13 @@ export function LiveApp() {
   // 稳定引用：`?? []` 每次渲染都会产生新数组，会让下面的 effect/memo 每次都重跑。
   const sessionList = useMemo(() => sessions.data ?? [], [sessions.data])
   const snapshot = snapshotQuery.data ?? null
-  const currentMode = sessionList.find((item) => item.session_id === activeSessionId)?.mode ?? 'agent'
+  const selectedFollowup = followup?.sessionId === activeSessionId ? followup : null
+  const submit = useSubmitMessage(activeSessionId, {
+    parent_turn_id: selectedFollowup?.turnId,
+    expected_branch_id: selectedFollowup?.branchId ?? snapshot?.branch_id,
+    expected_snapshot_id: selectedFollowup?.baseSnapshotId ?? snapshot?.snapshot_id,
+  })
+  const currentMode = snapshot?.mode ?? sessionList.find((item) => item.session_id === activeSessionId)?.mode ?? 'agent'
 
   // 刷新恢复：本地没有选中项时，按服务端的 `is_active` 回填（全库唯一 active）。
   useEffect(() => {
@@ -163,6 +182,8 @@ export function LiveApp() {
   const session = snapshot === null ? null : mapSession(snapshot, modelLabel)
   const running = session?.status === 'running'
   const awaitingApproval = session?.status === 'awaiting-approval'
+  const interrupted = snapshot?.interrupted_request_id != null
+  useEffect(() => { setRecoveryConfirm(false) }, [activeSessionId, snapshot?.snapshot_id, snapshot?.interrupted_request_id])
   const failedWithoutDetail = snapshot?.session_state === 'failed' && (snapshot.errors ?? []).length === 0
 
   // 审批卡直接由快照派生：**刷新恢复不需要任何额外机制**——快照本来就由 Checkpoint 投影，
@@ -189,7 +210,7 @@ export function LiveApp() {
       .filter((error) => !visibleErrorIds.has(error.diagnostic_id))
       .map((error) => ({ kind: 'error' as const, id: error.diagnostic_id, notice: mapError(error) }))
 
-    const messages = snapshot === null ? [] : [...mapMessages(snapshot, tail), ...errors]
+    const messages = snapshot === null ? [] : collapseDuplicateErrors([...mapMessages(snapshot, tail), ...errors])
       // 展开态在这里注入：适配层只给"默认紧凑"，被点过的行按界面状态覆盖。
       .map((message) =>
         message.kind === 'tool'
@@ -328,12 +349,13 @@ export function LiveApp() {
   }
 
   const send = () => {
-    if (activeSessionId === null || draft.trim() === '' || running || awaitingApproval || submit.isPending || createSession.isPending) return
+    if (activeSessionId === null || draft.trim() === '' || running || awaitingApproval || interrupted || submit.isPending || createSession.isPending || setSessionMode.isPending) return
     const text = draft
     // 先清草稿：提交的幂等键重试由用户发起（见 queries.ts），草稿不该在失败后被吞掉，
     // 但也不该在成功后又发一遍——所以这里清掉，失败时用户可以重新输入。
     setDraft(activeSessionId, '')
     submit.mutate(text, {
+      onSuccess: () => { setFollowup(null); setFocusTurn(null) },
       onError: () => {
         // 服务端可能先进入待审批，或另一页面抢先提交。只有用户尚未写新草稿时才恢复原文；
         // 绝不拿旧请求覆盖用户在执行期间刚写的内容。
@@ -413,6 +435,7 @@ export function LiveApp() {
         }}
         actions={{
           onSelectWorkspace: (id) => {
+            setDataCenterOpen(false)
             setWorkspaceActionError(null)
             selectWorkspace.mutate({ workspace_id: id }, {
               onSuccess: (selected) => {
@@ -460,6 +483,7 @@ export function LiveApp() {
             })
           },
           onSelectSession: (id) => {
+            setDataCenterOpen(false)
             setWorkspaceActionError(null)
             void selectSession(id).then(async (selected) => {
               openSelected(selected)
@@ -468,11 +492,13 @@ export function LiveApp() {
               ? error.message : '没能打开会话，请重试。'))
           },
           onNewSession: () => {
+            setDataCenterOpen(false)
             if (createSession.isPending) return
             setWorkspaceActionError(null)
             createSession.mutate({ workspaceId, mode: currentMode }, {
               onSuccess: (created) => {
                 openSession(created.session_id)
+                setTab('conversation')
                 setWorkspace(created.workspace?.workspace_id ?? null)
               },
               onError: (error) => setWorkspaceActionError(error instanceof ApiError
@@ -480,16 +506,26 @@ export function LiveApp() {
             })
           },
           onOpenSettings: () => setSettingsOpen(true),
+          onOpenDataCenter: () => { setSettingsOpen(false); setDataCenterOpen(true) },
           onToggleCollapse: () => setCollapsedPref(!sidebarCollapsed),
         }}
       />
       <main className={styles.main}>
+        {dataCenterOpen ? <DataCenter workspaces={workspaces.data ?? []} initialWorkspaceId={workspaceId}
+          running={running || awaitingApproval} onClose={() => setDataCenterOpen(false)} /> : <>
         <TopBar
           title={session?.title ?? '新会话'}
           workspace={session?.workspace ?? null}
           activeTab={tab}
           onSelectTab={setTab}
+          onOpenMap={() => setTab('map')}
         />
+        {selectedFollowup === null ? snapshot?.branch_id && snapshot.branch_id !== 'main' ?
+          <p className={styles.notice}>当前分支：{snapshot.branch_title} · 新提问会接在此分支末尾。</p> : null :
+          <p className={styles.notice}>基于第{selectedFollowup.ordinal}轮继续提问：{selectedFollowup.question.slice(0, 100)}。
+            上下文包含会话开头到本轮，原后续问答保留。
+            <button type="button" disabled={running || awaitingApproval || submit.isPending}
+              onClick={() => setFollowup(null)}>取消历史追问</button></p>}
         {stream.notices.length === 0 ? null : (
           // 传输层提示（超限/空闲超时/无法解析的帧）如实显示：它们不代表数据损坏，但用户有权知道。
           <p className={styles.notice} role="status">
@@ -521,6 +557,23 @@ export function LiveApp() {
               : '这次提交的执行结果尚不能确认。请先刷新会话核对状态；若可能涉及工具副作用，不要直接重复执行。'}
           </p>
         ) : null}
+        {interrupted ? <div className={styles.notice} role="alert">
+          本轮执行已中断，工具执行结果需要核对。刷新不会重跑工具。
+          <label><input type="checkbox" checked={recoveryConfirm} onChange={(event) => setRecoveryConfirm(event.target.checked)} />
+            我已查看本轮记录并核对相关文件或命令结果</label>
+          <button type="button" disabled={!recoveryConfirm || endInterrupted.isPending}
+            onClick={() => {
+              if (snapshot === null || snapshot.interrupted_request_id == null) return
+              endInterrupted.mutate({ sessionId: snapshot.session_id, requestId: snapshot.interrupted_request_id,
+                snapshotId: snapshot.snapshot_id }, { onSuccess: () => {
+                  setRecoveryConfirm(false)
+                  submit.reset()
+                  approvalDecision.reset()
+                } })
+            }}>结束中断任务</button>
+          {endInterrupted.isError ? <p>未能结束本轮，请刷新状态后重新核对。</p> : null}
+        </div> : null}
+        {modeError?.sessionId === activeSessionId ? <p className={styles.notice} role="alert">{modeError.message}</p> : null}
         {createSession.isError ? (
           <p className={styles.notice} role="alert">没能新建会话。请检查工作区状态后重试。</p>
         ) : null}
@@ -540,13 +593,34 @@ export function LiveApp() {
             }}>刷新状态</button>
           </p>
         )}
-        {tab === 'trace' ? (
+        {tab === 'map' && activeSessionId !== null ? (
+          <ConversationMapPanel key={activeSessionId} sessionId={activeSessionId} scenario={scenario}
+            snapshotId={snapshot?.snapshot_id ?? null} busy={running || awaitingApproval || submit.isPending}
+            onContinue={(node, context) => {
+              if (snapshot === null || useUiStore.getState().activeSessionId !== activeSessionId) return
+              setFollowup({ sessionId: activeSessionId, turnId: node.id, question: node.question,
+                ordinal: node.ordinal, context, baseSnapshotId: snapshot.snapshot_id, branchId: snapshot.branch_id ?? 'main' })
+              setFocusTurn(null)
+              setTab('conversation')
+            }}
+            onLocate={(turnId) => {
+              setFollowup(null); setFocusTurn({ sessionId: activeSessionId, turnId }); setTab('conversation')
+            }}
+            onBranchChanged={() => { setFollowup(null); setFocusTurn(null) }} />
+        ) : tab === 'trace' ? (
           <TraceView trace={trace} />
         ) : (
-          <Conversation scenario={scenario} autoFollow onToggleTool={toggleTool} />
+          <Conversation scenario={selectedFollowup !== null && snapshot?.snapshot_id === selectedFollowup.baseSnapshotId ? {
+            ...scenario,
+            messages: mapMessages(selectedFollowup.context).map((message) => message.kind === 'tool' ?
+              { ...message, tool: { ...message.tool, expanded: expandedTools.has(message.id) } } : message),
+            activity: null, empty: null, loading: null, stats: null,
+            turnStats: mapTurnStats(selectedFollowup.context, mapMessages(selectedFollowup.context), false),
+          } : scenario} autoFollow onToggleTool={toggleTool}
+            focusTurnId={focusTurn?.sessionId === activeSessionId ? focusTurn.turnId : null} />
         )}
-        {/* 轨迹视图只替换对话区；输入区留在这里，两个页签下都能继续写草稿。 */}
-        <Composer
+        {/* 地图留出详情空间；历史追问回到同一个输入框，审批时保留接管按钮。 */}
+        {tab !== 'map' || awaitingApproval ? <Composer
           mode={currentMode}
           session={session ?? { title: '新会话', workspace: null, status: 'idle', modelLabel: '' }}
           plan={scenario.plan}
@@ -582,18 +656,20 @@ export function LiveApp() {
             },
             onToggleMeter: () => setMeterOpen((open) => !open),
             onSelectMode: (mode) => {
-              if (mode === currentMode || createSession.isPending) return
-              createSession.mutate({ workspaceId, mode }, {
-                onSuccess: (created) => {
-                  openSession(created.session_id)
-                  setTab('conversation')
-                },
+              if (activeSessionId === null || mode === currentMode || setSessionMode.isPending || running || awaitingApproval || interrupted || submit.isPending) return
+              setModeError(null)
+              const sessionId = activeSessionId
+              setSessionMode.mutate({ sessionId, mode, expectedMode: currentMode }, {
+                onError: (error) => setModeError({ sessionId, message: error instanceof ApiError
+                  ? error.message : '模式切换未保存，请检查连接后重试。' }),
               })
             },
+            modeDisabled: activeSessionId === null || running || awaitingApproval || interrupted || submit.isPending || setSessionMode.isPending,
             // 任务进行中**允许继续写**，但不让发（T30 裁定）：草稿留在输入框里等这一轮结束。
-            canSend: activeSessionId !== null && draft.trim() !== '' && !running && !awaitingApproval && !submit.isPending && !createSession.isPending,
+            canSend: activeSessionId !== null && draft.trim() !== '' && !running && !awaitingApproval && !interrupted && !submit.isPending && !createSession.isPending && !setSessionMode.isPending,
           }}
-        />
+        /> : null}
+        </>}
         {settingsOpen ? <ModelSettingsDialog onClose={() => {
           setSettingsOpen(false)
           void queryClient.invalidateQueries({ queryKey: queryKeys.modelConnections })

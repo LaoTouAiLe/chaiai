@@ -11,8 +11,8 @@
   台账仍为"执行中"但锁没被占用（等于上一次进程留下的）时，先**只读**核对 Checkpoint——只有"台账
   绑定的 run == 当前 run 且已有终态"才算证明得了；能证明就补齐结果引用，证明不了（**包括 run 没绑定**）
   就返回 `RECOVERY_REQUIRED`，**绝不自动重提**。
-- **图抛异常不写终态**：异常可能发生在工具副作用之后，写成"失败"等于声称"什么都没发生"；
-  台账保留"执行中"并标记需要恢复，由下一次重试按 Checkpoint 核对（见 `_execute`）。
+- **不确定异常不自动写终态**：工具或持久化异常可能发生在副作用之后，台账保留待核对。
+  不执行工具的模型节点在图内明确失败；不确定请求由用户核对后显式结束，绝不重放工具。
 - **读取与订阅都不得改业务状态**：`get_session_snapshot` 只读 Checkpoint 与进程内脱敏展示副本，不推进图；完整业务事件仍是 State 的单向投影。
 - **模型连接在提交边界解析并在这一轮固定**（§6.8）：新提交按"会话选择 → 默认连接"构造客户端，并把
   `model_binding`（连接 id + 版本 + 不含明文的凭据引用）写进 State；审批恢复按**那一轮固定的**版本
@@ -40,9 +40,11 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from local_agent import config as config_module
+from local_agent.application import conversation, data_center
 from local_agent.application import errors as app_errors
 from local_agent.application import events as app_events
 from local_agent.application import projection as proj
+from local_agent.application.data_center_models import MemoryPageView, UsagePageView
 from local_agent.application.events import (
     EventEnvelope,
     SessionSnapshotEvent,
@@ -53,6 +55,7 @@ from local_agent.application.models import (
     AssistantMessageView,
     CapabilityCheckView,
     CommandResultView,
+    ConversationMapView,
     ExternalPathAccess,
     ExternalPathGrantView,
     ExternalPathsMode,
@@ -104,6 +107,7 @@ from local_agent.model_settings.preferences import (
     complete_preferences,
     initial_preferences,
 )
+from local_agent.persistence.conversation_store import ConversationTurn
 from local_agent.persistence.request_ledger import (
     OPERATION_RESOLVE_APPROVAL,
     OPERATION_SUBMIT,
@@ -143,6 +147,7 @@ class _ThreadView:
     has_live_interrupt: bool
     checkpoint_id: str | None
     confirmation_stage: int = 1
+    next_nodes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -499,6 +504,7 @@ class ApplicationService:
         self._build_model = model_factory or llm_factory.build_chat_model
         self._workspace_root = Path(workspace_root)
         self._sessions = sessions
+        self._conversations = sessions.conversations
         self._ledger = ledger
         self._secrets = tuple(secrets)
         if bus is not None and sequencer is not None and bus.sequencer is not sequencer:
@@ -513,6 +519,17 @@ class ApplicationService:
         self._catalog_lock = threading.RLock()
 
     # ---- 会话 ---------------------------------------------------------------
+
+    def get_memory_page(self, *, workspace_id: str | None = None, kind: str = "all",
+                        query: str = "", status: str = "all", offset: int = 0, limit: int = 30) -> MemoryPageView:
+        return data_center.memories(self, workspace_id=workspace_id, kind=kind, query=query,
+                                    status=status, offset=offset, limit=limit)
+
+    def get_usage_page(self, *, workspace_id: str | None = None, model: str = "",
+                       since: datetime | None = None, until: datetime | None = None,
+                       offset: int = 0, limit: int = 30) -> UsagePageView:
+        return data_center.usage(self, workspace_id=workspace_id, model=model, since=since,
+                                 until=until, offset=offset, limit=limit)
 
     def preferences_view(self) -> PreferencesView:
         defaults = initial_preferences(self._app_config)
@@ -690,6 +707,56 @@ class ApplicationService:
     def rename_session(self, session_id: str, title: str) -> SessionSummaryView:
         self._session_or_raise(session_id)
         return self._summary(self._sqlite_access(partial(self._sessions.rename, session_id, title)))
+
+    def set_session_mode(self, session_id: str, mode: str, expected_mode: str) -> SessionSummaryView:
+        with self._catalog_session_guard(session_id):
+            session = self._session_or_raise(session_id)
+            if session.mode != expected_mode:
+                raise conversation.conflict(session_id, "会话模式已在其他页面改变，请刷新后再切换。")
+            if self._sqlite_access(lambda: self._ledger.has_executing(session_id)):
+                raise conversation.conflict(session_id, "请先核对并结束中断任务，再切换模式。")
+            updated = self._sqlite_access(partial(self._sessions.set_mode, session_id, mode))
+            self._bus.publish(session_id, [self._snapshot_event(updated, self._read(updated))])
+            return self._summary(updated)
+
+    def end_interrupted_request(self, session_id: str, request_id: str,
+                                expected_snapshot_id: str) -> SessionSnapshot:
+        """用户核对后结束中断请求；只写检查点，不恢复图、不重放工具。"""
+        lock = self._lock_for(session_id)
+        if not lock.acquire(blocking=False):
+            raise app_errors.session_busy(session_id=session_id, request_id=request_id, occurred_at=_now())
+        try:
+            session = self._session_or_raise(session_id)
+            entry = self._sqlite_access(partial(self._ledger.get, request_id))
+            view = self._read(session)
+            current_id = view.checkpoint_id or f"{session_id}:no-checkpoint"
+            if entry is None or entry["session_id"] != session_id:
+                raise conversation.conflict(session_id, "找不到待核对请求。")
+            if entry["status"] in TERMINAL_STATUSES:
+                return self._snapshot(session, view)  # 重复点击不会再修改检查点。
+            if current_id != expected_snapshot_id:
+                raise conversation.conflict(session_id, "会话状态已改变，请刷新后重新核对。")
+            state_run = proj.current_run_id(view.values) or None
+            ref = None
+            if entry["run_id"] is not None:
+                if entry["run_id"] != state_run:
+                    raise conversation.conflict(session_id, "请求与当前轮次不一致，不能结束其他轮次。")
+                if view.values.get("task_status") in TASK_TERMINAL_STATUSES and not view.has_live_interrupt:
+                    self._recover(session, entry=entry, operation=entry["operation"])
+                    return self._snapshot(session, view)
+                builder.close_interrupted_turn(self._graph, self._conversation_config(session),
+                                               view.values, request_id)
+                conversation.sync(self, session)
+                view = self._read(session)
+                ref = view.checkpoint_id
+            # 未绑定 run 的请求不能借用上一轮结果。旧 id 保持不可重跑，也不返回别人的结果。
+            self._sqlite_access(partial(self._ledger.finish, request_id, status=STATUS_FAILED,
+                                       result_ref=ref, error_code=app_errors.RECOVERY_REQUIRED))
+            snapshot = self._snapshot(session, view)
+            self._bus.publish(session_id, [self._snapshot_event(session, view)])
+            return snapshot
+        finally:
+            lock.release()
 
     def archive_session(self, session_id: str) -> SessionSummaryView:
         with self._catalog_lock, self._catalog_session_guard(session_id):
@@ -1139,12 +1206,18 @@ class ApplicationService:
 
     # ---- 执行状态修改（共用同一互斥边界）------------------------------------
 
-    def submit_message(self, session_id: str, text: str, client_request_id: str) -> CommandResultView:
+    def submit_message(self, session_id: str, text: str, client_request_id: str, *,
+                       parent_turn_id: str | None = None,
+                       expected_branch_id: str | None = None,
+                       expected_snapshot_id: str | None = None) -> CommandResultView:
         """提交一条用户消息。"""
         digest = _digest(OPERATION_SUBMIT, session_id, text)
+        if any(value is not None for value in (parent_turn_id, expected_branch_id, expected_snapshot_id)):
+            digest = _digest(digest, parent_turn_id or "", expected_branch_id or "", expected_snapshot_id or "")
         session = self._session_or_raise(session_id)
         # 提交边界解析的结果（连接固定 + 客户端就绪），在预检里算一次、在运行里原样复用。
         prepared: list[_RunEnv] = []
+        parents: list[ConversationTurn | None] = []
 
         def prepare() -> None:
             """幂等判定之后、**落台账之前**的预检：解析连接、备好客户端与密钥。
@@ -1153,11 +1226,20 @@ class ApplicationService:
             或缺 Key，这条请求什么都没跑却留下了"执行中"记录——用户按提示配好连接后拿**同一个请求 id**
             重试，会被当成上一次进程留下的陈旧请求，判成 `RECOVERY_REQUIRED`（复审实证）。
             """
+            nonlocal session
+            session = self._session_or_raise(session_id)
             self._require_idle(session, client_request_id)
+            if expected_snapshot_id is not None:
+                current = self._read(session).checkpoint_id or f"{session.session_id}:no-checkpoint"
+                if current != expected_snapshot_id:
+                    raise conversation.conflict(session_id, "会话已经新增内容，本次提问尚未执行。")
+            parents.append(conversation.submission_parent(
+                self, session, parent_turn_id, expected_branch_id))
             prepared.append(self._run_env(session, self._resolve_binding(session)))
 
         def run() -> CommandResultView:
             env = prepared[0]
+            conversation.start_path(self, session, parents[0])
             payload: dict[str, Any] = {
                 "user_input": text,
                 "thread_id": session.thread_id,
@@ -1262,6 +1344,9 @@ class ApplicationService:
             raise app_errors.session_busy(
                 session_id=session.session_id, request_id=request_id, occurred_at=_now()
             )
+        if self._sqlite_access(lambda: self._ledger.has_executing(session.session_id)):
+            raise app_errors.recovery_required(session_id=session.session_id, request_id=request_id,
+                detail="请先核对并结束此前中断的请求，不会自动重发。", occurred_at=_now())
 
     def _require_pending_approval(self, session: Session, approval_id: str) -> None:
         """这个审批是不是还真的在等这一步决定？不是就别 resume——那会答非所问。"""
@@ -1362,6 +1447,10 @@ class ApplicationService:
             这是**执行期**投影：终态不在这一批发（见 `_turn_events` 的 `include_terminal`）。
             """
             view = self._read(session)
+            with self._locks_guard:
+                sink = self._streams.get(session.session_id)
+            if sink is not None and sink._run_id is not None and proj.current_run_id(view.values) != sink._run_id:
+                return
             self._publish_new_events(
                 session,
                 snapshot=self._snapshot(session, view),
@@ -1481,7 +1570,7 @@ class ApplicationService:
         with self._live_stream(session.session_id, sink):
             for chunk in self._graph.stream(
                 payload,
-                config={"configurable": {"thread_id": session.thread_id}},
+                config=self._conversation_config(session),
                 context=self._context(session, env),
                 stream_mode="updates",
             ):
@@ -1497,7 +1586,9 @@ class ApplicationService:
                             env.usage_recorder.bind_run(run_id)
                         bound = True
                 if on_update is not None:
+                    conversation.sync(self, session)
                     on_update()
+        conversation.sync(self, session)
 
     @contextmanager
     def _live_stream(self, session_id: str, sink: _StreamingAnswerSink) -> Iterator[None]:
@@ -1622,7 +1713,66 @@ class ApplicationService:
     # ---- 内部：读取与投影 ----------------------------------------------------
 
     def _read(self, session: Session) -> _ThreadView:
+        with self._locks_guard:
+            sink = self._streams.get(session.session_id)
+        if sink is not None and sink._run_id is not None:
+            latest = self._view_of(self._graph.get_state({"configurable": {"thread_id": session.thread_id}}))
+            if proj.current_run_id(latest.values) == sink._run_id:
+                return latest
+        branch = self._sqlite_access(lambda: self._conversations.active(session.session_id))
+        if branch is not None and branch.checkpoint_id is not None:
+            view = self._read_checkpoint(session, branch.checkpoint_id)
+            if view is None:
+                raise conversation.conflict(session.session_id, "当前分支检查点无法恢复。")
+            return view
         return self._view_of(self._graph.get_state({"configurable": {"thread_id": session.thread_id}}))
+
+    def _conversation_config(self, session: Session) -> RunnableConfig:
+        branch = self._sqlite_access(lambda: self._conversations.active(session.session_id))
+        config: RunnableConfig = {"configurable": {"thread_id": session.thread_id}}
+        if branch is not None and branch.checkpoint_id is not None:
+            config["configurable"]["checkpoint_id"] = branch.checkpoint_id
+        return config
+
+    def get_conversation_map(self, session_id: str, query: str = "") -> ConversationMapView:
+        return conversation.map_view(self, self._session_or_raise(session_id), query)
+
+    def get_turn_snapshot(self, session_id: str, turn_id: str, *,
+                          include_ancestors: bool = False) -> SessionSnapshot:
+        return conversation.turn_snapshot(self, self._session_or_raise(session_id), turn_id,
+                                           include_ancestors=include_ancestors)
+
+    def select_branch(self, session_id: str, branch_id: str) -> SessionSnapshot:
+        with self._catalog_session_guard(session_id):
+            if self._sqlite_access(lambda: self._ledger.has_executing(session_id)):
+                raise conversation.conflict(session_id, "还有执行结果未确认的请求，不能切换分支。")
+            session = self._session_or_raise(session_id)
+            conversation.initialize(self, session)
+            branches = self._sqlite_access(lambda: self._conversations.branches(session_id))
+            target = next((branch for branch in branches if branch.branch_id == branch_id), None)
+            if target is None:
+                raise conversation.conflict(session_id, "找不到该分支。")
+            if target.checkpoint_id is not None and self._read_checkpoint(session, target.checkpoint_id) is None:
+                raise conversation.conflict(session_id, "目标分支的检查点无法恢复，当前路径没有改变。")
+            self._sqlite_access(lambda: self._conversations.select(session_id, branch_id))
+            view = self._read(session)
+            snapshot = self._snapshot(session, view)
+            self._bus.publish(session_id, [self._snapshot_event(session, view)])
+            return snapshot
+
+    def arrange_branch(self, session_id: str, branch_id: str, title: str,
+                       position: int) -> ConversationMapView:
+        with self._catalog_session_guard(session_id):
+            session = self._session_or_raise(session_id)
+            conversation.initialize(self, session)
+            branches = self._sqlite_access(lambda: self._conversations.branches(session_id))
+            if not any(branch.branch_id == branch_id for branch in branches):
+                raise conversation.conflict(session_id, "找不到该分支。")
+            clean = " ".join(title.split())
+            if not clean or len(clean) > 80 or position < 0:
+                raise conversation.conflict(session_id, "分支名称需为 1 至 80 个字符，位置不能为负数。")
+            self._sqlite_access(lambda: self._conversations.arrange(session_id, branch_id, clean, position))
+            return conversation.map_view(self, session)
 
     def _current_run_id(self, session: Session) -> str | None:
         """当前 Checkpoint 里的轮次（审批恢复要绑定"正在恢复的那一轮"）。"""
@@ -1667,6 +1817,7 @@ class ApplicationService:
             has_live_interrupt=bool(has_interrupt),
             checkpoint_id=None if checkpoint_id is None else str(checkpoint_id),
             confirmation_stage=confirmation_stage,
+            next_nodes=tuple(getattr(snapshot, "next", ()) or ()),
         )
 
     def _context(self, session: Session, env: _RunEnv) -> Any:
@@ -1850,6 +2001,17 @@ class ApplicationService:
             snapshot_id=view.checkpoint_id or f"{session.session_id}:no-checkpoint",
             created_at=_now(),
         )
+        lock = self._lock_for(session.session_id)
+        if lock.acquire(blocking=False):
+            try:
+                entries = self._sqlite_access(lambda: self._ledger.executing(session.session_id))
+                if entries:
+                    snapshot = snapshot.model_copy(update={
+                        "session_state": "blocked", "interrupted_request_id": entries[-1]["request_id"],
+                        "approval": None,
+                    })
+            finally:
+                lock.release()
         with self._locks_guard:
             sink = self._streams.get(session.session_id)
         if sink is not None and snapshot.current_task is not None and snapshot.session_state == "running":
@@ -1862,7 +2024,7 @@ class ApplicationService:
         self, session: Session, view: _ThreadView, *, snapshot_id: str, created_at: datetime
     ) -> SessionSnapshot:
         """按给定时点与标识投影一份快照（实时快照用当前时间，重放历史用记录里的时间）。"""
-        return proj.project_snapshot(
+        snapshot = proj.project_snapshot(
             view.values,
             session_id=session.session_id,
             workspace=self._workspace_ref(session),
@@ -1875,6 +2037,11 @@ class ApplicationService:
             workspace_root=Path(session.workspace_root),
             confirmation_stage=view.confirmation_stage,
         )
+        branch = self._sqlite_access(lambda: self._conversations.active(session.session_id))
+        changes: dict[str, Any] = {"mode": "chat" if session.mode == "chat" else "agent"}
+        if branch is not None:
+            changes.update(branch_id=branch.branch_id, branch_title=branch.title)
+        return snapshot.model_copy(update=changes)
 
     def _session_model_selection(self, session_id: str) -> ModelSelectionView | None:
         """会话**自己的**下一轮模型选择（`None` = 跟随默认）。

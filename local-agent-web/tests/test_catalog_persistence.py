@@ -20,8 +20,8 @@ def test_v4_upgrade_backfills_workspaces_and_preserves_sessions(tmp_path: Path) 
         ("old", "thread-old", "旧历史", normalize_path(root), "project", "2026-01-01", "2026-01-01", "active", "chat"),
     )
     connection.commit()
-    assert migrations.apply_migrations(connection) == 5
-    assert migrations.apply_migrations(connection) == 5
+    assert migrations.apply_migrations(connection) == migrations.CHAT_SCHEMA_VERSION
+    assert migrations.apply_migrations(connection) == migrations.CHAT_SCHEMA_VERSION
     store = SessionStore(connection, workspace_root=root)
     before = store.get("old")
     assert before is not None and before.mode == "chat" and not before.archived

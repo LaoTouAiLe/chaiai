@@ -8,8 +8,12 @@ import { useRef } from 'react'
 
 import {
   ApiError,
+  setSessionMode,
+  endInterruptedRequest,
   createSession,
   getHealth,
+  getMemoryPage,
+  getUsagePage,
   getSessionSnapshot,
   listModelConnections,
   listSessions,
@@ -22,6 +26,15 @@ import {
   submitMessage,
 } from './client'
 import type { components } from './schema.gen'
+import type { SubmissionContext } from './client'
+import type { MemoryFilters, UsageFilters } from './client'
+
+export function useMemoryPage(filters: MemoryFilters, enabled: boolean) {
+  return useQuery({ queryKey: ['data-center', 'memory', filters], queryFn: () => getMemoryPage(filters), enabled, staleTime: 5000 })
+}
+export function useUsagePage(filters: UsageFilters, enabled: boolean) {
+  return useQuery({ queryKey: ['data-center', 'usage', filters], queryFn: () => getUsagePage(filters), enabled, staleTime: 5000 })
+}
 
 export const queryKeys = {
   health: ['health'] as const,
@@ -123,6 +136,35 @@ export function useCreateSession() {
   })
 }
 
+export function useSetSessionMode() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ sessionId, mode, expectedMode }: { sessionId: string; mode: 'chat' | 'agent'; expectedMode: 'chat' | 'agent' }) =>
+      setSessionMode(sessionId, mode, expectedMode),
+    onSuccess: (session) => {
+      queryClient.setQueryData<components['schemas']['SessionSnapshot']>(queryKeys.snapshot(session.session_id),
+        (previous) => previous === undefined ? previous : { ...previous, mode: session.mode })
+      queryClient.setQueriesData<components['schemas']['SessionSummaryView'][]>({ queryKey: ['sessions'] },
+        (previous) => previous?.map((item) => item.session_id === session.session_id ? session : item))
+      void queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(session.session_id) })
+    },
+  })
+}
+
+export function useEndInterruptedRequest() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ sessionId, requestId, snapshotId }: { sessionId: string; requestId: string; snapshotId: string }) =>
+      endInterruptedRequest(sessionId, requestId, snapshotId),
+    onSettled: (_data, _error, request) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
+      void queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      void queryClient.invalidateQueries({ queryKey: ['conversation-map', request.sessionId] })
+    },
+  })
+}
+
 /**
  * 提交一条消息。
  *
@@ -133,18 +175,28 @@ export function useCreateSession() {
  *   第二条消息会被静默丢弃（或被判成 `IDEMPOTENCY_CONFLICT`）。
  * 所以键与它当时对应的文本绑在一起记。
  */
-export function useSubmitMessage(sessionId: string | null) {
+export function useSubmitMessage(sessionId: string | null, context: SubmissionContext = {}) {
   const queryClient = useQueryClient()
-  const pending = useRef(new Map<string, { id: string; text: string }>())
+  const pending = useRef(new Map<string, { id: string; signature: string; context: SubmissionContext }>())
 
   const mutation = useMutation({
-    mutationFn: async (request: { sessionId: string; text: string }) => {
+    mutationFn: async (request: { sessionId: string; text: string; context: SubmissionContext }) => {
       const existing = pending.current.get(request.sessionId)
       const text = request.text
-      const requestId = existing !== undefined && existing.text === text ? existing.id : newRequestId()
-      pending.current.set(request.sessionId, { id: requestId, text })
-      const result = await submitMessage(request.sessionId, text, requestId)
-      // 成功之后才换新的：失败（含忙碌、冲突、网络中断）都保留，重试仍指向同一次提交。
+      const signature = JSON.stringify([text, request.context.parent_turn_id ?? null, request.context.expected_branch_id ?? null])
+      const same = existing?.signature === signature
+      const requestId = same ? existing.id : newRequestId()
+      const boundContext = same ? existing.context : request.context
+      pending.current.set(request.sessionId, { id: requestId, signature, context: boundContext })
+      let result
+      try {
+        result = await submitMessage(request.sessionId, text, requestId, boundContext)
+      } catch (error) {
+        // 明确拒绝且没有执行时，刷新后可换观测版本；网络中断仍保留原请求的上下文与幂等键。
+        if (error instanceof ApiError && error.code === 'CONVERSATION_CONFLICT') pending.current.delete(request.sessionId)
+        throw error
+      }
+      // 成功后换新键；未确认执行结果的失败保留原上下文，明确的路径拒绝已在上面清除。
       pending.current.delete(request.sessionId)
       return result
     },
@@ -152,18 +204,23 @@ export function useSubmitMessage(sessionId: string | null) {
       // 提交返回的是**命令结果**（不是快照）：权威状态仍以快照为准，所以拉一次。
       void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
       void queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      void queryClient.invalidateQueries({ queryKey: ['conversation-map', request.sessionId] })
       return result
+    },
+    onError: (_error, request) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
     },
   })
   const belongsHere = mutation.variables?.sessionId === sessionId
   return {
     mutate: (text: string, options?: Parameters<typeof mutation.mutate>[1]) => {
       if (sessionId === null) throw new Error('还没有打开会话')
-      mutation.mutate({ sessionId, text }, options)
+      mutation.mutate({ sessionId, text, context }, options)
     },
     isPending: belongsHere && mutation.isPending,
     isError: belongsHere && mutation.isError,
     error: belongsHere ? mutation.error : null,
+    reset: mutation.reset,
   }
 }
 
@@ -211,6 +268,7 @@ export function useResolveApproval(sessionId: string | null) {
     },
     isPending: belongsHere && mutation.isPending,
     error: belongsHere ? mutation.error : null,
+    reset: mutation.reset,
   }
 }
 

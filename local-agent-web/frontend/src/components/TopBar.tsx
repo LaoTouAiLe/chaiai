@@ -4,19 +4,20 @@ interface TopBarProps {
   title: string
   /** Null while no workspace is selected: no breadcrumb is shown. */
   workspace: string | null
-  activeTab: 'conversation' | 'trace'
+  activeTab: 'conversation' | 'trace' | 'map'
   /**
    * 切换页签。
    *
    * 省略即原型行为：页签只显示当前态、不产生跳转（原型里"当前页签"由 `?state=` 决定）。
    */
   onSelectTab?: (tab: 'conversation' | 'trace') => void
+  onOpenMap?: () => void
 }
 
 /**
  * Session header: title and conversation/trace switch.
  */
-export function TopBar({ title, workspace, activeTab, onSelectTab }: TopBarProps) {
+export function TopBar({ title, workspace, activeTab, onSelectTab, onOpenMap }: TopBarProps) {
   return (
     <header className={styles.bar}>
       <div className={styles.left}>
@@ -47,6 +48,10 @@ export function TopBar({ title, workspace, activeTab, onSelectTab }: TopBarProps
           >
             轨迹
           </button>
+          {onOpenMap === undefined ? null : <button type="button" role="tab"
+            aria-selected={activeTab === 'map'}
+            className={activeTab === 'map' ? `${styles.tab} ${styles.tabActive}` : styles.tab}
+            onClick={onOpenMap}>会话地图</button>}
         </div>
       </div>
     </header>

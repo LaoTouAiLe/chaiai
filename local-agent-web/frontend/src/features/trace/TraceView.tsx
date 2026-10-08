@@ -22,6 +22,7 @@ const STATUS_CLASS: Record<TraceRowView['status'], string> = {
   running: styles.statusRunning ?? '',
   succeeded: styles.statusSucceeded ?? '',
   failed: styles.statusFailed ?? '',
+  uncertain: styles.statusFailed ?? '',
 }
 
 interface TraceViewProps {

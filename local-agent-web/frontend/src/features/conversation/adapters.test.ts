@@ -6,6 +6,7 @@ import {
   mapApproval,
   mapContext,
   mapError,
+  collapseDuplicateErrors,
   mapMessages,
   mapPlan,
   mapSession,
@@ -456,6 +457,16 @@ describe('mapMessages', () => {
 })
 
 describe('mapError', () => {
+  it('merges identical notices within a turn, preserving different errors and later turns', () => {
+    const notice = mapError({ code: 'RUN_STAGE_FAILED', category: 'system', severity: 'error',
+      title: '失败', message: '证据未确认', hint: '', retryable: false, blocked_reason: null,
+      retry_condition: null, diagnostic_id: 'diag', occurred_at: '2026-10-07T00:00:00Z', source: 'run' })
+    const error = { kind: 'error' as const, id: 'one', notice }
+    const user = { kind: 'user' as const, id: 'u', text: '再问', at: '' }
+    const different = { ...error, id: 'different', notice: { ...notice, message: '不同原因' } }
+    expect(collapseDuplicateErrors([error, { ...error, id: 'two' }, different, user, { ...error, id: 'later' }])
+      .map((row) => row.id)).toEqual(['one', 'different', 'u', 'later'])
+  })
   it('renames the contract fields without reinterpreting them', () => {
     const notice = mapError({
       code: 'MODEL_AUTH_FAILED',

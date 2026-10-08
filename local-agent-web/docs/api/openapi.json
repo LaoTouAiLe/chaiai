@@ -293,7 +293,8 @@
               "executing",
               "approved",
               "rejected",
-              "expired"
+              "expired",
+              "interrupted"
             ],
             "title": "State",
             "type": "string"
@@ -331,6 +332,28 @@
           "created_at"
         ],
         "title": "ApprovalView",
+        "type": "object"
+      },
+      "ArrangeBranchRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "position": {
+            "minimum": 0.0,
+            "title": "Position",
+            "type": "integer"
+          },
+          "title": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "position"
+        ],
+        "title": "ArrangeBranchRequest",
         "type": "object"
       },
       "AssistantMessageView": {
@@ -582,6 +605,173 @@
           }
         },
         "title": "ContextMeterView",
+        "type": "object"
+      },
+      "ConversationBranchView": {
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "branch_id": {
+            "title": "Branch Id",
+            "type": "string"
+          },
+          "fork_turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fork Turn Id"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "tip_turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tip Turn Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "branch_id",
+          "title",
+          "position",
+          "active"
+        ],
+        "title": "ConversationBranchView",
+        "type": "object"
+      },
+      "ConversationMapView": {
+        "properties": {
+          "active_branch_id": {
+            "title": "Active Branch Id",
+            "type": "string"
+          },
+          "branches": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationBranchView"
+            },
+            "title": "Branches",
+            "type": "array"
+          },
+          "matched_turn_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Matched Turn Ids",
+            "type": "array"
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationNodeView"
+            },
+            "title": "Nodes",
+            "type": "array"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "active_branch_id",
+          "nodes",
+          "branches"
+        ],
+        "title": "ConversationMapView",
+        "type": "object"
+      },
+      "ConversationNodeView": {
+        "properties": {
+          "answer_preview": {
+            "title": "Answer Preview",
+            "type": "string"
+          },
+          "can_continue": {
+            "title": "Can Continue",
+            "type": "boolean"
+          },
+          "ordinal": {
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "origin_branch_id": {
+            "title": "Origin Branch Id",
+            "type": "string"
+          },
+          "parent_turn_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Turn Id"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "submitted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submitted At"
+          },
+          "turn_id": {
+            "title": "Turn Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "turn_id",
+          "origin_branch_id",
+          "question",
+          "answer_preview",
+          "state",
+          "ordinal",
+          "can_continue"
+        ],
+        "title": "ConversationNodeView",
         "type": "object"
       },
       "CreateSessionRequest": {
@@ -1344,6 +1534,121 @@
         "title": "MediumTermPreferences",
         "type": "object"
       },
+      "MemoryEntryView": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
+          },
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "importance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Importance"
+          },
+          "kind": {
+            "enum": [
+              "medium",
+              "fact",
+              "conclusion"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "truncated": {
+            "default": false,
+            "title": "Truncated",
+            "type": "boolean"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "content",
+          "scope",
+          "status"
+        ],
+        "title": "MemoryEntryView",
+        "type": "object"
+      },
       "MemoryMessageView": {
         "properties": {
           "kind": {
@@ -1366,6 +1671,69 @@
           "memory"
         ],
         "title": "MemoryMessageView",
+        "type": "object"
+      },
+      "MemoryPageView": {
+        "additionalProperties": false,
+        "properties": {
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Counts",
+            "type": "object"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryEntryView"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "incomplete": {
+            "default": false,
+            "title": "Incomplete",
+            "type": "boolean"
+          },
+          "limit": {
+            "exclusiveMinimum": 0.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "notices": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notices",
+            "type": "array"
+          },
+          "offset": {
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "resources": {
+            "items": {
+              "$ref": "#/components/schemas/MemoryResourceView"
+            },
+            "title": "Resources",
+            "type": "array"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entries",
+          "resources",
+          "total",
+          "counts",
+          "offset",
+          "limit"
+        ],
+        "title": "MemoryPageView",
         "type": "object"
       },
       "MemoryProbeRequest": {
@@ -1540,6 +1908,44 @@
           "memory"
         ],
         "title": "MemoryRecalledPayload",
+        "type": "object"
+      },
+      "MemoryResourceView": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "medium",
+              "long"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "note": {
+            "title": "Note",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "available",
+              "missing",
+              "unavailable"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "enabled",
+          "state",
+          "note"
+        ],
+        "title": "MemoryResourceView",
         "type": "object"
       },
       "MemoryResourcesView": {
@@ -3253,6 +3659,35 @@
         "title": "PreferencesView",
         "type": "object"
       },
+      "RecoveryRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirm_reviewed": {
+            "const": true,
+            "title": "Confirm Reviewed",
+            "type": "boolean"
+          },
+          "expected_snapshot_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Expected Snapshot Id",
+            "type": "string"
+          },
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "expected_snapshot_id",
+          "confirm_reviewed"
+        ],
+        "title": "RecoveryRequest",
+        "type": "object"
+      },
       "RenameRequest": {
         "additionalProperties": false,
         "description": "会话与工作区的显示名称；不改变目录名或会话绑定。",
@@ -3579,6 +4014,33 @@
         "title": "SelectionExpectation",
         "type": "object"
       },
+      "SessionModeRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_mode": {
+            "enum": [
+              "chat",
+              "agent"
+            ],
+            "title": "Expected Mode",
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "chat",
+              "agent"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "expected_mode"
+        ],
+        "title": "SessionModeRequest",
+        "type": "object"
+      },
       "SessionSnapshot": {
         "description": "`session_snapshot` 事件的载荷，也是刷新恢复的权威展示状态。\n\n只读：生成快照不得写回 State、调用模型或执行工具（§15.4）。`schema_version` 与\n`snapshot_id` 一起让恢复逻辑能判断\"这份快照来自哪个契约版本\"。",
         "properties": {
@@ -3591,6 +4053,16 @@
                 "type": "null"
               }
             ]
+          },
+          "branch_id": {
+            "default": "main",
+            "title": "Branch Id",
+            "type": "string"
+          },
+          "branch_title": {
+            "default": "原讨论",
+            "title": "Branch Title",
+            "type": "string"
           },
           "context": {
             "$ref": "#/components/schemas/ContextMeterView"
@@ -3626,6 +4098,17 @@
                 "type": "null"
               }
             ]
+          },
+          "interrupted_request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interrupted Request Id"
           },
           "memory": {
             "anyOf": [
@@ -3669,6 +4152,15 @@
             },
             "title": "Messages",
             "type": "array"
+          },
+          "mode": {
+            "default": "agent",
+            "enum": [
+              "chat",
+              "agent"
+            ],
+            "title": "Mode",
+            "type": "string"
           },
           "model_calls": {
             "items": {
@@ -4062,6 +4554,45 @@
             "title": "Client Request Id",
             "type": "string"
           },
+          "expected_branch_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Branch Id"
+          },
+          "expected_snapshot_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Snapshot Id"
+          },
+          "parent_turn_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Turn Id"
+          },
           "text": {
             "maxLength": 100000,
             "minLength": 1,
@@ -4313,7 +4844,8 @@
               "running",
               "ok",
               "error",
-              "denied"
+              "denied",
+              "unknown"
             ],
             "title": "Status",
             "type": "string"
@@ -4764,7 +5296,8 @@
               "running",
               "ok",
               "error",
-              "denied"
+              "denied",
+              "unknown"
             ],
             "title": "Status",
             "type": "string"
@@ -5070,6 +5603,220 @@
         "title": "TurnUsageView",
         "type": "object"
       },
+      "UsageBucketView": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/UsageTotalsView"
+          }
+        },
+        "required": [
+          "label",
+          "totals"
+        ],
+        "title": "UsageBucketView",
+        "type": "object"
+      },
+      "UsageCallView": {
+        "additionalProperties": false,
+        "properties": {
+          "call": {
+            "$ref": "#/components/schemas/ModelCallRecordView"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "session_title": {
+            "title": "Session Title",
+            "type": "string"
+          },
+          "workspace_id": {
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "session_title",
+          "workspace_id",
+          "call"
+        ],
+        "title": "UsageCallView",
+        "type": "object"
+      },
+      "UsagePageView": {
+        "additionalProperties": false,
+        "properties": {
+          "daily": {
+            "items": {
+              "$ref": "#/components/schemas/UsageBucketView"
+            },
+            "title": "Daily",
+            "type": "array"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/UsageCallView"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "incomplete": {
+            "default": false,
+            "title": "Incomplete",
+            "type": "boolean"
+          },
+          "limit": {
+            "exclusiveMinimum": 0.0,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "missing_record_sessions": {
+            "default": 0,
+            "title": "Missing Record Sessions",
+            "type": "integer"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/UsageBucketView"
+            },
+            "title": "Models",
+            "type": "array"
+          },
+          "notices": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notices",
+            "type": "array"
+          },
+          "offset": {
+            "minimum": 0.0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "purposes": {
+            "items": {
+              "$ref": "#/components/schemas/UsageBucketView"
+            },
+            "title": "Purposes",
+            "type": "array"
+          },
+          "scanned_sessions": {
+            "default": 0,
+            "title": "Scanned Sessions",
+            "type": "integer"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "totals": {
+            "$ref": "#/components/schemas/UsageTotalsView"
+          }
+        },
+        "required": [
+          "totals",
+          "daily",
+          "models",
+          "purposes",
+          "entries",
+          "total",
+          "offset",
+          "limit",
+          "generated_at"
+        ],
+        "title": "UsagePageView",
+        "type": "object"
+      },
+      "UsageTotalsView": {
+        "additionalProperties": false,
+        "properties": {
+          "cache_hit_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Hit Ratio"
+          },
+          "cache_read_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cache Read Tokens"
+          },
+          "calls": {
+            "default": 0,
+            "title": "Calls",
+            "type": "integer"
+          },
+          "failed_calls": {
+            "default": 0,
+            "title": "Failed Calls",
+            "type": "integer"
+          },
+          "input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Input Tokens"
+          },
+          "missing_usage_calls": {
+            "default": 0,
+            "title": "Missing Usage Calls",
+            "type": "integer"
+          },
+          "output_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Tokens"
+          },
+          "uncached_input_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncached Input Tokens"
+          }
+        },
+        "title": "UsageTotalsView",
+        "type": "object"
+      },
       "UserMessageView": {
         "properties": {
           "created_at": {
@@ -5177,6 +5924,237 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/data-center/memories": {
+      "get": {
+        "operationId": "memory_page_api_data_center_memories_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "kind",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "medium",
+                "fact",
+                "conclusion"
+              ],
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 500,
+              "title": "Query",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "all",
+              "enum": [
+                "all",
+                "active",
+                "expired",
+                "superseded",
+                "conflicted",
+                "deleted",
+                "unknown"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 30000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryPageView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "只读记忆列表"
+      }
+    },
+    "/api/data-center/usage": {
+      "get": {
+        "operationId": "usage_page_api_data_center_usage_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "model",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 200,
+              "title": "Model",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since"
+            }
+          },
+          {
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Until"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 100000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 30,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsagePageView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "去重后的实际调用用量"
+      }
+    },
     "/api/health": {
       "get": {
         "description": "服务可用性。不含路径、密钥或内部标识。\n\n`model_configured=false` 是**初始设置模式**的正常状态（§15.9）：服务照常可用，用户去设置页\n加一条连接就行；提交消息会得到可执行的配置提示。",
@@ -6188,6 +7166,222 @@
         "summary": "Archive Session"
       }
     },
+    "/api/sessions/{session_id}/branches/{branch_id}": {
+      "patch": {
+        "operationId": "arrange_branch_api_sessions__session_id__branches__branch_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "branch_id",
+            "required": true,
+            "schema": {
+              "title": "Branch Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArrangeBranchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationMapView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "分支改名与展示排序"
+      }
+    },
+    "/api/sessions/{session_id}/branches/{branch_id}/select": {
+      "post": {
+        "operationId": "select_branch_api_sessions__session_id__branches__branch_id__select_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "branch_id",
+            "required": true,
+            "schema": {
+              "title": "Branch Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSnapshot"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "切换会话分支"
+      }
+    },
+    "/api/sessions/{session_id}/conversation-map": {
+      "get": {
+        "operationId": "conversation_map_api_sessions__session_id__conversation_map_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "query",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 500,
+              "title": "Query",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationMapView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "会话地图"
+      }
+    },
     "/api/sessions/{session_id}/events": {
       "get": {
         "operationId": "session_events_api_sessions__session_id__events_get",
@@ -6307,6 +7501,75 @@
         "summary": "提交消息"
       }
     },
+    "/api/sessions/{session_id}/mode": {
+      "patch": {
+        "operationId": "set_session_mode_api_sessions__session_id__mode_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SessionModeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSummaryView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set Session Mode"
+      }
+    },
     "/api/sessions/{session_id}/model": {
       "put": {
         "description": "为这个会话选下一轮用的连接；`connection_id=null` 表示恢复为跟随默认。\n\n返回**新快照**：让页面直接看到\"下一轮会用哪条\"，而不用自己拼状态。\n`expected_selection` 必填（\"恢复跟随默认\"也是一次写入，同样不能覆盖别人的选择）。",
@@ -6365,6 +7628,75 @@
           }
         },
         "summary": "选择会话下一轮模型"
+      }
+    },
+    "/api/sessions/{session_id}/recovery": {
+      "post": {
+        "operationId": "end_interrupted_request_api_sessions__session_id__recovery_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecoveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSnapshot"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "End Interrupted Request"
       }
     },
     "/api/sessions/{session_id}/restore": {
@@ -6463,6 +7795,84 @@
           }
         },
         "summary": "Select Session"
+      }
+    },
+    "/api/sessions/{session_id}/turns/{turn_id}": {
+      "get": {
+        "operationId": "turn_detail_api_sessions__session_id__turns__turn_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "turn_id",
+            "required": true,
+            "schema": {
+              "title": "Turn Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "include_ancestors",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Include Ancestors",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionSnapshot"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "单轮问答与执行详情"
       }
     },
     "/api/workspaces": {

@@ -17,7 +17,7 @@ import logging
 from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final, Literal, cast
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -27,6 +27,7 @@ from local_agent.api.container import ApiRuntime
 from local_agent.api.schemas import (
     PATH_MAX_CHARS,
     ApprovalDecisionRequest,
+    ArrangeBranchRequest,
     CreateSessionRequest,
     ErrorResponse,
     ExternalPathGrantRequest,
@@ -34,18 +35,22 @@ from local_agent.api.schemas import (
     ModelConnectionRequest,
     PermissionsModeRequest,
     PickDirectoryView,
+    RecoveryRequest,
     RenameRequest,
     SelectDefaultConnectionRequest,
     SelectionExpectation,
     SelectSessionModelRequest,
     SelectWorkspaceRequest,
+    SessionModeRequest,
     SubmitMessageRequest,
 )
 from local_agent.api.security import is_allowed_origin
 from local_agent.application import errors as app_errors
+from local_agent.application.data_center_models import MemoryPageView, UsagePageView
 from local_agent.application.models import (
     SCHEMA_VERSION,
     CommandResultView,
+    ConversationMapView,
     ModelConnectionView,
     PermissionsView,
     SessionSnapshot,
@@ -68,6 +73,7 @@ _STATUS_BY_CODE: Final[dict[str, int]] = {
     app_errors.WORKSPACE_NOT_FOUND: 404,
     app_errors.MODEL_CONNECTION_NOT_FOUND: 404,
     app_errors.SESSION_BUSY: 409,
+    app_errors.CONVERSATION_CONFLICT: 409,
     app_errors.IDEMPOTENCY_CONFLICT: 409,
     app_errors.RECOVERY_REQUIRED: 409,
     app_errors.APPROVAL_EXPIRED: 409,
@@ -187,6 +193,26 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     router = APIRouter(prefix="/api")
     service = runtime.service
 
+    @router.get("/data-center/memories", response_model=MemoryPageView, summary="只读记忆列表")
+    def memory_page(workspace_id: str | None = None,
+                    kind: Literal["all", "medium", "fact", "conclusion"] = "all",
+                    query: str = Query(default="", max_length=500),
+                    status: Literal["all", "active", "expired", "superseded", "conflicted", "deleted", "unknown"] = "all",
+                    offset: int = Query(default=0, ge=0, le=30000), limit: int = Query(default=30, ge=1, le=100)) -> MemoryPageView:
+        return service.get_memory_page(workspace_id=workspace_id, kind=kind, query=query,
+                                       status=status, offset=offset, limit=limit)
+
+    @router.get("/data-center/usage", response_model=UsagePageView, summary="去重后的实际调用用量")
+    def usage_page(workspace_id: str | None = None, model: str = Query(default="", max_length=200),
+                   since: datetime | None = None, until: datetime | None = None,
+                   offset: int = Query(default=0, ge=0, le=100000), limit: int = Query(default=30, ge=1, le=100)) -> UsagePageView:
+        if any(moment is not None and moment.tzinfo is None for moment in (since, until)):
+            raise HTTPException(status_code=422, detail="时间必须带时区")
+        if since is not None and until is not None and since >= until:
+            raise HTTPException(status_code=422, detail="开始时间必须早于结束时间")
+        return service.get_usage_page(workspace_id=workspace_id, model=model, since=since,
+                                      until=until, offset=offset, limit=limit)
+
     @router.get("/health", response_model=HealthView, summary="健康检查")
     def health() -> HealthView:
         """服务可用性。不含路径、密钥或内部标识。
@@ -268,6 +294,14 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     def select_session(session_id: str) -> SessionSummaryView:
         return service.select_session(session_id)
 
+    @router.patch("/sessions/{session_id}/mode", response_model=SessionSummaryView, responses=_STATE_CONFLICT)
+    def set_session_mode(session_id: str, payload: SessionModeRequest) -> SessionSummaryView:
+        return service.set_session_mode(session_id, payload.mode, payload.expected_mode)
+
+    @router.post("/sessions/{session_id}/recovery", response_model=SessionSnapshot, responses=_STATE_CONFLICT)
+    def end_interrupted_request(session_id: str, payload: RecoveryRequest) -> SessionSnapshot:
+        return service.end_interrupted_request(session_id, payload.request_id, payload.expected_snapshot_id)
+
     @router.post("/sessions/{session_id}/archive", response_model=SessionSummaryView, responses=_STATE_CONFLICT)
     def archive_session(session_id: str) -> SessionSummaryView:
         return service.archive_session(session_id)
@@ -307,7 +341,30 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     )
     def submit_message(session_id: str, payload: SubmitMessageRequest) -> CommandResultView:
         """同步跑完这一轮，返回**稳定的命令结果引用**：结局不依赖 SSE（§15.3）。"""
-        return service.submit_message(session_id, payload.text, payload.client_request_id)
+        return service.submit_message(session_id, payload.text, payload.client_request_id,
+                                      parent_turn_id=payload.parent_turn_id,
+                                      expected_branch_id=payload.expected_branch_id,
+                                      expected_snapshot_id=payload.expected_snapshot_id)
+
+    @router.get("/sessions/{session_id}/conversation-map", response_model=ConversationMapView,
+                responses=_STATE_CONFLICT, summary="会话地图")
+    def conversation_map(session_id: str, query: str = Query(default="", max_length=500)) -> ConversationMapView:
+        return service.get_conversation_map(session_id, query)
+
+    @router.get("/sessions/{session_id}/turns/{turn_id}", response_model=SessionSnapshot,
+                responses=_STATE_CONFLICT, summary="单轮问答与执行详情")
+    def turn_detail(session_id: str, turn_id: str, include_ancestors: bool = False) -> SessionSnapshot:
+        return service.get_turn_snapshot(session_id, turn_id, include_ancestors=include_ancestors)
+
+    @router.post("/sessions/{session_id}/branches/{branch_id}/select", response_model=SessionSnapshot,
+                 responses=_STATE_CONFLICT, summary="切换会话分支")
+    def select_branch(session_id: str, branch_id: str) -> SessionSnapshot:
+        return service.select_branch(session_id, branch_id)
+
+    @router.patch("/sessions/{session_id}/branches/{branch_id}", response_model=ConversationMapView,
+                  responses=_STATE_CONFLICT, summary="分支改名与展示排序")
+    def arrange_branch(session_id: str, branch_id: str, payload: ArrangeBranchRequest) -> ConversationMapView:
+        return service.arrange_branch(session_id, branch_id, payload.title, payload.position)
 
     @router.post(
         "/sessions/{session_id}/approvals/{approval_id}",

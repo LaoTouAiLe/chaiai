@@ -1,4 +1,4 @@
-import { Check, ChevronRight, Cross, Doc, Pencil } from '../../components/icons'
+import { Check, ChevronRight, Cross, Doc, Pencil, WarningTriangle } from '../../components/icons'
 import type { ToolRowView } from '../../fixtures/types'
 import { DiffCard } from './DiffCard'
 import { ToolCard } from './ToolCards'
@@ -20,9 +20,11 @@ const STATUS_CLASS: Record<ToolRowView['status'], string> = {
   running: styles.statusRunning ?? '',
   succeeded: styles.statusSucceeded ?? '',
   failed: styles.statusFailed ?? '',
+  uncertain: styles.statusFailed ?? '',
 }
 
 function StatusIcon({ status }: { status: ToolRowView['status'] }) {
+  if (status === 'uncertain') return <WarningTriangle />
   if (status === 'pending') return <span className={styles.pendingDot} aria-hidden="true" />
   if (status === 'succeeded') return <Check />
   if (status === 'failed') return <Cross />

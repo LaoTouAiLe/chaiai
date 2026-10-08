@@ -28,6 +28,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from local_agent.exceptions import SessionStoreError
+from local_agent.persistence.conversation_store import ConversationStore
 
 #: ``project_id`` / ``normalize_path`` 等稳定标识在 :mod:`local_agent.scope` 统一实现：
 #: 记忆层要用同一份规则，放在这里会造成两侧各算一次而漂移。
@@ -130,6 +131,7 @@ class SessionStore:
 
     def __init__(self, connection: sqlite3.Connection, *, workspace_root: Path) -> None:
         self._connection = connection
+        self.conversations = ConversationStore(connection)
         self.workspace_root = Path(workspace_root).resolve()
         self.project_id = project_id_for(self.workspace_root)
 
@@ -376,6 +378,15 @@ class SessionStore:
         self._connection.execute(
             "UPDATE sessions SET title = ? WHERE session_id = ?", (cleaned, session_id)
         )
+        self._connection.commit()
+        return self._require(session_id)
+
+    def set_mode(self, session_id: str, mode: str) -> Session:
+        """修改下一轮模式，保留线程、标题、工作区和历史路径。"""
+        self._require(session_id)
+        if mode not in {"chat", "agent"}:
+            raise SessionStoreError("未知会话模式")
+        self._connection.execute("UPDATE sessions SET mode = ? WHERE session_id = ?", (mode, session_id))
         self._connection.commit()
         return self._require(session_id)
 

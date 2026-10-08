@@ -13,6 +13,12 @@ const mock = vi.hoisted(() => ({
   messages: [] as Record<string, unknown>[],
   mutate: vi.fn(),
   modelMutate: vi.fn(),
+  modeMutate: vi.fn(),
+  recoveryMutate: vi.fn(),
+  submitReset: vi.fn(),
+  approvalReset: vi.fn(),
+  mode: 'agent' as 'agent' | 'chat',
+  interrupted: null as string | null,
   resolve: vi.fn(),
   pickMutate: vi.fn(),
   workspaceMutate: vi.fn(),
@@ -86,6 +92,7 @@ vi.mock('../api/queries', () => ({
     data: [{
       session_id: 's1',
       title: '测试会话',
+      mode: mock.mode,
       is_active: true,
       updated_at: '2026-09-27T00:00:00Z',
       workspace: { workspace_id: 'w1', display_name: '工作区' },
@@ -96,6 +103,7 @@ vi.mock('../api/queries', () => ({
       session_id: 's1',
       title: '测试会话',
       session_state: mock.sessionState,
+      interrupted_request_id: mock.interrupted,
       snapshot_id: 'snapshot-1',
       schema_version: 1,
       created_at: '2026-09-27T00:00:00Z',
@@ -119,14 +127,17 @@ vi.mock('../api/queries', () => ({
     ]
   }),
   useCreateSession: () => ({ mutate: vi.fn() }),
+  useSetSessionMode: () => ({ mutate: mock.modeMutate, isPending: false }),
+  useEndInterruptedRequest: () => ({ mutate: mock.recoveryMutate, isPending: false }),
   useSelectWorkspace: () => ({ mutate: mock.workspaceMutate }),
   usePickWorkspaceDirectory: () => ({ mutate: mock.pickMutate, isPending: false, error: null }),
-  useSubmitMessage: () => ({ mutate: mock.mutate, isPending: false, isError: false }),
+  useSubmitMessage: () => ({ mutate: mock.mutate, isPending: false, isError: false, reset: mock.submitReset }),
   useSelectSessionModel: () => ({ mutate: mock.modelMutate, isPending: false }),
   useResolveApproval: () => ({
     resolve: mock.resolve,
     isPending: mock.resolvePending,
     error: mock.resolveError,
+    reset: mock.approvalReset,
   }),
 }))
 
@@ -147,6 +158,12 @@ beforeEach(() => {
   mock.resolveError = null
   mock.mutate.mockReset()
   mock.modelMutate.mockReset()
+  mock.modeMutate.mockReset()
+  mock.recoveryMutate.mockReset()
+  mock.submitReset.mockReset()
+  mock.approvalReset.mockReset()
+  mock.mode = 'agent'
+  mock.interrupted = null
   mock.resolve.mockReset()
   mock.pickMutate.mockReset()
   mock.workspaceMutate.mockReset()
@@ -158,6 +175,38 @@ describe('LiveApp pending approval', () => {
   const renderApp = () => render(
     <QueryClientProvider client={new QueryClient()}><LiveApp /></QueryClientProvider>,
   )
+
+  it('switches mode in the current session and keeps the draft', () => {
+    mock.sessionState = 'idle'
+    renderApp()
+    fireEvent.click(screen.getByRole('button', { name: '选择会话模式' }))
+    fireEvent.click(screen.getByRole('menuitemradio', { name: /闲聊/ }))
+    expect(mock.modeMutate).toHaveBeenCalledWith({ sessionId: 's1', mode: 'chat', expectedMode: 'agent' }, expect.any(Object))
+    expect(useUiStore.getState().activeSessionId).toBe('s1')
+    expect(screen.getByRole('textbox', { name: '给智能体发消息' })).toHaveValue('保留这段草稿')
+  })
+
+  it('blocks switching mode while a turn is running', () => {
+    mock.sessionState = 'running'
+    renderApp()
+    expect(screen.getByRole('button', { name: '选择会话模式' })).toBeDisabled()
+  })
+
+  it('requires explicit review before closing an interrupted request', () => {
+    mock.sessionState = 'idle'
+    mock.interrupted = 'request-crash'
+    renderApp()
+    expect(screen.getByRole('button', { name: '发送消息' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '结束中断任务' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('checkbox', { name: /我已查看/ }))
+    fireEvent.click(screen.getByRole('button', { name: '结束中断任务' }))
+    expect(mock.recoveryMutate).toHaveBeenCalledWith({ sessionId: 's1', requestId: 'request-crash', snapshotId: 'snapshot-1' }, expect.any(Object))
+    expect(mock.mutate).not.toHaveBeenCalled()
+    const options = mock.recoveryMutate.mock.calls[0][1] as { onSuccess: () => void }
+    act(() => options.onSuccess())
+    expect(mock.submitReset).toHaveBeenCalledOnce()
+    expect(mock.approvalReset).toHaveBeenCalledOnce()
+  })
 
   it('恢复已打开会话时校准工作区，不让新会话沿用错误目标', () => {
     useUiStore.setState({ workspaceId: 'outdated-workspace', activeSessionId: 's1' })

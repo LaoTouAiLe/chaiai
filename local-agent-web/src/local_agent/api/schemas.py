@@ -71,11 +71,25 @@ class CreateSessionRequest(_Request):
     mode: Literal["chat", "agent"] = "agent"
 
 
+class SessionModeRequest(_Request):
+    mode: Literal["chat", "agent"]
+    expected_mode: Literal["chat", "agent"]
+
+
+class RecoveryRequest(_Request):
+    request_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_CHARS)
+    expected_snapshot_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_CHARS)
+    confirm_reviewed: Literal[True]
+
+
 class SubmitMessageRequest(_Request):
     """提交消息。`client_request_id` 是幂等键（§6.1），由前端生成并复用。"""
 
     text: str = Field(min_length=1, max_length=MESSAGE_MAX_CHARS)
     client_request_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_CHARS)
+    parent_turn_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)
+    expected_branch_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)
+    expected_snapshot_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)
 
     @model_validator(mode="after")
     def _text_is_not_blank(self) -> SubmitMessageRequest:
@@ -83,6 +97,11 @@ class SubmitMessageRequest(_Request):
             msg = "text 不能只有空白字符"
             raise ValueError(msg)
         return self
+
+
+class ArrangeBranchRequest(_Request):
+    title: str = Field(min_length=1, max_length=80)
+    position: int = Field(ge=0)
 
 
 class ApprovalDecisionRequest(_Request):

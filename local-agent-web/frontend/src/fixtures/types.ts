@@ -135,7 +135,7 @@ export interface ToolRowView {
   name: string
   /** Short human summary of what the call is doing. */
   summary: string
-  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'uncertain'
   /** Pre-formatted duration; measuring timings is T34's job. */
   durationLabel: string
   target: string | null
@@ -335,7 +335,7 @@ export interface ApprovalView {
   confirmationStage?: 1 | 2
   impact: readonly string[]
   risk: 'normal' | 'high'
-  state: 'pending' | 'executing' | 'approved' | 'rejected' | 'expired'
+  state: 'pending' | 'executing' | 'approved' | 'rejected' | 'expired' | 'interrupted'
   /** Shown for a refused or stale request instead of offering the buttons again. */
   note: string | null
   /**
