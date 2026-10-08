@@ -1,0 +1,56 @@
+.panel { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+.toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 20px; padding: 15px 20px; border-bottom: 1px solid var(--law-border-l2); background: var(--law-bg-base); z-index: 3; }
+.heading { display: flex; align-items: center; gap: 10px; margin-right: auto; }
+.heading strong { font-size: 14px; }
+.heading span, .note { color: var(--law-text-secondary); font-size: 12px; }
+.search { display: flex; gap: 6px; width: 270px; }
+.panel input, .panel select { min-width: 0; padding: 7px 9px; border: 1px solid var(--law-border-l2); border-radius: 6px; background: var(--law-bg-base); color: inherit; font-size: 12px; }
+.search input { flex: 1; width: 0; }
+.panel button { border: 1px solid var(--law-border-l2); border-radius: 6px; padding: 6px 9px; background: transparent; color: inherit; cursor: pointer; }
+.panel button:hover:not(:disabled) { background: var(--law-surface-tip); }
+.panel button:focus-visible, .panel input:focus-visible, .panel select:focus-visible { outline: 2px solid var(--law-accent-500); outline-offset: 2px; }
+.panel button:disabled { opacity: .45; cursor: default; }
+.branches { display: flex; align-items: center; gap: 12px; font-size: 12px; }
+.branches label { display: flex; align-items: center; gap: 8px; }
+.branches select { max-width: 145px; }
+.branches details { position: relative; }
+.branches summary { cursor: pointer; color: var(--law-text-secondary); }
+.branches details[open] { border: 1px solid var(--law-border-l2); border-radius: 8px; background: var(--law-bg-base); padding: 10px; }
+.branch { display: flex; align-items: center; gap: 4px; padding: 6px 0; max-width: 300px; }
+.branch > span { flex: 1; overflow-wrap: anywhere; }
+.branch form { display: flex; flex-wrap: wrap; gap: 4px; }
+.branch input { width: 130px; }
+.toolbar > .note, .toolbar > .error { margin: 0; }
+.workspace { position: relative; display: flex; flex: 1; min-height: 0; overflow: hidden; }
+.detail { display: flex; flex-direction: column; width: 460px; max-width: 48%; flex-shrink: 0; min-width: 0; min-height: 0; border-left: 1px solid var(--law-border-l2); background: var(--law-bg-base); box-shadow: -5px 0 20px #00000005; z-index: 2; }
+.drawerHeading { display: flex; align-items: center; justify-content: space-between; padding: 10px 18px; color: var(--law-text-tertiary); font-size: 12px; border-bottom: 1px solid var(--law-border-l1); flex-shrink: 0; }
+.drawerHeading button { border: 0; font-size: 22px; line-height: 1; padding: 3px 6px; }
+.detailHeader { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding: 12px 18px; flex-shrink: 0; }
+.detailHeader strong { font-size: 14px; }
+.detailHeader p { margin: 6px 0 0; font-size: 12px; color: var(--law-text-secondary); }
+.actions, .detailTabs { display: flex; flex-wrap: wrap; gap: 8px; }
+.actions button { font-size: 12px; }
+.actions button:last-child { border-color: var(--law-accent-200); color: var(--law-accent-700); background: var(--law-accent-50); }
+.detailTabs { padding: 8px 18px; flex-shrink: 0; border-bottom: 1px solid var(--law-border-l1); }
+.detailTabs button { font-size: 12px; }
+.detailTabs button[aria-pressed=true] { background: var(--law-surface-tip); font-weight: 600; }
+.detail > .note { margin: 0 18px 6px; line-height: 1.6; font-size: 11px; flex-shrink: 0; }
+.placeholder { margin: auto; padding: 24px; color: var(--law-text-secondary); }
+.error { font-size: 12px; line-height: 1.7; }
+.execution { flex: 1; min-height: 0; overflow: auto; padding: 0 18px 18px; }
+.execution > section { margin: 18px 0; font-size: 13px; }
+.calls { padding-left: 24px; }
+.calls li { padding: 8px 0; border-bottom: 1px solid var(--law-border-l1); }
+.calls li span { display: block; margin: 4px 0; overflow-wrap: anywhere; }
+.calls li span + span { color: var(--law-text-secondary); font-size: 12px; }
+@media (max-width: 1000px) {
+  .detail { position: absolute; top: 0; right: 0; bottom: 0; max-width: 100%; width: 460px; box-shadow: -8px 0 30px #00000015; }
+  .toolbar { padding: 10px 14px; gap: 10px; }
+}
+@media (max-width: 600px) {
+  .search { width: 100%; order: 3; }
+  .branches label { gap: 4px; }
+  .branches select { max-width: 110px; }
+  .branches { gap: 8px; }
+  .detail { width: 100%; }
+}

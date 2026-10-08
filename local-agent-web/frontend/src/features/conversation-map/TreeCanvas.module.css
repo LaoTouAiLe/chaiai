@@ -1,0 +1,41 @@
+.canvas { position: relative; flex: 1; min-width: 0; min-height: 0; background: var(--law-surface-sidebar); }
+.viewport { position: absolute; inset: 0; overflow: clip; cursor: grab; touch-action: none; background-image: radial-gradient(var(--law-border-l3) 1px, transparent 1px); background-size: 22px 22px; }
+.viewport:focus-visible { outline: 2px solid var(--law-accent-500); outline-offset: -3px; }
+.dragging { cursor: grabbing; user-select: none; }
+.world { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.connections { position: absolute; inset: 0; overflow: visible; pointer-events: none; }
+.edge, .activeEdge { fill: none; stroke: var(--law-border-l4); stroke-width: 2; }
+.activeEdge { stroke: var(--law-accent-400); stroke-width: 2.5; }
+.node { position: absolute; border: 1px solid var(--law-border-l3); border-radius: 13px; background: var(--law-bg-base); box-shadow: 0 3px 12px #00000006; }
+.node.inPath { border-color: var(--law-accent-200); }
+.node.selected { border-color: var(--law-accent-500); box-shadow: 0 0 0 3px var(--law-accent-100), 0 4px 16px #0000000a; }
+.node .card { display: flex; flex-direction: column; width: 100%; height: 100%; gap: 10px; padding: 16px 18px 13px; text-align: left; border: 0; border-radius: inherit; background: var(--law-bg-base); color: var(--law-text-primary); cursor: pointer; }
+.node .card:hover { background: var(--law-bg-base); box-shadow: inset 0 0 0 1px var(--law-accent-400); }
+.cardTop { display: flex; align-items: center; justify-content: space-between; font-size: 11px; color: var(--law-text-tertiary); }
+.status { padding: 2px 6px; border-radius: 4px; font-size: 10px; background: var(--law-surface-tip); color: var(--law-text-secondary); }
+.status[data-state="已完成"] { background: var(--law-state-success-subtle); color: var(--law-state-success); }
+.status[data-state="失败"] { background: var(--law-state-error-subtle); color: var(--law-state-error); }
+.status[data-state="等待审批"], .status[data-state="执行中"] { background: var(--law-state-info-subtle); color: var(--law-state-info); }
+.question { font-size: 14px; line-height: 21px; font-weight: 600; }
+.preview { font-size: 12px; line-height: 18px; color: var(--law-text-secondary); }
+.question, .preview { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.cardBottom { margin-top: auto; padding-top: 8px; border-top: 1px solid var(--law-border-l1); display: flex; justify-content: space-between; gap: 12px; width: 100%; color: var(--law-text-tertiary); font-size: 10px; }
+.cardBottom > span:first-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.cardBottom > span:last-child { flex-shrink: 0; }
+.inputPort, .outputPort { position: absolute; top: calc(50% - 4px); width: 8px; height: 8px; border: 1.5px solid var(--law-border-l4); border-radius: 50%; background: var(--law-bg-base); pointer-events: none; }
+.inputPort { left: -5px; }
+.outputPort { right: -5px; }
+.inPath .inputPort, .inPath .outputPort { border-color: var(--law-accent-400); }
+.node .fold { position: absolute; right: -31px; top: calc(50% - 11px); width: 22px; height: 22px; padding: 0; border-radius: 50%; font-size: 11px; border-color: var(--law-border-l3); background: var(--law-bg-base); z-index: 1; }
+.legend { position: absolute; top: 16px; left: 20px; display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--law-text-secondary); pointer-events: none; }
+.dot, .otherDot { width: 7px; height: 7px; border-radius: 50%; background: var(--law-accent-400); }
+.otherDot { margin-left: 10px; background: var(--law-border-l4); }
+.controls { position: absolute; left: 50%; bottom: 42px; transform: translateX(-50%); display: flex; align-items: center; gap: 3px; padding: 5px; border: 1px solid var(--law-border-l2); border-radius: 10px; background: var(--law-bg-base); box-shadow: 0 4px 20px #00000008; white-space: nowrap; }
+.controls button { border: 0; font-size: 12px; padding: 7px 9px; }
+.divider { height: 16px; width: 1px; background: var(--law-border-l2); margin: 0 4px; }
+.hint { position: absolute; left: 10px; right: 10px; bottom: 9px; text-align: center; font-size: 11px; margin: 0; color: var(--law-text-tertiary); pointer-events: none; }
+.empty { position: absolute; left: 0; right: 0; top: 40%; text-align: center; color: var(--law-text-secondary); pointer-events: none; }
+@media (max-width: 600px) {
+  .controls { width: max-content; max-width: calc(100% - 24px); justify-content: center; flex-wrap: wrap; gap: 0; }
+  .controls button { padding: 7px; font-size: 11px; }
+}
