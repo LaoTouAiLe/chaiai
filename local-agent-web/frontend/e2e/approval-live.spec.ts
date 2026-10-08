@@ -36,7 +36,8 @@ async function submit(page: import('@playwright/test').Page, text: string) {
 
 /** 展开那次编辑的工具行（收起时只有一行摘要，结构化 diff 在展开后才在 DOM 里）。 */
 async function expandEditRow(page: import('@playwright/test').Page) {
-  const row = page.getByRole('button', { name: /edit_file/ })
+  // 工具行显示**可读动作名**：原始工具名不上屏（见 `features/tool/display.ts` 的 `LABELS`）。
+  const row = page.getByRole('button', { name: /修改文件/ })
   await expect(row).toHaveAttribute('aria-expanded', 'false')
   await row.click()
   await expect(row).toHaveAttribute('aria-expanded', 'true')
@@ -47,15 +48,19 @@ test('批准一次大范围编辑：卡片接管输入区，刷新不丢，批�
   await page.goto('/')
   const input = await submit(page, 'T32_APPROVE')
 
-  // 1) 审批卡接管输入区：动作、规范化目标与参数都在，按钮可达。
+  // 1) 审批卡接管输入区：可读动作、目标、影响与风险都在，按钮可达。
   const card = page.getByLabel('审批')
   await expect(card.getByText('等待审批', { exact: true })).toBeVisible()
-  await expect(card.getByText('edit_file')).toBeVisible()
-  // 目标：服务端把结构化请求里的 `path` 解析成**规范化绝对路径**再展示（卡片要让用户核对完整目标）；
-  // 模型原样给的相对路径在下一行的参数里，两处都要能对上。
-  await expect(card.getByRole('definition').filter({ hasText: /notes\.txt$/ }))
-    .toHaveText(/^(\/|[A-Za-z]:\/).*notes\.txt$/)
-  await expect(card.getByText('path=notes.txt')).toBeVisible()
+  // 动作用可读名称（`features/tool/display.ts` 的 `LABELS`），原始工具名不上屏（§T39 字段门槛）。
+  await expect(card.getByText('修改文件')).toBeVisible()
+  // 目标：工作区内的审批目标展示**相对路径**（架构 §15.8）——用户要核对的是"哪个文件"，
+  // 不是机器路径；原始 `key=value` 参数不再逐条铺开，收进"查看操作参数"。
+  await expect(card.getByRole('definition').filter({ hasText: /notes\.txt$/ })).toHaveText('notes.txt')
+  // 影响与风险由服务端投影成可读说明，原始参数收进"查看操作参数"。
+  // 用 `toContainText` 而不是 `getByText`：同一句话可能同时出现在摘要与"操作原因"两处，
+  // 严格模式下一次匹配到多个元素就直接失败（实测踩过）。
+  await expect(card).toContainText('需要人工审批')
+  await expect(card).toContainText('查看操作参数')
   await expect(input).toHaveCount(0)
 
   // 2) 刷新恢复：挂起审批来自服务端检查点，不靠浏览器里的本地状态。

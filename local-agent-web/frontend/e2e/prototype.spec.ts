@@ -99,7 +99,8 @@ for (const scenario of COMPOSER_SCENARIOS) {
 
 test('diff checkpoint shows both hunks with signs and the long line', async ({ page }) => {
   await page.goto('/?state=diff')
-  await page.getByText('执行过程 · 1 个动作').click()
+  // 原型 fixture 里这次编辑本身就是 `expanded: true`，diff 卡直接可见；曾经需要先点开的
+  // "执行过程 · N 个动作"聚合行已在 Think 那一轮移除（工具行各自折叠，不跨助手正文搬运动作）。
   const card = page.locator('figure')
   await expect(card.getByText('src/local_agent/config.py')).toBeVisible()
 
@@ -200,7 +201,7 @@ test('diff tail is fully visible after scrolling to the end', async ({ page }, t
   // 不是布局缺陷。这条断言的意义只在宽窗成立。
   test.skip(testInfo.project.name === '640x800', '窄窗下元素高于视口')
   await page.goto('/?state=diff')
-  await page.getByText('执行过程 · 1 个动作').click()
+  // 与上一条同理：fixture 里这次编辑已展开，不需要（也再没有）"执行过程"聚合行可点。
   const card = page.locator('figure')
   await scrollConversationToEnd(page)
   await expect(card.getByText(/def validate_ratio\(cls\)/)).toBeInViewport({ ratio: 1 })
@@ -261,13 +262,17 @@ test('retrieval rows separate a hit, a miss and a failure', async ({ page }) => 
   const hit = page.getByRole('region', { name: '检索与记忆' })
   await expect(hit.getByText('已命中')).toBeVisible()
   await expect(hit.getByText('3 处来源')).toBeVisible()
+  // 来源与说明**默认折叠**（T39：检索详情、每轮统计、审批参数默认折叠），展开后才断言内容。
+  await hit.getByText('检索与记忆').click()
   // Locators, never content: no retrieved text is shown.
   await expect(hit.getByText('local-agent-web/ARCHITECTURE.md:15.6')).toBeVisible()
   await expect(hit.getByText(/不展示正文、向量或内部评分/)).toBeVisible()
   await expect(hit.getByText(/已写入长期记忆/)).toBeVisible()
 
   await page.goto('/?state=memory-miss')
-  await expect(page.getByText('未命中')).toBeVisible()
+  const miss = page.getByRole('region', { name: '检索与记忆' })
+  await expect(miss.getByText('未命中')).toBeVisible()
+  await miss.getByText('检索与记忆').click()
   await expect(page.getByText(/不会为来源留空位，也不会编造出处/)).toBeVisible()
   await expect(page.getByText(/写入长期记忆失败/)).toBeVisible()
   await expect(page.getByText('检索失败')).toHaveCount(0)

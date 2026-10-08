@@ -4,13 +4,25 @@ const REPLY = '第一句回答已经开始。这里是持续生成的补充说�
 
 test('最终回答真正增量出现，并在完成与刷新后只留一份', async ({ page }) => {
   await page.goto('/')
-  await page.getByRole('button', { name: '新建会话' }).click()
-  await page.getByRole('button', { name: '选择会话模式' }).click()
-  const streamReady = page.waitForResponse((response) =>
+  const created = page.waitForResponse((response) =>
+    response.url().endsWith('/api/sessions') && response.request().method() === 'POST' && response.status() === 200,
+  )
+  // 增量来自**会话级** SSE：订阅在会话创建后建立，所以先等它，再切模式发消息。
+  const subscribed = page.waitForResponse((response) =>
     response.url().includes('/api/sessions/') && response.url().endsWith('/events') && response.status() === 200,
   )
+  await page.getByRole('button', { name: '新建会话' }).click()
+  await created
+  await subscribed
+  // 切换到闲聊**不会**新建会话，也不再产生第二条 `/events` 订阅（2026-10-08 起模式切换用 PATCH
+  // 改当前会话，见 `conversation-live.spec.ts` 的"在当前会话切换模式"用例），所以这里等 PATCH。
+  const switched = page.waitForResponse((response) =>
+    response.url().endsWith('/mode') && response.request().method() === 'PATCH' && response.status() === 200,
+  )
+  await page.getByRole('button', { name: '选择会话模式' }).click()
   await page.getByRole('menu', { name: '会话模式' }).getByRole('menuitemradio', { name: /闲聊/ }).click()
-  await streamReady
+  await switched
+  await expect(page.getByRole('button', { name: '选择会话模式' })).toContainText('闲聊')
   const input = page.getByPlaceholder('给智能体发消息')
   await input.fill('请回答')
   await page.getByRole('button', { name: '发送消息' }).click()

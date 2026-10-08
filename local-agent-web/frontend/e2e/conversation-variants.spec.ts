@@ -24,7 +24,9 @@ test('长回答可滚到末尾、空回答与模型异常有可见状态', async
   await newSession('T30_LONG')
   await input.fill('T30_EMPTY')
   await send.click()
-  await expect(page.getByRole('alert')).toContainText('没有生成可展示的最终回答')
+  // 空回答：页面必须解释"这一轮为什么没有可展示的回答"。文案来自 `LiveApp` 的 failedWithoutDetail
+  // 分支（`LiveApp.tsx`），同一条由 `LiveApp.test.tsx` 钉住；这里只断言它出现，不复制整句。
+  await expect(page.getByRole('alert')).toContainText('这轮在给出最终回答前就结束了')
 
   await newSession('T30_EMPTY')
   await input.fill('T30_ERROR')
