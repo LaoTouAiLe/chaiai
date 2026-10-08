@@ -1,0 +1,67 @@
+.page { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; position: relative; background: var(--law-surface-code); color: var(--law-text-primary); }
+.page button { cursor: pointer; }
+.page button:disabled { cursor: default; opacity: .45; }
+.page button:focus-visible, .page input:focus-visible, .page select:focus-visible { outline: 2px solid var(--law-state-info); outline-offset: 2px; }
+.header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 26px 32px 20px; background: var(--law-bg-layer-1); }
+.header h1 { font-size: 24px; font-weight: 650; margin: 4px 0; }
+.header p { margin: 0; font-size: 13px; color: var(--law-text-secondary); }
+.eyebrow { color: var(--law-state-info); font-size: 12px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.actions button, .filters button, .pagination button { padding: 8px 12px; border: 1px solid var(--law-border-l2); border-radius: 8px; background: var(--law-bg-layer-1); font-size: 13px; }
+.tabs { display: flex; gap: 6px; padding: 0 28px; border-bottom: 1px solid var(--law-border-l1); background: var(--law-bg-layer-1); overflow-x: auto; flex-shrink: 0; }
+.tabs button { padding: 14px 12px; font-size: 14px; white-space: nowrap; border-bottom: 2px solid transparent; color: var(--law-text-secondary); }
+.tabs button[aria-current] { border-bottom-color: var(--law-state-info); color: var(--law-state-info); font-weight: 600; }
+.filters { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding: 16px 32px; background: var(--law-bg-layer-1); border-bottom: 1px solid var(--law-border-l1); }
+.filters label { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--law-text-secondary); }
+.filters input, .filters select { height: 34px; padding: 0 10px; font-size: 12px; min-width: 110px; max-width: 200px; border: 1px solid var(--law-border-l2); border-radius: 7px; background: var(--law-bg-layer-1); color: var(--law-text-primary); }
+.filters form { display: flex; align-items: end; gap: 6px; }
+.body { overflow: auto; flex: 1; min-height: 0; padding: 24px 32px 32px; }
+.notice { padding: 12px 14px; margin-bottom: 16px; border: 1px solid var(--law-border-l2); border-radius: 8px; background: var(--law-state-warn-subtle); font-size: 13px; }
+.metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.metric, .resources article, .chart { border: 1px solid var(--law-border-l1); background: var(--law-bg-layer-1); border-radius: 12px; padding: 20px; }
+.metric { display: flex; flex-direction: column; gap: 12px; }
+.metric span { font-size: 13px; color: var(--law-text-secondary); }
+.metric strong { font-size: 25px; font-weight: 650; overflow-wrap: anywhere; }
+.metric small { font-size: 11px; color: var(--law-text-secondary); }
+.resources { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; }
+.resources h2, .chart h2 { font-size: 15px; font-weight: 600; margin: 12px 0; }
+.resources strong { font-size: 24px; }
+.resources p { color: var(--law-text-secondary); font-size: 12px; margin: 12px 0; }
+.resources button { color: var(--law-state-info); font-size: 13px; }
+.badge { font-size: 11px; padding: 4px 7px; border-radius: 5px; background: var(--law-surface-code); color: var(--law-text-secondary); white-space: nowrap; }
+.chartGrid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; margin-top: 20px; }
+.chart h2 { margin-top: 0; }
+.chart h2 small { font-size: 10px; color: var(--law-text-secondary); font-weight: 400; }
+.barRow { display: flex; align-items: center; gap: 12px; width: 100%; font-size: 12px; padding: 9px 0; }
+.barTrack { flex: 1; height: 8px; background: var(--law-state-info-subtle); border-radius: 4px; }
+.barTrack span { display: block; height: 100%; background: var(--law-state-info); border-radius: 4px; min-width: 3px; }
+.modelRow { display: flex; justify-content: space-between; gap: 12px; width: 100%; font-size: 12px; padding: 10px 0; border-bottom: 1px solid var(--law-border-l1); }
+.modelRow span { overflow-wrap: anywhere; text-align: left; }
+.modelRow strong { white-space: nowrap; }
+.chart .subheading { margin-top: 22px; }
+.summary, .footnote { color: var(--law-text-secondary); font-size: 12px; line-height: 1.8; margin: 16px 0; }
+.tableWrap { overflow-x: auto; border: 1px solid var(--law-border-l1); border-radius: 10px; background: var(--law-bg-layer-1); }
+.tableWrap table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.tableWrap th { padding: 12px 16px; text-align: left; color: var(--law-text-secondary); background: var(--law-surface-code); white-space: nowrap; }
+.tableWrap td { padding: 12px 16px; border-top: 1px solid var(--law-border-l1); vertical-align: middle; }
+.tableWrap td:first-child { min-width: 240px; max-width: 460px; }
+.tableWrap td:last-child { min-width: 152px; }
+.rowLink { display: flex; flex-direction: column; width: 100%; text-align: left; gap: 6px; }
+.rowLink strong { font-weight: 550; font-size: 13px; }
+.rowLink span { color: var(--law-text-secondary); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.6; }
+.rowLink:hover strong { color: var(--law-state-info); }
+.empty { padding: 32px; text-align: center; color: var(--law-text-secondary); font-size: 13px; }
+.pagination { display: flex; justify-content: center; gap: 18px; align-items: center; margin-top: 20px; font-size: 12px; }
+.drawer { position: absolute; top: 0; bottom: 0; right: 0; width: 460px; max-width: 100%; background: var(--law-bg-layer-1); border-left: 1px solid var(--law-border-l2); box-shadow: -8px 0 30px #00000012; display: flex; flex-direction: column; z-index: 5; }
+.drawer header { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px; border-bottom: 1px solid var(--law-border-l1); }
+.drawer h2 { font-size: 16px; font-weight: 600; }
+.drawer header button { font-size: 24px; padding: 2px 8px; }
+.detailBody { overflow-y: auto; padding: 22px; font-size: 13px; }
+.detailBody h3 { font-size: 15px; font-weight: 600; margin: 0 0 16px; overflow-wrap: anywhere; }
+.detailBody dl { margin: 20px 0; }
+.detailBody dl div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; margin: 12px 0; }
+.detailBody dt { color: var(--law-text-secondary); }
+.detailBody dd { margin: 0; overflow-wrap: anywhere; }
+.detailBody pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; line-height: 1.9; padding: 14px; background: var(--law-surface-code); border-radius: 8px; }
+@media (max-width: 1100px) { .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .chartGrid { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { .header { padding: 18px 16px; align-items: start; } .header h1 { font-size: 21px; } .header p { max-width: 150px; } .actions { flex-direction: column; } .tabs { padding: 0 8px; } .filters { padding: 12px 16px; gap: 10px; } .filters input, .filters select { max-width: 150px; } .body { padding: 18px 16px; } .metrics { gap: 10px; } .metric { padding: 14px; } .metric strong { font-size: 20px; } .resources { grid-template-columns: 1fr; } .drawer { width: 100%; } }
