@@ -819,8 +819,9 @@ def test_registry_exposes_only_read_tools_in_chat_mode(app_config: AppConfig, tm
     policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
     registry = ToolRegistry.build(policy)
 
-    assert [tool.name for tool in registry.tools_for_mode("chat")] == ["list_dir", "read_file"]
-    assert [tool.name for tool in registry.tools_for_mode("tool")] == [
+    # T50：`tools_for_mode` → `tools_for(mode, capabilities)`；默认 Profile 等价于 v0.4 的 tool 模式。
+    assert [tool.name for tool in registry.tools_for("chat")] == ["list_dir", "read_file"]
+    assert [tool.name for tool in registry.tools_for("tool")] == [
         "update_plan",
         "list_dir",
         "read_file",

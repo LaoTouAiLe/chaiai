@@ -349,6 +349,8 @@ def build_runtime_context(
         app_config=app_config,
         user_id=user_id,
         config_profile=config_profile,
+        agent_profile=app_config.profiles.active,
+        agent_capabilities=app_config.profiles.capabilities(),
         security_policy=policy,
         tool_registry=registry,
         model_capabilities=capabilities,

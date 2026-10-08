@@ -19,6 +19,16 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from local_agent.capabilities import (
+    DEFAULT_PROFILE,
+    PROFILES,
+    capability_names,
+    duplicated_capabilities,
+    profile_names,
+    resolve_capabilities,
+    unknown_capabilities,
+)
+
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 DEFAULT_ENV_PATH = Path(".env")
 
@@ -534,6 +544,60 @@ class ModelSettingsConfig(_StrictModel):
     credential_store: Literal["auto", "memory"] = "auto"
 
 
+class ProfilesConfig(_StrictModel):
+    """Agent Profile（v0.5 T50；契约 §16.1）。
+
+    ``active`` 是当前生效的 Profile；``custom`` 用来在不改代码的前提下定义自己的组合
+    （名字 → 能力列表）。校验在**配置加载阶段**完成：
+
+    - ``active`` 必须存在（内置或自定义）；
+    - 能力名必须在架构 §6.9 的闭集内；
+    - 能力列表不能为空、不能重复；
+    - ``custom`` 不得覆盖内置名——内置三档是验收与页面的固定参照，被覆盖后"当前是哪个 Profile"
+      就说不清了。
+
+    宁可启动失败也不静默忽略：配错名字的结果是"看起来配了、实际用默认档"，而这类问题只在模型
+    **该调用某个工具却没调用**时才显形，定位成本极高。
+    """
+
+    active: str = DEFAULT_PROFILE
+    #: 自定义 Profile：名字 → 能力列表（顺序即工具绑定顺序）。空表示只用内置三档。
+    custom: dict[str, list[str]] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _check_profiles(self) -> ProfilesConfig:
+        shadowed = sorted(name for name in self.custom if name in PROFILES)
+        if shadowed:
+            raise ValueError(
+                "profiles.custom 不能覆盖内置 Profile："
+                + "、".join(shadowed)
+                + f"（内置：{'、'.join(profile_names())}）"
+            )
+        for name, capabilities in self.custom.items():
+            if not capabilities:
+                raise ValueError(f"profiles.custom.{name} 的能力列表不能为空")
+            duplicated = duplicated_capabilities(capabilities)
+            if duplicated:
+                raise ValueError(f"profiles.custom.{name} 的能力重复：" + "、".join(duplicated))
+            unknown = unknown_capabilities(capabilities)
+            if unknown:
+                raise ValueError(
+                    f"profiles.custom.{name} 里有未登记的能力："
+                    + "、".join(unknown)
+                    + f"（可用能力：{'、'.join(capability_names())}）"
+                )
+        if self.active not in PROFILES and self.active not in self.custom:
+            available = "、".join(profile_names())
+            if self.custom:
+                available += "；自定义：" + "、".join(sorted(self.custom))
+            raise ValueError(f"profiles.active={self.active} 不存在（可用：{available}）")
+        return self
+
+    def capabilities(self) -> tuple[str, ...]:
+        """当前 Profile 的能力集合（校验已保证非空且全部已登记）。"""
+        return resolve_capabilities(self.active, self.custom)
+
+
 class AppConfig(_StrictModel):
     """全部配置的根对象。"""
 
@@ -550,6 +614,7 @@ class AppConfig(_StrictModel):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     web: WebConfig = Field(default_factory=WebConfig)
     model_settings: ModelSettingsConfig = Field(default_factory=ModelSettingsConfig)
+    profiles: ProfilesConfig = Field(default_factory=ProfilesConfig)
 
     def as_run_config(self) -> RunConfig:
         """收窄成运行期配置；``llm`` 缺省时抛可执行的 `ConfigError`。

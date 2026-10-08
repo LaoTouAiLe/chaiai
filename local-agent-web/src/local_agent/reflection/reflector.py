@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
+from functools import lru_cache
 from typing import Any, Literal
 
 from langchain_core.language_models import BaseChatModel
@@ -26,12 +27,12 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
+from local_agent.capabilities import tool_names_for
 from local_agent.graph.state import PlanStep
 from local_agent.llm.models import ModelCapabilities
 from local_agent.llm.protocol import call_structured
 from local_agent.reflection.memory_candidates import parse_entity_fact
 from local_agent.reflection.validators import EvidenceLevel
-from local_agent.tools.tool_registry import MODE_TOOLS
 
 #: 工具输出的数据边界标记：标记内是**不可信数据**，只作为判断依据，不是指令。
 TOOL_DATA_OPEN = "<<<TOOL_OUTPUT>>>"
@@ -161,24 +162,48 @@ MAX_PLAN_STEPS = 5
 #:
 #: 2026-09-30 补上**真实工具清单**：原提示既不给工具集、又要求"不要在这里决定用哪个工具"，
 #: 模型于是在步骤里写出"先用 grep/搜索定位…所在行号"这类**本机并不存在**的工具（实测）。
-#: 计划第一步就注定无法执行，只能退回整文件读取，把循环预算烧在重复列目录上。工具名取自
-#: :data:`~local_agent.tools.tool_registry.MODE_TOOLS` 的 tool 模式，避免两处各写一份而漂移。
-_PLAN_TOOL_NAMES: tuple[str, ...] = MODE_TOOLS["tool"]
+#: 计划第一步就注定无法执行，只能退回整文件读取，把循环预算烧在重复列目录上。
+#:
+#: 2026-10-08（T50）改成**按 Profile 生成**：工具名与定位/读取建议都取自当前 Profile 实际可见的
+#: 工具（架构 §6.9）。写死清单会在只读 Profile 上重演同一类缺陷——提示里出现该 Profile 看不到的
+#: 工具，模型照着写进步骤，第一步就无法执行。
+@lru_cache(maxsize=8)
+def plan_draft_instruction(tool_names: tuple[str, ...] | None = None) -> str:
+    """生成计划草拟指令。
 
-PLAN_DRAFT_INSTRUCTION = (
-    f"你在为本机 Agent 做一次{PLAN_DRAFT_MARKER}：把用户请求拆成**按顺序执行**的最少步骤。"
-    "只输出结构化结果，不要输出任何其他文字。\n"
-    "\n"
-    "要求：\n"
-    f"1. 1~{MAX_PLAN_STEPS} 步；能一步做完就给一步，不要为了凑数拆细。\n"
-    "2. 每步写成可执行、可验证的动作（例如「读取 X 并确认 Y」）；不要写「分析一下」这类无法验证的话。\n"
-    "3. 步骤按依赖顺序排列，后面的步骤可以使用前面的结果。\n"
-    "4. 不要在这里决定用哪个工具，也不要编造任何结果。\n"
-    "5. 本机可用的工具**只有**这些："
-    f"{'、'.join(_PLAN_TOOL_NAMES)}。\n"
-    "6. 使用 grep / glob 定位，再用 read_file 读取所需行区间；步骤描述里不得出现第 5 条清单之外"
-    "的工具名或参数。执行中通过 update_plan 显式更新进度；不要把工具成功当成步骤完成。\n"
-)
+    Args:
+        tool_names: 当前 Profile 在 ``tool`` 模式下可见的工具名；``None`` 表示默认 Profile。
+    """
+    names = tool_names_for("tool") if tool_names is None else tool_names
+    positioning = "、".join(name for name in ("grep", "glob") if name in names)
+    reading = "read_file" if "read_file" in names else ""
+    hints: list[str] = []
+    if positioning and reading:
+        hints.append(f"用 {positioning} 定位，再用 {reading} 读取所需行区间")
+    elif reading:
+        hints.append(f"用 {reading} 读取所需行区间")
+    elif positioning:
+        hints.append(f"用 {positioning} 定位")
+    if "update_plan" in names:
+        hints.append("执行中通过 update_plan 显式更新进度")
+    hints.append("不要把工具成功当成步骤完成")
+    return (
+        f"你在为本机 Agent 做一次{PLAN_DRAFT_MARKER}：把用户请求拆成**按顺序执行**的最少步骤。"
+        "只输出结构化结果，不要输出任何其他文字。\n"
+        "\n"
+        "要求：\n"
+        f"1. 1~{MAX_PLAN_STEPS} 步；能一步做完就给一步，不要为了凑数拆细。\n"
+        "2. 每步写成可执行、可验证的动作（例如「读取 X 并确认 Y」）；不要写「分析一下」这类无法验证的话。\n"
+        "3. 步骤按依赖顺序排列，后面的步骤可以使用前面的结果。\n"
+        "4. 不要在这里决定用哪个工具，也不要编造任何结果。\n"
+        "5. 本机可用的工具**只有**这些："
+        f"{'、'.join(names) or '（无）'}。\n"
+        f"6. {'；'.join(hints)}；步骤描述里不得出现第 5 条清单之外的工具名或参数。\n"
+    )
+
+
+#: 默认 Profile（``coder``）的指令；其它 Profile 用 :func:`plan_draft_instruction` 单独生成。
+PLAN_DRAFT_INSTRUCTION = plan_draft_instruction()
 
 
 class PlanDraft(BaseModel):
@@ -192,6 +217,7 @@ def draft_plan(
     *,
     request: str,
     capabilities: ModelCapabilities | None = None,
+    profile_capabilities: Sequence[str] | None = None,
 ) -> tuple[str, ...]:
     """把用户请求拆成有序步骤；拆不出来时返回空元组（调用方退化为单步）。
 
@@ -199,6 +225,8 @@ def draft_plan(
         model: 聊天模型（来自 RuntimeContext 的适配器）。
         request: 用户请求（归一化后的文本）。
         capabilities: 模型能力；支持原生 JSON Schema 时优先使用。
+        profile_capabilities: 当前 Profile 的能力集合；工具清单按它生成（架构 §6.9），
+            ``None`` 表示默认 Profile。
 
     Returns:
         步骤描述（已去空、截断到 :data:`MAX_PLAN_STEPS`）；空元组表示"无法拆步"。
@@ -209,7 +237,9 @@ def draft_plan(
     draft = call_structured(
         model,
         [
-            SystemMessage(content=PLAN_DRAFT_INSTRUCTION),
+            SystemMessage(
+                content=plan_draft_instruction(tool_names_for("tool", profile_capabilities))
+            ),
             HumanMessage(content=f"【用户请求】{request.strip() or '（空）'}"),
         ],
         PlanDraft,

@@ -195,6 +195,17 @@ agent:
   max_retries_per_step: 2
   require_evidence_for_completion: true
 
+# Agent Profile（v0.5 T50，契约 §16.1）：决定**模型能看见哪些工具**。
+# 可见性不是授权——写类工具与 Shell 照旧要过安全门与人工审批（架构 §6.9）。
+# 内置三档（名字固定）：coder（= v0.4 的工具集，默认）| researcher（只读 + 计划）| reviewer（只读）。
+# custom 用于不改代码地定义自己的组合；不能覆盖内置名，能力名必须是架构 §6.9 闭集里的，
+# 写错会在启动时失败并列出可选项（不静默退回默认档）。
+profiles:
+  active: "coder"
+  custom: {}
+  # custom:
+  #   docs: ["files_read", "code_search"]
+
 # v0.4 独立 Web 前端与 HTTP API（T29，契约 §15.3）。
 # 默认只绑定回环地址：v0.4 没有鉴权，改 host 必须同时打开 allow_non_loopback，
 # 否则启动校验直接拒绝（不允许"改了就暴露到公网"这种静默升级）。

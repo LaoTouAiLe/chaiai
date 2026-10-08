@@ -559,7 +559,9 @@ def _tool_definition_tokens(state: AgentState, context: RuntimeContext) -> int:
     registry = context.tool_registry
     if registry is None:
         return 0
-    return estimate_tools_tokens(registry.tools_for_mode(str(state.get("mode", "chat"))))
+    return estimate_tools_tokens(
+        registry.tools_for(str(state.get("mode", "chat")), context.agent_capabilities)
+    )
 
 
 def _snapshot_tokens(
@@ -1058,7 +1060,10 @@ def _draft_steps(context: RuntimeContext, goal: str) -> tuple[str, ...]:
     single = (goal.strip() or "完成用户请求",)
     try:
         steps = draft_plan(
-            context.model_adapter, request=goal, capabilities=context.model_capabilities
+            context.model_adapter,
+            request=goal,
+            capabilities=context.model_capabilities,
+            profile_capabilities=context.agent_capabilities,
         )
     except Exception:  # noqa: BLE001 —— 拆步是增强而非必需，任何失败都按单步继续
         return single
@@ -1084,7 +1089,7 @@ def agent_decision_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
         raise LocalAgentError("运行上下文缺少 tool_registry，无法进行工具决策")
 
     capabilities = context.model_capabilities
-    tools = registry.tools_for_mode(str(state.get("mode", "chat")))
+    tools = registry.tools_for(str(state.get("mode", "chat")), context.agent_capabilities)
     if tools and isinstance(capabilities, ModelCapabilities) and not capabilities.tool_calling:
         # 架构 §11.7：不支持 Tool Calling 时不得静默退化成闲聊，要明确告知
         return _tool_calling_unavailable(state, capabilities)
@@ -1930,7 +1935,11 @@ def task_memory_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
         return {}
     try:
         registry = context.tool_registry
-        tools = registry.tools_for_mode(str(state.get("mode", "chat"))) if registry else []
+        tools = (
+            registry.tools_for(str(state.get("mode", "chat")), context.agent_capabilities)
+            if registry
+            else []
+        )
         model = context.model_adapter.bind_tools(tools) if tools else context.model_adapter
         decision = extract_task_memory(
             model,

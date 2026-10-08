@@ -370,7 +370,7 @@ _MEMORY_SCORE_RULE = (
 
 #: 「能力与边界」段落（chat / tool 共用）。
 #:
-#: 这一段落只陈述**本产品真实具备**的能力与硬边界（工具集见 ``tools.tool_registry.MODE_TOOLS``，
+#: 这一段落只陈述**本产品真实具备**的能力与硬边界（工具集见 :mod:`local_agent.capabilities`，
 #: 审批与拒绝的判定见 ``security.policy.SecurityPolicy``），不写推测性的未来能力——
 #: 提示里承诺模型做不到的事，只会换来一次编造。
 _CAPABILITY_RULES = (
@@ -411,8 +411,10 @@ _CAPABILITY_RULES = (
 
 #: 「工具使用规范」段落（**仅 tool 模式**）。
 #:
-#: chat 模式不绑定任何工具（``MODE_TOOLS["chat"] == ()``），把工具规范塞给它只会诱导模型尝试调用，
-#: 与 ``_mode_rules("chat")`` 的"不调用文件 / Shell 工具"自相矛盾。
+#: 注意：chat 模式**也**绑定了两个只读工具——``capabilities.MODE_CAPABILITIES["chat"]`` 是
+#: ``files_read``（``list_dir`` / ``read_file``）。所以下面这条"仅 tool 模式"是**既有实现的现状**，
+#: 不是"chat 没有工具"。两者的矛盾（chat 有工具却拿不到工具规范）记在
+#: `docs/planning/FUTURE_WORK.md` 的 B-28；改它等于改稳定前缀，须连同缓存口径一起做，不在 T50 内。
 _TOOL_USAGE_RULES = (
     "## 工具使用规范\n"
     "\n"

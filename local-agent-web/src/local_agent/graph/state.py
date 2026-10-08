@@ -23,6 +23,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AnyMessage, ToolCall
 from langgraph.graph.message import add_messages
 
+from local_agent.capabilities import DEFAULT_PROFILE, PROFILES
 from local_agent.config import RunConfig
 from local_agent.context.token_budget import ContextBudget, TokenUsage
 from local_agent.graph.scope import tool_scope_key
@@ -478,6 +479,10 @@ class RuntimeContext:
     app_config: RunConfig
     user_id: str | None = None
     config_profile: str = "default"
+    #: 当前 Agent Profile 的名字（诊断与页面用）与它解析出的能力集合（架构 §16.1）。
+    #: 默认取 ``coder``，即 v0.4 ``tool`` 模式的工具集——既有调用点的行为因此不变。
+    agent_profile: str = DEFAULT_PROFILE
+    agent_capabilities: tuple[str, ...] = PROFILES[DEFAULT_PROFILE]
     #: 合并后的 AGENTS 规则文本，由 load_agents 节点写入（架构 §4.1、§7.2）。
     agents_context: str | None = None
     #: 启动时探测到的模型能力（架构 §11.7）；工具模式据此失败闭合。
