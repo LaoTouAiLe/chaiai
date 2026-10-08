@@ -544,6 +544,31 @@ class ModelSettingsConfig(_StrictModel):
     credential_store: Literal["auto", "memory"] = "auto"
 
 
+#: 外部内容访问（v0.5 T53）的 provider 闭集。目前只有一个**免密钥**实现。
+WebAccessProvider = Literal["duckduckgo_html"]
+
+
+class WebAccessConfig(_StrictModel):
+    """外部网络访问（v0.5 T53；契约 §16.3、工具定义 §6.10）。
+
+    **默认关闭**：本机 Agent 一旦能联网，攻击面就从"用户自己的文件"扩到"互联网"，打开这个开关应当是
+    用户的显式决定（与 `web.allow_non_loopback` 同一口径）。关闭时 `web` 能力的工具**完全不可见**，
+    行为与 v0.4 一致。
+
+    段名是 `web_access` 而不是 `web`：``web`` 已经是**本机 HTTP 服务**的配置段（§15.3），把"改监听端口"
+    和"允许联网"混在一起看，早晚会有人以为自己只改了端口。
+    """
+
+    enabled: bool = False
+    provider: WebAccessProvider = "duckduckgo_html"
+    timeout_seconds: int = Field(default=15, gt=0, le=120)
+    max_results: int = Field(default=5, ge=1, le=20)
+    #: 单次抓取的正文上限（字符）：超过即截断，并在结果 ``note`` 里写明。
+    max_chars: int = Field(default=8_000, ge=500, le=100_000)
+    #: 请求头里的 User-Agent。不伪装成浏览器：被对方按 UA 拒绝时，如实失败比假装成 Chrome 更诚实。
+    user_agent: str = "chaiai/0.5 (local agent)"
+
+
 class ProfilesConfig(_StrictModel):
     """Agent Profile（v0.5 T50；契约 §16.1）。
 
@@ -615,6 +640,7 @@ class AppConfig(_StrictModel):
     web: WebConfig = Field(default_factory=WebConfig)
     model_settings: ModelSettingsConfig = Field(default_factory=ModelSettingsConfig)
     profiles: ProfilesConfig = Field(default_factory=ProfilesConfig)
+    web_access: WebAccessConfig = Field(default_factory=WebAccessConfig)
 
     def as_run_config(self) -> RunConfig:
         """收窄成运行期配置；``llm`` 缺省时抛可执行的 `ConfigError`。

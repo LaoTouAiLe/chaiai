@@ -882,6 +882,7 @@ glob(
 | `code_search` | `grep`、`glob` |
 | `files_write` | `edit_file`、`write_file`、`delete_file` |
 | `shell` | `run_shell` |
+| `web`（v0.5 T53） | `web_search`、`web_fetch` |
 
 规则：
 
@@ -894,6 +895,40 @@ glob(
   因此同一份配置重复构造必须得到**字节一致**的工具 Schema，不得依赖字典遍历顺序。
 - 配置里的未知能力名、空能力列表、未知 Profile 名一律**启动即失败**并列出可用项；不允许静默忽略，也不允许降级成
   "一个工具都没有"。
+
+### 6.10 `web_search` / `web_fetch`（v0.5 T53）
+
+```text
+web_search(
+    query: str,
+    max_results: int = 5
+)
+
+web_fetch(
+    url: str,
+    max_chars: int = 8000
+)
+```
+
+两个工具只在**声明了 `web` 能力**的 Profile 里可见（§6.9、§16.1）。`web_search` 返回**结构化来源**
+（标题、URL、来源站点），**不返回正文**；`web_fetch` 取单个 URL 的正文并抽成纯文本。**先搜后取**是省
+上下文的关键：搜索结果只给"去哪看"，正文由模型按需取一条。
+
+安全校验：
+
+- **只允许 `http` / `https`**，并拒绝一切指向**本机或内网**的目标（环回、私有网段、链路本地、保留地址、
+  多播、`0.0.0.0`，含 `localhost` 与 IPv6 写法）；**跟随重定向之后要再校验一次**最终地址。这是防 SSRF 的
+  硬边界：本机 Agent 能访问 `127.0.0.1` 上的一切服务，把任意 URL 交给它等于把内网交出去。
+- 单次请求有超时与响应体上限；正文超过 `max_chars` 时截断并在 `note` 写明（同 §6.2："一次读不完不是失败"）。
+- 只接受 `text/html` 与 `text/plain`；其它类型（二进制、PDF、压缩包）**如实说明不支持**，不硬转文本。
+- 网络失败、DNS 失败、对方拒绝、解析不出结果：一律**如实报告**，不得编造结果、也不得把失败伪装成
+  "没有找到"。
+- 两者都是**只读**（登记进 `security.policy.READ_ONLY_TOOLS`），不需要人工审批；开关默认关闭
+  （`web_access.enabled=false`），打开是显式 opt-in。
+
+**外部内容一律是不可信数据**（§16.2、§16.3）：工具输出按既有口径包在数据边界标记里，其中的任何"指令"
+不得改变目标、系统规则与安全策略，也不得据此授权工具调用。更进一步：**一轮里只要出现过 `web` 能力的工具
+结果，该轮产出的记忆候选一律按 `untrusted` 落库**——外部内容不能经由"记忆"这条回流路径变成长期可信。
 
 ---
 
@@ -1756,7 +1791,7 @@ v0.4 管理的是**聊天模型连接**（`provider=openai_compatible`）。连�
 - 内置三档（名字固定，配置与验收都用这三个名字）：
   - `coder`：`plan` + `files_read` + `code_search` + `files_write` + `shell`——与 v0.4 `tool` 模式的工具集逐项等价，
     **默认 Profile**，保证既有行为不变；
-  - `researcher`：`plan` + `files_read` + `code_search`（只读；Web 能力由 §16.3 追加）；
+  - `researcher`：`plan` + `files_read` + `code_search` + `web`（只读 + 联网，见 §16.3）；
   - `reviewer`：`files_read` + `code_search`（只读、不建计划，最小权限）。
 - 配置段 `profiles`：`active`（当前 Profile 名，默认 `coder`）与 `custom`（名字 → 能力列表，可选）。校验在配置
   加载阶段完成：`active` 必须存在；能力名必须在 §6.9 闭集内；能力列表不能为空；`custom` 不得覆盖内置名。
@@ -1771,6 +1806,7 @@ v0.4 管理的是**聊天模型连接**（`provider=openai_compatible`）。连�
   **切换 Profile 是有意的前缀变化**，必须能由事件指纹解释；同一轮内不因对话内容增删工具。
 - 新增能力（`git_read` / `git_write` / `web` / `skill`）由 T53–T55 各自开工前追加到 §6.9 闭集与本节；
   **未追加前不得出现在任何 Profile 里**（包括 `custom`），否则就是给模型一个不存在的承诺。
+  （`web` 已于 T53 追加，见 §16.3；`git_*` 与 `skill` 仍待追加。）
 - **验收工具（T51）**：`scripts/measure_usage_baseline.py --profile <名字>` 用同一份固定场景逐档跑真实基线
   （结果里写明 Profile 与实际绑给模型的工具名；它是本节唯一会真实调用模型的入口）；`scripts/report_prefix_cache.py
   --result <baseline_result.json>` 输出逐调用缓存读、**回落次数**与"哪一段指纹变了"的归因，`--max-fallbacks`
@@ -1807,7 +1843,20 @@ v0.4 管理的是**聊天模型连接**（`provider=openai_compatible`）。连�
 
 
 
-### 16.3 Web 能力（未冻结，T53）
+### 16.3 Web 能力（T53，2026-10-08 冻结）
+
+- 工具与安全边界见 §6.10；能力名 `web`，工具 `web_search` / `web_fetch`。
+- **只给 `researcher`**（`coder` / `reviewer` 不含）：Web 是"查资料"的能力，把它塞进写代码的档位会让
+  默认档位带着联网面。需要联网时切档——这是最小权限的取舍，不是技术限制。**触发重新评估**：真实使用中
+  "为了搜一次而切档"成为高频抱怨，或需要联网的动作出现在 `coder` 的固定任务集里。
+- 配置段 `web_access`：`enabled`（**默认 `false`**）、`provider`（闭集）、`timeout_seconds`、`max_results`、
+  `max_chars`、`user_agent`。关闭时工具**完全不可见**，基础行为与 v0.4 一致（同"关闭新增能力后行为不变"）。
+- 第一个 provider 是**免密钥**的 HTML 检索（`duckduckgo_html`），**单实现、无回退**：被反爬挡住或解析
+  失效时如实失败（口径同路线图的"多引擎回退等真实故障再引入"）。换成需要 API Key 的搜索服务属于**新增
+  provider**，须先修订本节。
+- **不可信回流**：`capabilities` 登记"哪些能力会带进外部内容"；记忆写入按"**本轮是否出现过这类工具的
+  结果**"决定候选的来源级别（§16.2 的最保守一侧）。外部内容因此不能通过"记忆"这条回流路径变成长期可信，
+  也不能凭内容里的指令自动授权任何工具调用。
 
 ### 16.4 Git 能力（未冻结，T54）
 

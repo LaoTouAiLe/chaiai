@@ -13,12 +13,14 @@ from collections.abc import Sequence
 from langchain_core.tools import BaseTool
 
 from local_agent.capabilities import CAPABILITY_TOOLS, tool_names_for
+from local_agent.config import WebAccessConfig
 from local_agent.exceptions import LocalAgentError
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.file_tools import build_file_tools
 from local_agent.tools.plan_tools import build_plan_tools
 from local_agent.tools.search_tools import build_search_tools
 from local_agent.tools.shell_tools import build_shell_tools
+from local_agent.tools.web_tools import build_web_tools
 
 
 class ToolRegistry:
@@ -28,12 +30,22 @@ class ToolRegistry:
         self._tools: dict[str, BaseTool] = {tool.name: tool for tool in tools}
 
     @classmethod
-    def build(cls, policy: SecurityPolicy) -> ToolRegistry:
-        """构造注册表（文件工具 + 计划工具 + 检索工具 + 安全 Shell）。
+    def build(
+        cls, policy: SecurityPolicy, *, web_access: WebAccessConfig | None = None
+    ) -> ToolRegistry:
+        """构造注册表（文件工具 + 计划工具 + 检索工具 + 安全 Shell + Web 工具）。
 
         构造时校验**能力归属覆盖**（架构 §6.9）：每个已实现的工具必须且只能归属一个能力，能力表里的
         名字也必须都已实现。漏登记的后果是"注册了但永远不给模型"，或"配了但没有实现"——两者都要等到
         很久以后才以"模型怎么不调用它"的形式暴露，所以在构造时失败闭合。
+
+        `web` 的工具**总是被构造**（否则覆盖校验会失败），但"对模型可见"由两处决定：
+        `web_access.enabled`（关掉时能力不进有效集合，见 `capabilities.effective_capabilities`）与
+        Profile 是否声明 `web`。
+
+        Args:
+            policy: 安全策略。
+            web_access: 外部访问配置；省略时按默认（关闭）构造，工具存在但不会可见。
 
         Raises:
             LocalAgentError: 能力归属不完整（重复归属、登记未实现、实现未登记）。
@@ -44,6 +56,7 @@ class ToolRegistry:
                 *build_plan_tools(),
                 *build_search_tools(policy),
                 *build_shell_tools(policy),
+                *build_web_tools(web_access or WebAccessConfig()),
             ]
         )
         registry.assert_capability_coverage()

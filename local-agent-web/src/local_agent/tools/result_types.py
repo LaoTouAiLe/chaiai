@@ -113,6 +113,39 @@ class GlobResult(BaseModel):
     note: str | None = None
 
 
+class WebSearchHit(BaseModel):
+    """一条搜索结果：**只有来源信息，没有正文**（§6.10 的"先搜后取"）。"""
+
+    title: str
+    url: str
+    #: 来源站点（URL 的 host）；让用户能一眼看出这条来自哪里。
+    source: str
+
+
+class WebSearchResult(BaseModel):
+    """``web_search`` 的返回结构（v0.5 T53）。"""
+
+    query: str
+    results: list[WebSearchHit] = Field(default_factory=list)
+    truncated: bool = False
+    note: str | None = None
+
+
+class WebFetchResult(BaseModel):
+    """``web_fetch`` 的返回结构（v0.5 T53）。
+
+    ``text`` 是抽成纯文本的正文；``final_url`` 是跟随重定向之后的地址（可能与请求的不同）。
+    被 ``max_chars`` 截断时 ``truncated=True`` 并写明续读方式。
+    """
+
+    url: str
+    final_url: str | None = None
+    title: str | None = None
+    text: str = ""
+    truncated: bool = False
+    note: str | None = None
+
+
 class EditFileResult(BaseModel):
     """``edit_file`` 的返回结构（架构 §6.3）。
 

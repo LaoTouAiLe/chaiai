@@ -46,7 +46,16 @@ from local_agent.security.shell_guard import prepare_shell
 #: ``grep`` / ``glob``（2026-09-30 新增）也是只读：它们只返回"哪个文件哪一行命中了什么"，
 #: 不写盘、不改状态，因此与 ``list_dir`` / ``read_file`` 同级，**不需要人工审批**。
 #: 但它们必须登记在这里——``KNOWN_TOOLS`` 是"可绑定给模型"的白名单，没登记的会被安全门拒。
-READ_ONLY_TOOLS: tuple[str, ...] = ("list_dir", "read_file", "grep", "glob")
+#: ``web_search`` / ``web_fetch``（v0.5 T53）同样登记在这里：它们只读不写，且**只在本机或内网之外**
+#: （SSRF 校验，见 §6.10），不需要人工审批；真正的开关是 `web_access.enabled`（默认关闭，显式 opt-in）。
+READ_ONLY_TOOLS: tuple[str, ...] = (
+    "list_dir",
+    "read_file",
+    "grep",
+    "glob",
+    "web_search",
+    "web_fetch",
+)
 CONTROL_TOOLS: tuple[str, ...] = ("update_plan",)
 
 #: 写入类工具（本版本只放行其中的安全子集）。

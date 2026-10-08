@@ -72,11 +72,13 @@ def test_default_profile_reproduces_v04_tool_order(app_config: AppConfig, tmp_pa
 def test_builtin_profiles_are_declared_read_only_subsets(tmp_path: Path) -> None:
     """三档内置 Profile 的能力集合（名字固定，配置与验收都用它们）。"""
     assert PROFILES["coder"] == ("plan", "files_read", "code_search", "files_write", "shell")
-    assert PROFILES["researcher"] == ("plan", "files_read", "code_search")
+    assert PROFILES["researcher"] == ("plan", "files_read", "code_search", "web")
     assert PROFILES["reviewer"] == ("files_read", "code_search")
-    # 最小权限是**子集关系**，不是另一套写法：researcher ⊂ coder、reviewer ⊂ researcher
-    assert set(PROFILES["researcher"]) < set(PROFILES["coder"])
+    # 最小权限用**显式枚举**表达，不假设"researcher 一定是 coder 的子集"：T53 起 researcher 多了 `web`
+    # （coder 没有），两者是各取所需，而不是包含关系。
     assert set(PROFILES["reviewer"]) < set(PROFILES["researcher"])
+    assert set(PROFILES["reviewer"]) < set(PROFILES["coder"])
+    assert "web" in PROFILES["researcher"] and "web" not in PROFILES["coder"]
 
 
 def test_only_read_tools_are_visible_to_read_only_profiles(
@@ -88,7 +90,16 @@ def test_only_read_tools_are_visible_to_read_only_profiles(
     researcher = _names(registry.tools_for("tool", PROFILES["researcher"]))
     reviewer = _names(registry.tools_for("tool", PROFILES["reviewer"]))
 
-    assert researcher == ["update_plan", "list_dir", "read_file", "grep", "glob"]
+    assert researcher == [
+        "update_plan",
+        "list_dir",
+        "read_file",
+        "grep",
+        "glob",
+        # T53：Web 能力只给 researcher（架构 §16.3）
+        "web_search",
+        "web_fetch",
+    ]
     assert reviewer == ["list_dir", "read_file", "grep", "glob"]
     for forbidden in ("edit_file", "write_file", "delete_file", "run_shell"):
         assert forbidden not in researcher

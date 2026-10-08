@@ -36,7 +36,7 @@ from langchain_core.messages.tool import ToolCall
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
-from local_agent.capabilities import is_visible
+from local_agent.capabilities import is_visible, untrusted_tool_names
 from local_agent.config import EmbeddingConfig, MediumTermMemoryConfig, resolve_api_key
 from local_agent.context.agents_loader import load_agents
 from local_agent.context.prompt_context import (
@@ -104,7 +104,7 @@ from local_agent.llm.usage_recording import (
     use_model_purpose,
 )
 from local_agent.memory import long_term, medium_term, recall, writer
-from local_agent.memory.schemas import ORIGIN_OWNER, MemoryReference
+from local_agent.memory.schemas import ORIGIN_OWNER, ORIGIN_UNTRUSTED, MemoryReference
 from local_agent.memory.short_term import (
     PromptWindow,
     recent_turns_start,
@@ -2248,6 +2248,29 @@ def _source_event_ids(state: AgentState) -> tuple[str, ...]:
     return (_run_id(state),)
 
 
+def _turn_had_untrusted_input(state: AgentState) -> bool:
+    """本轮是否真的取回过**外部内容**（架构 §16.3）。
+
+    判定口径：
+
+    - 只看**当前任务**（``run_id`` 作用域，与工具结果配对的既有口径一致）：上一轮查过的网页不该把这一轮的
+      记忆也打成不可信，反过来更不行——只要本轮碰过外部内容，本轮的候选就按最保守的一侧处理；
+    - 只看 ``status == "ok"`` 的结果：被拒绝或失败的调用没有带进任何外部内容；
+    - 工具名取自 :func:`~local_agent.capabilities.untrusted_tool_names`（能力表是唯一真源）。
+    """
+    names = set(untrusted_tool_names())
+    if not names:
+        return False
+    scope = current_task_scope(state)
+    for record in state.get("tool_results", []):
+        name = str(record.get("tool_name") or "")
+        if name not in names or str(record.get("status") or "") != "ok":
+            continue
+        if _in_current_task(record.get("run_id"), scope=scope):
+            return True
+    return False
+
+
 def _memory_candidates(
     items: Sequence[Any] | None, state: AgentState
 ) -> list[MemoryCandidate]:
@@ -2259,6 +2282,10 @@ def _memory_candidates(
     ``MemoryCandidate`` 不新增作用域字段）。
     """
     sources = _source_event_ids(state)
+    # 来源可信级别由**代码**判定，不取模型输出（模型不能给自己的内容打信任标签）。默认是本机会话与
+    # 工作区（owner）；**本轮取回过外部内容时一律按 untrusted**（架构 §16.2/§16.3 的最保守一侧）：
+    # 外部内容不能经由"记忆"这条回流路径变成长期可信。
+    origin = ORIGIN_UNTRUSTED if _turn_had_untrusted_input(state) else ORIGIN_OWNER
     candidates: list[MemoryCandidate] = []
     for item in items or []:
         content = str(getattr(item, "content", "") or "").strip()
@@ -2268,11 +2295,7 @@ def _memory_candidates(
             MemoryCandidate(
                 memory_type=item.memory_type,
                 content=content,
-                # 来源可信级别由**代码**判定，不取模型输出：本函数的输入是本机会话消息与工具结果
-                # （用户自己的数据），所以是 owner。让模型给自己的内容打信任标签是安全隐患，
-                # 而且"判定不出来"绝不允许默认 owner（架构 §16.2）。将来读取外部内容的能力
-                # （T53 Web）必须在这条链路上打 untrusted。
-                origin=ORIGIN_OWNER,
+                origin=origin,
                 subject=str(getattr(item, "subject", "") or "").strip(),
                 importance=float(getattr(item, "importance", 0.5)),
                 confidence=float(getattr(item, "confidence", 0.5)),

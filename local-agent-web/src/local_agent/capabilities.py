@@ -29,7 +29,14 @@ CAPABILITY_TOOLS: Mapping[str, tuple[str, ...]] = {
     "code_search": ("grep", "glob"),
     "files_write": ("edit_file", "write_file", "delete_file"),
     "shell": ("run_shell",),
+    "web": ("web_search", "web_fetch"),
 }
+
+#: **会带进外部内容**的能力（架构 §6.10、§16.2、§16.3）。
+#:
+#: 用途只有一个但很关键：一轮里只要出现过这些能力的工具结果，该轮产出的记忆候选一律按
+#: ``untrusted`` 落库（取最保守的一侧），外部内容因此不能经由"记忆"这条路变成长期可信。
+UNTRUSTED_CAPABILITIES: tuple[str, ...] = ("web",)
 
 #: 内置 Profile → 能力集合（架构 §16.1）。名字固定，配置与验收都用这三个名字。
 #:
@@ -37,7 +44,7 @@ CAPABILITY_TOOLS: Mapping[str, tuple[str, ...]] = {
 #: ``researcher`` / ``reviewer`` 是只读子集，后续任务（Web、Git）再往它们身上加能力。
 PROFILES: Mapping[str, tuple[str, ...]] = {
     "coder": ("plan", "files_read", "code_search", "files_write", "shell"),
-    "researcher": ("plan", "files_read", "code_search"),
+    "researcher": ("plan", "files_read", "code_search", "web"),
     "reviewer": ("files_read", "code_search"),
 }
 
@@ -109,6 +116,31 @@ def resolve_capabilities(
     if custom and profile in custom:
         return tuple(custom[profile])
     raise KeyError(profile)
+
+
+def effective_capabilities(
+    capabilities: Sequence[str], *, web_access_enabled: bool
+) -> tuple[str, ...]:
+    """按配置开关收窄能力集合（架构 §16.3）。
+
+    关掉的开关对应的能力对模型**完全不可见**：`web_access.enabled=false` 时 `web` 被移除，于是提示词
+    不会提到它、工具也不会绑给模型——"关闭新增能力后基础行为不变"就是靠这一条成立的。
+    """
+    return tuple(
+        capability for capability in capabilities if capability != "web" or web_access_enabled
+    )
+
+
+def untrusted_tool_names() -> tuple[str, ...]:
+    """会带进外部内容的工具名（架构 §16.3）。
+
+    记忆写入按"本轮有没有出现过这些工具的结果"决定候选的来源级别——见
+    :func:`~local_agent.memory.schemas.is_auto_injectable` 与 §16.2 的最保守一侧。
+    """
+    names: list[str] = []
+    for capability in UNTRUSTED_CAPABILITIES:
+        names.extend(CAPABILITY_TOOLS[capability])
+    return tuple(names)
 
 
 def is_visible(mode: str, capabilities: Sequence[str] | None, name: str) -> bool:

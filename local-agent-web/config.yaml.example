@@ -206,6 +206,18 @@ profiles:
   # custom:
   #   docs: ["files_read", "code_search"]
 
+# 外部访问（v0.5 T53，契约 §16.3）。**默认关闭**：本机 Agent 一旦能联网，攻击面就从"用户自己的文件"
+# 扩到互联网，打开它应当是显式决定。关闭时 web 能力完全不可见（工具不绑定、提示也不提）。
+# 只有 researcher 档声明了 web 能力（coder / reviewer 不含），所以要先改 profiles.active 才有用。
+# 安全边界（§6.10）：只允许 http/https，拒绝本机与内网地址，并且**重定向后再次校验**（防 SSRF）。
+web_access:
+  enabled: false
+  provider: "duckduckgo_html"   # 目前只有这一个**免密钥**实现；被反爬挡住或页面改版时如实失败
+  timeout_seconds: 15
+  max_results: 5
+  max_chars: 8000
+  user_agent: "chaiai/0.5 (local agent)"
+
 # v0.4 独立 Web 前端与 HTTP API（T29，契约 §15.3）。
 # 默认只绑定回环地址：v0.4 没有鉴权，改 host 必须同时打开 allow_non_loopback，
 # 否则启动校验直接拒绝（不允许"改了就暴露到公网"这种静默升级）。

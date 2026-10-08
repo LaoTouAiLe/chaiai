@@ -21,6 +21,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from local_agent.capabilities import effective_capabilities
 from local_agent.config import RunConfig
 from local_agent.graph.edges import ChatStateGraph, add_minimal_chat_edges
 from local_agent.graph.nodes import (
@@ -338,7 +339,7 @@ def build_runtime_context(
     policy = security_policy or SecurityPolicy.from_config(
         app_config, workspace_root=workspace_root, external_policy=external_policy
     )
-    registry = tool_registry or ToolRegistry.build(policy)
+    registry = tool_registry or ToolRegistry.build(policy, web_access=app_config.web_access)
     capabilities = model_capabilities or probe_capabilities(
         model_adapter, provider_name=provider_name or app_config.llm.model
     )
@@ -350,7 +351,11 @@ def build_runtime_context(
         user_id=user_id,
         config_profile=config_profile,
         agent_profile=app_config.profiles.active,
-        agent_capabilities=app_config.profiles.capabilities(),
+        # 有效能力 = Profile 声明 ∩ 配置开关：关掉的开关对应的能力对模型完全不可见（架构 §16.3）。
+        agent_capabilities=effective_capabilities(
+            app_config.profiles.capabilities(),
+            web_access_enabled=app_config.web_access.enabled,
+        ),
         security_policy=policy,
         tool_registry=registry,
         model_capabilities=capabilities,
