@@ -789,14 +789,17 @@ def test_later_safety_gate_pass_keeps_the_approval_clock(
     runtime = _runtime_with_policy(tmp_path, model_factory, app_config)
     call = {"name": "delete_file", "args": {"path": "a.txt"}, "id": "call-1"}
 
+    # T51：安全门按"模式 + Profile"判可见性（缺失 mode 与绑定侧同回退：按 chat，只读），
+    # 而审批只在**可见**的工具上发生，所以这里必须显式写工具模式。
     first = graph_nodes.safety_gate_node(
-        {"run_id": RUN, "pending_tool_calls": [call], "approval_history": []}, runtime
+        {"run_id": RUN, "mode": "tool", "pending_tool_calls": [call], "approval_history": []},
+        runtime,
     )
     assert isinstance(first["approval_requested_at"], datetime)
     assert first["pending_approval"] is not None
 
     second = graph_nodes.safety_gate_node(
-        {"run_id": RUN, "pending_tool_calls": [], "approval_history": []}, runtime
+        {"run_id": RUN, "mode": "tool", "pending_tool_calls": [], "approval_history": []}, runtime
     )
     # 没有新审批 → 这个键不出现在更新里，State 里留下的还是上一次请求的时刻。
     assert "approval_requested_at" not in second

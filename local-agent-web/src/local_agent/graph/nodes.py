@@ -36,6 +36,7 @@ from langchain_core.messages.tool import ToolCall
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
+from local_agent.capabilities import is_visible
 from local_agent.config import EmbeddingConfig, MediumTermMemoryConfig, resolve_api_key
 from local_agent.context.agents_loader import load_agents
 from local_agent.context.prompt_context import (
@@ -1161,6 +1162,21 @@ def _tool_calling_unavailable(state: AgentState, capabilities: ModelCapabilities
     }
 
 
+def _invisible_tool_reason(profile: str, mode: str) -> str:
+    """不可见工具的拒绝理由（给模型看，不含内部字段名）。
+
+    2026-10-08 真实基线实证：``reviewer`` 档只绑了四个只读工具，但提示词里"新建文件用 write_file"
+    那句仍在，模型于是报出 ``write_file`` 调用，而执行节点按**全量**注册表把它跑掉了——文件真被创建。
+    所以可见性必须在**执行侧**也成立，且理由要告诉模型"该做什么"，而不只是"不行"。
+    """
+    if mode == "chat":
+        return "闲聊会话只允许读取目录和文件，该动作未执行"
+    return (
+        f"该工具不在当前 Agent 配置（{profile} 档）的能力范围内，未执行。"
+        "需要它时请说明这一点，并让用户切换到具备该能力的档位后重试"
+    )
+
+
 def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
     """安全门：逐个判定工具调用是否放行（架构 §5.3、§1.3-4）。
 
@@ -1182,9 +1198,16 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
         call_id = _call_id(call)
         name = call["name"]
         arguments = dict(call.get("args") or {})
-        if state.get("session_mode") == "chat" and name not in {"list_dir", "read_file"}:
+        if not is_visible(str(state.get("mode", "chat")), runtime.context.agent_capabilities, name):
+            # 原来这里只硬拦 chat 模式（"闲聊只允许读"）；T51 起改成**按可见集合**拦：
+            # chat 的可见集合恰好就是 {list_dir, read_file}（行为不变），而 Profile 缺哪一档能力
+            # 也一并被拦住——"没绑定给模型"必须同时是"不能执行"，否则模型自己报个名字就能跑。
             decision = SafetyDecision(
-                allowed=False, requires_approval=False, reason="闲聊会话只允许读取目录和文件"
+                allowed=False,
+                requires_approval=False,
+                reason=_invisible_tool_reason(
+                    runtime.context.agent_profile, str(state.get("mode", "chat"))
+                ),
             )
         else:
             decision = policy.classify_tool(name, arguments)
@@ -1406,6 +1429,56 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
     for call in state.get("pending_tool_calls", []):
         call_id = _call_id(call)
         name = call["name"]
+
+        if not is_visible(str(state.get("mode", "chat")), context.agent_capabilities, name):
+            # 防御纵深：正常路径上安全门已经拦掉了不可见的调用。这里再拦一次，是因为
+            # **审批恢复**会把被批准过的调用直接放回待执行列表、不重新经过安全门（架构 §4.2）。
+            #
+            # ``mode`` 缺失时按 ``chat`` 处理：这是**绑定侧**（agent_decision_node）同一个回退，
+            # 守卫必须与绑定同口径，否则"模型看不到的"和"执行允许的"就会错位。注意反思节点用的是
+            # 另一条既有口径（缺失按工具分支，见 reflection_node 的注释），两处不同是历史现状，
+            # 不要在这里"顺手统一"。
+            note = _invisible_tool_reason(context.agent_profile, str(state.get("mode", "chat")))
+            messages.append(ToolMessage(content=note, tool_call_id=call_id, name=name))
+            events.append(
+                ToolEvent(
+                    tool_call_id=call_id,
+                    tool_name=name,
+                    redacted_arguments=_redacted_arguments(call, policy),
+                    status="denied",
+                    output_preview=note,
+                    output_digest=_digest(note),
+                    run_id=_run_id(state),
+                )
+            )
+            results.append(
+                ToolResultRecord(
+                    tool_call_id=call_id,
+                    tool_name=name,
+                    status="denied",
+                    truncated=False,
+                    output_preview=note,
+                    output_digest=_digest(note),
+                    run_id=_run_id(state),
+                )
+            )
+            records.append(
+                _decision(
+                    state,
+                    stage="tool_execution",
+                    summary=f"{name} 不在当前配置的可见工具集合内，拒绝执行",
+                    tool_call_id=call_id,
+                )
+            )
+            errors.append(
+                _error(
+                    state,
+                    stage="tool_execution",
+                    message=f"{name} 不在当前 Agent 配置的可见工具集合内，已拒绝执行",
+                    tool_call_id=call_id,
+                )
+            )
+            continue
 
         if call_id in confirmed:
             # 已确认过的调用：既不重复执行，也不重复追加事件（架构 §4.2）

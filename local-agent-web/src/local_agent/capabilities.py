@@ -111,6 +111,16 @@ def resolve_capabilities(
     raise KeyError(profile)
 
 
+def is_visible(mode: str, capabilities: Sequence[str] | None, name: str) -> bool:
+    """``name`` 是否可见（=会被发给模型）。
+
+    **可见性是执行侧的前置条件**（架构 §6.9、§16.1）：安全门与执行节点都必须用它做拦截，
+    否则"没绑定给模型"就只是"没告诉它"，模型自己报出名字照样能跑——2026-10-08 的真实基线
+    实证过一次：``reviewer`` 档（只读）照提示词里的 ``write_file`` 说明发起调用，文件真的被创建了。
+    """
+    return name in tool_names_for(mode, capabilities)
+
+
 def tool_names_for(mode: str, capabilities: Sequence[str] | None = None) -> tuple[str, ...]:
     """该模式下发模型的工具名序列（**顺序即绑定顺序**）。
 

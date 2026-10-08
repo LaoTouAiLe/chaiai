@@ -366,6 +366,8 @@ def test_confirmed_call_is_not_executed_twice(
 
     state: dict[str, Any] = {
         "run_id": RUN_ID,
+        # T51：同上——执行可见性依赖 mode（缺失按 chat，只有只读工具）。
+        "mode": "tool",
         "loop_count": 0,
         "pending_tool_calls": [
             {
@@ -411,6 +413,9 @@ def _stale_effect_state(**overrides: Any) -> dict[str, Any]:
     """**更早运行**放行了 ``write_file``、却没有留下结果的 State（当前 run 是另一个）。"""
     state: dict[str, Any] = {
         "run_id": "current-run",
+        # T51：执行节点按"模式 + Profile"判可见性，缺失 ``mode`` 时与绑定侧同一回退（按 chat，
+        # 只有只读工具）。这些用例跑的是工具模式的写入，必须显式写上 mode，否则会被边界拦住。
+        "mode": "tool",
         "loop_count": 0,
         "messages": [],
         "pending_tool_calls": [_write_call("call-2")],
@@ -602,6 +607,9 @@ def _verified_state(**overrides: Any) -> dict[str, Any]:
     """读文件成功、机械校验为 ``verified`` 的 State。"""
     state: dict[str, Any] = {
         "run_id": RUN_ID,
+        # T51：执行节点按"模式 + Profile"判可见性，而绑定侧的既有回退是把缺失的 mode 当 chat
+        # （只读）。这些用例构造的是**工具模式**的运行，缺了 mode 就会被按 chat 拦住写操作。
+        "mode": "tool",
         "loop_count": 1,
         "messages": [],
         "task_goal": "读取配置文件",
