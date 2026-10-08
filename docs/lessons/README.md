@@ -1,5 +1,7 @@
 # 从零读懂 local-agent-web
 
+> 本目录是源码学习资料，文件行号与流程属于编写时快照；当前版本已增加 FastAPI/React 和新主循环，不能把教程当作下一步排期或现行运行契约。当前总览见 [项目入口](../../README.md)，正式启动见 [使用指南](../../local-agent-web/README.md)。
+
 > 一套写给「有 Java 基础、但没写过 Agent」的人的代码导读。
 > 目标：读完能自己看懂这个项目的每一层，能改、能扩展。
 
@@ -26,7 +28,7 @@
 | 文档 | 定位 | 什么时候看 |
 |---|---|---|
 | [`ARCHITECTURE.md`](../../ARCHITECTURE.md) | **设计文档（权威）**：代码里到处出现的 `架构 §6.3` 就指它 | 想知道"为什么这么设计"时查对应章节 |
-| [`DEVELOPMENT_PLAN.md`](../../DEVELOPMENT_PLAN.md) | 开发任务分解（T01、T05…），代码注释里的 `开发文档 T05` 指它 | 想知道某个模块是在哪一步加进来的 |
+| [`DEVELOPMENT_PLAN.md`](../archive/v0.1-v0.3-development.md) | 开发任务分解（T01、T05…），代码注释里的 `开发文档 T05` 指它 | 想知道某个模块是在哪一步加进来的 |
 | [`local-agent-web/README.md`](../../local-agent-web/README.md) | 安装、配置、运行 | 要跑起来时看 |
 | [`local-agent-web/CONTRIBUTING.md`](../../local-agent-web/CONTRIBUTING.md) | 提交规范 | 要改代码并提交时看 |
 | **本目录** | **学习导读**：把上面的设计文档"翻译"成可逐步阅读的代码讲解 | 想弄懂代码怎么读时看 |
@@ -116,7 +118,8 @@ uv run mypy src
 启动界面：
 
 ```powershell
-uv run streamlit run src/local_agent/web.py
+uv run python -m local_agent.api
+# 可选调试入口：uv run streamlit run src/local_agent/web.py
 ```
 
 ---

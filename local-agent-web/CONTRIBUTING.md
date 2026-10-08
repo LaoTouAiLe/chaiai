@@ -2,8 +2,10 @@
 
 ## 文档基线
 
+先读 [项目总览](../README.md) 确认当前任务；历史证据和后续候选不自动授权新实现。
+
 动手前先读仓库上级目录的 [ARCHITECTURE.md](../ARCHITECTURE.md) 与
-[DEVELOPMENT_PLAN.md](../DEVELOPMENT_PLAN.md)。架构文件定义契约（State、Graph、工具签名、
+[V0_4_DEVELOPMENT_PLAN.md](../V0_4_DEVELOPMENT_PLAN.md)。架构文件定义契约（State、Graph、工具签名、
 安全语义），开发文档定义任务顺序与验收方式。两者冲突时先核对架构文档。
 
 修改 State 字段、Graph 边、工具签名或存储字段，必须先改架构文档，再改开发文档与实现，

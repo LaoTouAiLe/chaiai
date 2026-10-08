@@ -1,155 +1,62 @@
-# local-agent-web
+# chaiai 使用与开发指南
 
-本机运行的学习型网页 Agent：浏览器里自然聊天、读写本地代码、执行受控命令。
-当前主界面采用 FastAPI + React，Agent 内核采用 Python + LangGraph + LangChain Core；Streamlit 保留为调试入口。
+当前功能、状态和下一步统一见 [项目总览](../README.md)。本文件只说明如何启动、配置、使用及开发，不维护一份重复的任务表。
 
-- 架构契约：[../ARCHITECTURE.md](../ARCHITECTURE.md)
-- 实施计划与验收标准：[../DEVELOPMENT_PLAN.md](../DEVELOPMENT_PLAN.md)
-
-> 这是学习项目，不是商用成品。默认只监听本机回环地址，不包含账号体系、多人并发或公网部署。
+界面是 FastAPI + React；Python + LangGraph 执行业务。默认本机、单用户、单进程、单 Uvicorn worker；Streamlit 保留为调试入口。内部包名 `local-agent-web` / `local_agent` 未改名。
 
 ## 快速开始
 
-```powershell
-uv sync                                     # 装依赖（首次）
-Copy-Item config.yaml.example config.yaml   # 首次：复制一份配置（config.yaml 已被 .gitignore 排除）
-# 编辑 config.yaml 的 llm 段：base_url / model / context_window_tokens
-#   context_window_tokens 是必填项，且必须大于 max_tokens
-uv run python -m local_agent.api            # 正式入口 → http://127.0.0.1:8000
-```
-
-页面还需要前端产物（首次，或前端代码改动之后）：
+所有 Python 命令在本 README 所在的 `local-agent-web/` 执行。
 
 ```powershell
+uv sync
+# 首次需要中期向量记忆或本地 ONNX：uv sync --extra memory
+# 仅首次创建配置；已有 config.yaml 时不要覆盖。
+Copy-Item config.yaml.example config.yaml
+# 编辑 config.yaml，并在 .env 或指定环境变量中配置模型密钥。
 cd frontend
-npm ci         # 严格按 package-lock.json 安装；换机器复现用这个，不要用 npm install
-npm run build  # 先 typecheck，再产出 frontend/dist
+npm ci
+npm run build
+cd ..
+uv run python -m local_agent.api
 ```
 
-然后刷新 <http://127.0.0.1:8000>。没有产物时根路径只给一段可执行提示，API 仍然可用。
+浏览器打开 http://127.0.0.1:8000。前端构建后刷新；后端更新后重启服务。没有产物时根路径提供构建提示，API 仍可用。Python/Node/npm 版本要求以 `pyproject.toml` 与 `frontend/package.json` 为准，精确依赖由锁文件确定。
 
-开发时前端走 Vite 热更新（**另开一个终端，两个进程一起跑**）：
+开发时另开终端，在 `frontend/` 执行 `npm run dev`，访问 http://127.0.0.1:5173；Vite 将 `/api` 代理到后端 :8000。生产运行只需要 Python 服务和前端产物，不启动 Node 服务。T40 EXE 试用包尚未交付。
 
-```powershell
-cd frontend
-npm run dev                                 # http://127.0.0.1:5173，/api 代理到 127.0.0.1:8000
-```
+## 配置与数据
 
-**必须在项目根目录启动**（也就是本 README 所在的 `local-agent-web/`）：`config.yaml`、`.env` 与
-`workspace.root` 都按进程当前目录解析。
+- `config.yaml.example` 是完整字段参考；复制后的 `config.yaml` 与 `.env` 已被 Git 排除。
+- `llm.api_key_env` 只填写变量名；密钥值放环境变量或 `.env`。`llm.context_window_tokens` 按实际连接填写，必须大于 `max_tokens`。
+- 工作区是默认上下文、相对路径与检索根。会话绑定登记工作区；外部访问由“设置 → 权限”控制。
+- 聊天/Checkpoint、设置、长期 SQLite 和中期 Chroma 的实际路径按配置解析；不要删除正式库来复现测试。
+- 打开设置、浏览地图和数据中台不会因为浏览操作新增模型调用；提交追问和显式 Embedding 测试会实际执行并可能产生费用。
+- AGENTS 规则从工作区加载；本仓库当前没有项目级 `AGENTS.md`，协作约定仍以用户提供的协议为准。新增关键约定应补充独立项目规则，不能把历史开发计划当作模型指令。
 
-配置字段、质量命令、端到端测试与故障排查见下面各节；Streamlit 是**可选的调试入口**，朋友试用不需要。
+## 页面操作
 
-## 当前进度
+侧栏提供新建/选择会话、搜索、会话改名/归档/恢复与工作区改名/移除。会话归档保留历史数据；移除工作区登记不删除磁盘目录。运行或待审批时遵守原切换限制。
 
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| v0.1a / T01 | 项目骨架、只监听本机的网页壳、模型配置检查 | 已完成 |
-| v0.1a / T02 | 配置文件与 `.env`、模型工厂、最小闲聊子图 | 已完成 |
-| v0.1a / T03 | SQLite Checkpoint 会话恢复 | 已完成 |
-| v0.1a / T04 | AGENTS 规则加载、系统提示组装、闲聊/工具模式路由 | 已完成 |
-| v0.1a / T05 | 只读工具闭环（`list_dir`、`read_file`）+ 路径边界 + 机械证据 | 已完成 |
-| v0.1a / T06 | `edit_file`（精确串替换 + diff）、`write_file`（只建新文件） | 已完成 |
-| v0.1a / T07 | 安全 Shell（`run_shell`，结构化白名单） | 已完成 |
-| v0.1b / T08 | 追加 reducer 去重、事件幂等、完整机械证据 | 已完成 |
-| v0.1b / T09 | 模型能力探测与结构化输出降级链 | 已完成 |
-| v0.1b / T10 | 三出口人工审批（批准 / 修改 / 拒绝）+ 动作指纹 | 已完成 |
-| v0.1b / T11 | 会话索引与侧栏（新建 / 切换 / 恢复 / 重命名） | 已完成 |
-| v0.1b / T12 | 跨平台 Shell（argv 直执行 / cmd.exe / pwsh / sh）+ 阶段回归 | 已完成 |
-| v0.2 / T13 | 作用域规则、记忆库初始化（长期 SQLite 迁移 / Chroma 惰性适配层 / `scripts/init_db.py`） | 已完成 |
-| v0.2 / T14A | 本地 ONNX Embedding 适配器（FastEmbed + `BAAI/bge-small-zh-v1.5`、provider 条件配置、缓存目录受控） | 已完成 |
-| v0.2 / T14B | 中期向量记忆写入与召回（Chroma、作用域隔离、`memory_refs` 注入 Prompt） | 已完成 |
-| v0.2 / T14C | 网页工作区选择（两级侧栏、随会话保存）与受控外部路径策略 | 已完成 |
-| v0.2 / T15 | 长期事实 CRUD（版本记录、冲突不静默覆盖、过期处理、人工软删除）与长期召回原语 | 已完成 |
-| v0.2 / T16 | Prompt 预算与会话摘要压缩（窗口按完整轮次裁剪，不动 Checkpoint 原始消息） | 已完成 |
-| v0.2 / T17 | 反思节点的 LLM 完成度判断与动态重规划（机械证据优先，未完成不冒充完成） | 已完成 |
-| v0.2 / T18 | 记忆写入审核与遗忘（候选校验与落库映射、按来源幂等、老化与显式遗忘任务） | 已完成 |
-| v0.2 / T19 | 三层记忆集成（中期 + 长期统一召回与注入）与 Embedding 准备状态展示 | 已完成 |
-| v0.3 / T20 | 多步骤规划与恢复（步骤推进、失败重规划、步级重试、重启不重做副作用） | 已完成 |
-| v0.3 / T22 | 编辑预览与 Patch 冲突（`edit_file` 新增 unified diff 输入模式，冲突/错 hunk/旧 Hash 不符即拒绝） | 已完成 |
-| v0.3 / T21 | 按需代码 RAG（工作区搜索 + 有界片段读取，不建持久索引，局部 AST 可选） | 已完成（检索/注入/来源定位契约；回答质量记入 T23 基线） |
-| v0.3 / T23 | 轨迹与评测（固定任务集指标与报表，双层评测 + 最终回答流式展示） | 已完成（T24 继续遥测/全功能回归） |
-| v0.4 | 独立 Web 与应用服务；朋友试用前完成权限、展示和 Windows EXE 分发门槛 | 主体开发完成，T38/T39/T40 与 T37 朋友试用复验未完成 |
-| v0.4 / T41 | 窗口追加式与工具结果体积控制（成本与缓存命中；**提前于 T39/T40 执行**） | 已完成——同一道题命中率 19.9% → 77.9%，单题花费量级 1.6~2.0 元 → 0.15 元（依据与局限见 `V0_4_DEVELOPMENT_PLAN.md` 的 T41 执行记录） |
+输入区的 Agent／闲聊切换直接作用于当前会话，从下一轮生效，保留草稿、历史与地图分支，不新建会话。运行、审批或结果待核对时不可切换。模型调用失败明确结束本轮，可检查连接后继续提问；若工具或持久化异常导致执行结果不确定，刷新仍保留核对入口，先查看本轮记录与实际文件/命令结果，勾选确认后点击“结束中断任务”。这个操作不会重跑工具，也不会撤销已执行的操作。
 
-**现在能做什么**：本机网页里和模型多轮闲聊；刷新/重启后会话仍在，可新建、切换、重命名会话；**在侧栏选择工作区**（输入本机绝对路径或从已用列表切换，切换即恢复该工作区最近的会话）；加载 AGENTS 规则；列目录、读文件、精确串替换改文件（也可以按 unified diff 打补丁，冲突即拒绝且不动原文件）、新建文件、执行安全命令（白名单内免审直执行，其余批准后执行，含管道/重定向的走平台 Shell 适配器）；代码问题会先在工作区里按需检索、把带路径与行号的片段交给模型（`rag.enabled`，**默认打开**）；删除、覆盖写、大范围编辑、白名单外命令与危险命令会**暂停等待你在页面上批准 / 修改参数 / 拒绝**。
-**现在不能做什么**：工作区外的路径由「设置 → 权限」的**档位 + 逐目录授权**决定（`deny` / `whitelist` / `allow` 三档，默认 `whitelist` + 空白名单 = **拒绝一切外部路径**，因此出厂即安全；授权分 `read` / `read_write` 两级；旧键 `workspace.allow_external_paths` 只是 `mode: allow` 的快捷方式，不再是主要口径）；无论哪一档，**删除 / 覆盖已有文件 / 破坏性 Shell / 大范围编辑仍必须人工批准**，`~`、相对路径逃逸与 Windows 盘符相对路径始终拒绝，受保护目标（根目录、主目录、系统目录、Git 元数据）即使用户批准也不执行；密钥文件与未获批准的命令一律拒绝；**代码检索只是字面匹配、不建索引**（每次直接读磁盘现状；LSP、全库符号图与持久语义索引不在本阶段范围）；**记忆只在"任务完成且反思给出候选"或"闲聊里用户明确要求记住"时写入，普通闲聊不会自动写记忆**；没有会话删除或归档、没有公网部署与账号体系。
+对话与轨迹按轮展示模型实际返回的 Think、工具、计划、检索/记忆、审批和用量。隐藏或未返回的推理不补造。审批的批准、拒绝、修改参数及重启恢复由服务端契约决定，刷新不重新执行副作用。
 
-## 环境要求
+### 会话地图
 
-- Python 3.10 – 3.13
-- [uv](https://docs.astral.sh/uv/)（项目依赖与虚拟环境的唯一管理工具）
+会话顶部打开“会话地图”：父节点在左，卡片向右展开；点击独立详情，搜索问答，拖空白平移、滚轮缩放，也可适应全图和定位当前分支。
 
-## 安装
+“基于此轮继续提问”返回原输入框。末端追问延续分支，中间追问新增子分支；上下文继承根到所选轮次，原后续路径保留。分支可以改名和调整显示顺序。文件与共享记忆不随路径回滚；缺历史检查点、运行/待审批时相应入口禁用。
 
-在项目目录内执行：
+当前不支持自由布局、改父关系、智能分类、历史重生成和分支删除。[功能与证据](docs/ui-reference/CONVERSATION_MAP.md)。
 
-```powershell
-uv lock          # 按 pyproject.toml 生成/更新 uv.lock
-uv lock --check  # 校验 uv.lock 与 pyproject.toml 一致
-uv sync          # 按 uv.lock 创建 .venv 并安装依赖（含 dev 组）
-```
+### 数据中台
 
-`uv.lock` 必须提交到版本库：它是“换台机器能装出同样环境”的唯一依据。
+侧栏“数据中台”提供概览、中期记忆、长期事实、任务结论和 Token 用量。记忆可按工作区、状态、关键词筛选并分页查看；点击详情，关闭按钮或 Escape 返回。
 
-## 配置
+用量可按工作区、模型、UTC 日期筛选；包括归档会话与各分支，共享调用去重。图表可点击进入对应日期/模型明细。未知不补零；上限或读取失败明确提示。返回保留会话、分支与未发送草稿，刷新页面不承诺保存草稿。
 
-两个文件，都已被 `.gitignore` 排除，不会提交：
-
-| 文件 | 内容 |
-|---|---|
-| `config.yaml` | 非秘密配置；可复制 `config.yaml.example` 后修改 |
-| `.env` | API Key；可复制 `.env.example` 后填入，变量名要与 `config.yaml` 的 `llm.api_key_env` 一致 |
-
-默认对接 DeepSeek（`base_url: https://api.deepseek.com`）。该端点上实际可用的模型名以
-`curl -H "Authorization: Bearer $KEY" https://api.deepseek.com/models` 返回为准，
-当前为 `deepseek-flash` 与 `deepseek-v4-pro`。
-
-`config.yaml` 的关键字段：
-
-```yaml
-llm:
-  base_url: "https://api.deepseek.com"
-  api_key_env: "DEEPSEEK_API_KEY"   # 只写变量名，Key 的值放 .env
-  model: "deepseek-flash"
-  context_window_tokens: 65536      # 必填：模型上下文窗口；按所连模型填写，且必须大于 max_tokens
-```
-
-`llm.context_window_tokens` 是 T16 新增的**必填**键（没有默认值）：压缩触发比 `trigger_ratio`
-以"上下文窗口 − `max_tokens`"为分母，给一个固定缺省窗口会让"达到多少比例"随模型失真。
-**已有的 `config.yaml` 需要补上这个键**（按模型文档填真实窗口），否则启动时校验失败。
-
-配置缺失、字段拼错、YAML 语法错误、环境变量没设，都会在页面上给出具体原因；
-`security.require_approval` 的四项不允许关闭，写成 `false` 会直接校验失败。
-
-`security.shell` 决定命令怎么判定与执行（架构 §6.6）：
-
-```yaml
-security:
-  shell:
-    platform: "auto"            # auto / windows / posix
-    executor: "argv_preferred"  # 也可显式写 cmd / pwsh / sh，指定 Shell 语法命令用哪个适配器
-    default_timeout_seconds: 60
-    max_output_chars: 30000
-    whitelist:                  # 免审条目：平台 + 可执行名 + 参数完全一致（可选 cwd 限定目录）
-      - platform: ["windows", "posix"]
-        executable: "python"
-        args: ["--version"]
-        match: "exact"
-    blocked_patterns: ["rm -rf", "del /s", "format ", "shutdown", "chmod", "curl ", "wget "]
-```
-
-## 项目规则（AGENTS.md）
-
-每次提问都会扫描规则文件并注入系统提示（架构 §7.1）：
-
-- 从当前目录向上扫描到最近的 `.git`，但**绝不越过 `workspace.root`**；
-- 合并顺序为 Git 根 → 当前目录（越近的目录优先级越高，排在后面）；
-- 同一目录存在 `AGENTS.override.md` 时覆盖该目录的 `AGENTS.md`；
-- 单个文件超过 `agents.max_file_chars`、累计超过 `agents.max_total_chars` 时保留头尾并插入截断标记；
-- `agents.enabled: false` 时完全不读取规则文件。
-
-工作区之外的规则文件不会被读取（有测试覆盖）。
+第一版只读，不含记忆写删、向量库重建和费用换算。真实存储/浏览器已验证；大规模性能、实体触屏和本轮真实缓存 A/B 未验。[统计口径与证据](docs/ui-reference/data-center-20261007.md)。
 
 ## 网页设置
 
@@ -170,182 +77,176 @@ security:
 远端密钥沿用本机 `.env` 或环境变量方式，页面只填写变量名、显示是否可用；修改 `.env` 后需重启后端。准备状态只验证静态条件，实际缓存及接口需通过测试确认。
 高级配置只读展示压缩、历史保留与 AGENTS 规则，不开放修改。检索/记忆参数改变模型输入，缓存率需单独实测。
 
-## 模式路由
+[设置技术与质量验收](docs/ui-reference/MEMORY_SETTINGS.md)。页面交付不等于召回质量遗留已解决。
 
-每轮提问会先做一次意图分类（LLM 分类 + 关键词兜底）：
+## 安全与运行边界
 
-- 判为 `chat`：闲聊分支，**不绑定任何工具**给模型；
-- 判为 `tool`：进入工具分支，模型可以提出工具调用。
+- 默认只监听回环，单进程/单 worker；不提供公网、多用户、后台任务队列或真实取消能力。
+- 外部路径采用 deny/whitelist/allow 与逐目录 read/read_write 授权；默认 whitelist 加空授权拒绝外部访问。
+- 删除、覆盖已有文件、破坏性 Shell、大范围编辑仍需批准；受保护目标和敏感文件不因审批放行。
+- 工具执行、作用域、安全判据和恢复真源在服务端；浏览器不直接操作文件或解释 Graph State。
+- 记忆写入经过候选/作用域审核，普通聊天不自动写入。具体规则、配置和 API 见 [架构](../ARCHITECTURE.md) 与生成 `docs/api/openapi.json`；不能从历史示例反推当前默认值。
 
-## 工具
+## 质量命令与调试
 
-工具签名与架构 §6.1–6.6 一致：
+```powershell
+uv lock --check
+uv run pytest -q -p no:cacheprovider
+uv run ruff check src tests
+uv run mypy src
+uv run python scripts/export_openapi.py --check
+```
 
-| 工具 | 参数 | 本版本行为 |
-|---|---|---|
-| `list_dir` | `path="."`、`recursive=False`、`include_hidden=False`、`max_entries=200` | 只读，放行 |
-| `read_file` | `path`、`start_line=None`、`end_line=None`、`max_chars=50000` | 只读，放行 |
-| `edit_file` | `path`、`old_text`、`new_text`、`replace_all=False`、`expected_sha256=None`、`reason=""` | 免审上限内放行；超出改动行数上限进入人工审批 |
-| `write_file` | `path`、`content`、`overwrite=False`、`reason=""` | 只允许创建新文件；覆盖已有文件进入人工审批 |
-| `run_shell` | `command`、`cwd="."`、`timeout_seconds=None`、`env_keys=None` | 白名单内免审直执行；其余人工批准后执行，Shell 语法走平台适配器 |
-| `delete_file` | `path`、`recursive=False`、`reason=""` | 人工批准后才执行；递归删除需二次确认 |
+受限环境的 pytest `--basetemp` 使用本次可写、仓库外的新目录；不要复用真实数据。默认自动测试不依赖密钥或网络，真实供应商案例必须另用隔离库并标记费用及测量边界。
 
-`run_shell` 的 `timeout_seconds` 省略（或传 `None`）时使用 `security.shell.default_timeout_seconds`
-（出厂默认值 60）；显式值不能超过该配置。安全判定、动作指纹与工具执行取同一个有效值。
+可选 Streamlit：`uv run streamlit run src/local_agent/web.py`。用于调试/对照，朋友试用不需要。提交规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-`edit_file` 的额外约束：必须先 `read_file` 拿到 `expected_sha256` 并在调用时原样带上；
-`old_text` 必须唯一匹配（多处匹配要显式 `replace_all=true`）；不接受用整份文件内容做替换
-（单行文件例外）；改动行数超过 `security.large_edit.max_changed_lines_without_approval`
-时进入人工审批（批准后才写入）。写入用"同目录临时文件 + 原子替换"，改完重新计算 Hash，并把 unified diff
-作为审计产物返回。
+<a id="frontend"></a>
 
-一次工具调用的完整链路：
+## 前端开发、契约与视觉参考
+
+本节 npm 命令和前端源码路径以 `frontend/` 为根；Python 导出 OpenAPI 的命令从 `local-agent-web/` 执行。静态原型只用于参考，不能当真实操作验收。当前界面功能见本文件前文。
+
+### 前端命令
 
 ```text
-模型提出 tool_calls → safety_gate_node 判放行（未放行的当场回填拒绝原因）
-                   → tool_execution_node 执行 → ToolMessage 回填给模型
-                   → reflection_node 机械校验（状态、是否有输出）→ 记录证据
-                   → completion_router 决定继续 / 结束（超上限强制结束）
+npm ci                 # 按 package-lock.json 安装（.npmrc 已固定 legacy-peer-deps，见下）
+npm run typecheck      # tsc --noEmit
+npm run lint           # eslint
+npm run test           # vitest run（单元测试）
+npm run test:e2e       # playwright（先 build，再对 dist 截图比对）
+npm run test:live      # 真 Python 服务 + 确定性假模型：两轮/刷新/模型选择
+npm run test:live:streaming  # 真 SSE 增量、完成与刷新去重
+npm run test:live:variants   # 长回答、空回答与模型异常
+npm run build          # typecheck + vite build → dist/
+npm run dev            # 开发服务器 127.0.0.1:5173，把 /api 代理到 127.0.0.1:8000
+npm run generate:api   # 从受控 OpenAPI 生成 src/api/schema.gen.ts
+npm run check:api      # 漂移检查：重新生成后必须与已入库的生成文件逐字节相同
 ```
 
-保证：
+### 传输类型与受控 OpenAPI（T29）
 
-- **工作区边界**：路径解析（含 `..`、`~`、符号链接）后仍必须在 `workspace.root` 内，否则拒绝；
-- **敏感文件**：`.env`、私钥等一律拒绝读取（`security.secrets.block_known_secret_files`）；
-- **二进制**：只返回类型说明，不把内容注入提示；
-- **截断**：单文件大小、返回字符数与目录条数都有上限，超出会标注；
-- **失败不隐藏**：工具报错会作为 `ToolMessage` 回填给模型，同时记入工具事件；
-- **写入前校验版本**：改文件必须带 `expected_sha256`，与服务端当前 Hash 不一致就拒绝；
-- **原子写入**：先写同目录临时文件再替换，避免写到一半留下损坏文件；
-- **不伪造证据**：`final_evidence` 只来自真实执行的工具，`verified` 由机械校验决定；
-  编辑类还要额外通过"Hash 确实变了""diff 非空"两项检查才算 `verified`。
+前端不手写接口形状，只从**受控 OpenAPI** 生成：
 
-## 调试入口（Streamlit，可选）
-
-正式入口是下面的 HTTP/SSE 服务；这一条**只在需要与旧界面做回归对照时**才用。
-
-```powershell
-python -m streamlit run src/local_agent/web.py --server.address=127.0.0.1 --server.port=8501
+```text
+后端契约（FastAPI 路由 + 应用层 DTO）
+  → uv run python scripts/export_openapi.py        # 落盘 docs/api/openapi.json（入库，唯一来源）
+  → npm run generate:api                           # 生成 src/api/schema.gen.ts（不得手改）
+  → npm run check:api                              # 重新生成后逐字节比对；检查不留改动
 ```
 
-浏览器打开 <http://127.0.0.1:8501>。`.streamlit/config.toml` 已把地址与端口固定为
-`127.0.0.1:8501`，即使用户忘记加命令行参数也不会把服务暴露到局域网。
+- 改契约的顺序：改后端 → 重新导出 → `npm run generate:api`；两处都有漂移检查
+  （后端 `pytest tests/test_api.py` 断言"落盘文档 == 真实应用"，前端 `npm run check:api`）。
+- 生成文件只描述**传输**形状（路径、请求体、响应体、错误信封 `{"error": …}`）；业务语义仍以
+  `ARCHITECTURE.md` §15 为准。真实页面经 `features/*/adapters.ts` 转成展示模型，`src/fixtures/`
+  只给视觉原型使用；两者都不直接读取 Graph State（§6.1）。
+- `.npmrc` 里的 `legacy-peer-deps=true` 是**有意**的：`openapi-typescript` 的 peer 只到 `typescript@^5.x`，
+  而本项目用 TS 6。副作用见该文件注释——新增依赖后请顺手跑 `npm run typecheck`。
 
-必须**在项目根目录启动**：`config.yaml`、`.env` 与 `workspace.root` 都按进程当前目录解析。
+### 本机环境约定
 
-## 启动（正式入口：本机 HTTP/SSE 服务）
+- **Node / npm**：本机验证过 `node v22.20.0` + `npm 10.9.3`，`package.json` 的 `engines` 与之对齐；
+  依赖的精确版本由 `package-lock.json` 锁定。
+- **npm 缓存**：若遇到本机磁盘空间限制，安装时必须把缓存指到数据盘，否则会写 C 盘：
+  `$env:npm_config_cache='E:\npm-cache'`（不写 `~/.npmrc`）。
+- **本机的批量删除拦截**（环境问题，不是项目问题）：`npm ci` 会先删 `node_modules`，本机拦截一次超过 500 个
+  文件的删除 → `npm ci` 中途失败并留下残缺依赖树。这是既有本机例外记录：曾使用 `npm install` 恢复残缺依赖。正常安装仍使用 `npm ci`，不能将该故障写成所有环境的要求。
+- **Playwright 浏览器**：1.63 需要 Chromium **1243**，本机原有的 1217 版本不匹配，已安装到
+  `E:\pw-browsers`。该路径放在**被 gitignore 的本机文件** `playwright.local.json` 里由
+  `playwright.config.ts` 读取，因此配置本身保持可移植：
 
-v0.4 的正式入口（T29 起的 HTTP 服务），与上面的 Streamlit 调试入口**并存**：
-
-```powershell
-uv run python -m local_agent.api          # 默认 http://127.0.0.1:8000
-```
-
-- **只绑定回环地址**：改 `web.host` 必须同时设 `web.allow_non_loopback: true`，否则启动直接拒绝
-  （v0.4 没有鉴权，不提供"改了才发现暴露到局域网"的路径）。
-- **单进程、单 worker**：官方入口硬编 `workers=1`，并用排他文件锁（`data/checkpoints.sqlite.api.lock`）
-  拒绝第二个进程——进程内广播、每会话互斥与幂等台账都以"只有一个进程在写这个库"为前提（架构 §15.1）。
-- **生产同源**：`frontend/` 构建过（`npm run build`）就由本服务托管静态产物；没有产物时只提供 API，
-  根路径会给出可执行提示。开发时用 Vite（`npm run dev`，`/api` 代理到本服务）。
-- **事件流（SSE）**：`GET /api/sessions/{session_id}/events`。连接建立时先发一条由当前 Checkpoint 投影的
-  `session_snapshot`，其后是**这条连接期间**的实时增量（计划、工具、审批、消息、任务终态）；`:` 开头是心跳
-  注释行。**没有持久游标**：不发 `id:`，重连靠新快照，不靠 `Last-Event-ID`。长时间没有事件、或客户端读得
-  太慢，服务端会主动结束这条连接并说明原因（`stream_idle_timeout` / `stream_overrun`），重连即可；
-  **任务不会因此被取消**。
-- **契约**：参数/响应形状见 `ARCHITECTURE.md` §15、路由形态见 `V0_4_DEVELOPMENT_PLAN.md` §6.2；
-  运行中的服务在 `/api/openapi.json` 给出 OpenAPI（交互文档不挂在本服务上）。
-- **受控 OpenAPI 与前端类型**：入库的契约文件是 `docs/api/openapi.json`，由
-  `uv run python scripts/export_openapi.py` 从代码导出（`--check` 做漂移检查，导出不需要数据库或密钥）；
-  前端的只读传输类型从它生成：`cd frontend` → `npm run generate:api`（生成物不得手改）、
-  `npm run check:api`（重新生成后逐字节比对）。
-- **入口现状**：v0.4 的 React 前端已经在 T30–T35 接线完成，是**正式入口**（会话、消息、流式回答、
-  计划/工具/记忆展示、审批接管、diff、用量计量都在其中）。上面的 Streamlit 入口**保留为调试与回归对照**
-  （T33 起两个 UI 都只经应用服务访问业务能力），朋友试用不需要它。
-
-### 本机环境备忘（Windows）
-
-- `uv` 装在 `E:\tools\uv\uv.exe`；若终端 PATH 还没生效，用全路径调用 `E:\tools\uv\uv.exe`。
-- 本机 C 盘空间紧张，uv 缓存与临时目录已指向 E 盘。在**新开的**终端里已自动生效；
-  旧终端需要手动设置：
-  ```powershell
-  $env:UV_CACHE_DIR='E:\uv-cache'; $env:TEMP='E:\tmp'; $env:TMP='E:\tmp'
+  ```json
+  { "browsersPath": "E:\\pw-browsers" }
   ```
-- 已避免使用系统环境变量存放密钥：Key 只从项目根目录的 `.env` 读取。
 
-## 开发与构建（v0.4 前端）
+  环境变量 `PLAYWRIGHT_BROWSERS_PATH` 优先级最高，CI 可用它覆盖。首次准备：把同一变量指向目标目录后执行
+  `npx playwright install chromium`。
 
-前端是 v0.4 的正式入口，代码在 `frontend/`，是**独立的 npm 工程**（不在 Python 包内）。
-Node / npm 版本要求见 `frontend/package.json` 的 `engines`。
+### 原型宿主与场景
 
-```powershell
-cd frontend
-npm ci            # 严格按 package-lock.json 安装；换机器复现用这个，不要用 npm install
-npm run dev       # 开发服务器 http://127.0.0.1:5173，/api 代理到 127.0.0.1:8000
-npm run build     # 先 typecheck 再产出 frontend/dist（生产静态托管读的就是这里）
-npm run preview   # 本地预览构建产物（没有 /api 代理，只看静态部分）
+`src/app/App.tsx` 默认进入真实的 `LiveApp`；只有传 `?state=` 时才选择 fixture 场景，供视觉基线复验。
+原型标识条已删除，fixture 按钮不能当作真实操作入口。
+
+```text
+/?state=shell             常驻会话壳：侧栏、会话头、对话流、计划条、工具行、统计行、上下文计量器
+/?state=diff              早期检查点 1：双 hunk 完整文件 diff（含增删行与超长行）
+/?state=errors            早期检查点 2：供应商错误态三种（鉴权失败 / 限流 / 超时重试耗尽）
+/?state=tools             其余工具卡：读取窗口 / 搜索两种形状 / 终端非零退出 / 待办 / 未知工具回退
+/?state=approval          审批接管输入区：动作、目标、影响、风险 + 一次性批准或拒绝
+/?state=approval-expired  审批失效态：不再提供按钮，只说明未执行任何操作
 ```
 
-开发时**两个进程一起跑**：先 `uv run python -m local_agent.api`（后端 :8000），再 `npm run dev`（:5173）。
-生产形态不需要 Vite——`npm run build` 之后由 FastAPI 同源托管 `frontend/dist` 与 `/api`（见上面的启动一节）。
-
-质量与契约命令（与上面的「质量命令」并列）：
-
-```powershell
-npm run typecheck     # tsc --noEmit
-npm run lint          # eslint
-npm run test          # vitest（单测，jsdom）
-npm run generate:api  # 由 docs/api/openapi.json 生成只读传输类型（生成物不得手改）
-npm run check:api     # 重新生成后逐字节比对，检测契约漂移
+```text
+/?state=settings-models  设置页：连接六态（已验证/未验证/检测中/检测失败/能力不支持/密钥缺失）+ 删除确认 + 下一轮生效
+/?state=settings-empty   设置页空态：还没有连接，且系统凭据存储不可用
+/?state=model-menu       输入区模型菜单：切换只对下一次提交生效，正在运行的一轮固定原连接
 ```
 
-端到端（Playwright）：
+检索与记忆（只给来源定位，不给正文 / 向量 / 评分）：
 
-- 默认套件 `npm run test:e2e` 只依赖 node（视觉基线 + 设置页），**不需要** uv 或后端工程；
-- 四条**真后端** live 套件各自拉起 `scripts/serve_fake.py`——注入确定性假模型与假密钥，
-  **不需要真 Key、不产生费用**——并同源托管 `frontend/dist`，因此**需要 `uv` 与后端工程可用**：
-
-```powershell
-npm run test:live            # :8123 conversation-live.spec.ts
-npm run test:live:streaming  # :8124 conversation-streaming.spec.ts
-npm run test:live:variants   # :8125 conversation-variants.spec.ts
-npm run test:live:approval   # :8126 approval-live.spec.ts
+```text
+/?state=memory-hit      命中：来源类型 + 安全引用 + 用途，并标明不展示什么
+/?state=memory-miss     未命中 + 写入长期记忆失败（明说不编造出处）
+/?state=memory-failed   检索失败：与"未命中"分开陈述
 ```
 
-每个 live 套件的 `webServer` 会先 `npm run build` 再起服务，首次跑要把构建时间算进去；
-本地重复跑时 `reuseExistingServer` 会复用已起的实例。**并发务必压到 1–2**
-（`npm run test:live -- --workers=2`）：本机按 8 个 worker 跑会 OOM。
-浏览器走本机已装的 Chrome（`devices['Desktop Chrome']`），不额外下载 headless shell。
+空 / 加载 / 禁用：
 
-## 数据库初始化
-
-三层记忆的库都在 `data/`（已被 `.gitignore` 排除），首次使用或升级后可先初始化（幂等，可反复执行）：
-
-```powershell
-uv run python scripts/init_db.py            # 建库 / 升级到当前结构版本
-uv run python scripts/init_db.py --check    # 只检查，不改动任何文件（未就绪时退出码 1）
+```text
+/?state=empty-no-workspace  未选工作区：输入区禁用并用真实元素说明原因，侧栏不高亮
+/?state=empty-session       空会话（已选工作区）：空态标题 + 可用输入区
+/?state=running-empty       运行中且无内容：阶段态 + 可写草稿但暂时禁用发送（不渲染停止按钮）
+/?state=loading-history     读取事件中：骨架只有形状、无文字
 ```
 
-- 只初始化 SQLite：聊天库（Checkpoint + 会话索引，`memory.short_term.path`）与长期记忆库
-  （`entities` / `facts` / `task_conclusions`，`memory.long_term.path`）；**配置里关闭的层不会建库**。
-- 长期记忆必须使用**独立**的数据库文件：如果把它指到聊天库文件上，脚本会直接报错并说明原因。
-- 中期记忆是 Chroma 目录（`memory.medium_term.path`）：只有 `memory.medium_term.enabled` 为 `true`
-  时才需要，且要先装可选依赖 `uv sync --extra memory`；日常链路不会因为没装它而失败
-  （未安装时给出可读提示，而不是 `ImportError`）。
+计量器与侧栏（矩阵 22/23/24）与服务端冲突码：
 
-## 质量命令
-
-```powershell
-python -m pytest
-python -m ruff check .
-python -m mypy src
+```text
+/?state=meter-open         上下文计量器展开：精确读数 + 三态口径 + 窗口与缓存基线规则
+/?state=sidebar-collapsed  侧栏收起：窄轨只保留品牌、新建、展开与设置，不渲染会话树
+/?state=error-codes        SESSION_BUSY / IDEMPOTENCY_CONFLICT / RECOVERY_REQUIRED 三种可执行性
 ```
 
-运行前请先 `uv sync`，或使用 `uv run python -m pytest` 等命令。
+矩阵 22 的**悬停**态没有独立场景：它由 `context-meter-hover.png` 这张 e2e 证据图覆盖
+（真实 `hover()` 触发 CSS 弹出，断言弹层完整进入视口后截图）。
 
-- 只装基础依赖（`uv sync`）时套件同样是绿的：缺少可选依赖 `memory` 的 20 条用例会**跳过并写明原因**
-  （判据是"装没装可选组"，不是"跑起来报什么错"）；要跑全部记忆 / Embedding 用例请
-  `uv sync --extra memory`。`mypy src` 在两种环境下都干净（`chromadb` / `fastembed` 在
-  `pyproject.toml` 的 `ignore_missing_imports` 名单里）。
+页面不再显示「原型」标识条；正式视觉基线也不带它。
+
+审批接管**只在 `pending` 时替换输入区**。一旦审批失效或已作出决定，输入框立即恢复，审批结果以卡片留在输入区上方——
+一张让用户"重新发起请求"的卡片，不能同时成为他无法输入的原因（见 `src/components/Composer.test.tsx`）。
+
+侧栏里**选中行的运行状态取自当前场景**，未选中行才用侧栏 fixture 自己的状态；每个会话行的状态同时有可见文本
+与隐藏状态词（空闲 / 运行中 / 等待审批 / 已完成），选中行带 `aria-current`（见 `src/app/App.test.tsx`）。
+
+fixture 与视图模型在 `src/fixtures/`。它们是**展示用视图模型**，不是传输 DTO，也不镜像 Graph State
+（V0_4_DEVELOPMENT_PLAN §6.1）。
+
+### 视觉基线（冻结参考）
+
+- 截图由 `e2e/prototype.spec.ts` 生成，落在 `e2e/__screenshots__/{1440x900,1280x800}/`，
+  固定视口、`deviceScaleFactor=1`、浅色主题、`zh-CN`、`Asia/Shanghai`、`reduced-motion`。
+- 每次截图前都必须经过 `settle()`：等 `document.fonts.ready` 并等两帧 `requestAnimationFrame`。少了它，
+  并行 worker 下截图可能落在字体就绪之前，同一个页面会产出两张不同图片（假回归）。
+- 每个视口 27 张：19 个场景（`shell` / `diff` / `errors` / `tools` / `approval` / `approval-expired` /
+  `settings-models` / `settings-empty` / `model-menu` / `memory-hit` / `memory-miss` / `memory-failed` /
+  `empty-no-workspace` / `empty-session` / `running-empty` / `loading-history` / `meter-open` /
+  `sidebar-collapsed` / `error-codes`）各一张，外加 8 张**证据图**：7 张滚动证据（`diff-bottom` /
+  `errors-bottom` / `error-codes-bottom` / `tools-read` / `tools-bottom` / `settings-models-mid` /
+  `settings-models-confirm`）+ 1 张悬停证据 `context-meter-hover`，共 54 张。
+- 滚动证据用 `expect(...).toBeInViewport({ ratio: 1 })` 断言被折叠在首屏之下的内容在滚动后**完整进入视口**：
+  第二个 hunk 末行、第三张错误卡的完整提示与"重新发送"按钮、读取卡的窗口与行号、尾部的待办/通用回退/成功终端卡、
+  连接列表的中段（"检测中"+ 明文传输标记 / "检测失败" / "能力不支持"，把第三张卡对齐到滚动容器顶部后三张同时完整可见）、
+  末张连接卡的删除确认按钮。因此"需要滚动"不等于"不可读/不可操作"，而"元素存在"也不等于"可以验收"。
+- 截图比较是**严格**的（`maxDiffPixelRatio: 0`）。之前允许 0.002 的比例，在 1280×800 下放过约 2000 个像素的差异，
+  于是输入区 chip 还写着旧模型的过期基线也能"通过"——`52/52 passed` 单独并不证明基线是最新的。
+- 有意改动视觉后重采：`npx playwright test -g "<测试名>" --update-snapshots=all`。`=all` 会把**当前仍能通过**的
+  基线也一并重写（默认的 `--update-snapshots` 只在差异超出容差时才写），因此要用 `-g` / `--project` 限定到确实改过的
+  那几条测试，不要整目录刷。重采后**必须人工看新图**，不允许用批量更新掩盖回归（`V0_4_DEVELOPMENT_PLAN.md` §4.2）。
+- 截图依赖本机字体（`Microsoft YaHei` 等），因此基线是**本机环境产物**；换机器需要重新确认。
+- 参考资产的对照方法见 [docs/ui-reference/README.md](docs/ui-reference/README.md) 与
+  [state-matrix.md](docs/ui-reference/state-matrix.md)。
+
+
 
 ## 故障诊断
 
@@ -366,441 +267,4 @@ python -m mypy src
 | `npm run check:api` 失败 | `docs/api/openapi.json` 与后端代码漂移 | `uv run python scripts/export_openapi.py` 重新导出 → `npm run generate:api` → 再比对 |
 | 报"数据库结构未就绪" | 库还没建或版本旧 | `uv run python scripts/init_db.py --check` 看原因，需要时跑一次 `scripts/init_db.py` |
 
-## 已知限制与安全边界
-
-- 只监听 `127.0.0.1`。本地网页不是安全边界，将来若开放远程访问，必须另行设计身份认证与隔离。
-- 网页只是客户端：工作区、文件读写和命令执行都发生在**本机那个 Python 服务进程**里（v0.4 是
-  `python -m local_agent.api`，Streamlit 入口同样如此），浏览器不直接碰文件系统与 Shell。
-- Shell 判定基于**解析后的命令结构**，不是字符串包含：
-  - `security.shell.whitelist` 命中（平台 + 归一化可执行名 + 参数完全一致 + 可选 `cwd`）的命令
-    免审直执行（`shell=False` + argv 数组）；
-  - 其余命令、带路径的可执行文件、命中 `blocked_patterns` 的破坏性命令一律需要人工审批，
-    批准后才执行；
-  - 含 Shell 语法（管道、重定向、命令替换、后台执行）的命令由平台适配器执行：Windows 默认
-    `cmd.exe /d /s /c`、POSIX 默认 `/bin/sh -c`，可用 `security.shell.executor: pwsh` 改为
-    `pwsh -NoProfile -NonInteractive -Command`；适配器与运行平台不匹配时直接拒绝；
-  - 大小写与 `.exe` / `.cmd` 后缀会被归一化，但**别名不共享免审资格**：`python3`、`py` 不等于 `python`。
-- 跨平台覆盖：Windows 与 POSIX 两套解析规则都有单元测试；**真执行只在本机平台验证过**
-  （自动测试在当前平台真跑一条管道命令，另一平台只做解析断言）。
-- 需要审批的动作在网页上暂停：批准按**动作指纹**执行前复核，目标变化则失效；拒绝按指纹匹配，
-  换一个调用 ID 也绕不过；递归删除必须二次确认，刷新不会沿用第一次确认。
-- 页面审批控件与会话侧栏都有自动化测试（AppTest），仍建议人工点一遍。
-- 编辑不做过行尾自动转换：文件是 CRLF 时，`old_text` 必须照原样带上 `\r\n`，否则匹配不上。
-- 同一输入不会因页面重绘而重复执行工具；单轮的工具循环上限由 `agent.max_tool_loops` 兜底。
-- 敏感文件一律拒绝读取，**包括 `.env.example`**（模式 `.env.*`）；如希望放行示例文件，需要调整 `security.secrets` 相关策略。
-- 会话索引在 `data/checkpoints.sqlite` 的 `sessions` 表：同一工作区至多一个“当前会话”，
-  刷新与重启都会回到它；第一个会话沿用 v0.1a 的 `thread_id = local-default`，升级不会丢历史。
-  没有会话删除/归档，也没有"多个浏览器标签各自独立选会话"（本地单用户场景）。
-- 会话数据存在 `data/checkpoints.sqlite`（首次启动自动创建，已被 `.gitignore` 排除）。
-  SQLite 是单文件数据库，不适合高并发写入，本机单用户足够。
-- 模型能力（Tool Calling、结构化输出）在启动时探测；不支持 Tool Calling 的模型在工具模式下
-  失败闭合，并给出明确提示。
-- 中期向量召回（T14B）与写入（T18）都已在对话链路里：按作用域、`top_k`、`min_score`
-  （默认 `0.53`）召回，只把相关记忆注入 Prompt；写入侧只接受**经过结构化验证的候选**
-  （见下面的记忆写入与遗忘），所以库里不会自己长出未经校验的记忆。启用它需要
-  `memory.medium_term.enabled=true` 且 embedding 可用：`onnx_local` 走本地 FastEmbed
-  （`uv sync --extra memory`），`embedding.cache_dir` 必须是本机可写的绝对路径，
-  模型权重与 HuggingFace 附属缓存都只落在该目录下。
-- 工作区随会话保存（T14C）：侧栏分两级——上面选工作区，下面只列**当前工作区**的会话；切换
-  工作区会切到该工作区最近的会话，没有才新建。`sessions.status='active'` 是**整个库唯一**的
-  当前会话（聊天库 v2 迁移把历史多条 active 归一为最新一条并加唯一约束）；一个会话只绑定一个
-  工作区，同一 Checkpoint 不会跨工作区污染 AGENTS、`project_id`、记忆与文件上下文。关闭短期
-  记忆时没有持久会话索引：页面内可以选工作区，服务重启回到配置的 `workspace.root`。
-- 外部路径（T14C）：`workspace.allow_external_paths=false`（默认）时所有文件工具与
-  `run_shell.cwd` 必须落在工作区内；设为 `true` 后只接受**原始输入本身是绝对路径**的外部目标
-  （`~`、相对路径逃逸、Windows 盘符相对路径仍拒绝），外部读受限规模与敏感名，外部写/改/删与
-  工作区外 `run_shell.cwd` 一律人工审批且不命中免审白名单；文件系统/驱动器根、用户主目录根、
-  工作区根、Git 元数据与系统关键目录即使用户批准也不执行。外部路径不加载 AGENTS、不改变作用域。
-- 长期事实 CRUD（T15）已接入对话链路（写入与召回都走 T18/T19 的链路）：库层提供实体/事实/任务结论的写入与查询，
-  版本记录用"同键多行 + `status`"（旧值保留为 `superseded`），同键新值只在置信度**严格更高**时
-  才取代，否则记 `conflicted` 且不覆盖当前值；同值按 JSON 语义比较（不产生假冲突），`expires_at`
-  必须是可解析的 ISO-8601（非法值写入即拒绝，库里已有的非法值按已过期处理）、到期即不召回
-  （`expire_overdue()` 负责落库改状态），人工删除是软删除。写入事务用 `BEGIN IMMEDIATE` 串行化，
-  同一库被多个连接/进程同时写也不会插出重复实体或同键两条 `active`（等锁上限由连接超时决定，
-  默认 5 秒），同一实例内读与写共用这把连接锁（读方法不会看到事务中间态）；打开库时校验三张表的
-  列是否齐全，自称 v2 却缺列的文件直接报错并提示重建。
-  `recall_long_term` 按作用域
-  与 `confidence_threshold` / `importance_threshold` 过滤后，用 `confidence × 有效重要度` 排序
-  （任务结论没有重要度列，按 1.0 计，且只按当前项目召回）。**自动老化在召回时实时生效**：
-  `aging_enabled=true` 时超期事实当场排除、其余用线性衰减后的有效重要度参与阈值、返回字段与分数
-  （库里的原始 `importance` 一个字不动），不依赖维护任务先跑一遍。T18 起反思验证过的候选会写进
-  这个库（见下），遗忘由显式任务处理；长期记忆默认启用，显式设为
-  `memory.long_term.enabled=false` 时节点按透传处理
-  （不建库、不写入）。
-- Prompt 预算与摘要压缩（T16）已接入对话链路：使用比 = 估算 Prompt 用量 ÷
-  （`llm.context_window_tokens` − `llm.max_tokens`），达到 `memory.compression.trigger_ratio`
-  就生成会话摘要（滚动合并已有摘要）并注入「会话摘要」段落。送模型的窗口同时受
-  `prompt_window_messages` 与 `preserve_recent_turns` 约束，且**按完整轮次对齐**——不会切开
-  `AIMessage(tool_calls)` 与它的 `ToolMessage`。窗口另有一层**工具步**限制
-  （`preserve_recent_tool_steps`，默认 3）：只保留最近若干个**完整**工具步——每个调用 id 都必须
-  **非空且唯一**，并由紧邻、匹配且不重复的结果覆盖；更早的整步省略，并留一条占位说明。占位只放
-  **可信元数据**（工具名、状态、输出长度），**不放工具输出原文**：它以系统角色出站，原文里的
-  注入文本不能因此获得系统指令的权重。一个用户请求内的长工具链只有 1 个人类轮次，轮次保底裁不掉
-  它，靠这条才能收缩；**未拿到结果的调用、id 重复或缺失的调用、不匹配结果与孤立结果都不会被
-  裁掉**（省略的消息仍在 Checkpoint 里，等轮次推进后被摘要覆盖）。
-  压缩只改模型输入，Checkpoint 里的原始
-  `messages` 一条都不删；压缩默认启用，显式设为 `compression.enabled=false` 时窗口原样返回全部消息、
-  不生成摘要；
-  摘要失败只记一条错误事件（`error_events`）并继续本轮。摘要成功后会记录**覆盖边界**
-  （`summary_covered_messages`）：已被摘要代表的旧消息不再进窗口，预算按新窗口与新摘要重算，
-  不会重复摘要同一批历史。估算覆盖系统提示、消息窗口、**工具调用参数**与**绑定给模型的工具定义**。
-  预算状态在 State 的 `context_budget` 里可见（估算用量、预算、是否触发、窗口/总条数、摘要长度、
-  覆盖条数）。
-- 反思与完成度判断（T17）：工具分支在每次执行后都会反思。**是否 `verified` 只由机械校验决定**
-  （工具状态、输出、退出码、文件 Hash、diff），LLM 只补充完成度、异常解释、计划调整与下一步
-  动作（继续 / 重试 / 追问 / 结束）。两者冲突时以机械结论为准：证据等级不是 `verified` 时
-  `goal_achieved` 一律压回 `False` 并改为向用户说明；未达成目标时不允许用"结束"收尾；重试超过
-  `agent.max_retries_per_step` 也改为向用户说明。结构化输出失败时按机械结论兜底并记一条错误事件。
-  未达成目标就结束的任务，`task_status` 保持 `running`，不再冒充 `completed`。
-  两个终止分支都会留下**可展示的回答**：`ask_user` 生成确定性的追问（含证据不足说明），
-  `finish` 走一次**不绑定工具**的最终回答合成（模型不可用时退化为确定性结果摘要）；
-  `plan` 与反思写入的计划调整会通过系统提示的「当前任务」「当前计划」段落影响下一轮决策。
-  `agent.max_tool_loops` **只拦"还想继续 / 重试"的动作**：已经判定完成或需要用户补充的当轮结论
-  不会被上限改写成失败（否则正常终止会在边界轮次丢失）。
-  `finish` 的收尾合成与普通出站一样**先过预算**：超预算时按"预算 − 系统提示 − 指令"的剩余额度
-  逐步收敛证据（先截短每条、再减少条数），并包成**不可信数据**；连固定部分都放不下时**不调用
-  模型**，直接用确定性摘要并记一条降级事件。这次调用的估算会写回 `context_budget` /
-  `token_usage`（含独立分项，各分项之和等于 `prompt_tokens`）；**实际发起模型调用时**
-  `estimated_prompt_tokens` 不超过 `prompt_budget_tokens`，连"系统提示 + 指令"都放不下时保留
-  超限的估算值并**跳过调用**（只记降级事件）。收尾合成与确定性摘要都只取**最近** 5 条工具结果（先按当前任务
-  筛选、再取末尾），不会因为早期失败就把后续成功挤出最终回答；所有估算都按消息口径计算
-  （系统提示、消息窗口、指令一致，含消息包装开销）。
-- 记忆写入与遗忘（T18）：**只有经过结构化验证的候选**才会被写入，两个入口走同一条校验路径
-  （架构 §5.2）：① 任务完成时由 `reflection_node` 给出候选；② **闲聊分支**也从 `chat_node` 进入
-  `reflection_node`，由它做一次**记忆意图审核**——用户明确说"请记住…"或明确陈述固定偏好时才产出
-  候选，普通闲聊拿到空候选就直接进最终回答。审核**没有关键词兜底**，且**只看用户本轮输入**
-  （助手自己的回答不参与判断，否则模型编出来的"偏好"会被下一次结构化调用自我强化成记忆），
-  输入按 2000 字符截断。审核**无论记忆层开关都会执行**（否则无法判断"用户是否要求记住"），输出里
-  `user_requested` 与候选列表相互独立：`user_requested=false` 时即使模型给出候选也**丢弃、不写入**
-  （结构化输出自相矛盾）；审核失败只在记忆层开启时才提示与记事件。与工具分支的区别是闲聊
-  **不参与任务完成判定**（结论是 `goal_achieved=false` + `next_action=finish`），
-  `final_response_node` 对 `mode=chat` 不看这个字段。
-  `memory_write_node` 按固定契约落库：`entity_fact` → 长期事实（`subject` 是实体名，
-  `content` 必须是规范 JSON `{"entity_type": ..., "key": ..., "value": ...}`；**`subject` 缺失时由
-  代码按 `entity_type` 推导**：`user` → 当前逻辑用户，`project` / `workspace` → 当前工作区目录名，
-  推不出来才拒绝。模型漏填一个字段不该让整条记忆丢掉——真实模型对"请记住：我个人习惯用 pytest"
-  给出的 JSON 是正确的，只是没写 `subject`，原先整条被拒、用户会觉得"说了记住却没记住"；推导过的
-  动作会把说明写进决策轨迹（"实体名由系统推导：…"），审计能看出哪部分是代码补的）；`task_fragment` →
-  中期向量库，任务完成且证据 `verified` 时**同时**写长期任务结论；`conversation_summary` → 中期
-  向量库（与 T16 的会话摘要不是同一份数据）。**作用域只允许 `project` / `user`**（不自动写
-  `global`），且由"候选类型 + `entity_fact` 的 `entity_type` + **显式授权**"机械推导（候选本身不带
-  作用域字段，架构 §10.4 明确不新增）：只有 `entity_type="user"` **并且**配置打开
-  `memory.long_term.allow_user_scope` 时才写用户级（跨项目可见），其余一律项目级——模型输出的
-  JSON 值不足以决定跨项目隔离边界，一次误分类就会让项目事实被别的项目召回；推不出作用域或候选
-  不合法就拒绝并在 `error_events` 里说明。**不设 `importance` / `confidence` 写入下限**——低分记录
-  允许写入，由召回阈值过滤。
-
-  四条写入硬语义：① **两层各自打开、各自降级**——中期库打不开不影响长期写入，反之亦然；且
-  **"配置已启用但打不开"按失败处理**，只有"配置关闭"才算未启用；② **按候选判定完成**——只有该
-  候选的**所有**目标都成功（或该层未启用 / 同一条候选已写过）**且至少有一个目标真正落库**才登记进
-  `memory_write_candidates`；部分成功与零写入都不登记，下一轮还能补写（中期记录、长期事实与长期
-  结论都幂等，重试不会写重）；③ **真实写入失败进 `error_events`**，未启用与幂等跳过只进决策轨迹；
-  同一轮的多条事件各带 `salt`，不会因 ID 相同被去重丢掉；同一轮内**重复的候选只处理一次**（按写入
-  判重键去重，否则中期稳定 id 只留一条、确认却会报"保存 2 条"）；④ **闲聊必须说实话**——`mode=chat`
-  时**最终展示文本**（`final_response`）由写入结果决定：先让模型结合"记忆处理结果"**重写一次回答**
-  （同时回答用户本轮的问题，只按系统给的事实表述记忆状态），再追加确定性结果说明（"已保存到记忆：
-  N 条" / "只保存了 X 条，另有 Y 条没有保存成功——原因" / "这条记忆没有保存成功——原因"）；未全部
-  成功时，若文本里仍出现"已记住 / 已保存"这类承诺，就**丢弃该文本、只用确定性说明**（宁可少说，
-  也不说错），失败原因优先取**被拒候选**的原因（候选不合法要报"content 必须是规范 JSON"，不能
-  错报成"目标记忆层当前不可用"）。**Checkpoint 里的 `messages` 一律不动**——架构 §10.1 规定原始
-  消息是审计与恢复记录，T19 验收也要求"原文恢复"；展示文本与历史因此完全分离，也不会多出
-  "原回答 + 确认"的重复消息。**"已记住"只有写入成功后才出现**；`user_requested=false` 却给出候选
-  属于审核自相矛盾，代码丢弃候选、不写入，并给出确定性的未保存说明。
-
-  修正后的回答同时写进 **`reply_overrides`（按消息 id 的回答投影，架构 §4.2）**：页面渲染、下一轮
-  Prompt 窗口与会话摘要的输入都经它取值——否则用户在页面上仍会看到那句假承诺、模型也会照着它继续对话，
-  摘要还会把这句话写进 `conversation_summary` 回流到之后每一轮（复审实证），而 `messages` 里的原文
-  照旧只用于审计与恢复。本轮回答为空时也会写投影：渲染本身会跳过空消息，只有投影才能让"记忆没保存
-  成功"这类确定性说明真的出现在页面上。这次收尾重写与工具分支的收尾合成同一口径：**先过 Prompt
-  预算**（按"系统提示 + 素材 + 指令"估算，放不下就不调用模型，退化为确定性说明），并把估算写回
-  `token_usage` / `context_budget`；重写调用失败、返回空文本、或重写后又出现承诺时，都记一条降级事件。
-  幂等：来源事件是 `run_id:tool_call_id`（不同轮次复用同一个 `call_1` 不会被误判成"已写过"），
-  判重键还含**候选身份**（同一事件下的其它候选不会被误伤）；中期记录与长期任务结论都用**稳定 id**
-  （结论走 `INSERT OR IGNORE`，id 里含任务标题），因此"数据库写成功、Checkpoint 提交前重放"不会
-  写出第二条，同内容不同标题的两条结论也能并存。
-
-  遗忘：长期事实在 `aging_enabled=true` 时按**不修改原值**的线性有效重要度
-  `importance × max(0, 1 - age_days / forget_after_days)` 降权（年龄基准是
-  `last_accessed_at or updated_at or created_at`，纯查询不写访问时间），`expire_overdue()` 处理
-  显式有效期、`expire_aged()` 处理纯年龄淘汰，两者分工不重叠；中期记忆沿用半衰期公式，并清理
-  显式过期的记录。普通闲聊**不会**自动写入记忆（不引入关键词触发）。
-- 三层记忆集成（T19）：召回节点把**中期向量记忆**与**长期结构化记忆**合并进同一个
-  `memory_refs`——按 `memory_id` 去重、按分数倒序、最多 12 条，并在系统提示的「召回的相关记忆」
-  段落里按来源标注：中期是「相关度 x.xx」（真实余弦相似度）；长期只写「长期事实」/「任务结论」，
-  **不带数字**——综合分是内部排序量，给模型数字只会被它复述给用户（实测先是把 0.66 说成"置信度"，
-  而那条记忆的 `confidence` 其实是 0.95；后来又在显式记忆问答里直接报出"综合分 0.63"）。系统提示
-  里同时要求"不向用户报出任何数值或分数"。
-
-  记忆问答的路由与证据口径：询问"我之前说过的偏好""我习惯用什么""我们上次的结论"属于**回忆型
-  问题**，路由分类按闲聊处理——答案就在已召回的 Prompt 段落里，不需要读写文件；**即使**被判成工具
-  模式，提示词也明确「召回的相关记忆」里的长期事实与任务结论**同样是可信来源**，不得因为工作区里
-  没有相关文件就否认这些事实或转而追问用户，并给出具体话术——「记忆记录为 pytest，但未从文件核实」，
-  只有记忆与工具结果**冲突**时才以后者为准（实测：直接问"我习惯用什么测试工具？"时模型曾选工具
-  模式、检查空目录后追问；自然问"这个测试项目默认用什么运行自动化测试？"时同样进了工具模式，
-  列空目录两次后还在追问，已召回的项目事实完全没被用上）。项目事实/约定问答也已写进路由规则，
-  分类应偏向闲聊。  **任一层关闭就不访问对应的库**，两层都关时连 embedding 模型都不加载；
-  一层失败只记一条错误事件、另一层照常召回。**召回失败与"查了没有结果"分开表述**：失败时 Prompt
-  写明"本轮记忆召回不可用、空白不代表没有相关记忆"，成功但无结果才说"没有召回相关记忆"——混说会让
-  模型向用户断言"我没有关于你偏好的记忆"，而库里其实有记录（复审实证）。失败时还明确**不追问用户、
-  不请用户重述偏好**（检索失败是本轮的技术问题，不是用户需要补充信息；恢复后可以重新尝试检索）。
-  这条口径有**代码级兜底**：提示词挡不住（真实页面回归里模型仍附带"你可以直接告诉我工具名"），
-  所以召回失败且回答里出现"直接告诉我 / 请提供 / 再说一遍"这类重述措辞时，`final_response_node`
-  会把整条回答换成确定性说明——只在**本轮召回失败**时生效，正常轮次不受影响。失败原因同时以提示
-  形式显示在对话下方。Embedding 只做**静态准备探测**（不加载模型、不联网）：
-  侧栏显示 provider/模型、缓存目录与当前状态（已关闭 / 缺依赖 / 配置不完整 / 就绪），配置问题以
-  warning 标出。探测会检查缓存目录**能不能真的用**（路径存在但不是目录、上级目录不可写都报
-  `not_ready`），`local_files_only=true` 时文案明确"只验证配置、模型缓存尚未验证"；远端 provider
-  缺 Key 时状态页展示"请补 Key"的警告，**不会整个页面抛 `ConfigError`**。下载或加载失败的原因
-  随本轮的 `error_events` 展示——**页面会把本轮新增的降级/错误事件脱敏后显示在对话下方**（按
-  `event_id` 去重，重绘不会重复弹），否则用户只看到一条正常回复、却不知道记忆其实没工作
-  （复审实证：图产生了可读的 `recall_memory` 错误事件，页面却不显示）。
-  记忆管理命令（T18 的人工入口）：`python -m local_agent.cli memory list|delete|forget|probe`，
-  用 `--config` 指定配置文件（默认 `./config.yaml`，所以要先进入 `local-agent-web` 目录或 `uv sync`）。
-  `list` / `delete` 另可用 `--workspace`；**`forget` 没有 `--workspace`**——它是**整库**维护任务
-  （存储层的过期与老化都不按作用域过滤），`--dry-run` 与真正执行**同范围同判定**，不会出现
-  "预览 0 条、实际过期 1 条"。
-
-  `list` 列出的是**当前作用域内可管理的记忆**：作用域组合（global / user / project / **workspace**）
-  与召回层来自同一处，时间口径也与召回一致（已过期、已超龄的事实不列出；存储层的 `active` 行本身
-  不等于"可召回"）。是否真的被召回仍取决于查询相似度、阈值与 `top_k`。中期列表同样按作用域与有效期
-  过滤，所以不会列出其它项目的记录。
-
-  长期事实与实体是**软删除**（置 `deleted`、历史行保留），中期记忆的删除不可逆且**返回实际删除条数**
-  （不存在的 id 会明确报"没有找到"）；`delete` 必须显式加 `--yes`。**删除默认只允许清理当前
-  `--workspace` 可见作用域内的记录**（global / user / project / workspace 四种，与召回同一套作用域
-  组合）：作用域不匹配时**一个字都不写、返回失败码**，并提示改用正确的 `--workspace`——清理旧项目就
-  显式指定那个项目的工作目录；跨项目整库清理若将来确有需要，再设计单独的管理开关（目前没有）。
-  校验发生在删除**之前**（只在删除后打印作用域挡不住输错 ID）；删除成功后仍会打印作用域供核对。
-  侧栏的「记忆管理」只做只读展示（长期事实与结论条数，同样按可见性口径过滤）并指向这些命令——
-  **页面上不提供删除按钮**，避免误点，也避免在页面上加载 embedding 模型。
-
-  手动验收清单（**v0.2 退出条件**，自动测试不能替代；逐项做并记录结果，这是进入 v0.3 的前置）。
-  准备：`memory.medium_term.enabled` / `memory.long_term.enabled` / `embedding.enabled` 都设为
-  `true`，`embedding.cache_dir` 指向本机可写的绝对路径，`.env` 里配好模型 Key。
-
-  T14A｜本地 Embedding（不需要真实聊天模型）：
-  1. 首次加载：权重与 HuggingFace 附属缓存**只**落在 `embedding.cache_dir` 下（该目录之外不应新增
-     模型文件）；记录首次加载耗时。
-  2. 复用：第二次查询（或第二次启动）不再下载；记录复用耗时，应明显小于首次。
-  3. 离线：`local_files_only=true` 时不发起网络请求，仍能加载已缓存模型。**首次加载必须
-     `local_files_only=false` 且有可用网络**；网络不稳时先在能联网的环境把权重放进
-     `embedding.cache_dir`（FastEmbed 的 ONNX 权重与该模型在 HuggingFace 上的附属文件都落在这个
-     目录下），再切回离线验证"不再下载"。
-     建议**先用命令行单独验证加载**：`python -m local_agent.cli memory probe` —— 它是**显式探针**，
-     会真正触发模型加载并编码一段文本，打印首次/复用耗时、向量维度与"是否全为有限值"，失败时给出
-     可读原因并返回非零码。
-     **不能**用 `memory list --kind medium` 判断权重是否可用：中期库的 embedding 适配器是**惰性**的，
-     该命令只读向量库、不做编码，空缓存 + 离线时它照样返回 0（复审实证：只有真正编码才抛
-     `EmbeddingLoadError`）。同理，`memory forget --dry-run` 也不是探针。
-  4. 缓存缺失或损坏：给出可读的失败状态与原因，不是无响应、也不是裸异常。
-  5. 向量自查：查询文本返回 512 维有限数值（无 NaN / Inf）。
-
-  T14B｜中期召回排序：用本地中文模型时，中文**近义**内容排在无关内容之前。
-
-  T19｜三层集成与页面状态：
-  6. 侧栏显示 provider / 模型名 / 缓存目录 / 当前状态；删掉缓存目录后重启，页面仍给出可处理的状态
-     （配置问题用 warning 标出）；下载或加载失败时原因出现在对话的 `error_events` 里。
-  7. 场景回归（工具分支）：只读成功 / 工具失败 / 需要追问 / 解析降级 / 一个请求内长工具链。每例记录
-     最终回答是否与证据一致、有无 `error_events`、`context_budget` 是否与实际出站请求相符。
-  8. 记忆写入：完成一个有结论的任务，或直接说"请记住：我习惯用 pytest"。**只有真的写入成功才出现**
-     "已记住 / 已保存"；失败时给确定性的未保存说明（不是模型原话里那句假承诺）。
-  9. 跨会话与跨项目：**新建会话**问同一件事（应召回）；**换一个工作区**问（不同 `project_id`，
-     应召回不到）。
-  10. 人工删除与遗忘：`memory list` 找到刚写的事实与 id → `memory delete <id> --yes` →
-      新会话再问（应召回不到）→ `memory forget --dry-run`（只统计）→ `memory forget`（落库老化）。
-  11. 压缩与投影：长对话触发摘要后，Checkpoint 里的 `messages` 一条不少；若本轮出现过"记忆没保存
-      成功"，**下一轮**的 Prompt 与页面里都不应再出现模型原话里的那句假承诺。
-  12. 阶段演示（v0.2 收尾）：完成项目任务 → 审核后写入中期摘要 / 长期结论 → 新会话提问召回相关记忆
-      → 人工删除后不再召回；压缩前后 Checkpoint 消息完整。
-
-  **验收状态（截至 2026-09-21，隔离环境 + 真实模型 + 本地 Embedding）**：
-
-  - **已通过**：离线预置权重的 Embedding 探针（512 维有限向量，首次约 0.21s / 同进程复用约 0.003s）；
-    中文近义排序正确（相关 0.699 / 无关 0.251，Chroma 顺序正确）；闲聊"请记住：我个人习惯用 pytest"
-    → 写入 1 条 `active` 事实 → **新会话**召回并答 pytest、**换项目**召回 0 条；自然问法
-    "我习惯用什么测试工具？"进闲聊、召回长期事实并答对；项目事实经页面写入后显示"已保存到记忆：1 条"、
-    CLI 查到该事实、新会话 Checkpoint 含记忆引用；人工删除后不再召回；`forget --dry-run` 与执行**同范围**
-    （两个项目共 2 条超龄，执行后均落 `expired`）；召回失败时页面显示 `[recall_memory]` 与可读原因，
-    回答不冒充"没有相关记忆"；T14A/T14B 的离线、复用、缓存缺失均可读失败。
-  - **曾判"待补验（外部环境阻断）"→ 2026-09-22 已补验通过**：全新空缓存的**首次在线下载**最初多次以
-    `WinError 10060` 连接超时结束（`memory probe` 返回非零）。T24 用全新空缓存目录
-    （`E:\tmp\t24-embed-cache`、`local_files_only: false`）重跑 `memory probe`：13 s 拉取 5 个文件、
-    首次含加载 16.0 s、512 维有限向量、同进程复用 0.003 s；随后用同一目录把 `local_files_only` 改为
-    `true`（禁止下载）再跑一次，0.150 s 通过——**"首次在线下载"与"断网复用"两项都实测通过**。
-    按开发计划（§6 T19）这一项属人工验收、不是 CI 门槛；它与"发布门槛是否全部通过"是两件事，
-    后者仍未全部通过（见下一节的未验证项），不因此创建发布标签。
-- 长期记忆库与聊天库是两套迁移、各自持有 `schema_migrations`，必须使用不同的文件
-  （`scripts/init_db.py` 会在指向同一个文件时报错）。
-- 多步骤规划与恢复（T20）：复杂请求由 `planner_node` 拆成最多 5 步的计划（步骤 id 形如
-  `<run_id>:step-N`，天然按任务隔离；拆步失败**合法退化**为单步，行为与 T17 一致）。三条机械规则：
-  ① **完成一步不等于完成整个任务**——当前步完成但计划还有后续时，即使模型给 `finish` 也改成
-  `continue`，把该步记进 `completed_steps`（只追加，已完成步骤不重写、不重跑）；② **重规划必须真的
-  改计划**——反思的 `plan_adjustment` 非空且当前步失败时，把该步标 `failed` 并在其后**插入调整步骤**，
-  索引指向新步（T20 只实现这一种调整方式）；③ **重试按步骤计数**——用 `PlanStep.retry_count`，进入
-  下一步从 0 重新开始，`agent.max_tool_loops` 仍限制整个任务。计划里还有 `pending` / `running` 步骤时
-  `agent_decision_node` **不直接收尾**：模型偶尔会在第二步就说"任务完成了"，直接结束会让第三步永远
-  不执行、而 `task_status` 还显示 `running`；先走反思，由机械规则决定继续还是收尾。
-  整体可信度（`result_trust`）按**工具名取最后一次**的机械校验结果汇总，`final_evidence` 与异常清单
-  仍全量重算——全量汇总会让"第二步失败、调整后成功"永久停留在失败，任务再也收不了尾。
-  **不确定的副作用不自动重放**：放行标记在安全门放行与**人工批准**两条路径上都会写入（批准后不经过
-  安全门，漏写就检测不到"批准后执行中崩溃"）；执行前若发现**更早运行**留下的同名副作用放行没有配对
-  结果，直接跳过该调用、回填"请先核对"并记一条错误事件——检查必须在执行前，等反思发现时副作用已经
-  又跑过一次。同一批遗留只提示一次，避免一次异常结束变成永久阻断。
-- 编辑预览与 Patch 冲突（T22）：`edit_file` 新增 **unified diff 输入模式**（`patch` 参数），
-  精确串替换仍是**默认**模式，两者**互斥**（同时给出或都为空即拒绝；安全判定与工具执行共用同一个
-  判定函数，不会两处规则分叉）。补丁在写盘之前逐项校验：空 Patch、hunk 头格式非法、`@@` 声明行数
-  与内容不符、hunk 乱序或重叠、hunk 体内有无前缀行、Git 扩展 diff 头、`\ No newline at end of file`
-  标记，全部直接拒绝（结构非法的补丁是**硬拒绝**，不会弹审批让人白批准一次）。定位**严格按 `@@`
-  的旧行号**，上下文行与删除行必须与当前文件**逐字**一致——不做模糊搜索、不容忍行号漂移，不一致
-  即冲突。任一校验不过，**原文件一字不动**（Hash 不变）。匹配忽略 CRLF 差异，写回按行保留原有
-  结束符；文件头只校验 basename（项目自己的 diff 预览只写文件名，子目录文件也能把这份 diff 回灌）。
-  合法修改的审计产物仍是 unified diff 预览，页面上额外标出应用的 hunk 数（patch 模式下
-  `replaced_count` 表示 hunk 数，不是替换处数）。补丁同样走大范围修改审批（按补丁声明的删除 + 新增
-  行数判定），并且 `patch` 已纳入动作指纹——否则"批准 A 段补丁、执行 B 段补丁"会命中同一个指纹。
-- 按需代码检索（T21）：`rag.enabled` 打开后，工具分支在**规划之前**多走一个
-  `retrieve_code_node`——从用户请求里提取词项（路径、文件名、标识符；纯中文片段也可以作字面词项），
-  在当前工作区内找出候选，再读取命中处**前后各 `rag.context_lines` 行**的有界片段，连同相对路径与
-  1 基行号一起注入系统提示的「检索到的代码片段」段落。**不建持久索引**：每次都直接读磁盘，所以
-  文件的新增、修改、删除在下一次查询里立刻可见，也没有索引缓存要失效。候选发现优先调用外部
-  `rg`（可选加速器，`uv sync` 不装它；以参数数组直执行、不经 Shell），**`rg` 缺失或执行失败时
-  退化为有界 Python 扫描**——两条路径共用同一套限额（超时、文件数、单文件字节数、每词项命中数、
-  片段字符数与段落总长度），跳过隐藏项、常见依赖目录、敏感文件、符号链接、二进制与超大文件；
-  工作区外的结果即使由 `rg` 返回也会被丢弃。关闭时节点直接透传：**不访问文件系统、不探测 `rg`、
-  不加载任何解析器，也不记错误事件**。检索失败与"检索了但没有命中"在提示里用不同占位文字区分
-  （未启用 / 失败 / 无命中），失败会写进页面可见的错误事件。**已知限制（实测）**：检索是
-  **字面匹配**，词项优先取请求里的路径/文件名/标识符——只要句中出现标识符，中文片段就不再当词项
-  （中文虚词按字面匹配会命中中文散文，实测"里的"能把 8 个结果位吃掉 7 个）；纯中文长问句没有任何
-  标识符时才会退回中文片段，那种情况召回很弱。把查询里的文件名或函数名写清楚，召回质量最好。
-  **验收记录（真实模型手测，2026-09-21）**：检索、注入（片段确实进入系统提示）与来源定位（相对路径 +
-  1 基行号逐条核对）**均通过**，无越界、无敏感文件、无虚假检索；**最终回答质量未通过**——模型给出的
-  回答不完整，随后诚实追问（**无虚假完成**）。按裁定这属于**质量基线**而非检索/安全契约缺陷，已作为
-  固定用例 `rag-natural-question`（理想路径：直接用片段回答）与 `rag-natural-question-asks`（真实形态：
-  诚实追问）纳入 T23 评测集逐例记录。
-- 反思证据与空转保护（实测缺陷修复）：**给模型看的工具证据必须可判读**——工具结果是 JSON，字段顺序
-  是"元数据在前、正文在后"，只取前 N 个字符会让模型（反思、收尾合成）只看到 `path` / `line_count` /
-  `sha256`，于是判定"正文被截断、任务没完成"，连续空转并反过来向用户索取**已经读到**的内容。现在按
-  "标识字段完整保留 → 正文类字段给可见片段 → 截断时显式标注'此处为摘要，原文共 N 字符'、未展示字段
-  给出计数"渲染，反思提示、收尾合成的有界证据与确定性结果摘要共用这一层。另加**空转保护**：反思要求
-  继续/重试、但模型已经连续 2 轮没有产生任何工具调用时，归一为"追问用户"并把当前步骤标为 `blocked`
-  ——重复调用不会有新信息，而"计划没走完不许收尾"仍是硬语义（实测修复前会连续空转 10 轮到循环上限，
-  用户最终看到的是一句自相矛盾的追问）。
-- 思考模型的字段往返（DeepSeek）：思考模式下带 `tool_calls` 的响应必须把供应商字段
-  `reasoning_content` 原样带回下一轮，而官方 `ChatOpenAI` 明确不提取、不保留这类字段，直接用会让
-  工具循环的第二次请求被 400 拒绝。`llm/compat.py` 用一个最小的 provider 子类接上这条链路（**空串也要
-  留住**、所有带该字段的 assistant 消息都回传），没有该字段的模型行为完全不变；该字段只留在消息元数据
-  里，不进决策轨迹、工具事件、错误事件与最终证据，也不在页面渲染。
-- 轨迹与评测（T23，自动化层）：`tests/test_agent_eval.py` 用脚本化替身模型跑一组**固定任务集**
-  （18 条：闲聊 / 读 / 改 / Shell 免审与需审批 / 拒绝与越界 / 敏感文件 / 审批后重启恢复 / 记忆写入 /
-  检索开关 / 错误宣称 / 空转保护 / 思考模型轨迹 / 多步计划正常收尾 / **T21 那条自然问法的两个变体**），
-  逐例断言"终点类型 + 关键不变量"，并把结果与指标写成固定报表 `eval/latest.json` 与 `eval/latest.md`
-  （本地产物，已加进 `.gitignore`，两次运行可比）：完成率、追问率、错误宣称、重复副作用、平均与最大
-  循环次数、**空转保护误伤**、失败用例。三条**全局硬不变量**对每条用例都生效——工具真的跑过但机械证据
-  不是 `verified` 就不许标 `completed`；同一副作用工具在一次任务里只能执行一次；决策轨迹 / 工具事件 /
-  错误事件 / 最终证据 / 审批历史里不得出现密钥、工作区外内容或 `reasoning_content`（隐藏思维链）。
-  **检索类用例另记录 8 个质量维度**（是否命中正确 `rag_refs`、片段是否真的注入、是否用上片段、是否给出
-  完整回答、是否多余工具调用、是否不必要追问、循环次数、是否虚假完成/重复副作用），其中**来源定位、
-  行号、注入、虚假完成、重复副作用算硬问题**（出现即回头修），"回答不完整后诚实追问"只记质量、不阻塞。
-  **真实模型冒烟是另一层**：`tests/test_agent_smoke.py`（默认跳过，显式设 `DS_SMOKE=1` 才跑，避免门槛
-  变成联网+有费用的操作）覆盖读文件 / 白名单内命令 / 覆盖写审批 / 代码检索问句四个代表场景，记录同样的
-  质量维度加上**成功率与失败分类**（硬问题 vs 质量问题），写 `eval/smoke-latest.json` 与 `.md`，
-  **不比对逐字输出**——这一层的价值是发现协议级/兼容性问题（这次的 `reasoning_content` 就是它发现的），
-  不是打分。**未做（T24 复核后仍未做，记为已知限制，不再是"留给 T24"的承诺）**：流式输出的 token/时间
-  维度、页面上的阶段/轮次/工具/token 遥测。T24 的范围是回归、物料与验收记录，**没有**扩展遥测；页面上
-  能看到的是工具事件、审批卡片与错误事件的既有展示，轮次 / token 统计只在 `eval/*.json` 报表里。
-- **最终回答的流式展示（T23，`llm.streaming` 打开后生效）**：只流式**最终自然语言回答**——
-  planner、反思、工具调用、工具结果与隐藏推理都不流式（`agent_decision_node` 的调用可能产出工具调用，
-  事先无法区分，所以不接）。增量只进页面上的临时占位符，**不逐块写 Checkpoint**：节点结束时仍写
-  **一条**完整 `AIMessage`，占位符在调用结束后清空、最终回答由历史统一渲染（不重复显示，重绘/刷新
-  不重新调用模型）。**降级**：模型不支持或首块前失败 → 一次普通完整调用（不记事件）；**中途失败** →
-  丢弃不完整投影 + 普通调用重试一次 + 记一条**可见降级事件**；降级只重调模型，不重放工具、不重写记忆
-  （工具次数、`tool_events`、记忆写入与非流式路径一致，有专门用例比对）。真实模型实测（`deepseek-flash`）：
-  单轮能看到 200+ 个增量块，且不触发 `reasoning_content` 400。**两个实现陷阱**（写进架构 §11.7）：
-  构造模型时**不要传** `streaming=`（传 `False` 会让 `.stream()` 退化成一次 `invoke`，传 `True` 会让所有
-  `invoke()` 丢掉供应商字段并被 400 拒绝）；真增量流式本身也会丢字段，因此对"见过该字段的供应商"要给
-  流式回答补一个空值占位。开关默认关闭（`config.yaml` 的 `llm.streaming`），关闭时行为与之前完全一致。
-
-## v0.3 退出条件（T24 验收矩阵核对）
-
-**核对方式**：对照开发文档 §10 全链路验收矩阵逐项做自动验证 + 手工观察，分四类标记——**自动通过** /
-**手工通过** / **外部阻断** / **未覆盖**。本轮实测环境：Windows + CPython 3.13.12 + `uv 0.12.13`，
-模型端点为 DeepSeek（`deepseek-flash`、`deepseek-v4-pro`）。
-
-| §10 场景 | 自动验证（用例数 = 本轮实测） | 手工观察项 | 标记 |
-|---|---|---|---|
-| 网页闲聊不调用工具 | test_web（53）、test_router（103） | 网页启动实测 HTTP 200；两轮上下文由 AppTest 用例覆盖 | 自动通过 |
-| 只读/编辑/新建/安全 Shell | test_tools（71）、test_security（47 + 1 环境跳过） | 内容/Hash/退出码与页面一致、刷新不重复副作用：AppTest 用例覆盖 | 自动通过 |
-| 删除、覆盖、大改、危险 Shell | test_security、test_graph_resume（63） | 未批准不执行 / 批准后重新审批 / 递归删除二次确认 / 拒绝不循环：用例覆盖 | 自动通过 |
-| Checkpoint 与多会话 | test_graph_resume（63）、test_web（53） | 重启恢复、跨会话不串线：用例 + 基础配置真实模型两轮实测 | 自动通过 |
-| 工作区选择与外部路径 | test_web、test_tools、test_security、test_graph_resume | 严格/允许模式与外部只读、外部副作用强制审批：用例覆盖 | 自动通过（1 条符号链接用例因本机不支持创建链接而跳过） |
-| 模型能力与错误输出 | test_router（103）、test_web（53） | 不支持 Tool Calling 不伪装完成、JSON 错误有界重试：用例覆盖 | 自动通过 |
-| 本地 Embedding 与模型缓存 | test_memory（127，含假 Embedding；缺可选组时相关用例跳过） | **首次在线下载**：2026-09-22 用全新空缓存实测通过（13 s 拉 5 文件、512 维、含加载 16.0 s、复用 0.003 s、`local_files_only` 再跑 0.150 s） | 自动通过 + 手工通过 |
-| 中长期记忆召回和写入 | test_memory、test_reflection（42） | 跨会话召回 / 跨项目不召回 / 删除后不召回：见 v0.2 验收状态 | 自动通过 |
-| 摘要压缩 | test_memory、test_graph_resume（63） | 窗口变短、Checkpoint 原消息不减：用例覆盖 | 自动通过 |
-| 反思、重规划和循环上限 | test_reflection（42）、test_router（103） | 错误工具不 verified、失败可调计划、循环有明确终点：用例 + 空转保护用例 | 自动通过 |
-| 按需代码 RAG | test_rag（22） | 开启后有界片段 + 路径行号、关闭时零访问：用例覆盖；真实模型检索/注入/来源定位见 T21 记录 | 自动通过（局部 AST **未采用**，不在本轮范围） |
-| 轨迹与评测 | test_agent_eval（19） | 固定集产出指标与失败原因、轨迹无密钥与隐藏思维链：用例断言 + `eval/*.md` | 自动通过 |
-
-**T24 额外做的真实模型记录（不比对逐字输出）**：
-
-- 冒烟层（`DS_SMOKE=1`）：`deepseek-flash` **4/4** 无硬问题（增量块 246–509、单场景 1–2 轮）；
-  `deepseek-v4-pro` **4/4** 无硬问题（增量块 43–333、单场景 1–3 轮）。两模型在"覆盖写"场景都选了
-  `edit_file` 而不是 `write_file`（记为观察，不是缺陷）；`deepseek-v4-pro` 这次对检索自然问法给出了
-  **完整回答**，`deepseek-flash` 仍是诚实追问——同一问句的差异正是"两层评测"要保留的信息。
-- 基础配置（示例配置：中期/长期记忆、Embedding、RAG、流式全关）+ 真实模型两轮：闲聊 `completed`、
-  无工具事件；工具轮 `read_file` 命中 `README.md` 且机械证据 `verified`。**没有加分项**：工具轮之后
-  反思未判定完成，多轮无新动作后由空转保护转为 `ask_user`，最终文本是"停下来问你"——属质量基线
-  （同样是 `rag-natural-question-asks` 那条用例记录的现象），不是崩溃或虚假完成。
-- 网页：`python -m streamlit run src/local_agent/web.py` 在本机启动成功、`GET /` 返回 200、Ctrl-C
-  后端口释放。
-
-**本次执行的命令与结果**：
-
-```powershell
-uv lock --check                                  # exit 0（155 包）
-python -m pytest                                 # 597 passed / 4 skipped（含 memory 可选组）
-python -m pytest                                 # 578 passed / 23 skipped（仅基础依赖：缺可选组的 20 条跳过）
-python -m ruff check . ; python -m mypy src       # 两种环境都干净（60 文件）
-```
-
-干净环境（`uv` 新建、CPython 3.13.12）：`uv lock --check` → `uv sync --extra memory`（155 包）→
-`uv pip check` 报 "All installed packages are compatible" → 同一套门槛全绿。
-
-**未验证项（如实记录，不算通过）**：
-
-- **第二端点未验证**：本机只有 DeepSeek 一个兼容端点；`deepseek-flash` 与 `deepseek-v4-pro` 是**同一端点**
-  上的两个模型，不构成"第二种兼容端点"。
-- **POSIX 未实测**：真执行只在 Windows 上验证过，POSIX 结论全部来自解析层单元测试；平台相关跳过项为
-  `test_is_under_is_case_sensitive_on_posix`（POSIX 专用）与 `test_path_guard_blocks_symlink_escape`
-  （本机不支持创建符号链接）。
-- **网页人工点击**：页面行为由 AppTest（53 条）与本机启动实测覆盖，逐项人工点击未由本轮执行。
-- **页面遥测**：阶段/轮次/工具/token 的页面展示**未实现**（T23 起即记为未做，T24 未扩展）。
-- **本端点的结构化输出降级**：`deepseek-flash` 对 `json_schema` 方式返回 `OpenAIInvalidRequestError`，
-  能力探测按失败闭合把 `structured_json_schema` 降为 `false`，链路继续走降级路径（架构 §11.7 的设计行为，
-  但说明"兼容端点 ≠ 完全等价"）。
-
-### 发布前修复：Checkpoint 反序列化白名单
-
-langgraph 1.2.11 起，`JsonPlusSerializer` 对**未登记**的自定义类型只告警放行（serde 事件
-`msgpack_unregistered_allowed`），并预告未来版本改为直接阻止；严格模式或显式白名单下，未登记类型不会被
-构造，而是退回原始 tuple/`dict`。本项目 State 里有 7 个自定义 frozen dataclass 会落盘，原先依赖默认行为。
-
-现在 `persistence/checkpoint.py` 用显式白名单打开 saver（`CHECKPOINT_ALLOWED_TYPES` +
-`build_checkpoint_serializer()`），并显式关闭 `pickle_fallback`：
-
-- **白名单只含实测会落盘的类型**（`ContextBudget`、`TokenUsage`、`EvidenceReference`、
-  `MemoryCandidate`、`PlanStep`、`ReflectionResult`、`ToolEvent`）——不猜模块、不按包名放开、不预留
-  "以后可能用到"；langchain 消息与 `datetime` / `UUID` / `Path` 由 langgraph 的 `SAFE_MSGPACK_TYPES` 覆盖。
-- **未登记类型被拒绝**（fail-closed）：加载时不会构造它，也不会被静默放行；`pickle` 载荷直接拒绝。
-- **读取不迁移、不重写**：旧库打开后逐 thread 恢复状态，Checkpoint 记录与文件哈希都不变。
-- `tests/test_checkpoint_serde.py`（8 条）三层守住：默认序列化器下**复现**告警并钉住"实际落盘类型集合"、
-  项目序列化器下**零** serde 事件、边界（未登记被拒 / pickle 拒绝 / 旧记录无损恢复 / 读取不改写）。
-  它跑的是真实图与真实 SQLite，覆盖多轮消息、工具步、多步计划、记忆候选、审批中断后重启恢复。
-- **实测证据**：全量套件（除该文件外 597 条）在收集器下**零** serde 事件；用本机**真实旧库**
-  （4 个 thread，含 v0.1a 时代的 `local-default`）的白名单恢复：`ToolEvent` 87、`EvidenceReference` 39、
-  `ReflectionResult` 2、`PlanStep` 1、`TokenUsage` 1、`ContextBudget` 1 全部复活为 dataclass 实例，
-  源库哈希不变——**纯白名单足够，不需要迁移方案**。
-- 一个往返表示差异（无害但已写明）：msgpack 没有 tuple，`PlanStep.dependencies` 读回来是 `list`；
-  该字段在源码里没有使用点，真要做相等比较需先归一化。
-
-**结论**：v0.3 的**代码与验收记录**已具备提交条件；**发布门槛尚未全部通过**（第二端点、POSIX 未验证），
-在获得明确豁免前不创建发布标签、不宣称整体验收通过。
+旧 T01–T24 进度、底层实现展开及完整整理前 README 见 [阶段历史](../docs/archive/v0.1-v0.3-development.md#readme-snapshot)。

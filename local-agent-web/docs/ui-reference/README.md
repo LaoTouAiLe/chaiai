@@ -1,16 +1,33 @@
-# v0.4 UI 参考基线（T25 产物）
+# 界面资料与验收索引
+
+当前状态和下一步只看 [项目总览](../../../README.md)。本目录包含参考基线、实现验收与截图；教程、历史与候选规划不在这里排期。
+
+| 主题 | 文档 | 作用 |
+| --- | --- | --- |
+| 会话地图 | [CONVERSATION_MAP.md](CONVERSATION_MAP.md) | 当前横向树、分支执行与两轮验收合并 |
+| 记忆/Embedding 设置 | [MEMORY_SETTINGS.md](MEMORY_SETTINGS.md) | 设置修复、技术验收、召回质量遗留合并 |
+| 数据中台 | [data-center-20261007.md](data-center-20261007.md) | 只读范围、统计口径、验证与截图 |
+| T39 过程/审批/管理 | [t39-20261002.md](t39-20261002.md) | 阶段实操证据；早期阻断已在后段修复 |
+| chaiai 品牌 | [浅色效果](chaiai-brand-20261007.png)、[深色效果](chaiai-brand-dark-20261007.png) | 名称和同源 SVG 图标；不是缓存实测 |
+| 视觉状态参考 | [state-matrix.md](state-matrix.md)、[design-tokens.md](design-tokens.md) | 冻结参考与设计尺度，不代表当前每个状态已验收 |
+
+## 冻结参考来源（历史）
+
+以下完整保留 T25 的参考采集记录。文内“本目录不含本项目实现”指当时，仅限此历史部分；本目录现已包含上表实现验收。冻结日期与待补原型不作为当前整体状态。
+
+## v0.4 UI 参考基线（T25 产物）
 
 本目录冻结 v0.4 独立 Web 页面的**视觉与交互参考基线**：参考来源、可复现的采集方法、页面状态矩阵、设计
 Token 与截图资产。它是 `V0_4_DEVELOPMENT_PLAN.md` T25 与 T26 的输入，不是本项目自身的界面规范。
 
-> 权威边界：页面**要做什么**由 `PRODUCT_EVOLUTION_ROADMAP.md` §6 与 `V0_4_DEVELOPMENT_PLAN.md` §6 决定；
-> 本目录只回答**长什么样、交互怎么反馈**。冲突时以两份规划文档为准。
+> 当时的权威边界：页面**要做什么**由原 `PRODUCT_EVOLUTION_ROADMAP.md` §6 与 `V0_4_DEVELOPMENT_PLAN.md` §6 决定；原路线已合并至 [后续规划](../../../docs/planning/FUTURE_WORK.md#roadmap)。
+> 本目录只回答**长什么样、交互怎么反馈**。当前交付状态以根 README 和当前计划为准。
 >
 > 状态：参考资产已采集并冻结（2026-09-23）——**参考基线已冻结，本项目特有状态的原型待验收**。
 > 这两件事不等价：`state-matrix.md` §3 中标 ⚠️ 的状态与 §5 的待补原型各自通过前，不得描述为"已高保真还原"。
 > 本目录只包含参考截图与 Token 证据，**不含**本项目实现。
 
-## 1. 参考来源（已冻结）
+### 1. 参考来源（已冻结）
 
 | 项 | 值 |
 |---|---|
@@ -22,9 +39,9 @@ Token 与截图资产。它是 `V0_4_DEVELOPMENT_PLAN.md` T25 与 T26 的输入�
 | 采集时工作区 | 干净（仅有一个与本项目无关的未跟踪 `.codebuddy/`） |
 | 页面来源 | `apps/web/dist`（Vite 构建产物），由 `apps/cli` 的 `dsh web`（= `--profile web`）托管于 `http://127.0.0.1:3080` |
 
-## 2. 采集方法（可复现）
+### 2. 采集方法（可复现）
 
-### 2.1 启动参考页面
+#### 2.1 启动参考页面
 
 ```cmd
 set DSH_HOME=E:\tmp\dsh-ref-home
@@ -42,7 +59,7 @@ pnpm dsh web --port 3080 --no-open
 - `DSH_HOME` 把全部用户数据从 `~/.dsh` 重定向到 E 盘：本机 C 盘已满，禁止任何写 C 盘的操作。
   该变量的语义见 `packages/util/home-paths/src/index.ts`（优先级：显式配置 > `$DSH_HOME` > `~/.dsh`）。
 
-### 2.2 用假传输渲染页面状态
+#### 2.2 用假传输渲染页面状态
 
 参考应用内置一个**客户端假服务器**：URL 带 `fixture` 查询参数时，`packages/client/connection/src/client/index.ts`
 的 `apply()` 选择 `FixtureApiClient` 而不是真实 HTTP 传输。可用的查询参数由同包 `fixture.ts` 的
@@ -63,7 +80,7 @@ reasoning、上下文字段注入、工具调用（`fx-bash` / `fx-write` / `edi
 终端输出（ANSI 颜色 + 非零退出码 + 高度折叠）、搜索卡（按文件分组与截断）、图片消息、输出上限截断提示、
 常驻待审批请求与常驻待回答提问（两者都会接管输入区）。
 
-### 2.3 截图脚本与浏览器
+#### 2.3 截图脚本与浏览器
 
 - 驱动：Playwright（来自 `D:\ideaTest2\deepseek-harness\apps\web\node_modules`）。
 - 浏览器：本机已下载的 Chromium 1217，**显式指定** `executablePath`
@@ -72,7 +89,7 @@ reasoning、上下文字段注入、工具调用（`fx-bash` / `fx-write` / `edi
   `reducedMotion=reduce`、视口 1440×900 与 1280×800。
 - 等待策略：`waitUntil: 'domcontentloaded'`。**不能用 `networkidle`**——页面持有常驻事件流，永不空闲。
 
-### 2.4 内测声明弹窗的处理（重要）
+#### 2.4 内测声明弹窗的处理（重要）
 
 首次启动会弹出 `内测声明` 模态框。在 `?fixture` 下它**无法通过界面关闭**：确认状态写入 Host settings
 scope（`packages/client/ui-settings-models/src/client/welcome-store.ts`），而假传输不提供该域，点击后
@@ -83,7 +100,7 @@ scope（`packages/client/ui-settings-models/src/client/welcome-store.ts`），�
 （连同其 `[role="presentation"]` 容器与 `inert` 属性）以露出下层页面。这是**采集手段**，不代表本项目
 应该跳过首次启动声明——v0.4 的初始设置流程仍按 `V0_4_DEVELOPMENT_PLAN.md` §6.8 实现。
 
-## 3. 目录结构
+### 3. 目录结构
 
 ```text
 docs/ui-reference/
@@ -100,7 +117,7 @@ docs/ui-reference/
 
 截图总体积 2.64 MiB。
 
-## 4. 借鉴与不借鉴的边界
+### 4. 借鉴与不借鉴的边界
 
 **借鉴（视觉与交互结果）**：常驻会话壳、紧凑工具行与展开卡、输入区接管（审批/提问）、计划条、
 diff 摘要卡、轨迹时间线与检查器、每轮统计行、圆形上下文计量器、设置页的组件语言与状态反馈。
@@ -111,7 +128,7 @@ Slot/插件注册体系、Monorepo 包结构。本项目使用独立实现与自
 参考页面里属于**其产品边界**、本项目 v0.4 不做的部分（插件配置页、Cordis 面板、Agent 预设、Skill、
 Subagent、WebSocket 终端等）只用于理解其信息层级，不作为 v0.4 的实现范围。
 
-## 5. 缺口（无法从参考复现的状态）
+### 5. 缺口（无法从参考复现的状态）
 
 以下状态在冻结版本 + 离线假传输下**没有**产出截图。缺口如实列出，不用文字描述替代视觉验收。
 **裁定结果（2026-09-23）**：前两项不索取参考截图，改用本项目自定基线并由 T26 早期视觉检查点产出原型；
@@ -133,7 +150,7 @@ Subagent、WebSocket 终端等）只用于理解其信息层级，不作为 v0.4
    （`V0_4_DEVELOPMENT_PLAN.md` §6.8），需要**删减**而不是照搬。
 2. 参考的 `模型与推理等级` 是同一个小菜单（模型 + 推理等级）；本项目 v0.4 的会话模型选择只切换连接。
 
-## 6. 验收方式
+### 6. 验收方式
 
 T26 与 T37 的视觉验收按以下步骤执行，逐项留痕：
 

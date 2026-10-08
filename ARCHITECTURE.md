@@ -5,7 +5,7 @@
 > 参考方向：Aider、OpenHands 的 Agent 编排与代码编辑思路；本项目只提供本地 Web 界面。  
 > 当前范围：网页自然聊天、本地文件操作、代码读写编辑、Shell 执行、可配置 OpenAI 兼容模型。工作区是默认上下文、检索和相对路径根目录；按显式配置可受控访问工作区外的本机路径。
 
-> 实施任务、目录、配置和依赖见 [完整开发文档](DEVELOPMENT_PLAN.md)；本文件只保留架构契约与设计边界。
+> 当前状态和下一步见 [项目总览](README.md)，现行任务见 [v0.4 计划](V0_4_DEVELOPMENT_PLAN.md)。早期目录/配置设计保留于 [阶段历史](docs/archive/v0.1-v0.3-development.md)；具体当前配置以配置示例、源码及生成契约为准。本文件维护架构边界。
 
 ---
 
@@ -136,7 +136,7 @@ flowchart TD
 
 | 模块 | 职责 | 对应学习知识点 |
 |---|---|---|
-| 模式判定模块 | 从会话记录读取固定模式；闲聊只绑定目录与文件读取工具 | Router、条件边、会话索引 |
+| 模式判定模块 | 从会话记录读取下一轮模式；闲聊只绑定目录与文件读取工具 | Router、条件边、会话索引 |
 | LLM 接入与配置模块 | 从 YAML 构造 OpenAI 兼容模型对象 | 模型抽象、依赖倒置、BYO LLM |
 | 文件工具模块 | 目录读取、文件读取、精确串替换、写入、删除和 diff 预览 | Tool Calling、文件系统 Agent |
 | Shell 执行模块 | 执行命令、超时控制、白名单和危险命令检测 | 工具安全、沙箱、命令策略 |
@@ -154,7 +154,7 @@ flowchart TD
 
 ## 3. 项目结构约束
 
-源码采用 `src/local_agent/` 布局；`graph/`、`tools/`、`security/`、`context/`、`memory/`、`reflection/`、`rag/`、`persistence/`、`ui/` 与 `web.py` 的职责以 §2 为准。具体目录树、文件职责和按阶段创建顺序见 [开发文档 §3](DEVELOPMENT_PLAN.md#3-项目目录与阶段归属)。禁止为了匹配最终目录树在早期建立空壳模块。
+源码采用 `src/local_agent/` 布局；`graph/`、`tools/`、`security/`、`context/`、`memory/`、`reflection/`、`rag/`、`persistence/`、`ui/` 与 `web.py` 的职责以 §2 为准。具体目录树、文件职责和按阶段创建顺序见 [开发文档 §3](docs/archive/v0.1-v0.3-development.md#3-项目目录与阶段归属)。禁止为了匹配最终目录树在早期建立空壳模块。
 
 ## 4. LangGraph State 完整定义
 
@@ -991,11 +991,11 @@ AGENTS 文件可以约束工作方式，但不能覆盖系统安全策略、人�
 
 ## 8. 配置契约
 
-模型、工作区、AGENTS、记忆、安全、RAG 和 Agent 的配置键及可运行样例统一维护在 [开发文档 §8](DEVELOPMENT_PLAN.md#8-配置文件与密钥)。`workspace.root` 是启动时默认工作区，网页运行时选择结果保存在会话索引中；`workspace.allow_external_paths` 只放宽显式绝对路径的工具访问，不扩大 AGENTS、记忆或 RAG 作用域。架构硬约束：密钥仅来自环境变量；本地 Embedding 必须显式指定模型缓存目录且不需要 API Key；v0.1a/v0.1b 中长期记忆与压缩关闭；危险操作不得仅靠配置或 Prompt 绕过代码级安全检查。
+模型、工作区、AGENTS、记忆、安全、RAG 和 Agent 的配置键及可运行样例统一维护在 [开发文档 §8](docs/archive/v0.1-v0.3-development.md#8-配置文件与密钥)。`workspace.root` 是启动时默认工作区，网页运行时选择结果保存在会话索引中；`workspace.allow_external_paths` 只放宽显式绝对路径的工具访问，不扩大 AGENTS、记忆或 RAG 作用域。架构硬约束：密钥仅来自环境变量；本地 Embedding 必须显式指定模型缓存目录且不需要 API Key；v0.1a/v0.1b 中长期记忆与压缩关闭；危险操作不得仅靠配置或 Prompt 绕过代码级安全检查。
 
 ## 9. 依赖与 Python 版本
 
-依赖、版本范围、可选依赖和 `pyproject.toml` / `requirements.txt` 示例统一维护在 [开发文档 §9](DEVELOPMENT_PLAN.md#9-依赖与环境)。实现不得使用旧版 LangChain Agent；聊天模型接入基于 `langchain-core`、`langchain-openai`，本地 Embedding 通过 `memory` 可选依赖提供，编排基于 LangGraph。
+依赖、版本范围、可选依赖和 `pyproject.toml` / `requirements.txt` 示例统一维护在 [开发文档 §9](docs/archive/v0.1-v0.3-development.md#9-依赖与环境)。实现不得使用旧版 LangChain Agent；聊天模型接入基于 `langchain-core`、`langchain-openai`，本地 Embedding 通过 `memory` 可选依赖提供，编排基于 LangGraph。
 
 ## 10. 三层记忆系统设计
 
@@ -1199,7 +1199,7 @@ task_conclusions
 
 ### 10.6 会话管理
 
-`thread_id` 是 LangGraph Checkpoint 的恢复键，`session_id` 是网页面向用户的会话标识。二者默认一一对应，但不能用工作目录直接代替会话 ID。v0.1a 只运行一个固定 `thread_id`；v0.1b 启用下面的会话索引；T14C 在此基础上提供网页工作区选择，并保持一个会话只绑定一个稳定 `workspace_root`。v0.4 起会话还固定一个 `mode`（`chat` / `agent`）：创建后不能在同一会话里切换；选择另一模式会新建会话，服务端以会话记录决定工具权限，不能信任浏览器提交的模式。
+`thread_id` 是 LangGraph Checkpoint 的恢复键，`session_id` 是网页面向用户的会话标识。二者默认一一对应，但不能用工作目录直接代替会话 ID。v0.1a 使用固定 `thread_id`，v0.1b 启用会话索引；T14C 保持一个会话绑定一个稳定 `workspace_root`。会话保存下一轮 `mode`（`chat` / `agent`）：空闲时可在当前会话切换，保留线程、标题、消息与分支；运行、待审批、结果待核对时拒绝切换。切换携带观测到的旧模式以拒绝其他页面的并发覆盖。服务端在执行锁内重新读取会话模式并固定本轮权限，不信任提交消息时的浏览器模式。当前快照也携带下一轮模式，供刷新与 SSE 同步。
 
 从 T14C 起，`sessions.status=active` 表示整个会话库唯一的当前会话，而不是“每个工作区各有一个当前会话”。切换工作区或会话时在同一事务中先停用旧记录、再激活目标记录；聊天库迁移必须把历史上可能存在的多条 active 记录归一为 `updated_at` 最新的一条，并用数据库约束防止再次出现多 active。T39 管理补全后，聊天库 v5 增加 `workspaces(workspace_root, title, removed)` 独立登记，迁移时从旧会话路径回填；移除只更新登记，不删除目录或会话，重新添加目录恢复分组和名称。`sessions.archived` 区分归档与正常会话，不复用 active/idle，不新增 AgentState 字段；归档保留 Checkpoint、请求台账和用量，当前会话归档后原子选择最近的非归档会话，无剩余则允许无 active。恢复不自动切换或重新登记工作区。运行中、恢复待核对运行态及待审批会话不能归档；工作区移除检查全部非归档关联线程并复用执行锁，不能隐藏正在运行或待审批的操作。切换历史会话显式持久化 active；名称修改只改变显示元数据。
 
@@ -1392,13 +1392,13 @@ Streaming 不可用时回退为非流式输出，不影响任务正确性。
 - **v0.1b**：三出口审批、完整机械证据、模型能力协商、会话索引与切换、跨平台 Shell 边界。
 - **v0.2**：本地 ONNX Embedding 适配器、Chroma 中期记忆、网页工作区选择与受控外部路径、SQLite 长期记忆、召回/写入/遗忘、Prompt 窗口压缩、LLM 反思。
 - **v0.3**：多步骤规划与重规划、可选代码 RAG（按需搜索与有界片段读取，局部 AST 可选）、可观测性与评测。
-- **v0.4**（规划中，契约已冻结）：可试用独立 Web、应用服务与结构化事件边界、可视化聊天模型连接与免重启切换、供应商实际 Token / 缓存观测、稳定系统前缀与追加式动态上下文快照。方向见 [产品演进路线图 §7](PRODUCT_EVOLUTION_ROADMAP.md)，实施顺序与退出门槛见 [V0_4_DEVELOPMENT_PLAN.md](V0_4_DEVELOPMENT_PLAN.md)；本节 §15 为其稳定契约。**当前状态：T25 已冻结契约与视觉基线，运行代码尚未改动。**
+- **v0.4**（主体已实现，分发与朋友试用门槛待验）：可试用独立 Web、应用服务与结构化事件边界、可视化聊天模型连接与免重启切换、供应商实际 Token / 缓存观测、稳定系统前缀与追加式动态上下文快照。方向见 [产品演进路线图 §7](docs/planning/FUTURE_WORK.md#roadmap)，实施顺序与退出门槛见 [V0_4_DEVELOPMENT_PLAN.md](V0_4_DEVELOPMENT_PLAN.md)；本节 §15 为其稳定契约。**当前状态：T25 已冻结契约与视觉基线，运行代码尚未改动。**
 
-每阶段的任务、前置条件、命令和验收证据见 [开发文档 §4–§7](DEVELOPMENT_PLAN.md#4-v01a图跑通)，其中工作区能力由 v0.2 的 T14C 交付。v0.4 的任务、测试与门槛见 [V0_4_DEVELOPMENT_PLAN.md](V0_4_DEVELOPMENT_PLAN.md)。§14 为预留能力，不属于上述交付范围。
+每阶段的任务、前置条件、命令和验收证据见 [开发文档 §4–§7](docs/archive/v0.1-v0.3-development.md#4-v01a图跑通)，其中工作区能力由 v0.2 的 T14C 交付。v0.4 的任务、测试与门槛见 [V0_4_DEVELOPMENT_PLAN.md](V0_4_DEVELOPMENT_PLAN.md)。§14 为预留能力，不属于上述交付范围。
 
 ## 13. 学习目标
 
-阶段化学习知识点、对应任务与可展示成果见 [开发文档 §13](DEVELOPMENT_PLAN.md#13-学习成果与简历证据)。架构目标仍是通过可验证的工作流理解工具规划、三层记忆、反思与人机协同，而非堆叠名词。
+阶段化学习知识点、对应任务与可展示成果见 [开发文档 §13](docs/archive/v0.1-v0.3-development.md#13-学习成果与简历证据)。架构目标仍是通过可验证的工作流理解工具规划、三层记忆、反思与人机协同，而非堆叠名词。
 
 ## 14. 未来预留扩展
 
@@ -1457,6 +1457,8 @@ test_model_connection(id)        select_default_model(id)
 select_session_model(session_id, id)
 submit_message(session_id, text, client_request_id)
 resolve_approval(session_id, approval_id, decision, client_request_id)
+set_session_mode(session_id, mode, expected_mode)
+end_interrupted_request(session_id, request_id, expected_snapshot_id)
 ```
 
 `workspace_id` 是由规范化工作区路径派生的稳定、不含原路径的标识；同名目录也必须可区分、可按 id 选回。
@@ -1473,6 +1475,9 @@ v0.4 **不公开** `cancel_task()`；DTO 可以让 `can_cancel=false`，但页�
 - 服务重启后台账仍为"执行中"时，先只读核对 Checkpoint：能证明终态则补齐结果引用；无法证明工具副作用与终态
   则返回 `RECOVERY_REQUIRED` 并要求人工核对，**绝不自动重提同一 Graph 输入或再次执行工具**。
 - 模型选择只写"下一轮"的设置，不修改正在运行的 Graph State；它按版本校验，避免两个页面互相覆盖。
+- 决策与闲聊模型节点的异常在图内闭合为失败，保留用量和错误记录；不继续调用工具。工具或检查点异常仍保留待核对台账。执行锁释放后，当前快照以 `interrupted_request_id` 提供中断入口，页面不再把它伪装为持续运行。查询不自动恢复或结束任务。
+- 用户核对后显式结束中断请求：检查会话、请求、轮次与快照，持有同一执行锁，只写终态检查点并收口原台账；不恢复图、不重放工具。无绑定请求不借用上一轮结果。已有可证明终态则补齐原结果。缺少完整结果的已批准工具展示 `interrupted`，不宣称未执行或继续执行。
+- 中断结束时，缺失回复的工具调用补写明确标注“结果未确认”的 ToolMessage，保持下一轮消息协议完整，不伪造工具成功结果或证据；工具行显示 `unknown`，旧审批状态在后续轮次仍保持 `interrupted`。前端清除已处理的请求错误提示，保留历史记录。
 
 ### 15.3 HTTP 与 SSE
 
@@ -1488,6 +1493,8 @@ PATCH/DELETE /api/model-connections/{id}
 POST /api/model-connections/{id}/test
 PUT  /api/model-connections/default     PUT /api/sessions/{session_id}/model
 POST /api/sessions/{session_id}/messages
+PATCH /api/sessions/{session_id}/mode
+POST /api/sessions/{session_id}/recovery
 POST /api/sessions/{session_id}/approvals/{approval_id}
 ```
 
@@ -1667,7 +1674,27 @@ v0.4 管理的是**聊天模型连接**（`provider=openai_compatible`）。连�
   高级概览显式筛选压缩与 AGENTS 规则，不返回密钥、数据库路径或命令规则；本轮不开放压缩修改、
   永久记忆清除、关闭强制审批或插件设置。增加入口不改变默认运行值；用户更改检索/记忆会改变模型输入，缓存率需另行实测。
 
-### 15.10 本节效力与停止条件
+### 15.10 会话地图与历史追问（T44，2026-10-07）
+
+- 一个会话内用用户消息 ID 标识问答节点，`parent_turn_id` 表示实际继承关系。旧线性历史按发生顺序形成一条链，首次浏览不分类、不调用模型、不写业务索引。
+- 聊天库 v6 增加 `conversation_turns` 与 `conversation_branches`。前者保存问答索引与不可改写的父关系，后者保存分支末端及对应 Checkpoint 游标；共享祖先只存一次。Checkpoint 仍是执行恢复真源，索引不是第二份可执行 Graph State。
+- 查看节点只返回该轮消息、模型调用与用量。显式追问才恢复根到该轮的历史上下文；只有无待执行节点、无挂起审批的终态 Checkpoint 可作锚点。缺少锚点的旧节点仍可浏览，但不允许伪造上下文继续执行。
+- 从当前分支末端继续时沿用该分支；选择其他分支末端时转到已有分支；从中间节点追问时创建子分支。提交仍走原 `submit_message`、Graph、工具与审批链路，按同一 `thread_id` 的指定 Checkpoint 开始新输入，不重放历史工具。
+- 新提交可携带 `parent_turn_id`、`expected_branch_id`、`expected_snapshot_id`；路径已改变时返回 `CONVERSATION_CONFLICT`/409，在创建台账和模型调用前拒绝。幂等摘要包含所选上下文，原请求重放仍读取原结果 Checkpoint。执行中、待审批、执行结果尚未确认时禁止分支切换。
+- 四个新接口：`GET /api/sessions/{id}/conversation-map`（可选 `query`），`GET /api/sessions/{id}/turns/{turn_id}`（可选 `include_ancestors`），`POST /api/sessions/{id}/branches/{branch_id}/select`，`PATCH /api/sessions/{id}/branches/{branch_id}`。页面从快照/SSE 重取实际路径，不凭节点点击改执行状态。
+- 地图按实际父关系从左到右排布问答卡片，支持空白画布平移、滚轮缩放、适应全图、定位当前分支；点击卡片打开详情，关闭后恢复完整画布。视图坐标只属于前端展示，不作为执行状态或节点父关系。快照刷新保留已挂载画布的视角。
+- 地图支持检索、节点折叠、定位聊天、分支改名与显示顺序；显示顺序不改变上下文父关系。返回的思考与工具详情沿用已有脱敏展示。地图元数据不加入模型 Prompt，浏览、搜索、整理不产生模型调用。
+- 历史追问只回到对话上下文；工作区文件、中期/长期共享记忆和当前模型设置仍使用当前状态。节点重新挂接、智能分类、节点自由拖拽布局、历史重生成和分支删除留待独立任务；只读记忆/用量页面见 §15.11。
+
+### 15.11 数据中台（T45，2026-10-07）
+
+- 在现有 Web 增加只读入口，展示中期记忆、长期事实/任务结论，以及实际模型调用用量；不修改 Graph、模型输入或召回配置，不开放编辑、删除、库重建或价格估算。
+- 读取现有记忆库，按 `visible_scope_keys` 限定可见范围。长期 SQLite 使用只读连接，不迁移或创建库；中期只打开已存在的 collection，显式关闭 embedding，不创建 collection、不生成向量。配置关闭仍可查看保留数据，页面区分开关、空库和读取失败。
+- `GET /api/data-center/memories` 按工作区、记忆类型、文本和状态分页；`GET /api/data-center/usage` 按工作区、时间和模型分页。只接收登记工作区 ID，不接收任意路径。正文与公开字段复用展示脱敏，不公开向量、密钥或供应商原始错误。
+- 用量从各会话最新及分支末端 Checkpoint 的累积调用记录读取，按会话与 `model_call_id` 去重；失败与重试分别保留，未知字段不补零。总览和趋势从同一过滤后的调用集合计算，缓存率按 Token 加权，不平均各调用百分比。归档会话仍统计；读取缺口或达到扫描上限必须显式提示。
+- 第一版读取和响应均有上限、服务端分页：每类记忆最多读取 10,000 条，正文最多展示 20,000 字符；用量最多扫描最近活动的 200 会话、2,000 检查点、100,000 次调用记录（分支重复读取也消耗扫描预算）。不把界面浏览写成记忆访问，不持久化另一份用量真源。验收包含分支去重、作用域、空库、未知指标、分页/筛选、无模型/向量调用和实际浏览器检查。
+
+### 15.12 本节效力与停止条件
 
 - 本节是 v0.4 的唯一实现权威；改变本节任一条都必须先修订本节与 `V0_4_DEVELOPMENT_PLAN.md`。
 - **v0.4 不得删减 v0.1–v0.3 已完成能力**：聊天、工作区、会话、工具、安全审批、三层记忆、压缩、反思、
@@ -1676,7 +1703,7 @@ v0.4 管理的是**聊天模型连接**（`provider=openai_compatible`）。连�
   Graph 状态；快照/事件投影会触发副作用；缓存优化降低现有正确性；为页面效果引入当前没有真实消费者的
   平台化抽象。
 - 视觉基线（"长什么样、交互如何反馈"）以 `local-agent-web/docs/ui-reference/` 为准；§15.1–§15.9 只管职责边界与
-  接口契约，不规定视觉细节。该目录的缺口清单必须如实保留，不得用文字描述替代高保真视觉验收。
+  接口契约，不规定视觉细节。新增会话地图遵循 §15.10。该目录的缺口清单必须如实保留，不得用文字描述替代高保真视觉验收。
 
 ---
 
