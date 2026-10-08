@@ -89,6 +89,9 @@
   3. 超时与失败如实报告，不伪造结果、不伪造进度。
   4. 关闭该能力时，行为与 v0.4 完全一致。
 - **明确不做**：多引擎回退、JS 渲染页面、登录态抓取、结果缓存（出现真实故障再引入）。
+- **状态（2026-10-08，已完成）**：契约 §6.10（工具定义与安全边界）与 §16.3 冻结；§6.9 能力表加 `web`，§16.1 的 `researcher` 追加 `web`。实现落点：`capabilities.py`（`web` 能力、`UNTRUSTED_CAPABILITIES`、`effective_capabilities`）、`config.py`（`web_access` 段，**默认关闭**）、`tools/web_tools.py`（搜索/抓取 + SSRF 边界 + 可注入 transport）、`tools/result_types.py`（三个结果结构）、`security/policy.py`（两个工具登记为只读）、`tools/tool_registry.py` + `graph/builder.py`（构造注册表与"配置开关收窄能力"）、`context/prompt_context.py`（Web 规范 + 不可信数据条款）、`graph/nodes.py`（**本轮取回过网页 → 该轮候选一律 `untrusted`**）、`config.yaml.example`。
+- **T53 的验收证据**：新增 `tests/test_web_tools.py` **25 条**——SSRF（10 种本机/内网/非 http 目标被拒、域名解析到内网被拒、公网通过并归一化、**重定向到本机被拦**）；失败如实报告（超时、HTTP 错误、解析不出结果、非文本类型）；结构（标题/URL/来源、搜索结果不含正文）；截断与说明；能力开关（默认关闭时 `web` 不进有效集合）；只给 `researcher`；以及**不可信回流**（本轮 `web_*` 成功结果 → 候选 `untrusted`；被拒/失败结果、上一轮的结果、本机工具都不算）。另同步 `test_capabilities.py` 的 Profile 断言。Python 全量见提交记录；`ruff check .`、`mypy src`（106 文件）通过。
+- **T53 未做（如实列出）**：① **没有真实联网验证**——全部用例走注入的假 transport；真实 provider（DuckDuckGo HTML 版）的抗反爬与页面结构稳定性，要等一次真实调用才知道（这正是"多引擎回退等真实故障再引入"的触发条件）。② 单实现、无回退，也没有"需要 API Key 的 provider"（要换按 §16.3 先改契约）。③ 页面暂不展示 Profile/能力状态（属 T56）；搜索来源目前靠最终回答里引用 URL 让用户核对。④ **没有新增"真实网页 + 注入页面"的人工对抗场景**——建议在 T56 或下一轮朋友复验时补，那才是"Web 内容中的提示注入不能修改安全策略"的端到端证据。
 
 ### T54｜Git 能力
 
