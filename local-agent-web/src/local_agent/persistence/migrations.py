@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 CHAT_SCHEMA_VERSION = 6
 
 #: 长期记忆库当前代码期望的结构版本。
-LONG_TERM_SCHEMA_VERSION = 2
+LONG_TERM_SCHEMA_VERSION = 3
 
 #: 设置库当前结构版本：v2 = 外部路径授权；v3 = 非秘密应用偏好。
 SETTINGS_SCHEMA_VERSION = 3
@@ -309,10 +309,21 @@ _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
     """),
 )
 
+#: 长期库 v3（T52）：给 ``facts`` 与 ``task_conclusions`` 加 ``origin`` 列（架构 §10.3、§16.2）。
+#:
+#: 用 ``ALTER TABLE ADD COLUMN`` 追加在末尾，与 dataclass 的字段顺序一致。``DEFAULT 'owner'`` 只服务
+#: **历史行**：T52 之前唯一的写入者是本机反思链路，属于已知来源；新写入一律显式给值，写侧校验会拒绝
+#: 越界与缺失（所以这里的默认值不会被新行用到）。
+_LONG_TERM_V3_ORIGIN_SQL = """
+ALTER TABLE facts ADD COLUMN origin TEXT NOT NULL DEFAULT 'owner';
+ALTER TABLE task_conclusions ADD COLUMN origin TEXT NOT NULL DEFAULT 'owner';
+"""
+
 #: 长期记忆库的迁移；规则同上（独立文件、独立版本号）。
 _LONG_TERM_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _LONG_TERM_SQL),
     (2, _LONG_TERM_V2_INDEXES_SQL),
+    (3, _LONG_TERM_V3_ORIGIN_SQL),
 )
 
 #: 模型连接设置库的迁移；规则同上（独立文件、独立版本号）。

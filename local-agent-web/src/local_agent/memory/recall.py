@@ -54,6 +54,8 @@ from local_agent.memory.schemas import (
     LongTermReference,
     MemoryReference,
     TaskConclusionRecord,
+    is_auto_injectable,
+    resolve_origin,
 )
 from local_agent.scope import (
     SCOPE_GLOBAL,
@@ -160,14 +162,23 @@ def _to_reference(
         created_at=created_at,
         source_thread_id=_optional_text(hit.metadata.get("source_thread_id")),
         expires_at=_optional_text(hit.metadata.get("expires_at")),
+        # 来源可信级别（架构 §16.2）：缺失表示 T52 之前的记录，按**已知来源**（owner）处理。
+        origin=resolve_origin(hit.metadata.get("origin")),
     )
 
 
 def _is_usable(
     reference: MemoryReference, config: MediumTermMemoryConfig, now: datetime
 ) -> bool:
-    """是否允许进入 Prompt：相似度达标、未过期、内容非空。"""
+    """是否允许进入 Prompt：来源可信、相似度达标、未过期、内容非空。
+
+    **来源检查排在第一**（架构 §16.2）：``untrusted`` / ``system`` 的内容在这里就被排除，是结构性
+    排除而不是打分惩罚——相似度、重要度、置信度再高都不能越过这条。缺失 ``origin`` 的引用按读回
+    口径归一（T52 之前的记录 = 已知来源），因此历史记忆的召回行为不变。
+    """
     if not reference["content"].strip():
+        return False
+    if not is_auto_injectable(resolve_origin(reference.get("origin"))):
         return False
     if reference["similarity"] < config.min_score:
         return False
@@ -224,10 +235,15 @@ def recall_long_term(
     for entity, fact in store.active_facts_with_entities(scope_keys, now=moment):
         if not is_recallable_fact(fact, config=config, now=moment):
             continue
+        if not is_auto_injectable(fact.origin):
+            # 结构性排除（架构 §16.2）：来源不可信的事实不参与自动注入，与阈值无关。
+            continue
         importance = effective_importance(fact, config=config, now=moment)
         if _long_term_usable(fact.confidence, importance, config):
             references.append(_fact_reference(entity, fact, importance=importance))
     for conclusion in store.list_task_conclusions(project_scope=project_scope):
+        if not is_auto_injectable(conclusion.origin):
+            continue
         if conclusion.confidence >= config.confidence_threshold:
             references.append(_conclusion_reference(conclusion, project_scope))
     return _top_long_term(references, top_k)
@@ -263,6 +279,7 @@ def _fact_reference(
         updated_at=fact.updated_at,
         expires_at=fact.expires_at,
         score=round(fact.confidence * importance, 6),
+        origin=fact.origin,
     )
 
 
@@ -282,6 +299,7 @@ def _conclusion_reference(
         updated_at=conclusion.updated_at,
         expires_at=None,
         score=round(conclusion.confidence * CONCLUSION_IMPORTANCE, 6),
+        origin=conclusion.origin,
     )
 
 
@@ -304,6 +322,7 @@ def as_memory_reference(reference: LongTermReference) -> MemoryReference:
         source_thread_id=None,
         expires_at=reference["expires_at"],
         kind="long_term_fact" if reference["kind"] == "fact" else "task_conclusion",
+        origin=reference["origin"],
     )
 
 

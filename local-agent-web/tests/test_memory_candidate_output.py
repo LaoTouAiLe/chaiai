@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from local_agent.graph import builder, nodes
 from local_agent.graph.state import MemoryCandidate
 from local_agent.llm.protocol import StructuredOutputError
+from local_agent.memory.schemas import ORIGIN_OWNER
 from local_agent.reflection.memory_candidates import RejectedCandidate, plan_writes
 from local_agent.reflection.reflector import (
     CandidateDecision,
@@ -48,8 +49,13 @@ def test_unescaped_entity_fact_is_repaired_once_preserving_prefix_and_scope(tmp_
     assert all(call[:len(prefix)] == prefix for call in calls)
     candidate = decision.memory_candidates[0]
     assert json.loads(candidate.content) == FLOW
-    writes = plan_writes(MemoryCandidate(**candidate.model_dump(), source_event_ids=["real"]),
-                         workspace_root=tmp_path)
+    writes = plan_writes(
+        # origin 由写入链路显式给出（不取模型输出）：T52 起它是必填字段。
+        MemoryCandidate(
+            **candidate.model_dump(), source_event_ids=["real"], origin=ORIGIN_OWNER
+        ),
+        workspace_root=tmp_path,
+    )
     assert not isinstance(writes, RejectedCandidate)
     assert writes[0].scope == "project"
     assert writes[0].payload.value == FLOW["value"]
@@ -101,8 +107,13 @@ def test_canonical_fact_keeps_json_values_and_project_default(tmp_path):
                "value": {"quotes": '"quoted"', "list": [None, False, 1, "中文\n行"]}}
     decision = CandidateDecision.model_validate({"memory_type": "entity_fact", "content": payload})
     assert json.loads(decision.content) == payload
-    writes = plan_writes(MemoryCandidate(**decision.model_dump(), source_event_ids=["real"]),
-                         workspace_root=tmp_path, user_id="actual-user")
+    writes = plan_writes(
+        MemoryCandidate(
+            **decision.model_dump(), source_event_ids=["real"], origin=ORIGIN_OWNER
+        ),
+        workspace_root=tmp_path,
+        user_id="actual-user",
+    )
     assert not isinstance(writes, RejectedCandidate)
     assert writes[0].scope == "project"  # No new cross-project authorization.
 

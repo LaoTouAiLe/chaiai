@@ -69,6 +69,7 @@ def _seed(
             source="test",
             expires_at=expires_at,
             now=now,
+            origin="owner",
         )
     finally:
         store.close()
@@ -513,6 +514,7 @@ def test_delete_allows_user_scope_records(
             confidence=0.9,
             importance=0.8,
             source="test",
+            origin="owner",
         )
     finally:
         store.close()

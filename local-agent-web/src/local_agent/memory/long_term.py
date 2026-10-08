@@ -50,10 +50,13 @@ from local_agent.memory.schemas import (
     FACT_STATUS_DELETED,
     FACT_STATUS_EXPIRED,
     FACT_STATUS_SUPERSEDED,
+    ORIGINS,
     EntityRecord,
     FactRecord,
     FactWriteResult,
+    Origin,
     TaskConclusionRecord,
+    resolve_origin,
 )
 from local_agent.persistence import migrations
 from local_agent.scope import SCOPES, MemoryScope, scope_key_for
@@ -80,6 +83,9 @@ _FACT_COLUMN_NAMES: tuple[str, ...] = (
     "last_accessed_at",
     "expires_at",
     "status",
+    # T52：来源可信级别（架构 §16.2）。列在末尾——迁移用 ALTER TABLE ADD COLUMN 追加，
+    # 字段顺序必须与 FactRecord 一致（tests/test_memory.py 逐字比对）。
+    "origin",
 )
 _CONCLUSION_COLUMN_NAMES: tuple[str, ...] = (
     "id",
@@ -90,6 +96,7 @@ _CONCLUSION_COLUMN_NAMES: tuple[str, ...] = (
     "confidence",
     "created_at",
     "updated_at",
+    "origin",
 )
 
 #: ``facts.status`` 的合法取值；读库时校验，未知状态明确失败（不静默当成 ``active``）。
@@ -339,6 +346,7 @@ class LongTermStore:
         confidence: float,
         importance: float,
         source: str,
+        origin: Origin,
         expires_at: str | None = None,
         now: datetime | None = None,
     ) -> FactWriteResult:
@@ -355,6 +363,8 @@ class LongTermStore:
             confidence: 来源置信度，0~1。
             importance: 重要度，0~1。
             source: 来源标识（供审计与冲突解释）。
+            origin: 内容来源可信级别（架构 §16.2）。**必填**：写入方必须显式给出，取值越界一律
+                拒绝——"不知道来源"不许当 ``owner``，那是自动注入 Prompt 的通行证。
             expires_at: 可选有效期，必须是可解析的 ISO-8601；解析不了时**写入即拒绝**
                 （否则会留下"写得进、永远不召回"的记录）。库里已有的非法值仍按已过期处理。
             now: 当前时间，默认取 UTC 现在；测试可注入。
@@ -372,7 +382,9 @@ class LongTermStore:
                 "请先用 record_entity 建立实体"
             )
         fact_key = _require_text(key, "key")
-        origin = _require_text(source, "source")
+        source_value = _require_text(source, "source")
+        # 写入侧校验用**拒绝**而不是归一：把未知来源悄悄写成 owner，就等于给了它注入资格。
+        checked_origin = _require_origin(origin)
         payload = _normalize_json(value, "value")
         score = _require_score(confidence, "confidence")
         weight = _require_score(importance, "importance")
@@ -394,7 +406,8 @@ class LongTermStore:
                     payload=payload,
                     confidence=score,
                     importance=weight,
-                    source=origin,
+                    source=source_value,
+                    origin=checked_origin,
                     expires_at=expiry,
                     status=FACT_STATUS_ACTIVE,
                     stamp=stamp,
@@ -408,7 +421,8 @@ class LongTermStore:
                     payload=payload,
                     confidence=score,
                     importance=weight,
-                    source=origin,
+                    source=source_value,
+                    origin=checked_origin,
                     expires_at=expiry,
                     status=FACT_STATUS_ACTIVE,
                     stamp=stamp,
@@ -420,7 +434,8 @@ class LongTermStore:
                 payload=payload,
                 confidence=score,
                 importance=weight,
-                source=origin,
+                source=source_value,
+                origin=checked_origin,
                 expires_at=expiry,
                 status=FACT_STATUS_CONFLICTED,
                 stamp=stamp,
@@ -603,6 +618,7 @@ class LongTermStore:
         conclusion: str,
         project_scope: str,
         confidence: float,
+        origin: Origin,
         evidence: Any = None,
         now: datetime | None = None,
     ) -> TaskConclusionRecord:
@@ -613,6 +629,7 @@ class LongTermStore:
             conclusion=conclusion,
             project_scope=project_scope,
             confidence=confidence,
+            origin=origin,
             evidence=evidence,
             now=now,
         )
@@ -626,6 +643,7 @@ class LongTermStore:
         conclusion: str,
         project_scope: str,
         confidence: float,
+        origin: Origin,
         evidence: Any = None,
         now: datetime | None = None,
     ) -> tuple[TaskConclusionRecord, bool]:
@@ -643,13 +661,14 @@ class LongTermStore:
             evidence_json=_normalize_json(evidence, "evidence"),
             project_scope=_require_text(project_scope, "project_scope"),
             confidence=_require_score(confidence, "confidence"),
+            origin=_require_origin(origin),
             created_at=moment,
             updated_at=moment,
         )
         with self._transaction():
             cursor = self.connection.execute(
                 f"INSERT OR IGNORE INTO task_conclusions ({_CONCLUSION_COLUMNS})"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.id,
                     record.task_title,
@@ -659,6 +678,7 @@ class LongTermStore:
                     record.confidence,
                     record.created_at,
                     record.updated_at,
+                    record.origin,
                 ),
             )
             if not cursor.rowcount:
@@ -732,6 +752,7 @@ class LongTermStore:
         confidence: float,
         importance: float,
         source: str,
+        origin: Origin,
         expires_at: str | None,
         status: str,
         stamp: str,
@@ -750,9 +771,11 @@ class LongTermStore:
             last_accessed_at=None,
             expires_at=expires_at,
             status=status,
+            origin=origin,
         )
         self.connection.execute(
-            f"INSERT INTO facts ({_FACT_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            f"INSERT INTO facts ({_FACT_COLUMNS})"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 record.id,
                 record.entity_id,
@@ -766,6 +789,7 @@ class LongTermStore:
                 record.last_accessed_at,
                 record.expires_at,
                 record.status,
+                record.origin,
             ),
         )
         return record
@@ -935,6 +959,20 @@ def _require_text(value: str, field: str) -> str:
     return text
 
 
+def _require_origin(value: object) -> Origin:
+    """写入侧的来源级别校验：必须是闭集取值，否则拒绝写入（架构 §16.2）。
+
+    与**读回**用的 :func:`~local_agent.memory.schemas.resolve_origin` 刻意不同：读回对缺失/脏值做
+    保守归一（越界一律当成"不可注入"），写入则**不允许**出现"没想清楚来源"的记录——那正是本条
+    契约要防的事。所以这里失败闭合，而不是替调用方挑一个默认值。
+    """
+    if value in ORIGINS:
+        return value
+    raise MemoryStoreError(
+        f"未知的 origin：{value!r}（只能是 {'、'.join(ORIGINS)}；见架构 §16.2）"
+    )
+
+
 def _optional_text(value: str | None) -> str | None:
     """可选文本字段：空白视作未提供。"""
     if value is None:
@@ -1082,6 +1120,8 @@ def _fact_from_row(row: Sequence[Any]) -> FactRecord:
             confidence=_require_score(float(row[4]), "confidence"),
             importance=_require_score(float(row[5]), "importance"),
             source=str(row[6]),
+            # 越界/脏值按"不可注入"处理（resolve_origin 的口径），不因为一行脏数据让整次召回失败
+            origin=resolve_origin(row[12]),
             created_at=str(row[7]),
             updated_at=str(row[8]),
             last_accessed_at=str(row[9]) if row[9] is not None else None,
@@ -1113,6 +1153,7 @@ def _conclusion_from_row(row: Sequence[Any]) -> TaskConclusionRecord:
             confidence=float(row[5]),
             created_at=str(row[6]),
             updated_at=str(row[7]),
+            origin=resolve_origin(row[8]),
         )
     except (IndexError, TypeError, ValueError) as exc:
         raise MemoryStoreError(f"task_conclusions 表存在无法解码的行：{exc}") from exc

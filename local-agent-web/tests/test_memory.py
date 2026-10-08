@@ -110,6 +110,8 @@ ARCHITECTURE_MEDIUM_TERM_FIELDS = (
     "last_accessed_at",
     "expires_at",
     "status",
+    # T52：来源可信级别（架构 §16.2 冻结；字段表 §10.2 已同步）。
+    "origin",
 )
 
 
@@ -814,6 +816,8 @@ def _project_record(
         "confidence": 0.5,
         "created_at": NOW_ISO,
         "status": schemas.MEDIUM_TERM_STATUS_ACTIVE,
+        # T52：来源可信级别（必填）；默认本机链路，用例可经 overrides 覆盖成 untrusted 等
+        "origin": "owner",
     }
     values.update(overrides)
     return schemas.MediumTermRecord(**values)
@@ -886,6 +890,76 @@ def test_medium_term_round_trip_and_metadata(memory_store, tmp_path: Path) -> No
     assert second["user_id"] == scope.LOCAL_USER_ID
     assert second["source_thread_id"] == "thread-x"
     assert second["expires_at"] == "2026-12-31T00:00:00+00:00"
+    # T52：origin 是固定键（永远有值），不随可选字段一起被省略
+    assert first["origin"] == "owner"
+
+
+def test_medium_term_metadata_carries_origin(memory_store, tmp_path: Path) -> None:
+    """来源可信级别要落进 Chroma metadata（架构 §16.2）：召回侧据此决定能否自动注入。"""
+    project_id = scope.project_id_for(tmp_path)
+    memory_store.upsert(
+        [
+            _project_record("mem-owner", "本机事实", project_id=project_id),
+            _project_record("mem-web", "网页摘录", project_id=project_id, origin="untrusted"),
+        ]
+    )
+
+    stored = memory_store.collection.get(ids=["mem-owner", "mem-web"], include=["metadatas"])
+    owner, web = stored["metadatas"]
+
+    assert owner["origin"] == "owner"
+    assert web["origin"] == "untrusted"
+
+
+def test_medium_term_recall_skips_non_injectable_origin(memory_store, tmp_path: Path) -> None:
+    """``untrusted`` / ``system`` 的中期记忆写得进、读得出，但**不召回**（结构性排除，不是打分惩罚）。"""
+    project_id = scope.project_id_for(tmp_path)
+    memory_store.upsert(
+        [
+            _project_record("mem-owner", QUERY_TEXT, project_id=project_id, importance=0.9),
+            _project_record(
+                "mem-web", QUERY_TEXT, project_id=project_id, importance=0.9, origin="untrusted"
+            ),
+            _project_record(
+                "mem-sys", QUERY_TEXT, project_id=project_id, importance=0.9, origin="system"
+            ),
+        ]
+    )
+
+    recalled = [
+        item["memory_id"]
+        for item in _recall(memory_store, config=_memory_config(tmp_path), workspace=tmp_path)
+    ]
+
+    assert recalled == ["mem-owner"]
+
+
+def test_legacy_medium_record_without_origin_is_still_recalled(
+    memory_store, tmp_path: Path
+) -> None:
+    """T52 之前的中期记录没有 ``origin`` 键：按**已知来源**处理（照旧召回），不当作不可信。"""
+    project_id = scope.project_id_for(tmp_path)
+    memory_store.collection.add(
+        ids=["legacy"],
+        documents=[QUERY_TEXT],
+        metadatas=[
+            {
+                "scope": scope.SCOPE_PROJECT,
+                "scope_key": project_id,
+                "importance": 0.9,
+                "confidence": 0.9,
+                "created_at": NOW_ISO,
+                "status": schemas.MEDIUM_TERM_STATUS_ACTIVE,
+            }
+        ],
+    )
+
+    recalled = [
+        item["memory_id"]
+        for item in _recall(memory_store, config=_memory_config(tmp_path), workspace=tmp_path)
+    ]
+
+    assert recalled == ["legacy"]
 
 
 def test_medium_term_query_filters_by_scope_and_status(memory_store, tmp_path: Path) -> None:
@@ -1443,6 +1517,7 @@ def _write_fact(
     confidence: float = 0.9,
     importance: float = 0.8,
     now: datetime | None = None,
+    origin: str = "owner",
     **overrides: Any,
 ) -> schemas.FactWriteResult:
     return store.upsert_fact(
@@ -1452,6 +1527,7 @@ def _write_fact(
         confidence=confidence,
         importance=importance,
         source="test",
+        origin=origin,  # type: ignore[arg-type]
         now=now,
         **overrides,
     )
@@ -1775,12 +1851,15 @@ def test_task_conclusions_are_recalled_by_project_scope(
         confidence=0.8,
         evidence=[{"file": "memory/long_term.py"}],
         now=NOW,
+        origin="owner",
     )
     store.record_task_conclusion(
-        task_title="别的项目", conclusion="不该被召回", project_scope=project_b, confidence=0.9, now=NOW
+        task_title="别的项目", conclusion="不该被召回", project_scope=project_b, confidence=0.9, now=NOW,
+        origin="owner",
     )
     weak = store.record_task_conclusion(
-        task_title="未验证结论", conclusion="仅供参考", project_scope=project_a, confidence=0.4, now=LATER
+        task_title="未验证结论", conclusion="仅供参考", project_scope=project_a, confidence=0.4, now=LATER,
+        origin="owner",
     )
 
     references = _recall_long_term(store, tmp_path, project_id=project_a)
@@ -1868,6 +1947,7 @@ def test_dirty_row_decoding_is_wrapped_as_store_error(
         project_scope=project_id,
         confidence=0.9,
         now=NOW,
+        origin="owner",
     )
     store.connection.execute('UPDATE facts SET "confidence" = ?', ("不是数字",))
     store.connection.execute('UPDATE task_conclusions SET "confidence" = ?', ("坏",))
@@ -1900,6 +1980,7 @@ def test_upsert_fact_rejects_invalid_input(
             project_scope="project-a",
             confidence=0.5,
             evidence=float("nan"),
+            origin="owner",
         )
     with pytest.raises(MemoryStoreError):
         store.upsert_fact(
@@ -1909,6 +1990,7 @@ def test_upsert_fact_rejects_invalid_input(
             confidence=0.9,
             importance=0.8,
             source="test",
+            origin="owner",
         )
     assert store.list_facts(entity_id=entity.id) == []
 
@@ -2060,6 +2142,7 @@ def test_two_stores_writing_the_same_key_keep_one_active_fact(tmp_path: Path) ->
                 importance=0.8,
                 source="test",
                 now=NOW,
+                origin="owner",
             )
             with guard:
                 outcomes.append(result.outcome)
@@ -2137,8 +2220,8 @@ def test_reads_wait_for_the_write_transaction(
     assert _status(store, current.record.id) == schemas.FACT_STATUS_SUPERSEDED
 
 
-def test_legacy_long_term_v1_database_upgrades_to_v2(tmp_path: Path) -> None:
-    """旧库（v1：只有表结构）能直接升到当前版本，数据保留、查询索引补齐。"""
+def test_legacy_long_term_v1_database_upgrades_to_current_version(tmp_path: Path) -> None:
+    """旧库（v1：只有表结构、没有 ``origin`` 列）能直接升到当前版本：数据保留、索引补齐、来源补成 owner。"""
     path = tmp_path / "data" / "memories.sqlite"
     path.parent.mkdir(parents=True)
     connection = sqlite3.connect(str(path))
@@ -2188,7 +2271,10 @@ def test_legacy_long_term_v1_database_upgrades_to_v2(tmp_path: Path) -> None:
             "idx_task_conclusions_scope_time",
         } <= indexes
         assert opened.get_entity("entity-old") is not None
-        assert opened.get_fact("fact-old") is not None
+        legacy = opened.get_fact("fact-old")
+        assert legacy is not None
+        # T52：升级只补齐列；历史行的来源按"已知来源"落 owner（架构 §16.2 的历史数据口径）
+        assert legacy.origin == "owner"
         # 旧身份行会被复用，不会因为升级产生重复实体
         reused = opened.record_entity(
             entity_type="project",
@@ -2203,7 +2289,12 @@ def test_legacy_long_term_v1_database_upgrades_to_v2(tmp_path: Path) -> None:
 
 
 def test_open_store_rejects_database_with_missing_columns(tmp_path: Path) -> None:
-    """自称 v2 但缺列的库必须**打开时就**明确失败，不能拖到第一次 CRUD 才裸抛。"""
+    """自称**当前版本**但缺列的库必须**打开时就**明确失败，不能拖到第一次 CRUD 才裸抛。
+
+    版本号写成当前版本（T52 起为 3）：自称更旧的库会先走迁移（这是升级路径，由
+    ``test_legacy_long_term_v1_database_upgrades_to_current_version`` 覆盖），而"版本号不可信"
+    这一条针对的正是"自称已经是最新、结构却对不上"的库。
+    """
     path = tmp_path / "data" / "memories.sqlite"
     path.parent.mkdir(parents=True)
     connection = sqlite3.connect(str(path))
@@ -2215,7 +2306,7 @@ def test_open_store_rejects_database_with_missing_columns(tmp_path: Path) -> Non
             CREATE TABLE task_conclusions (id TEXT PRIMARY KEY);
             CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
             INSERT INTO schema_migrations (version, applied_at)
-                VALUES (2, '2026-01-01T00:00:00+00:00');
+                VALUES (3, '2026-01-01T00:00:00+00:00');
             """
         )
         connection.commit()
@@ -2233,7 +2324,7 @@ def test_open_store_rejects_database_with_missing_columns(tmp_path: Path) -> Non
     # 失败不应改动文件：表还在、结构版本仍是它自称的那个
     connection = sqlite3.connect(str(path))
     try:
-        assert migrations.current_version(connection) == 2
+        assert migrations.current_version(connection) == 3
         assert "entities" in migrations.table_names(connection)
     finally:
         connection.close()
@@ -2996,11 +3087,16 @@ def _candidate(
     importance: float = 0.6,
     confidence: float = 0.8,
     sources: tuple[str, ...] = ("evt-1",),
+    origin: str = "owner",
 ) -> MemoryCandidate:
-    """构造一条候选（字段集合与架构 §4.3 逐字一致，不含作用域字段）。"""
+    """构造一条候选（字段集合与架构 §4.3 逐字一致，不含作用域字段）。
+
+    ``origin`` 必须显式给出（T52 起它是必填字段，没有默认值）：本机反思链路写 owner。
+    """
     return MemoryCandidate(
         memory_type=memory_type,  # type: ignore[arg-type]
         content=content,
+        origin=origin,  # type: ignore[arg-type]
         subject=subject,
         importance=importance,
         confidence=confidence,

@@ -59,6 +59,54 @@ FACT_STATUS_DELETED = "deleted"
 #: 参与召回的长期事实状态。
 FACT_STATUSES_RECALLABLE: tuple[str, ...] = (FACT_STATUS_ACTIVE,)
 
+#: 记忆内容的**来源可信级别**（架构 §16.2，T52 冻结）。闭集，且**没有默认值**。
+#:
+#: - ``owner``：内容来自用户本人或用户自己的工作区（本机会话消息、本机文件内容）；
+#: - ``system``：产品自身的脚手架内容（由代码生成的占位与说明）；
+#: - ``untrusted``：信任边界之外的内容（外部网页、第三方文档、他人提供的文本）。
+#:
+#: **无法判定时永不默认 owner**：写入方必须显式给出取值——给"不知道来源"的内容打 ``owner``，
+#: 等价于让它自动进 Prompt。所以候选、写入与读取三处都不设默认。
+Origin = Literal["owner", "system", "untrusted"]
+
+ORIGIN_OWNER: Origin = "owner"
+ORIGIN_SYSTEM: Origin = "system"
+ORIGIN_UNTRUSTED: Origin = "untrusted"
+
+#: 全部合法取值（校验与测试共用；顺序固定）。
+ORIGINS: tuple[Origin, ...] = (ORIGIN_OWNER, ORIGIN_SYSTEM, ORIGIN_UNTRUSTED)
+
+#: T52 之前写入的记录没有 ``origin`` 字段，读取时按这个值处理：那时唯一的写入者是本机反思链路
+#: （``facts.source = 'reflection'``），属于**已知来源**，不是"判定不出来"（架构 §16.2）。
+LEGACY_ORIGIN: Origin = ORIGIN_OWNER
+
+
+def is_auto_injectable(origin: object) -> bool:
+    """该来源级别的内容能否**自动进入 Prompt**（架构 §16.2）。
+
+    只有 ``owner`` 可以。判定写成"精确等于 ``owner``"而不是"不等于 ``untrusted``"：闭集之外的值
+    （脏数据、将来新增的取值）一律落在不可注入的一侧，符合失败闭合。
+    """
+    return origin == ORIGIN_OWNER
+
+
+def resolve_origin(value: object) -> Origin:
+    """把**库里读回**的值归一成闭集取值。
+
+    - 合法取值：原样返回；
+    - 缺失或空白（T52 之前的记录没有这个字段）：按 :data:`LEGACY_ORIGIN`——那时唯一的写入者是
+      本机反思链路（``facts.source = 'reflection'``），属于**已知来源**，不是"判定不出来"；
+    - 其它越界值（脏数据、将来版本的新取值）：按 ``untrusted``，**失败闭合**——宁可不让它自动进
+      Prompt，也不猜它是可信的。
+
+    只用于**读回**：写入路径不走这里（它必须显式给值，见 ``long_term._require_origin``）。
+    """
+    if value in ORIGINS:
+        return value
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return LEGACY_ORIGIN
+    return ORIGIN_UNTRUSTED
+
 
 class MemoryReference(TypedDict):
     """一条召回结果（架构 §4.2 的 ``memory_refs`` 元素；字段由 T14B 定义，架构 §4.3 未固定）。
@@ -88,6 +136,8 @@ class MemoryReference(TypedDict):
     expires_at: str | None
     #: 记忆来源；缺省按中期向量记忆处理（兼容 T14B 产出的结果）。
     kind: NotRequired[Literal["medium_term", "long_term_fact", "task_conclusion"]]
+    #: 内容来源可信级别（架构 §16.2）；缺失表示 T52 之前的记录，按 :data:`LEGACY_ORIGIN` 处理。
+    origin: NotRequired[Origin]
 
 
 class LongTermReference(TypedDict):
@@ -115,6 +165,8 @@ class LongTermReference(TypedDict):
     updated_at: str
     expires_at: str | None
     score: float
+    #: 内容来源可信级别（架构 §16.2）；必填——召回到的每一条都必须能回答"它能不能自动进 Prompt"。
+    origin: Origin
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -142,6 +194,8 @@ class MediumTermRecord:
     last_accessed_at: str | None = None
     expires_at: str | None = None
     status: str
+    #: 来源可信级别（架构 §16.2）；必填——写入方必须显式声明来源，没有默认值。
+    origin: Origin
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -177,6 +231,8 @@ class FactRecord:
     last_accessed_at: str | None = None
     expires_at: str | None = None
     status: str
+    #: 来源可信级别（架构 §16.2）；必填，且与 ``entities`` 表的字段顺序一致（§10.3 字段表）。
+    origin: Origin
 
 
 #: 一次 fact 写入的结果（T15 的"版本记录 + 冲突不静默覆盖"语义）：
@@ -219,3 +275,5 @@ class TaskConclusionRecord:
     confidence: float
     created_at: str
     updated_at: str
+    #: 来源可信级别（架构 §16.2）；必填（任务结论同样受"不可注入即不注入"的约束）。
+    origin: Origin

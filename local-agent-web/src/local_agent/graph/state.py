@@ -29,7 +29,7 @@ from local_agent.context.token_budget import ContextBudget, TokenUsage
 from local_agent.graph.scope import tool_scope_key
 from local_agent.llm.models import ModelCapabilities
 from local_agent.llm.usage_recording import ModelCallRecord, ModelCallRecorder, TurnRecord
-from local_agent.memory.schemas import MemoryReference
+from local_agent.memory.schemas import MemoryReference, Origin
 from local_agent.model_settings.models import ModelBinding
 from local_agent.security.approval import ApprovalDecision, ApprovalRequest
 from local_agent.security.policy import SecurityPolicy
@@ -301,6 +301,10 @@ class MemoryCandidate:
     """
 
     memory_type: Literal["conversation_summary", "task_fragment", "entity_fact"]
+    #: 内容来源可信级别（架构 §16.2）。**必填、无默认值**：写入链路必须显式声明来源，
+    #: 而"不知道来源"一律不许当 owner——那是自动注入的通行证（由
+    #: :func:`~local_agent.memory.schemas.is_auto_injectable` 收口）。
+    origin: Origin
     content: str
     subject: str = ""
     importance: float = 0.5

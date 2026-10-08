@@ -104,7 +104,7 @@ from local_agent.llm.usage_recording import (
     use_model_purpose,
 )
 from local_agent.memory import long_term, medium_term, recall, writer
-from local_agent.memory.schemas import MemoryReference
+from local_agent.memory.schemas import ORIGIN_OWNER, MemoryReference
 from local_agent.memory.short_term import (
     PromptWindow,
     recent_turns_start,
@@ -2268,6 +2268,11 @@ def _memory_candidates(
             MemoryCandidate(
                 memory_type=item.memory_type,
                 content=content,
+                # 来源可信级别由**代码**判定，不取模型输出：本函数的输入是本机会话消息与工具结果
+                # （用户自己的数据），所以是 owner。让模型给自己的内容打信任标签是安全隐患，
+                # 而且"判定不出来"绝不允许默认 owner（架构 §16.2）。将来读取外部内容的能力
+                # （T53 Web）必须在这条链路上打 untrusted。
+                origin=ORIGIN_OWNER,
                 subject=str(getattr(item, "subject", "") or "").strip(),
                 importance=float(getattr(item, "importance", 0.5)),
                 confidence=float(getattr(item, "confidence", 0.5)),

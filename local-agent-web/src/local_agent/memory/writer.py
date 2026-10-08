@@ -260,6 +260,8 @@ def _write_medium(
         created_at=_now_iso(now),
         expires_at=_timestamp(candidate.expires_at),
         status=MEDIUM_TERM_STATUS_ACTIVE,
+        # 来源可信级别随候选一路落到存储：召回侧据此决定"能不能自动进 Prompt"（架构 §16.2）。
+        origin=candidate.origin,
     )
     store.upsert([record])
     return WriteOutcome(
@@ -292,6 +294,7 @@ def _write_fact(intent: WriteIntent, *, store: LongTermStore, now: datetime | No
         importance=float(candidate.importance),
         source=WRITE_SOURCE,
         expires_at=_timestamp(candidate.expires_at),
+        origin=candidate.origin,
         now=now,
     )
     kind: WriteOutcomeKind = "written"
@@ -331,6 +334,7 @@ def _write_conclusion(
         conclusion=candidate.content,
         project_scope=intent.scope_key,
         confidence=float(candidate.confidence),
+        origin=candidate.origin,
         evidence=[
             {"source_event_id": str(event_id)} for event_id in candidate.source_event_ids
         ],

@@ -19,7 +19,7 @@ from local_agent.capabilities import CAPABILITY_TOOLS, tool_names_for
 from local_agent.context.token_budget import MESSAGE_OVERHEAD_TOKENS, estimate_tokens
 from local_agent.exceptions import LocalAgentError
 from local_agent.graph.state import AgentMode, PlanStep, RAGReference, RuntimeContext
-from local_agent.memory.schemas import MemoryReference
+from local_agent.memory.schemas import MemoryReference, is_auto_injectable, resolve_origin
 
 _NO_AGENTS_TEXT = "（未加载到任何 AGENTS 文件）"
 _NO_MEMORY_TEXT = "（本轮没有召回相关记忆）"
@@ -258,10 +258,19 @@ def render_memory_section(
     成功查询但无结果才说"没有相关记忆"。两者混说会让模型向用户断言一个它并不知道的结论。
 
     预算按**最终文本长度**算（含条目之间的换行符）：只累加各行长度会让"很多短条目"悄悄超出上限。
+
+    **只渲染可自动注入的来源**（架构 §16.2）：召回层已经过滤过一遍，这里是最后一道——即便有人绕过
+    召回层把 ``untrusted`` 引用塞进 State，它也不会出现在 Prompt 里。缺失 ``origin`` 的引用按读回
+    口径归一（T52 之前的记录 = 已知来源），历史行为不变。
     """
+    injectable = [
+        reference
+        for reference in memory_refs
+        if is_auto_injectable(resolve_origin(reference.get("origin")))
+    ]
     lines: list[str] = []
     used = 0
-    for index, reference in enumerate(memory_refs, start=1):
+    for index, reference in enumerate(injectable, start=1):
         content = " ".join(str(reference["content"]).split())
         if len(content) > MEMORY_ITEM_MAX_CHARS:
             content = f"{content[:MEMORY_ITEM_MAX_CHARS]}…"

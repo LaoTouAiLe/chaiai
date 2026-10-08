@@ -1669,6 +1669,7 @@ def test_dirty_long_term_row_is_isolated_to_the_recall_layer(
             confidence=0.9,
             importance=0.9,
             source="test",
+            origin="owner",
         )
     finally:
         opened.close()
@@ -2539,6 +2540,7 @@ def test_recall_failure_is_not_reported_as_no_memory(
             confidence=0.9,
             importance=0.8,
             source="test",
+            origin="owner",
         )
     finally:
         store.close()

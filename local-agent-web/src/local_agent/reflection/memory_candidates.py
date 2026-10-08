@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from local_agent.graph.state import MemoryCandidate
+from local_agent.memory.schemas import ORIGINS
 from local_agent.scope import (
     SCOPE_PROJECT,
     SCOPE_USER,
@@ -251,6 +252,13 @@ def parse_entity_fact(content: str) -> EntityFactPayload | None:
 
 def _static_rejection(candidate: MemoryCandidate) -> str | None:
     """与作用域无关的静态校验；通过时返回 ``None``。"""
+    if candidate.origin not in ORIGINS:
+        # 架构 §16.2：origin 是闭集且没有默认值。"判定不出来"绝不允许落成 owner——那是自动注入
+        # 的通行证。这里宁可拒绝整条候选（会被记成 RejectedCandidate 并说明原因），也不猜。
+        return (
+            f"未知的 origin：{candidate.origin!r}（合法取值：{'、'.join(ORIGINS)}；"
+            "见架构 §16.2）"
+        )
     if candidate.memory_type not in MEMORY_TYPES:
         return f"未知的 memory_type：{candidate.memory_type!r}"
     if not str(candidate.content).strip():

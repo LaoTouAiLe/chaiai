@@ -445,7 +445,13 @@ def _scope_where(scope_keys: Sequence[tuple[MemoryScope, str]]) -> dict[str, Any
 
 
 def _record_metadata(record: MediumTermRecord) -> dict[str, Any]:
-    """把记录映射成 Chroma metadata：可选字段无值时不写（不能写 ``None``）。"""
+    """把记录映射成 Chroma metadata：可选字段无值时不写（不能写 ``None``）。
+
+    ``origin`` 放进**固定键**（T52）：它永远有值，而且召回侧要按它决定"能不能自动进 Prompt"
+    （架构 §16.2）。加这个键**不** bump :data:`MEMORY_SCHEMA_VERSION`：它不改向量语义，
+    老 collection 照旧可用（老记录没有该键，读取时按 ``LEGACY_ORIGIN`` 处理），
+    那些版本号只用于"距离度量变了必须重建索引"这类真正影响向量可信度的变更。
+    """
     metadata: dict[str, Any] = {
         "scope": record.scope,
         "scope_key": record.scope_key,
@@ -453,6 +459,7 @@ def _record_metadata(record: MediumTermRecord) -> dict[str, Any]:
         "confidence": float(record.confidence),
         "created_at": record.created_at,
         "status": record.status,
+        "origin": record.origin,
     }
     for name in _OPTIONAL_METADATA_FIELDS:
         value = getattr(record, name)

@@ -43,11 +43,12 @@ def test_long_memory_scope_history_expiry_search_and_no_write(tmp_path, model_fa
     own = store.record_entity(entity_type="project", name="当前项目", scope="project", project_id=own_project)
     foreign = store.record_entity(entity_type="project", name="其它项目", scope="project", project_id="foreign")
     for entity, value in ((own, "中文 pytest sk-test-secret"), (foreign, "不应显示 FOREIGN_ONLY")):
-        store.upsert_fact(entity_id=entity.id, key="test", value=value, confidence=.8, importance=.7, source="人工")
+        store.upsert_fact(entity_id=entity.id, key="test", value=value, confidence=.8, importance=.7, source="人工", origin="owner")
     store.upsert_fact(entity_id=own.id, key="expired", value="已到期", confidence=.8, importance=.6,
+    origin="owner",
                       source="人工", expires_at="2020-01-01T00:00:00+00:00")
-    store.record_task_conclusion(task_title="缓存对照", conclusion="提示词前缀稳定", project_scope=own_project, confidence=.9)
-    store.record_task_conclusion(task_title="其它结论", conclusion="FOREIGN_ONLY", project_scope="foreign", confidence=.9)
+    store.record_task_conclusion(task_title="缓存对照", conclusion="提示词前缀稳定", project_scope=own_project, confidence=.9, origin="owner")
+    store.record_task_conclusion(task_title="其它结论", conclusion="FOREIGN_ONLY", project_scope="foreign", confidence=.9, origin="owner")
     before = (tmp_path / "long.sqlite").read_bytes()
     changes = store.connection.total_changes
     result = h.service.get_memory_page(workspace_id=workspace_id)

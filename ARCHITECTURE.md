@@ -314,6 +314,7 @@ EvidenceReference
 MemoryCandidate
 ├── memory_type: "conversation_summary" | "task_fragment" | "entity_fact"
 ├── content
+├── origin: "owner" | "system" | "untrusted"  # 来源可信级别（§16.2）；必填，无默认值
 ├── subject
 ├── importance
 ├── confidence
@@ -1117,7 +1118,11 @@ created_at
 last_accessed_at
 expires_at
 status
+origin
 ```
+
+`origin` 是内容来源可信级别，语义与排除规则见 §16.2（T52 冻结）；它参与"能否自动注入 Prompt"的判定，
+不参与相关度打分。
 
 `project_id` 生成规则：优先使用当前会话所选工作区内规范化 Git 根目录的稳定 Hash；无 Git 仓库时使用当前会话 `workspace_root` 的稳定 Hash。如果存在远程仓库，则额外保存规范化 `remote_url`。`scope` 取 `global` / `user` / `project` / `workspace`，`scope_key` 分别取固定值 `global` / 当前逻辑用户 ID / `project_id` / 规范化工作区路径的稳定 Hash；可选元数据字段无值时不写入向量库记录。单用户本地运行且 `user_id=None` 时，逻辑用户 ID 固定为 `local`，它不构成身份认证。召回按 `scope` 与 `scope_key` 精确过滤，再按相关度排序；不得把其他项目或工作区的私有记忆混入 Prompt。一次外部路径工具调用不会改变 `project_id`、`scope_key` 或记忆召回范围。
 
@@ -1159,7 +1164,8 @@ facts
 ├── updated_at
 ├── last_accessed_at
 ├── expires_at
-└── status
+├── status
+└── origin
 
 task_conclusions
 ├── id
@@ -1169,7 +1175,8 @@ task_conclusions
 ├── project_scope
 ├── confidence
 ├── created_at
-└── updated_at
+├── updated_at
+└── origin
 ```
 
 支持：
@@ -1209,7 +1216,7 @@ task_conclusions
 
 所有 `memory_write_intent` 必须经过 `reflection_node` 验证，生成带来源、置信度和重要度的 `MemoryCandidate`，然后才能进入 `memory_write_node`。
 
-`MemoryCandidate` 不新增作用域字段。`memory_write_node` 根据已验证的意图、候选类型及当前 `RuntimeContext` 中的逻辑用户和项目作用域确定写入范围；无法确定时不写入并说明原因。用户在普通闲聊中提出“记住”时也按 §5.2 经过反思校验，不能绕过该链路。
+`MemoryCandidate` 不新增作用域字段。`memory_write_node` 根据已验证的意图、候选类型及当前 `RuntimeContext` 中的逻辑用户和项目作用域确定写入范围；无法确定时不写入并说明原因。**`origin`（来源可信级别）是这条规则的唯一例外**：它不是作用域，而是内容能否自动注入的前提，必须由**写入链路**显式给出（§16.2），不由模型输出决定，也没有默认值。用户在普通闲聊中提出“记住”时也按 §5.2 经过反思校验，不能绕过该链路。
 
 普通闲聊不应每轮都写入长期记忆。
 
@@ -1769,7 +1776,36 @@ v0.4 管理的是**聊天模型连接**（`provider=openai_compatible`）。连�
   --result <baseline_result.json>` 输出逐调用缓存读、**回落次数**与"哪一段指纹变了"的归因，`--max-fallbacks`
   （默认 1）超限即返回非零。后者只读 JSON、不发模型调用。观测量是回落次数，不是命中率。
 
-### 16.2 信任分级 `origin`（未冻结，T52）
+### 16.2 记忆来源可信级别 `origin`（T52，2026-10-08 冻结）
+
+- **闭集**：`origin ∈ {owner, system, untrusted}`。
+  - `owner`：内容来自用户本人或用户自己的工作区（本机会话消息、本机文件内容）；
+  - `system`：产品自身的脚手架内容（由代码生成的占位、说明与规则）；
+  - `untrusted`：内容来自信任边界之外（外部网页、第三方文档、他人提供的文本）。
+- **无法判定时永不默认 `owner`**：`origin` 是**必填**字段、没有默认值，取值超出闭集一律拒绝写入。
+  给"不知道来源"的内容打 `owner`，等价于让它自动进 Prompt——这正是本条要防的事。
+- **`origin` 不由模型输出决定**：它由**写入链路**按输入来源判定（本次反思的输入是本机会话与工作区 →
+  `owner`）。模型不能给自己的内容打信任标签。将来任何"读取外部内容"的能力（§16.3）必须由那条链路
+  自己打 `untrusted`；并且**只要一轮的输入里含 untrusted 内容，该轮产出的候选一律按 `untrusted`**
+  （取最保守的一侧，不做"大部分输入是本机的"折中）。
+- **结构性排除，不是打分惩罚**：`untrusted` 与 `system` 在**构建 Prompt 之前**就被排除——召回层
+  （`memory.recall`）与渲染层（`prompt_context.render_memory_section`）各拦一次，后者是兜底。
+  它们仍可被读出来给人看（页面、审计、数据中台），只是**永远不自动注入**；召回频次、重要度或置信度
+  再高都不能越过这条。
+- **provenance 不写进正文**：`origin` 只作为记录字段（中期 Chroma metadata、长期 SQLite 列），
+  不拼进 `content`。否则被召回的正文就能改写自己的信任级别。
+- **历史数据**：T52 之前的记录没有 `origin`，读取时按 `owner` 处理——那时唯一的写入者是本机反思链路
+  （`facts.source = 'reflection'`），属于**已知来源**，不是"判定不出来"。新写入必须有显式值。
+- **存储**：中期 metadata 键 `origin`；长期 `facts.origin` 与 `task_conclusions.origin`（迁移 v3；
+  列的 `DEFAULT 'owner'` 只为补齐历史行，新写入必须显式给出）。
+- **为什么不另设 ``agent`` 档**（与 `docs/planning/FUTURE_WORK.md` B-01 建议的四值闭集的差异，2026-10-08 决定）：
+  B-01 建议 `owner`（用户明确表达）与 `agent`（模型从用户内容推导）分开。在本项目里"模型推导"是**唯一**的写入
+  形态——连用户说"请记住 X"也要经反思校验后由模型生成候选（§10.4），所以按 B-01 的字面分档，`owner` 会近乎
+  为空，而"能不能自动注入"这一目的不会因此变得更准：这两者在**信任边界**上是同一侧（输入都是本机用户内容），
+  转述精度的差别已由 `confidence` 表达。因此 v0.5 只保留三档，把"模型推导"归入 `owner`。**触发重新评估的条件**：
+  引入多用户/共享工作区，或出现"内容来源跨越信任边界"的新能力（`untrusted` 的第一批生产者，见 §16.3）。
+
+
 
 ### 16.3 Web 能力（未冻结，T53）
 
