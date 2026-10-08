@@ -74,6 +74,10 @@
 - **落点**：`memory/schemas.py`（`MemoryReference` / `MemoryCandidate` 加字段）、`reflection/memory_candidates.py`（生成时打标）、`memory/writer.py`（写入时落标）、Prompt 组装处（在**构建之前**结构性排除，不是打分惩罚）。
 - **验收**：无法判定来源时**永不默认 `owner`**（默认 `untrusted`）；`untrusted` / `system` 无论召回频次多高都不自动注入；现有记忆与召回用例全绿（不得以"新增字段"为由降低现有正确性）。
 - **明确不做**：把 provenance 写进 Markdown 正文——召回文本不允许改写自己的信任级别。
+- **状态（2026-10-08，已完成）**：契约 §16.2 冻结，§10.2/§10.3 字段表与 §4.3 候选字段同步。实现落点：`memory/schemas.py`（`Origin` 闭集、`is_auto_injectable`、`resolve_origin`，以及 `MemoryReference`/`MediumTermRecord`/`FactRecord`/`TaskConclusionRecord` 四个字段）、`graph/state.py`（`MemoryCandidate.origin`：**必填、无默认**）、`reflection/memory_candidates.py`（`plan_writes` 校验闭集，越界拒绝整条候选）、`memory/writer.py`（随载体落标）、`memory/medium_term.py`（Chroma metadata 固定键 `origin`）、`memory/long_term.py`（`facts`/`task_conclusions` 的 `origin` 列 + 写侧闭集校验）、`persistence/migrations.py`（**v3 迁移**：两条 `ALTER TABLE … ADD COLUMN origin … DEFAULT 'owner'`，只为补齐历史行）、`memory/recall.py`（召回侧结构性排除 + 读回归一）、`context/prompt_context.py`（渲染层兜底）、`graph/nodes.py`（候选构造处显式打 `owner`，**不取模型输出**）。
+- **T52 的验收证据**：新增 `tests/test_memory_origin.py` 16 条（闭集与归一、候选缺 origin 构造即 `TypeError`、越界 origin 被 `plan_writes` 与存储层双重拒绝、`owner` 召回/`untrusted` 与 `system` 落库但不召回、任务结论同规则、渲染层兜底）；`tests/test_memory.py` 新增 3 条中期用例（metadata 带 origin、`untrusted`/`system` 不召回、**T52 之前没有 origin 键的记录照旧召回**）并把 `ARCHITECTURE_MEDIUM_TERM_FIELDS` 与 v1 升级用例同步到 v3。Python 全量见提交记录；`ruff check .`、`mypy src` 通过。
+- **与 B-01 原建议的偏离（已写进契约）**：B-01 建议四值闭集（含 `agent` = 模型从用户内容推导），本次只做**三值**并把"模型推导"归入 `owner`——本项目里模型推导是唯一写入形态，按字面分档既让 `owner` 近乎为空、又不改变"能否自动注入"的判定（两者输入都在本机用户边界内，转述精度已由 `confidence` 表达）。理由与**重新评估条件**（多用户/共享工作区、或出现跨边界来源的新能力）见 `ARCHITECTURE.md` §16.2。
+- **T52 未做（如实列出）**：① **没有新的 `untrusted` 生产者**——今天唯一写入者仍是本机反思链路（恒为 `owner`），`untrusted` 的落点在 §T53（Web）；本轮的验收方式是"机制 + 可注入性判定"，不是"真的读到了恶意网页"。② 长期库没有 `origin` 索引：按来源过滤发生在召回后的 Python 侧与 `active_facts_with_entities` 的现有查询上，规模变大时再评估。③ 页面/数据中台**不显示** origin（属 T56）；当前它只在存储与判定上生效。
 
 ### T53｜Web 搜索与读取
 
