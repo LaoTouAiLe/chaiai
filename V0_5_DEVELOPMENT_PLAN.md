@@ -91,6 +91,12 @@
 - **明确不做**：多引擎回退、JS 渲染页面、登录态抓取、结果缓存（出现真实故障再引入）。
 - **状态（2026-10-08，已完成）**：契约 §6.10（工具定义与安全边界）与 §16.3 冻结；§6.9 能力表加 `web`，§16.1 的 `researcher` 追加 `web`。实现落点：`capabilities.py`（`web` 能力、`UNTRUSTED_CAPABILITIES`、`effective_capabilities`）、`config.py`（`web_access` 段，**默认关闭**）、`tools/web_tools.py`（搜索/抓取 + SSRF 边界 + 可注入 transport）、`tools/result_types.py`（三个结果结构）、`security/policy.py`（两个工具登记为只读）、`tools/tool_registry.py` + `graph/builder.py`（构造注册表与"配置开关收窄能力"）、`context/prompt_context.py`（Web 规范 + 不可信数据条款）、`graph/nodes.py`（**本轮取回过网页 → 该轮候选一律 `untrusted`**）、`config.yaml.example`。
 - **T53 的验收证据**：新增 `tests/test_web_tools.py` **25 条**——SSRF（10 种本机/内网/非 http 目标被拒、域名解析到内网被拒、公网通过并归一化、**重定向到本机被拦**）；失败如实报告（超时、HTTP 错误、解析不出结果、非文本类型）；结构（标题/URL/来源、搜索结果不含正文）；截断与说明；能力开关（默认关闭时 `web` 不进有效集合）；只给 `researcher`；以及**不可信回流**（本轮 `web_*` 成功结果 → 候选 `untrusted`；被拒/失败结果、上一轮的结果、本机工具都不算）。另同步 `test_capabilities.py` 的 Profile 断言。Python 全量见提交记录；`ruff check .`、`mypy src`（106 文件）通过。
+- **真实联网验证（2026-10-08，用户授权；`researcher` 档 + `web_access.enabled=true`，隔离数据目录）**：
+  - **provider 实测**：`html.duckduckgo.com` 被 DNS 污染到 Meta 的地址段（157.240.12.5）并连接超时，`lite.duckduckgo.com` 同样超时；`www.bing.com/search` 0.5 秒返回 10 条结果、直链无跳转包装 → **默认 provider 改为 `bing_html`**，DDG 保留为可选（§16.3 已记录这条环境事实与"换网络应重测"）。
+  - **抓取实测**：`www.python.org` **无视 `Accept-Encoding: identity` 恒返回 gzip**；最初版本把压缩流按文本解码，得到满屏乱码——补上 gzip/deflate 解压（含压缩炸弹上限）后正常：标题 `Welcome to Python.org`、正文 6467 字符、截断说明正确。契约 §6.10 已收录这条。
+  - **模型端到端**：模型先 `web_search`，发现"结果偏泛"后换词重搜，再 `web_fetch` 官方文档页，最终回答给出**页面标题与 URL**（`What's new in Python 3.14 — Python 3.14.8 documentation`）并列出了 PEP 编号；两轮均 `completed`、0 次审批、`errors` 为空。
+  - **SSRF 真实环境复核**：`http://127.0.0.1:8000/` 与 `http://169.254.169.254/latest/meta-data/` 都在发请求前被拒。
+  - **这次没有覆盖到的**：第二轮"请把来源记住"**没有产生任何记忆写入**（该轮走直接回答路径，没有反思与候选生成），所以"网页 → `untrusted` 记忆"这条回流**在真实运行里没有被触发**，仍只有单元测试覆盖。另外模型那一轮如实回答"这个档位没有写记忆的能力"并建议写进 AGENTS.md——口径正确，但暴露一个 UX 缺口：用户说"记住"时 `researcher` 档给不出落点（要等 T56 的能力状态展示把"为什么记不住"讲清楚）。
 - **T53 未做（如实列出）**：① **没有真实联网验证**——全部用例走注入的假 transport；真实 provider（DuckDuckGo HTML 版）的抗反爬与页面结构稳定性，要等一次真实调用才知道（这正是"多引擎回退等真实故障再引入"的触发条件）。② 单实现、无回退，也没有"需要 API Key 的 provider"（要换按 §16.3 先改契约）。③ 页面暂不展示 Profile/能力状态（属 T56）；搜索来源目前靠最终回答里引用 URL 让用户核对。④ **没有新增"真实网页 + 注入页面"的人工对抗场景**——建议在 T56 或下一轮朋友复验时补，那才是"Web 内容中的提示注入不能修改安全策略"的端到端证据。
 
 ### T54｜Git 能力
