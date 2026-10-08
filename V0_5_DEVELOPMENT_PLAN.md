@@ -62,6 +62,9 @@
   3. 逐调用**缓存读回落次数**作为观测量（目标 0–1 次，与 T34–T36 同一口径），不是命中率。
   4. 三档 Profile 各跑一次固定任务，成功率不低于 v0.4 基线。
 - **明确不做**：为省 Token 在同一 Profile 内按每轮内容动态裁剪工具集——那会让前缀每轮变化，属净损失。
+- **状态（2026-10-08，工具与口径已完成，真实逐档基线待授权）**：三处绑定在 T50 已同源（`tools = registry.tools_for(mode, context.agent_capabilities)`），工具 Schema 指纹由 `tools_fingerprint(tools)` 从**实际绑定的工具对象**算出，因此 Profile 变化自动进入指纹、无需另设一套。本轮补齐观测与口径：新增 `local-agent-web/scripts/report_prefix_cache.py`（读 `baseline_result.json`，输出逐调用缓存读、**回落次数**、以及"回落时同时变了哪一段指纹"的归因，`--max-fallbacks` 默认 1、超限返回退出码 3；**不发模型调用**）；`scripts/measure_usage_baseline.py` 增加 `--profile`（同一固定场景逐档跑，结果里写明 Profile 与实际工具名）；`ARCHITECTURE.md` §16.1 追加"验收工具"一条。
+- **T51 的验收证据（本轮）**：新增 `tests/test_prefix_cache_report.py` 7 条——回落归因到具体段落、Profile 切换计为前缀重置而非"无法解释的下降"、未上报缓存字段不当 0 也不计回落、阈值超限返回 3、输入缺失返回 2、以及**工具 Schema 指纹同档稳定 / 三档互不相同 / 与 chat 模式也不同**（用真实注册表计算）。Python 全量见提交记录；`ruff check .`、`mypy src` 通过。
+- **T51 未做（如实列出）**：① **真实模型逐档基线没有跑**——`measure_usage_baseline.py` 会真实调用模型并产生费用，按惯例要先经你同意；因此"三档 Profile 各跑一次固定任务、成功率不低于 v0.4 基线"这条**尚未有真实数据**。② `report_prefix_cache.py` 目前只认 `measure_usage_baseline.py` 的结果形状（`turns[].model_calls[]`），已有的 `eval/memory-acceptance-*` 审计格式（按轮聚合）不能直接喂给它。③ 本机既有仓库里没有留存的历史 `baseline_result.json`，所以端到端只验证到"合成记录 + 真实指纹"这一层。
 
 ### T52｜`origin` 信任分级（路线图把它定为 v0.5 的第一个任务）
 
