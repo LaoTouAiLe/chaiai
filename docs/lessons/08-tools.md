@@ -96,31 +96,47 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
 
 ## §1 `ToolRegistry`：谁给谁看
 
-[tool_registry.py](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/tool_registry.py) 只有 69 行，但它是"工具"和"模型"之间的唯一门面。
+[tool_registry.py](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/tool_registry.py) 是"工具"和"模型"之间的唯一门面。
 
-### 1.1 `MODE_TOOLS`：模式 → 工具名
+> **2026-10-08（T50）API 变更，读本节前先看这段**：工具归属与 Profile 已拆到
+> [`capabilities.py`](../../local-agent-web/src/local_agent/capabilities.py)（架构 §6.9、§16.1）：
+> `MODE_TOOLS` → `CAPABILITY_TOOLS`（能力 → 工具）+ `PROFILES`（Profile → 能力），
+> `ToolRegistry.tools_for_mode(mode)` → `ToolRegistry.tools_for(mode, capabilities)`，未知模式/能力
+> 从"返回空元组"改为**抛错**。本节下面讲的是**切分理由**（仍然成立），API 名与行号请对照当前源码。
+
+### 1.1 `CAPABILITY_TOOLS` 与 `PROFILES`：能力 → 工具名
 
 ```python
-MODE_TOOLS: Mapping[str, tuple[str, ...]] = {
-    "chat": (),
-    "tool": (
-        "list_dir", "read_file", "edit_file",
-        "write_file", "delete_file", "run_shell",
-    ),
+CAPABILITY_TOOLS: Mapping[str, tuple[str, ...]] = {
+    "plan": ("update_plan",),
+    "files_read": ("list_dir", "read_file"),
+    "code_search": ("grep", "glob"),
+    "files_write": ("edit_file", "write_file", "delete_file"),
+    "shell": ("run_shell",),
 }
+PROFILES = {                      # coder 与 v0.4 的 tool 模式逐项等价，所以它是默认档
+    "coder": ("plan", "files_read", "code_search", "files_write", "shell"),
+    "researcher": ("plan", "files_read", "code_search"),
+    "reviewer": ("files_read", "code_search"),
+}
+MODE_CAPABILITIES = {"chat": ("files_read",), "tool": PROFILES["coder"]}
 ```
 
-**闲聊模式一个工具都不给**。这不是"洁癖"，而是实打实的省钱 + 防误伤：每绑一个工具，工具的 JSON Schema 就会进入出站 Prompt，按 token 计费。`nodes.py:506-513` 的 `_tool_definition_tokens` 专门统计这部分开销：
+**闲聊模式（`chat`）不是一个工具都不给**：它固定绑定 `files_read`（`list_dir` / `read_file`），这是 v0.1 起就有的行为。（本节早期版本写的"chat 模式零工具"与源码矛盾，已按 `capabilities.py` 订正；由此暴露的"chat 绑着工具却拿不到工具规范"是另一个问题，记在 `docs/planning/FUTURE_WORK.md` B-28。）
+
+绑定工具不是免费的：每绑一个工具，它的 JSON Schema 就进入出站 Prompt，按 token 计费。`nodes.py` 的 `_estimate_tool_tokens` 专门统计这部分开销：
 
 ```python
-def _tool_definition_tokens(state, context) -> int:
-    if str(state.get("mode", "chat")) != "tool":
+def _estimate_tool_tokens(state, context) -> int:
+    registry = context.tool_registry
+    if registry is None:
         return 0
-    ...
-    return estimate_tools_tokens(registry.tools_for_mode("tool"))
+    return estimate_tools_tokens(
+        registry.tools_for(str(state.get("mode", "chat")), context.agent_capabilities)
+    )
 ```
 
-**Java 类比**：`MODE_TOOLS` 就是一张"角色 → 权限"的静态表，类似 `@PreAuthorize` 的注解清单。差别在于：这里的"权限"指的是"**看不看得见工具**"，**不是"能不能执行"**。这是两件事，见下一节。
+**Java 类比**：`CAPABILITY_TOOLS` + `PROFILES` 就是一张"角色 → 权限"的静态表，类似 `@PreAuthorize` 的注解清单。差别在于：这里的"权限"指的是"**看不看得见工具**"，**不是"能不能执行"**。这是两件事，见下一节。
 
 ### 1.2 看得见 ≠ 能执行
 
@@ -132,7 +148,7 @@ def _tool_definition_tokens(state, context) -> int:
 
 这是刻意的设计：**让模型能"提出"被拒绝的事，然后从拒绝理由里学会边界**。如果把危险工具直接藏起来，模型只会收到"没有这个工具"，学不到"为什么不能删"。
 
-### 1.3 `build` 与 `tools_for_mode`
+### 1.3 `build`、能力覆盖校验与 `tools_for`
 
 ```python
 class ToolRegistry:
@@ -141,17 +157,16 @@ class ToolRegistry:
 
     @classmethod
     def build(cls, policy: SecurityPolicy) -> ToolRegistry:
-        return cls([*build_file_tools(policy), *build_shell_tools(policy)])
+        registry = cls([...])                 # 文件 / 计划 / 检索 / Shell 四组工具
+        registry.assert_capability_coverage()  # T50：漏登记能力归属即失败
+        return registry
 
-    def names(self) -> tuple[str, ...]:
-        return tuple(self._tools)
-
-    def get(self, name: str) -> BaseTool | None:
-        return self._tools.get(name)
-
-    def tools_for_mode(self, mode: str) -> list[BaseTool]:
-        allowed = MODE_TOOLS.get(mode, ())
-        return [self._tools[name] for name in allowed if name in self._tools]
+    def tools_for(self, mode: str, capabilities: Sequence[str] | None = None) -> list[BaseTool]:
+        names = tool_names_for(mode, capabilities)      # 能力 → 工具名（顺序即绑定顺序）
+        missing = [name for name in names if name not in self._tools]
+        if missing:
+            raise LocalAgentError(...)                  # 不静默少给工具
+        return [self._tools[name] for name in names]
 ```
 
 三个细节值得记：
@@ -159,10 +174,10 @@ class ToolRegistry:
 | 写法 | 含义 |
 |---|---|
 | `self._tools: dict[str, BaseTool]` | 内部用 dict 索引，因为执行阶段要按名字快速 `get` |
-| `MODE_TOOLS.get(mode, ())` | **未知模式返回空元组**，不是抛异常。实测 `tools_for_mode("未知模式")` → `[]` |
-| `if name in self._tools` | 表里写了但没实现的工具会被静默跳过（防御"表超前于实现"） |
+| `tool_names_for` | 把"模式 + Profile 能力集"解析成工具名。**未知模式/能力抛错**，不再返回空元组——T50 改：静默空集会把"模型怎么不调用它"变成一次长途排查 |
+| `assert_capability_coverage` | T50 新增：能力表与实现必须**不重不漏**，漏一处构造注册表时就失败 |
 
-`names()` 返回 `tuple`、`tools_for_mode()` 返回 `list`——不是随手写的，前者是"快照"（不可变），后者要直接喂给 `bind_tools`（要 list）。
+`names()` 返回 `tuple`、`tools_for()` 返回 `list`——不是随手写的，前者是"快照"（不可变），后者要直接喂给 `bind_tools`（要 list）。**顺序也是契约**：工具顺序进入系统前缀，一旦变化，供应商前缀缓存整段失效（架构 §6.9）。
 
 ### 1.4 注册表在哪被用到
 
@@ -170,7 +185,7 @@ class ToolRegistry:
 
 | 位置 | 用途 |
 |---|---|
-| [nodes.py:830](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py#L830-L834) | `agent_decision_node`：`tools_for_mode(state["mode"])` → `bind_tools` |
+| [nodes.py](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py) | `agent_decision_node`：`tools_for(state["mode"], context.agent_capabilities)` → `bind_tools` |
 | [nodes.py:513](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py#L506-L513) | `_tool_definition_tokens`：估算工具定义占用的 token |
 | `tool_execution_node` | 按 `call["name"]` 取工具执行 |
 
@@ -1582,7 +1597,7 @@ sequenceDiagram
     participant P as SecurityPolicy
     participant S as State
 
-    AD->>R: tools_for_mode(mode)
+    AD->>R: tools_for(mode, capabilities)
     R-->>AD: [list_dir, read_file, …]
     AD->>M: bind_tools(tools).invoke(prompt)
     M-->>AD: AIMessage(tool_calls=[...])
@@ -1659,7 +1674,7 @@ reflect:  status="denied" → 记 ErrorEvent(stage="tool_execution")
 **架构层**
 1. `tools/` 和 `security/` 的分工是什么？为什么 `security/` 不 import `tools/`？（§0）
 2. 为什么 `policy` 通过闭包注入而不是作为工具参数？这带来的最大好处是什么？（§0）
-3. `MODE_TOOLS` 里 `chat` 模式为什么是空元组？后果是什么？（§1.1）
+3. `chat` 模式绑定哪些工具？`PROFILES` 三档之间的可见集是什么关系，为什么按"子集"设计？（§1.1）
 4. "工具绑给模型"和"工具允许执行"是两件事——分别由谁决定？（§1.2）
 
 **接口层**

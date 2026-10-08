@@ -48,6 +48,9 @@
   - `local-agent-web/src/local_agent/context/prompt_context.py:376`（`_CAPABILITY_RULES` 引用真实工具集）、`:412-416`（工具规范段落；那里的注释仍写着 `MODE_TOOLS["chat"] == ()`，与实际不符，一并订正）。
 - **验收**：三档 Profile 配置可通过/可拒绝；`tools_for(profile)` 结果与配置逐项一致；同一 Profile 重复构建工具顺序**字节稳定**；配置错误与缺依赖时启动即明确失败。
 - **明确不做**：动态注册；运行期改 Profile 后热更新工具集（口径与 v0.4 的模型切换一致——下一轮生效）。
+- **状态（2026-10-08，已完成）**：契约 §6.9 与 §16.1 已冻结。改动落点：新增 `local-agent-web/src/local_agent/capabilities.py`（能力闭集 + 内置三档 + 模式映射；**叶子模块**，避免 `config → tool_registry → security.policy → config` 循环导入）、`config.py` 的 `profiles` 段与启动校验、`graph/state.py` 的 `agent_profile`/`agent_capabilities`、`graph/builder.py` 装配、`graph/nodes.py` 三处工具绑定与 `_draft_steps`、`reflection/reflector.py` 的 `plan_draft_instruction()`（按 Profile 生成，只读 Profile 不再被承诺 `update_plan`）、`context/prompt_context.py` 两处过期注释、`config.yaml.example` 的 `profiles` 示例。
+- **T50 的验收证据**：新增 `tests/test_capabilities.py`（默认 Profile 与 v0.4 工具集**含顺序**逐项一致、chat 仍是两个只读工具、只读 Profile 看不到写类与 Shell、顺序稳定且不受访问顺序影响、能力表与实现不重不漏、未登记归属在构造注册表时失败、四类配置错误在加载阶段失败并列出可选项、计划草拟提示随 Profile 变化）。Python 全量 **1091 passed / 7 skipped**（上一轮 1063 + 本轮新增），`ruff check src tests` 与 `mypy src`（105 文件）通过。
+- **T50 未做（如实列出）**：① 缓存回落的**观测与基线**（逐调用回落次数、事件指纹解释）属 T51；② 页面/接口还没有任何 Profile 展示（属 T56）；③ 运行期切换 Profile 的入口未做——当前只能改配置后重启生效（比"下一轮生效"更保守，不算违约）；④ `docs/lessons/` 是按旧 API（`MODE_TOOLS` / `tools_for_mode`）讲的，本轮只加了变更说明，没有重写教程。
 
 ### T51｜只注入本 Profile 的工具 Schema，并把缓存口径钉住
 

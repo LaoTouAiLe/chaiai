@@ -345,7 +345,7 @@ docstring 只有两句（[L820-823](../../local-agent-web/src/local_agent/graph/
 
 ```text
 ① registry 缺失 → 抛 LocalAgentError          （不能没注册表还往下走）
-② 取当前模式的工具列表 registry.tools_for_mode(mode)
+② 取当前模式 + Profile 的工具列表 registry.tools_for(mode, capabilities)（T50 起）
 ③ 有工具但模型不支持 Tool Calling → 失败闭合 _tool_calling_unavailable
 ④ 有工具 → bind_tools(tools)；没工具 → 裸模型
 ⑤ model.invoke(...)

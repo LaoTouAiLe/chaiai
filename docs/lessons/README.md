@@ -68,7 +68,7 @@
 | # | 标题 | 内容 | 状态 |
 |---|---|---|---|
 | L7 | [安全层](07-security.md)：[`security/`](../../local-agent-web/src/local_agent/security) | 2001 行、6 文件：路径守卫（边界 / 不可审批目标 / 敏感名）→ Shell 判定（切词 / 语法提级 / 黑白名单 / 执行器）→ `classify_tool` 总入口 → 动作指纹与审批作用域 → 纵深防御的十道关 | ✅ |
-| L8 | [能力层](08-tools.md)：[`tools/`](../../local-agent-web/src/local_agent/tools) | 1203 行、5 文件：`ToolRegistry` 与 `MODE_TOOLS` → 模型看到的 JSON Schema → `list_dir`/`read_file`/`edit_file`/`write_file`/`delete_file`/`run_shell` 逐个拆解（有界遍历、整文件 Hash、乐观锁、patch 严格定位、原子写、`shell=False`）→ 工具结果怎么进 State | ✅ |
+| L8 | [能力层](08-tools.md)：[`tools/`](../../local-agent-web/src/local_agent/tools) | 1203 行、5 文件：`ToolRegistry` 与能力/Profile 表（T50 起：`capabilities.py`）→ 模型看到的 JSON Schema → `list_dir`/`read_file`/`edit_file`/`write_file`/`delete_file`/`run_shell` 逐个拆解（有界遍历、整文件 Hash、乐观锁、patch 严格定位、原子写、`shell=False`）→ 工具结果怎么进 State | ✅ |
 | L9 | [上下文与反思](09-context-reflection.md)：[`context/`](../../local-agent-web/src/local_agent/context) + [`reflection/`](../../local-agent-web/src/local_agent/reflection) | 约 1838 行：提示词十段组装与三态占位 → Token 估算与压缩阈值 → 窗口裁剪（轮次 + 工具步）→ 回答投影 → 反思三层职责 → 机械证据校验 → 记忆候选与写入意图 | ✅ |
 | L10 | 记忆与检索：`memory/`（除 `short_term`）+ `rag/` | 约 3300 行：短期/中期/长期三层记忆的读写、五因子打分召回、遗忘策略、Chroma 向量库、按需代码检索 | ⬜ |
 | L11 | 启动与界面：`web.py` + `ui/` + `persistence/` + `llm/` | 从点击到落盘的一次完整调用 | ⬜ |

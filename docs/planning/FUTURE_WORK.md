@@ -1247,7 +1247,7 @@ v0.5 已经承诺了它的验收条件：
 - **分类器不是本现象的成因（原判断亦更正）**："不确定时取 `chat`"（`routers.py:206`）只在**未传 `session_mode`** 的兜底分支才生效（`routers.py:134-139`），真实入口传了，分类器不被调用。
 - **无兜底、不能升级**：反思对 chat 直接短路（`graph/nodes.py:1544-1548`），只审"是否要求记住"；全 `src/local_agent` 搜 `escalat|re-route|reclassif|重新路由|二次判定` **零命中**。
 - **无指代消解**（与"长会话丢主题"同源的一类缺陷：产品没有任何把"他 / 这个 / 上面那个"绑定到前文实体的机制）：全仓搜 `指代|coreference|rewrite|话题` **0 匹配**。
-- **两处注释已过期**（与 B-14/B-15 同类）：`tools/tool_registry.py:4` 写"闲聊模式的集合为空"、`context/prompt_context.py:414` 写 `MODE_TOOLS["chat"] == ()`，都与 `tool_registry.py:24` 矛盾。
+- **两处注释已过期**（与 B-14/B-15 同类）：`tools/tool_registry.py:4` 写"闲聊模式的集合为空"、`context/prompt_context.py:414` 写 `MODE_TOOLS["chat"] == ()`，都与 `tool_registry.py:24` 矛盾。**2026-10-08 T50 已修**：两处注释随能力/Profile 契约一起订正，工具归属改为 `local_agent/capabilities.py`。**但本条要修的是行为矛盾（chat 绑着工具却拿不到工具规范），仍然未做**——改它等于改稳定前缀，须连同缓存回落口径一起做，见 [V0_5_DEVELOPMENT_PLAN.md](../../V0_5_DEVELOPMENT_PLAN.md) §T51。
 
 **阶段建议**：先做**最小改动**——统一"工具绑定"与"提示词"的口径（择一，不要并行）：
 
