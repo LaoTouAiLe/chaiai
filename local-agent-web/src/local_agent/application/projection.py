@@ -1052,13 +1052,16 @@ def project_memory(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) -> 
 
     write_outcome: str | None = None
     write_detail: str | None = None
-    candidates = len(_mappings(state.get("memory_write_candidates")))
+    # **本轮**落库条数（覆盖语义）。不数 `memory_write_candidates`：那是整条会话的累计列表，
+    # 用它会让"某轮写过记忆"之后的每一轮都显示"已写入 N 条"——2026-10-08 用一个只做算术、
+    # 完全没有记忆候选的轮次实测到这一点（快照仍报 `written · 6 条`）。
+    written_this_run = state.get("memory_write_count")
     if _stage_failed(state, STAGE_MEMORY_WRITE):
         write_outcome = "failed"
         write_detail = "写入失败 · 不影响本轮回答，也未写入任何内容"
-    elif candidates > 0:
+    elif isinstance(written_this_run, int) and written_this_run > 0:
         write_outcome = "written"
-        write_detail = f"{candidates} 条 · 来源：本轮对话"
+        write_detail = f"{written_this_run} 条 · 来源：本轮对话"
 
     if sources:
         note = "只显示来源定位与用途：不展示正文、向量或内部评分。"

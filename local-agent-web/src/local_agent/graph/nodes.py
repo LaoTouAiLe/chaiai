@@ -235,6 +235,9 @@ def prepare_context_node(state: AgentState) -> AgentState:
         "retry_count": 0,
         "loop_count": 0,
         "memory_refs": [],
+        # 本轮写入口径必须复位：不复位的话，界面会把上一轮的"已写入 N 条"当成这一轮的
+        # （`memory_write_candidates` 是追加型审计字段，不能用来回答"本轮写了什么"）。
+        "memory_write_count": None,
         "rag_refs": [],
         "final_response": None,
         "final_evidence": [],
@@ -3539,6 +3542,10 @@ def memory_write_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Ag
     }
     if completed:
         update["memory_write_candidates"] = completed
+    # 本轮口径的写入结果（覆盖语义，架构 §15）：投影的"已写入 N 条"只认这个数。
+    # 这里**无条件**写：本节点跑过但一条都没落时必须是 0（不是 None），否则界面会把
+    # 上一轮的条数当成这一轮的。没走到本节点的轮次才保持 None。
+    update["memory_write_count"] = len(completed)
     if errors:
         update["error_events"] = merge_appended(
             state.get("error_events", []), errors, error_event_key

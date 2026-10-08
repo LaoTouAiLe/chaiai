@@ -427,6 +427,47 @@ def test_memory_write_failure_is_reported_without_failing_the_turn() -> None:
     assert "不影响本轮回答" in (memory.write_detail or "")
 
 
+def test_memory_write_row_is_scoped_to_this_run() -> None:
+    """写入行只能报**本轮**的落库条数。
+
+    `memory_write_candidates` 是追加型的会话级审计字段。2026-10-08 实测：一个只做算术、完全没有
+    记忆候选的轮次，快照仍显示"已写入 6 条 · 来源：本轮对话"——因为它数的是那个累计列表。
+    """
+    state = _state(
+        memory_refs=[],
+        rag_refs=[],
+        # 会话里曾经写过（累计字段），但**本轮**一条都没落。
+        memory_write_candidates=[
+            {"memory_type": "entity_fact", "origin": "owner", "content": '{"key": "x"}'}
+        ],
+        memory_write_count=0,
+    )
+    memory = proj.project_memory(state)
+    assert memory is not None
+    assert memory.write_outcome is None
+    assert memory.write_detail is None
+
+
+def test_memory_write_row_reports_this_run_count() -> None:
+    state = _state(memory_refs=[], rag_refs=[], memory_write_count=2)
+    memory = proj.project_memory(state)
+    assert memory is not None
+    assert memory.write_outcome == "written"
+    assert memory.write_detail == "2 条 · 来源：本轮对话"
+
+
+def test_prepare_context_resets_the_per_run_memory_write_count() -> None:
+    """复位是"本轮口径"的另一半：没走写入节点的轮次必须回到 `None`。
+
+    不复位的话它会像累计字段一样跨轮残留，界面又会把上一轮的条数报成这一轮的
+    ——修复前实测就是这个现象（连只做算术的轮次都显示"已写入 6 条"）。
+    """
+    from local_agent.graph.nodes import prepare_context_node
+
+    update = prepare_context_node({"user_input": "1 加 1 等于几？", "memory_write_count": 6})
+    assert update["memory_write_count"] is None
+
+
 def test_projection_agrees_with_graph_on_recall_failure() -> None:
     """投影与 `graph.nodes._recall_failed` / `_rag_search_failed` 必须同一判据。
 

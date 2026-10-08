@@ -428,7 +428,13 @@ class AgentState(TypedDict, total=False):
 
     # 记忆与检索
     memory_refs: list[MemoryReference]
+    #: **追加型**：整条会话里真正落库过的候选（写入判重用），不是"本轮写了什么"。
     memory_write_candidates: Annotated[list[MemoryCandidate], operator.add]
+    #: **本轮**真正落库的候选条数（覆盖语义，由 `memory_write_node` 写；没走写入的轮次为 `None`）。
+    #: 界面投影只能用这个：上面那个列表带 `operator.add`，是会话累计值，用它会让"曾经写过记忆"
+    #: 的会话在**之后每一轮**都显示"已写入 N 条"（2026-10-08 用一个只做算术、没有任何记忆的
+    #: 轮次实测：快照仍报 `written · 6 条`）。
+    memory_write_count: int | None
     rag_refs: list[RAGReference]
 
     # 错误与循环控制
