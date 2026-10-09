@@ -118,6 +118,54 @@ def test_skill_load_refuses_a_manual_only_skill(tmp_path: Path) -> None:
     assert "只允许用户手动调用" in payload["note"]
 
 
+def test_skill_load_reads_a_resource_file(tmp_path: Path) -> None:
+    """按需读技能目录内的资源（正文里引用它，模型才有办法取到）。"""
+    _write(tmp_path, "release-checklist", "发布前检查清单")
+    refs = tmp_path / "release-checklist" / "references"
+    refs.mkdir()
+    (refs / "steps.md").write_text("第一步：先跑发布闸门测试。\n", encoding="utf-8")
+    tools = _tools(tmp_path)
+
+    payload = _payload(
+        tools["skill_load"].invoke({"name": "release-checklist", "resource": "references/steps.md"})
+    )
+
+    assert payload["resource"] == "references/steps.md"
+    assert "第一步：先跑发布闸门测试" in payload["content"]
+    assert "不会执行它" in payload["note"]
+
+
+def test_skill_load_refuses_a_resource_outside_the_skill(tmp_path: Path) -> None:
+    """越界资源（`..`/绝对路径）在读取之前被拒，正文与内容都是空的。"""
+    _write(tmp_path, "release-checklist")
+    _write(tmp_path, "another-skill")
+    tools = _tools(tmp_path)
+
+    for resource in ("../another-skill/SKILL.md", str(tmp_path / "x.md")):
+        payload = _payload(
+            tools["skill_load"].invoke({"name": "release-checklist", "resource": resource})
+        )
+        assert payload["content"] == ""
+        assert "不允许出现 `..`" in payload["note"] or "不接受绝对路径" in payload["note"]
+
+
+def test_skill_load_reports_a_missing_resource_and_a_directory(tmp_path: Path) -> None:
+    _write(tmp_path, "release-checklist")
+    refs = tmp_path / "release-checklist" / "references"
+    refs.mkdir()
+    tools = _tools(tmp_path)
+
+    missing = _payload(
+        tools["skill_load"].invoke({"name": "release-checklist", "resource": "references/nope.md"})
+    )
+    assert missing["content"] == "" and "没有" in missing["note"]
+
+    directory = _payload(
+        tools["skill_load"].invoke({"name": "release-checklist", "resource": "references"})
+    )
+    assert directory["content"] == "" and "是一个目录" in directory["note"]
+
+
 def test_skill_load_rereads_the_file_every_call(tmp_path: Path) -> None:
     """正文**不缓存**：技能改了，下一次调用就取到新内容（§16.5）。"""
     path = _write(tmp_path, "release-checklist")

@@ -152,17 +152,33 @@ class SkillCatalog:
             return None
         return skill
 
+    def visible_within_budget(self, max_chars: int) -> tuple[tuple[SkillSummary, ...], bool]:
+        """按字符预算取清单条目；返回 ``(条目, 是否被截断)``。
+
+        `skill_list` 工具与快照段落**共用这一条预算规则**：两处各算一遍的话，同一份配置会给出两种
+        "清单有多长"。第一条永远保留（截断到"一条都不剩"等于把功能关了，却看不出来）。
+        """
+        chosen: list[SkillSummary] = []
+        used = 0
+        for skill in self.model_visible:
+            cost = len(skill.name) + len(_one_line(skill.description)) + 4  # "- " + "：" + 换行
+            if chosen and used + cost > max_chars:
+                return tuple(chosen), True
+            chosen.append(skill)
+            used += cost
+        return tuple(chosen), False
+
     def render_listing(self, max_chars: int) -> tuple[str, bool]:
         """渲染给模型的清单：**只有名字与描述**，不含正文、路径、来源（§16.5）。
 
         Returns:
-            ``(文本, 是否截断)``；超限时按 §6.7 口径截断并如实标注。
+            ``(文本, 是否截断)``；超限时如实标注省掉了几个技能（不假装清单是完整的）。
         """
-        lines = [f"- {skill.name}：{_one_line(skill.description)}" for skill in self.model_visible]
-        text = "\n".join(lines)
-        if len(text) <= max_chars:
-            return text, False
-        return truncate_middle(text, max_chars), True
+        skills, truncated = self.visible_within_budget(max_chars)
+        text = "\n".join(f"- {skill.name}：{_one_line(skill.description)}" for skill in skills)
+        if truncated:
+            text = f"{text}\n…（清单已截断，省略 {len(self.model_visible) - len(skills)} 个技能）…"
+        return text, truncated
 
 
 def discover_skills(
@@ -232,14 +248,100 @@ def load_skill_body(skill: SkillSummary, *, max_chars: int) -> tuple[str, bool]:
     Returns:
         ``(正文, 是否截断)``；读不到时返回一句可读的说明（不抛异常，也不假装空技能）。
     """
+    text, truncated, problem = _read_text_capped(skill.path, max_chars=max_chars, strip=True)
+    if problem is not None:
+        return f"（该技能文件无法读取：{problem}）", False
+    return text, truncated
+
+
+def load_resource_text(
+    skill: SkillSummary, resource: str, *, max_chars: int
+) -> tuple[str, bool, str | None]:
+    """读取技能目录内的一个**资源文件**（§6.12、§16.5）。
+
+    与正文同一条读取与截断路径（`truncate_middle`），差别只有两点：不做 frontmatter 剥离（资源通常不是技能
+    正文），以及**先做越界判定再读**（:func:`resolve_resource`）。
+
+    Returns:
+        ``(文本, 是否截断, 给模型看的说明)``；说明非空时文本为空串。
+    """
+    resolution = resolve_resource(skill, resource)
+    if not resolution.ok:
+        return "", False, resolution.problem
+    assert resolution.path is not None  # 上面已保证
+    text, truncated, problem = _read_text_capped(resolution.path, max_chars=max_chars, strip=False)
+    if problem is not None:
+        return "", False, f"{resource.strip()}：{problem}"
+    return text, truncated, None
+
+
+def _read_text_capped(
+    path: Path, *, max_chars: int, strip: bool
+) -> tuple[str, bool, str | None]:
+    """按 UTF-8 读文本并截断；失败时返回 `problem` 而不是抛异常或编内容。"""
     try:
-        text = skill.path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
-        return f"（该技能文件无法读取：{type(exc).__name__}）", False
-    body = strip_frontmatter(text)
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return "", False, "无法按 UTF-8 文本读取（可能不是文本文件）"
+    except OSError as exc:
+        return "", False, f"读取失败（{type(exc).__name__}）"
+    body = strip_frontmatter(text) if strip else text
     if len(body) <= max_chars:
-        return body, False
-    return truncate_middle(body, max_chars), True
+        return body, False, None
+    return truncate_middle(body, max_chars), True, None
+
+
+@dataclass(frozen=True)
+class ResourceResolution:
+    """一次资源路径解析的结果：要么给路径，要么给"为什么不给"。"""
+
+    path: Path | None = None
+    problem: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.path is not None
+
+
+def resolve_resource(skill: SkillSummary, resource: str) -> ResourceResolution:
+    """把 `resource`（技能目录内的相对路径）解析成一个可读文件；越界一律拒绝。
+
+    这是本项目**唯一**一条读工作区之外文件的路径，所以判定顺序刻意是"先拒绝、再读"：
+
+    1. 空、绝对路径、含 `..` 的路径直接拒绝（不尝试规范化后再判断——那种写法容易漏掉一处）；
+    2. 解析**符号链接之后**仍须落在**该技能自己的目录**内（借道链接读到别处也算越界）；
+    3. 目录不是文件（要读目录请让用户说明要哪个文件）。
+
+    Returns:
+        路径 + 无问题，或 ``problem`` 里一句给模型看的说明。
+    """
+    raw = resource.strip()
+    if not raw:
+        return ResourceResolution(problem="resource 不能为空。")
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return ResourceResolution(
+            problem="resource 必须是**该技能目录内的相对路径**（不接受绝对路径）。"
+        )
+    if ".." in candidate.parts:
+        return ResourceResolution(problem="resource 不允许出现 `..`（不能用它跳出技能目录）。")
+
+    skill_dir = skill.path.parent
+    try:
+        skill_root = skill_dir.resolve()
+        target = (skill_dir / candidate).resolve()
+    except OSError:  # pragma: no cover - 极少数无法解析的路径
+        return ResourceResolution(problem="该路径无法解析，已拒绝。")
+
+    if target != skill_root and skill_root not in target.parents:
+        return ResourceResolution(
+            problem="该路径不在这个技能的目录内（解析符号链接之后仍然越界），已拒绝。"
+        )
+    if not target.is_file():
+        if target.is_dir():
+            return ResourceResolution(problem=f"{raw} 是一个目录，不是文件；请指定目录里的某个文件。")
+        return ResourceResolution(problem=f"这个技能目录里没有 {raw}。")
+    return ResourceResolution(path=target)
 
 
 def strip_frontmatter(text: str) -> str:

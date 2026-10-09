@@ -15,8 +15,11 @@ from local_agent.config import SkillsConfig
 from local_agent.context.skills_loader import (
     SKILL_NAME_PATTERN,
     USER_ROOTS,
+    SkillSummary,
     discover_skills,
+    load_resource_text,
     load_skill_body,
+    resolve_resource,
     strip_frontmatter,
 )
 
@@ -250,14 +253,18 @@ def test_listing_has_only_name_and_description(tmp_path: Path) -> None:
 
 
 def test_listing_truncation_is_marked(tmp_path: Path) -> None:
-    """清单超限按 §6.7 口径截断并如实标注。"""
+    """清单超限按 §6.7 口径截断并如实标注（省掉了几个技能）。"""
     root = tmp_path / "custom"
     _write_skill(root, "long-one", description="很长的描述" * 40)
+    _write_skill(root, "long-two", description="同样很长的描述" * 40)
 
     catalog = discover_skills(_config(tmp_path), workspace_root=tmp_path, home=tmp_path)
     text, truncated = catalog.render_listing(60)
     assert truncated is True
-    assert "内容已截断" in text
+    assert "清单已截断" in text
+    # 第一条永远保留：截断成"一条都不剩"等于把功能关了却看不出来。
+    assert "long-one" in text
+    assert "long-two" not in text
 
 
 def test_load_body_strips_frontmatter_and_rereads_every_time(tmp_path: Path) -> None:
@@ -317,6 +324,74 @@ def test_strip_frontmatter_handles_missing_closing_marker() -> None:
     assert strip_frontmatter("---\nname: x\n没有闭合") == "---\nname: x\n没有闭合"
     assert strip_frontmatter("直接就是正文") == "直接就是正文"
     assert strip_frontmatter("---\nname: x\n---\n\n正文") == "正文"
+
+
+def _skill_with_resources(tmp_path: Path) -> SkillSummary:
+    """建一个带资源的技能，返回它的摘要（资源读取用例共用）。"""
+    root = tmp_path / "custom"
+    _write_skill(root, "release-checklist")
+    skill_dir = root / "release-checklist"
+    (skill_dir / "references").mkdir()
+    (skill_dir / "references" / "steps.md").write_text("第一步：先跑测试。\n", encoding="utf-8")
+    (skill_dir / "scripts").mkdir()
+    (skill_dir / "scripts" / "gate.py").write_text("print('不该被执行')\n", encoding="utf-8")
+    catalog = discover_skills(_config(tmp_path), workspace_root=tmp_path, home=tmp_path)
+    return catalog.by_name["release-checklist"]
+
+
+def test_resolve_resource_reads_inside_the_skill_directory(tmp_path: Path) -> None:
+    """资源必须是技能目录内的相对路径；正常路径能解析成文件。"""
+    skill = _skill_with_resources(tmp_path)
+
+    resolution = resolve_resource(skill, "references/steps.md")
+
+    assert resolution.ok and resolution.path is not None
+    assert resolution.path.name == "steps.md"
+
+
+def test_resolve_resource_rejects_escapes(tmp_path: Path) -> None:
+    """绝对路径、`..`、空路径在**任何读取之前**就被拒。"""
+    skill = _skill_with_resources(tmp_path)
+
+    assert resolve_resource(skill, "").problem is not None
+    assert "绝对路径" in str(resolve_resource(skill, str(tmp_path / "x.md")).problem)
+    assert "`..`" in str(resolve_resource(skill, "../other/SKILL.md").problem)
+    # 借道符号链接跳出技能目录：解析之后仍须在目录内（本机不支持建链接时跳过这一步）。
+    outside = tmp_path / "outside.md"
+    outside.write_text("根外内容\n", encoding="utf-8")
+    link = skill.path.parent / "escape.md"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):  # pragma: no cover - 取决于权限
+        pass
+    else:
+        escaped = resolve_resource(skill, "escape.md")
+        assert not escaped.ok and "不在这个技能的目录内" in str(escaped.problem)
+
+
+def test_resolve_resource_reports_missing_and_directories(tmp_path: Path) -> None:
+    skill = _skill_with_resources(tmp_path)
+
+    assert "没有" in str(resolve_resource(skill, "references/nope.md").problem)
+    assert "是一个目录" in str(resolve_resource(skill, "references").problem)
+
+
+def test_load_resource_text_reads_truncates_and_reports_bad_files(tmp_path: Path) -> None:
+    """读资源走与正文同一个读取/截断口径；非文本与超限都如实报告。"""
+    skill = _skill_with_resources(tmp_path)
+
+    text, truncated, problem = load_resource_text(skill, "references/steps.md", max_chars=1_000)
+    assert problem is None and truncated is False and "第一步" in text
+
+    long_text, truncated_long, _ = load_resource_text(
+        skill, "references/steps.md", max_chars=5
+    )
+    assert truncated_long is True and "内容已截断" in long_text
+
+    binary = skill.path.parent / "blob.bin"
+    binary.write_bytes(b"\xff\xfe\x00\x01")
+    _, _, bad = load_resource_text(skill, "blob.bin", max_chars=1_000)
+    assert bad is not None and "UTF-8" in bad
 
 
 def test_relative_user_dir_is_rejected_at_config_time(tmp_path: Path) -> None:

@@ -28,7 +28,12 @@ from langchain_core.tools import tool as langchain_tool
 from pydantic import BaseModel, Field
 
 from local_agent.config import SkillsConfig
-from local_agent.context.skills_loader import SkillCatalog, discover_skills, load_skill_body
+from local_agent.context.skills_loader import (
+    SkillCatalog,
+    discover_skills,
+    load_resource_text,
+    load_skill_body,
+)
 
 #: 技能目录里可能带的资源目录（**只报存在性，不枚举文件**）。
 RESOURCE_DIRS: tuple[str, ...] = ("references", "scripts", "assets")
@@ -45,9 +50,10 @@ _LIST_DOC = (
     "清单为空时会说明原因（开关、发现根或格式）。"
 )
 _LOAD_DOC = (
-    "取一个技能的**正文**。`name` 必须是清单里出现过的名字。"
-    "正文过长会被截断并标注；技能自带的脚本**不会被本工具执行**（它只作为文本资源）。"
-    "取不到时如实报告是「没有这个技能」还是「已不可用」，不要臆造内容。"
+    "取一个技能的**正文**（`name` 必须是清单里出现过的名字），或取它目录内的一个**资源文件**"
+    "（给出 `resource`，例如 `references/steps.md`——路径必须是该技能目录内的相对路径）。"
+    "正文与资源过长都会被截断并标注；技能自带的脚本**不会被本工具执行**（只作为文本给出）。"
+    "取不到时如实报告是「没有这个技能」「已不可用」还是「资源越界/不存在」，不要臆造内容。"
 )
 
 
@@ -72,6 +78,8 @@ class SkillLoadResult(BaseModel):
     name: str = Field(min_length=1)
     #: 技能正文（已去 frontmatter）；取不到时为空串，原因在 ``note`` 里。
     content: str = ""
+    #: 本次取的是哪个资源文件（技能目录内的相对路径）；取正文时为 ``None``。
+    resource: str | None = None
     #: 该技能目录里存在的资源目录名（只报存在性）。
     resources: list[str] = Field(default_factory=list)
     note: str | None = None
@@ -121,12 +129,35 @@ def build_skill_tools(
         return SkillListResult(skills=entries, note=" ".join(notes) or None).model_dump_json()
 
     @langchain_tool("skill_load", description=_LOAD_DOC)
-    def skill_load(name: str) -> str:
-        """取一个技能的正文。"""
+    def skill_load(name: str, resource: str | None = None) -> str:
+        """取一个技能的正文，或它目录内的一个资源文件。"""
         catalog = _catalog()
         skill = catalog.get(name)
         if skill is None:
             return SkillLoadResult(name=name, note=_missing_note(name, catalog)).model_dump_json()
+
+        if resource is not None:
+            # 资源是**工作区之外**的读取路径，所以判定顺序刻意是"先拒绝、再读"（§6.12）。
+            text, truncated, problem = load_resource_text(
+                skill, resource, max_chars=config.max_skill_chars
+            )
+            if problem is not None:
+                return SkillLoadResult(
+                    name=skill.name, resource=resource.strip(), note=problem
+                ).model_dump_json()
+            resource_notes = [
+                "资源只作为**文本**给出，本工具不会执行它（要执行必须走命令执行能力与人工审批）。"
+            ]
+            if truncated:
+                resource_notes.append(
+                    f"内容超过上限（skills.max_skill_chars={config.max_skill_chars}）已截断，省略部分见标记。"
+                )
+            return SkillLoadResult(
+                name=skill.name,
+                resource=resource.strip(),
+                content=text,
+                note=" ".join(resource_notes),
+            ).model_dump_json()
 
         content, truncated = load_skill_body(skill, max_chars=config.max_skill_chars)
         notes: list[str] = []
