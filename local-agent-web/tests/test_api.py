@@ -45,6 +45,7 @@ from local_agent.application.errors import (
 )
 from local_agent.application.models import SCHEMA_VERSION
 from local_agent.application.service import EventSubscription
+from local_agent.capabilities import CAPABILITY_TOOLS
 from local_agent.config import AppConfig
 from local_agent.security.path_guard import normalize_grant_path
 
@@ -514,6 +515,38 @@ def test_health_reports_readiness_without_paths_or_secrets(api: tuple[TestClient
     assert "checkpoints.sqlite" not in response.text
     assert "sk-" not in response.text
     assert "C:\\" not in response.text
+
+
+def test_capabilities_endpoint_explains_what_is_unavailable(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    """能力状态端点：闭集全覆盖、不可用必须解释 + 给办法，且**不出现工具名**（§16.6）。"""
+    client, _runtime = api
+    response = client.get("/api/capabilities")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["profile"]
+    rows = {row["capability"]: row for row in body["capabilities"]}
+    assert set(rows) == set(CAPABILITY_TOOLS), "闭集里每个能力都要有一行"
+
+    for row in rows.values():
+        assert row["label"], row["capability"]
+        if row["available"]:
+            continue
+        # 不可用必须能解释、能照做；"只灰掉不解释"会让用户以为功能坏了
+        assert row["hint"], row["capability"]
+        assert row["reason"] in {"profile", "disabled", "missing_dependency"}
+
+    # 默认配置里 Git 关着：要说明是"开关没打开"，而不是笼统的不可用
+    assert rows["git_write"]["reason"] == "disabled"
+    assert "git.enabled" in rows["git_write"]["hint"]
+    # coder 不声明 web：这是档位问题，提示指向 profiles.active
+    assert rows["web"]["reason"] == "profile"
+
+    # 页面区块不出现原始工具名（§16.6、§15.8 的字段门槛）
+    for name in (name for names in CAPABILITY_TOOLS.values() for name in names):
+        assert name not in response.text, f"能力状态里泄露了工具名 {name}"
 
 
 def test_session_lifecycle_over_http(api: tuple[TestClient, ApiRuntime]) -> None:
@@ -1824,6 +1857,8 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/model-connections/{connection_id}/test",
         "/api/model-connections/default",
         "/api/permissions",
+        # v0.5 T56：当前档位与能力状态（只讲能力、不讲工具，§16.6）
+        "/api/capabilities",
         "/api/preferences",
         "/api/preferences/memory/test",
         "/api/data-center/memories",

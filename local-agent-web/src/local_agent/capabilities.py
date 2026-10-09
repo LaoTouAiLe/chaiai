@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Literal
 
 #: 能力闭集 → 该能力的工具名（**顺序即绑定顺序**）。
 #:
@@ -136,6 +138,134 @@ def effective_capabilities(
     """
     switch = {"web": web_access_enabled, "git_read": git_enabled, "git_write": git_enabled}
     return tuple(capability for capability in capabilities if switch.get(capability, True))
+
+
+#: 能力的中文名（页面展示用）。**页面只展示这个，不展示原始工具名**（§16.6、§15.8 的字段门槛）：
+#: 用户关心的是"这台机器现在能不能联网/能不能提交"，不是内部绑定了哪几个工具。
+CAPABILITY_LABELS: Mapping[str, str] = {
+    "plan": "任务计划",
+    "files_read": "读取工作区文件",
+    "code_search": "检索代码",
+    "files_write": "修改工作区文件",
+    "shell": "执行命令",
+    "web": "联网检索与抓取",
+    "git_read": "查看 Git 状态与差异",
+    "git_write": "提交到 Git",
+}
+
+#: 能力状态的原因类型。**只有这四种**：DTO 直接复用它，页面因此不会遇到"没见过的原因"。
+#: 定在这里（而不是各层各写一份字面量）是为了让"页面解释"与"后端判定"共用同一个闭集。
+CapabilityReason = Literal["available", "profile", "disabled", "missing_dependency"]
+
+#: 能力不可用的原因（**闭集**，页面据此解释，不允许自造一种）。
+REASON_AVAILABLE: CapabilityReason = "available"
+#: 当前档位没有声明这个能力（换档即可）。
+REASON_PROFILE: CapabilityReason = "profile"
+#: 配置开关关着（用户可自行打开）。
+REASON_DISABLED: CapabilityReason = "disabled"
+#: 运行环境缺东西（例如本机没装 git）：提示必须说"缺什么、怎么装"（§16.4、§16.6）。
+REASON_MISSING_DEPENDENCY: CapabilityReason = "missing_dependency"
+
+
+@dataclass(frozen=True)
+class CapabilityStatus:
+    """一个能力的对外状态：可用与否、**为什么**、以及怎么才能用（§16.6）。"""
+
+    capability: str
+    label: str
+    available: bool
+    reason: CapabilityReason
+    detail: str
+    hint: str | None = None
+
+
+def capability_status(
+    capabilities: Sequence[str],
+    *,
+    web_access_enabled: bool,
+    git_access_enabled: bool,
+    git_available: bool,
+    git_hint: str | None = None,
+) -> tuple[CapabilityStatus, ...]:
+    """把当前档位的能力集合展开成**可解释的状态列表**（§16.6）。
+
+    对闭集里的**每个**能力都给一行——不可用的也要在，并且必须带上"为什么 + 怎么办"：
+    "只灰掉不解释"会让用户以为功能坏了，而多数情况只是档位或开关的问题。
+
+    Args:
+        capabilities: 当前 Profile **声明**的能力集合（`PROFILES[active]` 或 custom）。
+        web_access_enabled: `web_access.enabled`。
+        git_access_enabled: `git.enabled`（配置开关）。
+        git_available: 本机是否存在 git 可执行文件（`tools.git_tools.git_availability`）。
+        git_hint: 缺 git 时给用户的可照做提示；缺它时退化为一句通用说明，不假装"稍后可用"。
+
+    Returns:
+        按 :data:`CAPABILITY_TOOLS` 顺序排列的状态行（顺序稳定，页面不会跳来跳去）。
+    """
+    declared = set(capabilities)
+    rows: list[CapabilityStatus] = []
+    for capability in CAPABILITY_TOOLS:
+        label = CAPABILITY_LABELS.get(capability, capability)
+        if capability not in declared:
+            rows.append(
+                CapabilityStatus(
+                    capability=capability,
+                    label=label,
+                    available=False,
+                    reason=REASON_PROFILE,
+                    detail="当前 Agent 档位没有包含这个能力。",
+                    hint="把 profiles.active 切到包含它的档位（coder / researcher / reviewer），或改 profiles.custom。",
+                )
+            )
+            continue
+        if capability == "web" and not web_access_enabled:
+            rows.append(
+                CapabilityStatus(
+                    capability=capability,
+                    label=label,
+                    available=False,
+                    reason=REASON_DISABLED,
+                    detail="联网开关关着：本机 Agent 一旦能联网，攻击面会扩到互联网，所以默认关闭。",
+                    hint="把 web_access.enabled 设为 true（并按 §16.3 的边界使用）。",
+                )
+            )
+            continue
+        if capability in {"git_read", "git_write"} and not git_access_enabled:
+            rows.append(
+                CapabilityStatus(
+                    capability=capability,
+                    label=label,
+                    available=False,
+                    reason=REASON_DISABLED,
+                    detail="Git 开关关着：默认不让 Agent 读仓库历史（更不让它提交）。",
+                    hint="把 git.enabled 设为 true。",
+                )
+            )
+            continue
+        if capability in {"git_read", "git_write"} and not git_available:
+            rows.append(
+                CapabilityStatus(
+                    capability=capability,
+                    label=label,
+                    available=False,
+                    reason=REASON_MISSING_DEPENDENCY,
+                    detail="这台机器上找不到 git 可执行文件，因此该能力不会绑给模型。",
+                    hint=git_hint
+                    or "安装 Git（Windows: https://git-scm.com/download/win ；macOS: brew install git ；"
+                    "Debian/Ubuntu: sudo apt install git）后重启本应用。",
+                )
+            )
+            continue
+        rows.append(
+            CapabilityStatus(
+                capability=capability,
+                label=label,
+                available=True,
+                reason=REASON_AVAILABLE,
+                detail="当前可用。",
+            )
+        )
+    return tuple(rows)
 
 
 def untrusted_tool_names() -> tuple[str, ...]:

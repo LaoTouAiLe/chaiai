@@ -53,7 +53,9 @@ from local_agent.application.events import (
 )
 from local_agent.application.models import (
     AssistantMessageView,
+    CapabilitiesView,
     CapabilityCheckView,
+    CapabilityStatusView,
     CommandResultView,
     ConversationMapView,
     ExternalPathAccess,
@@ -67,6 +69,7 @@ from local_agent.application.models import (
     SessionSummaryView,
     WorkspaceRef,
 )
+from local_agent.capabilities import capability_status
 from local_agent.config import LlmConfig, RunConfig
 from local_agent.exceptions import (
     ConnectionValidationError,
@@ -121,6 +124,7 @@ from local_agent.persistence.request_ledger import (
 from local_agent.persistence.session_store import Session, SessionStore
 from local_agent.scope import SCOPE_WORKSPACE, scope_key_for
 from local_agent.security.path_guard import ExternalPathPolicy, protected_target_reason
+from local_agent.tools.git_tools import git_availability
 
 #: 任务的终态，用于"能否证明终态"的判断（§15.2 的恢复口径）。
 TASK_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({"completed", "failed"})
@@ -1061,6 +1065,39 @@ class ApplicationService:
             return None
         selection = self._sqlite_access(partial(self._connections.session_selection, session_id))
         return None if selection is None else selection.connection_id
+
+    # ---- 能力状态（T56；§16.6）---------------------------------------------
+
+    def capabilities_view(self) -> CapabilitiesView:
+        """当前档位与每个能力的可用性（**每次现算**，不缓存；架构 §16.6）。
+
+        为什么不缓存：答案取决于配置开关与**这台机器上装没装 git**，两者都可能在运行期变化
+        （用户改配置、装完 Git 重启）。缓存一个旧答案比不显示更糟——那会让人以为"改了没用"。
+
+        对外只有**能力名与解释**，没有工具名（§15.8 的字段门槛）。
+        """
+        config = self._app_config
+        probe = git_availability()
+        return CapabilitiesView(
+            profile=config.profiles.active,
+            capabilities=[
+                CapabilityStatusView(
+                    capability=status.capability,
+                    label=status.label,
+                    available=status.available,
+                    reason=status.reason,
+                    detail=status.detail,
+                    hint=status.hint,
+                )
+                for status in capability_status(
+                    config.profiles.capabilities(),
+                    web_access_enabled=config.web_access.enabled,
+                    git_access_enabled=config.git.enabled,
+                    git_available=probe.available,
+                    git_hint=probe.hint,
+                )
+            ],
+        )
 
     # ---- 权限（T38；§1.5）---------------------------------------------------
 

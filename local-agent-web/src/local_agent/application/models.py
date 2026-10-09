@@ -25,6 +25,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from local_agent.application.errors import ErrorView
+from local_agent.capabilities import CapabilityReason
 
 #: 契约版本。任何破坏性改名都要提升它，并在 API 层显式声明。
 SCHEMA_VERSION: Final[int] = 1
@@ -198,6 +199,33 @@ class PermissionsView(_Dto):
     grants: list[ExternalPathGrantView] = Field(default_factory=list)
     #: 没有可用设置库时为真：这时改档位与加授权都存不下，界面必须如实说明。
     store_unavailable: bool = False
+
+
+# ---- 能力状态（v0.5 T56；契约 §16.6）--------------------------------------
+
+
+class CapabilityStatusView(_Dto):
+    """一个能力的对外状态（T56；§16.6）。
+
+    **只有能力与解释，没有工具名**（§15.8 的字段门槛）：用户要判断的是"这台机器现在能不能联网、
+    能不能提交"，不是内部绑了哪几个工具。原因取值直接复用 `capabilities.CapabilityReason`，
+    页面因此不会遇到"没见过的原因"。
+    """
+
+    capability: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    available: bool
+    reason: CapabilityReason
+    detail: str = Field(min_length=1)
+    #: 可照做提示；**不可用时必须有**（只灰掉不解释会让用户以为功能坏了）。
+    hint: str | None = None
+
+
+class CapabilitiesView(_Dto):
+    """当前 Agent 档位与每个能力的状态（T56；§16.6）。"""
+
+    profile: str = Field(min_length=1)
+    capabilities: list[CapabilityStatusView] = Field(default_factory=list)
 
 
 # ---- 计划 / 工具 / 审批 ----------------------------------------------------

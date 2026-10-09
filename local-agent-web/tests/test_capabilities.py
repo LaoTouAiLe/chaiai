@@ -18,11 +18,18 @@ from langchain_core.tools import BaseTool
 from pydantic import ValidationError
 
 from local_agent.capabilities import (
+    CAPABILITY_LABELS,
     CAPABILITY_TOOLS,
     DEFAULT_PROFILE,
     MODE_CAPABILITIES,
     PROFILES,
+    REASON_AVAILABLE,
+    REASON_DISABLED,
+    REASON_MISSING_DEPENDENCY,
+    REASON_PROFILE,
+    CapabilityStatus,
     capability_names,
+    capability_status,
     effective_capabilities,
     profile_names,
     tool_names_for,
@@ -183,6 +190,74 @@ def test_registry_keeps_git_tools_even_when_the_environment_lacks_git(
             PROFILES["coder"], web_access_enabled=False, git_enabled=registry.git_available
         )
     )
+
+
+def _status_rows(
+    *,
+    capabilities: Sequence[str] | None = None,
+    web_access_enabled: bool = False,
+    git_access_enabled: bool = False,
+    git_available: bool = True,
+    git_hint: str | None = None,
+) -> dict[str, CapabilityStatus]:
+    """默认按"web 关、git 关"算一遍能力状态，用例按需覆盖。"""
+    rows = capability_status(
+        PROFILES["coder"] if capabilities is None else capabilities,
+        web_access_enabled=web_access_enabled,
+        git_access_enabled=git_access_enabled,
+        git_available=git_available,
+        git_hint=git_hint,
+    )
+    return {row.capability: row for row in rows}
+
+
+def test_capability_status_covers_the_whole_closed_set() -> None:
+    """闭集里**每个**能力都要有一行（含不可用的），否则页面会漏掉"为什么用不了"。"""
+    rows = _status_rows(git_access_enabled=True)
+
+    assert set(rows) == set(CAPABILITY_TOOLS)
+
+
+def test_capability_status_separates_the_four_reasons() -> None:
+    """四种原因各走一条路：可用 / 档位没声明 / 开关关闭 / 环境缺依赖（§16.6）。"""
+    # 默认（web 关、git 关）：coder 声明了 git，但开关没打开
+    rows = _status_rows()
+
+    assert rows["plan"].reason == REASON_AVAILABLE
+    # coder 不声明 web：这是**档位**问题，不是开关问题——提示要指向 profiles.active
+    assert rows["web"].reason == REASON_PROFILE
+    assert "profiles.active" in (rows["web"].hint or "")
+
+    assert rows["git_write"].reason == REASON_DISABLED
+    assert "git.enabled" in (rows["git_write"].hint or "")
+
+    # 开关打开且环境就绪：git 转为可用（这条与上一条互为对照，避免"永远返回不可用"也能过）
+    ready = _status_rows(git_access_enabled=True)
+    assert ready["git_read"].available is True and ready["git_read"].hint is None
+
+    # 环境缺依赖：开关开着，但这台机器没有 git —— 提示用**传进来的**那句话（"缺什么、怎么装"）
+    missing = _status_rows(git_access_enabled=True, git_available=False, git_hint="装好 Git 再重启")
+    assert missing["git_read"].reason == REASON_MISSING_DEPENDENCY
+    assert missing["git_read"].hint == "装好 Git 再重启"
+
+
+def test_capability_status_never_leaks_tool_names() -> None:
+    """页面能力区块**不展示原始工具名**（§16.6、§15.8 的字段门槛）。
+
+    机械校验：能力名、中文名、说明、提示四类文本里都不能出现任何已实现工具的名字。
+    """
+    rows = _status_rows(git_access_enabled=True, git_available=False)
+    text = " ".join(
+        part
+        for row in rows.values()
+        for part in (row.capability, row.label, row.detail, row.hint or "")
+    )
+
+    for name in {name for names in CAPABILITY_TOOLS.values() for name in names}:
+        assert name not in text, f"能力状态的对外文本里出现了工具名 {name}"
+
+    # 每个能力都得有中文名（缺失会退化成能力 id，等于把内部标识怼到页面上）
+    assert set(CAPABILITY_LABELS) == set(CAPABILITY_TOOLS)
 
 
 def test_capability_table_covers_registered_tools_exactly(

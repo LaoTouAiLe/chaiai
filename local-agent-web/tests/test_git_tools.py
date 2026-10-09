@@ -65,7 +65,9 @@ def test_missing_git_explains_what_to_install() -> None:
     assert availability.available is False
     hint = availability.hint or ""
     assert "git-scm.com" in hint  # 可照做的安装提示
-    assert "git_status" in hint and "git_commit" in hint  # 说清哪些工具因此不可用
+    # 这段提示会出现在页面的能力状态区块，那里**只讲能力、不点工具名**（§16.6 的字段门槛）。
+    assert "Git 相关能力不可用" in hint
+    assert "git_status" not in hint and "git_commit" not in hint
 
 
 def test_git_available_when_which_finds_it() -> None:

@@ -49,6 +49,7 @@ from local_agent.application import errors as app_errors
 from local_agent.application.data_center_models import MemoryPageView, UsagePageView
 from local_agent.application.models import (
     SCHEMA_VERSION,
+    CapabilitiesView,
     CommandResultView,
     ConversationMapView,
     ModelConnectionView,
@@ -489,6 +490,17 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
             expected_selection=_selection_ref(payload.expected_selection),
         )
         return service.get_session_snapshot(session_id)
+
+    # ---- 能力状态（T56；§16.6）--------------------------------------------------
+
+    @router.get("/capabilities", response_model=CapabilitiesView, summary="当前档位与能力状态")
+    def capabilities() -> CapabilitiesView:
+        """当前 Profile 与每个能力的可用性、原因与下一步。
+
+        **只讲能力不讲工具**（§16.6）：用户要判断的是"现在能不能联网、能不能提交"。答案每次现算，
+        因此改完配置或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。
+        """
+        return service.capabilities_view()
 
     # ---- 权限（T38；§1.5）------------------------------------------------------
     # 这组接口只读写"工作区外路径"的档位与授权条目：档位存设置库（`config.yaml` 只是出厂默认），

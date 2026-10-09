@@ -114,7 +114,8 @@ def git_availability(*, which: Callable[[str], str | None] = shutil.which) -> Gi
         hint=(
             "未找到 git 可执行文件：请安装 Git（Windows: https://git-scm.com/download/win ，"
             "macOS: `brew install git` ，Debian/Ubuntu: `sudo apt install git`）后重启本应用；"
-            "安装前 git_status / git_diff / git_log / git_commit 不可用。"
+            # 刻意不点工具名：这段提示会出现在**页面**的能力状态区块，那里只讲能力不讲工具（§16.6）。
+            "安装前 Git 相关能力不可用。"
         ),
     )
 

@@ -136,6 +136,8 @@
 - **落点**：应用服务契约（能力可用性与不可用原因的 DTO/事件）+ 前端设置页/顶部栏 + Playwright 截图基线。
 - **验收**：`coder` / `researcher` / `reviewer` 各一套固定任务集可跑通并留结果；页面**不出现原始工具名**（沿用 `V0_4_DEVELOPMENT_PLAN.md` §T39 的字段门槛）；视觉基线按测试粒度重拍并人工抽查；缺依赖时页面说明"缺什么、怎么装"，不是只灰掉。
 - **明确不做**：Profile 的可视化编辑器（v0.4 已裁定不做安全/权限的通用配置编辑器）。
+- **后端切片已完成（2026-10-09）**：契约 §16.6 冻结（只讲能力不讲工具、原因闭集、不可用必须给可照做提示、**每次现算不缓存**）；`capabilities.py` 加 `CAPABILITY_LABELS`、`CapabilityReason`（闭集字面量，DTO 直接复用，页面不会遇到"没见过的原因"）与 `capability_status()`；`application/models.py` 加 `CapabilityStatusView` / `CapabilitiesView`；`ApplicationService.capabilities_view()`；新增 `GET /api/capabilities`；`git_tools.git_availability` 的安装提示改为**不点工具名**（它现在会出现在页面能力区块）。受控 OpenAPI 文档已重新生成（`docs/api/openapi.json`，逐字节比对的门槛靠 `write_bytes` 保住 LF）。**证据**：新增 4 条能力状态用例（闭集全覆盖、四种原因各一条、可用/不可用互为对照、**机械校验对外文本里不出现任何工具名**）+ 1 条端点用例（闭集、解释与提示、不泄露工具名）。
+- **T56 未做（如实列出）**：① 前端展示（设置页/顶部栏）与 Playwright 视觉基线——前端文件正被另一处改动编辑，等它落地再做；② 三档 Profile 的**固定任务集**（计划里把它列为 T56 的验收判据之一，尚未定义）；③ 能力状态目前只在 REST 端点暴露，**没有事件**（页面刷新即得，暂不需要推送）。
 
 ## 4. 全局硬验收（每个任务都要过）
 
