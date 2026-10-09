@@ -96,6 +96,34 @@ def resolve_under(base_dir: Path, value: str | Path) -> Path:
     return candidate if candidate.is_absolute() else (Path(base_dir) / candidate)
 
 
+def resolve_memory_paths(config: AppConfig, base_dir: Path) -> AppConfig:
+    """把三层记忆库的路径也钉到 ``base_dir`` 上（架构 §8）。
+
+    为什么这三条要单独收口：它们的消费方是**图内节点**（`graph/nodes.py` 直接拿
+    ``context.app_config.memory.*.path`` 去 ``open_store``），节点拿不到 base_dir，于是它们成了
+    全项目唯一"按进程当前目录解析"的路径。2026-10-09 实测后果：换一个目录启动，聊天库还在原地
+    （它在这里解析过），**长期记忆却换成了另一个库**——正是 T40 的"解压双击"场景。
+
+    语义与 :func:`resolve_under` 逐字一致（绝对路径照用、相对路径拼在基准目录上、不展开 ``~``）。
+    其余键仍由各自的消费方调用 :func:`resolve_under`，本次不改。
+    """
+    memory = config.memory
+    resolved = memory.model_copy(
+        update={
+            "short_term": memory.short_term.model_copy(
+                update={"path": str(resolve_under(base_dir, memory.short_term.path))}
+            ),
+            "medium_term": memory.medium_term.model_copy(
+                update={"path": str(resolve_under(base_dir, memory.medium_term.path))}
+            ),
+            "long_term": memory.long_term.model_copy(
+                update={"path": str(resolve_under(base_dir, memory.long_term.path))}
+            ),
+        }
+    )
+    return config.model_copy(update={"memory": resolved})
+
+
 def open_runtime(
     app_config: AppConfig,
     *,
@@ -142,6 +170,8 @@ def open_runtime(
     settings: SettingsDatabase | None = None
     try:
         workspace_root = resolve_under(base_dir, app_config.workspace.root)
+        # 图内节点直接按配置里的路径开记忆库，所以在这里先钉到 base_dir 上（§8）。
+        app_config = resolve_memory_paths(app_config, base_dir)
         database = checkpoint_module.open_database(database_path, workspace_root=workspace_root)
         settings = _open_settings(app_config, base_dir=base_dir)
         service = ApplicationService(

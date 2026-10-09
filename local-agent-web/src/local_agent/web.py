@@ -30,7 +30,12 @@ from uuid import uuid4
 import streamlit as st
 
 from local_agent import config as config_module
-from local_agent.api.container import ApiRuntime, open_runtime, resolve_under
+from local_agent.api.container import (
+    ApiRuntime,
+    open_runtime,
+    resolve_memory_paths,
+    resolve_under,
+)
 from local_agent.application.errors import ApplicationError
 from local_agent.application.models import SessionSnapshot, SessionSummaryView
 from local_agent.config import AppConfig, ConfigError
@@ -93,7 +98,9 @@ def load_debug_app(
     runtime = open_runtime(app_config, base_dir=base_dir)
     return DebugApp(
         runtime=runtime,
-        app_config=app_config,
+        # 侧栏"记忆管理"自己开长期库，因此必须与服务用**同一套解析结果**（§8）：
+        # 否则页面会去读另一个库，把"记忆是空的"显示成事实。
+        app_config=resolve_memory_paths(app_config, base_dir),
         # 与 `open_runtime` 同一套相对路径规则（相对配置文件目录，而不是进程当前目录）。
         workspace_root=resolve_under(base_dir, app_config.workspace.root),
     )

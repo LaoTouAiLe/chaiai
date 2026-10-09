@@ -16,7 +16,8 @@ uv run python scripts/init_db.py --check    # 只检查，不改动任何文件
 - 中期记忆是 Chroma 目录（架构 §10.2）：只有 ``memory.medium_term.enabled`` 为 ``true`` 时才需要，
   且必须先安装可选依赖（``uv sync --extra memory``）。本脚本只**检查**依赖是否就绪，不替它建目录，
   也不导入 ``chromadb``。
-- 相对路径按**进程当前目录**解析，与 ``web.py`` 的启动约定一致。
+- 配置里的记忆库路径按**配置文件所在目录**解析（与 ``open_runtime`` / ``web.py`` / ``cli`` 同一基准，
+  架构 §8）：换一个目录执行不会"另建一套库"。
 - 退出码：``0`` 成功或已就绪；``1`` 检查未通过（缺文件 / 版本落后 / 依赖缺失）；``2`` 配置或初始化失败。
 """
 
@@ -28,6 +29,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from local_agent.api.container import resolve_memory_paths
 from local_agent.config import DEFAULT_CONFIG_PATH, AppConfig, ConfigError, load_config
 from local_agent.exceptions import MemoryStoreError
 from local_agent.memory import long_term, medium_term
@@ -64,7 +66,7 @@ class DatabaseStatus:
 
 
 def chat_database_path(config: AppConfig) -> Path:
-    """聊天库文件路径（相对路径按进程当前目录解析，与 ``web.py`` 一致）。"""
+    """聊天库文件路径（已在 :func:`main` 里按配置文件目录展开，§8）。"""
     return Path(config.memory.short_term.path).resolve()
 
 
@@ -142,11 +144,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    config_path = Path(args.config)
     try:
-        config = load_config(Path(args.config))
+        config = load_config(config_path)
     except ConfigError as exc:
         print(f"配置不可用：{exc}")
         return EXIT_SETUP_PROBLEM
+    # 记忆库路径按配置文件所在目录展开（§8），与 open_runtime / web / cli 同一基准：
+    # 否则从别的目录执行这里，会把库建到别处并让"记忆是空的"看起来像事实。
+    config = resolve_memory_paths(config, config_path.resolve().parent)
 
     try:
         statuses = inspect(config) if args.check else initialize(config)
