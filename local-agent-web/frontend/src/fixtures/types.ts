@@ -584,6 +584,14 @@ export interface ConversationScenario {
   takeover: ComposerTakeoverView
   /** Non-null when the settings dialog is open over the shell. */
   settings: SettingsView | null
+  /**
+   * 非空时覆盖层显示「能力与档位」面板（v0.5 T56）。
+   *
+   * 面板在产品里是**侧栏的 live-only 入口**；原型宿主默认不渲染它，所以既有场景的 DOM 与
+   * 截图逐字节不变。要给它一条视觉基线，就只在这个场景上挂一份视图模型——数据是 fixture，
+   * 展示组件本来也不认识 fetch。
+   */
+  capabilities?: CapabilitiesView | null
   /** Non-null when the composer's model menu is open. */
   modelMenu: ModelMenuView | null
   /** Non-null when the conversation shows an empty state instead of a flow. */

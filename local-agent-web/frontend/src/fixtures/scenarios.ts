@@ -1278,6 +1278,84 @@ export const meterOpenScenario: ConversationScenario = {
   composer: { disabledReason: null, phase: null, meterOpen: true },
 }
 
+/* ---------------------------------------------------------------------------
+ * v0.5 T56: 能力与档位面板（产品里是侧栏 live-only 入口，这里只为给它一条视觉基线）。
+ * ------------------------------------------------------------------------- */
+
+/**
+ * 能力与档位：**闭集里的四种原因各出现一次**。
+ *
+ * 这条基线要证的不是"面板长得好看"，而是"不可用时说清了缺什么、怎么装"：所以 fixture 刻意让
+ * `available` / `profile` / `disabled` / `missing_dependency` 四种原因同时出现在一屏里。
+ *
+ * 取的是 `researcher` 档 + 联网开关关闭 + Git 开关开着但**这台机器没有 git**——最后这一组正是
+ * "两台机器配置一样却行为不同"的那个场景（§16.4），也是最容易被做成一排灰格子的一种。
+ *
+ * 八行文案**逐字**来自后端 `capabilities.py::capability_status()`（用同一组入参真算了一份再抄），
+ * 前端不在这里自造措辞；后端那份由 `tests/test_capabilities.py` 守着，改文案要两边一起改。
+ */
+export const capabilitiesScenario: ConversationScenario = {
+  id: 'capabilities',
+  sessionId: 's-shell',
+  purpose: '能力与档位面板：档位 + 四种可用性原因（可用 / 档位没有 / 开关关闭 / 缺依赖）+ 可照做提示',
+  session: shellScenario.session,
+  messages: shellScenario.messages,
+  plan: shellScenario.plan,
+  stats: shellScenario.stats,
+  context: shellScenario.context,
+  takeover: { kind: 'none' },
+  settings: null,
+  modelMenu: null,
+  capabilities: {
+    profile: 'researcher',
+    capabilities: [
+      { capability: 'plan', label: '任务计划', available: true, reason: 'available', detail: '当前可用。', hint: null },
+      { capability: 'files_read', label: '读取工作区文件', available: true, reason: 'available', detail: '当前可用。', hint: null },
+      { capability: 'code_search', label: '检索代码', available: true, reason: 'available', detail: '当前可用。', hint: null },
+      {
+        capability: 'files_write',
+        label: '修改工作区文件',
+        available: false,
+        reason: 'profile',
+        detail: '当前 Agent 档位没有包含这个能力。',
+        hint: '把 profiles.active 切到包含它的档位（coder / researcher / reviewer），或改 profiles.custom。',
+      },
+      {
+        capability: 'shell',
+        label: '执行命令',
+        available: false,
+        reason: 'profile',
+        detail: '当前 Agent 档位没有包含这个能力。',
+        hint: '把 profiles.active 切到包含它的档位（coder / researcher / reviewer），或改 profiles.custom。',
+      },
+      {
+        capability: 'web',
+        label: '联网检索与抓取',
+        available: false,
+        reason: 'disabled',
+        detail: '联网开关关着：本机 Agent 一旦能联网，攻击面会扩到互联网，所以默认关闭。',
+        hint: '把 web_access.enabled 设为 true（并按 §16.3 的边界使用）。',
+      },
+      {
+        capability: 'git_read',
+        label: '查看 Git 状态与差异',
+        available: false,
+        reason: 'missing_dependency',
+        detail: '这台机器上找不到 git 可执行文件，因此该能力不会绑给模型。',
+        hint: '安装 Git（Windows: https://git-scm.com/download/win ；macOS: brew install git ；Debian/Ubuntu: sudo apt install git）后重启本应用。',
+      },
+      {
+        capability: 'git_write',
+        label: '提交到 Git',
+        available: false,
+        reason: 'profile',
+        detail: '当前 Agent 档位没有包含这个能力。',
+        hint: '把 profiles.active 切到包含它的档位（coder / researcher / reviewer），或改 profiles.custom。',
+      },
+    ],
+  },
+}
+
 /**
  * Matrix 24: the resident shell in its narrow state.
  *
@@ -1427,6 +1505,7 @@ export const scenarios: readonly ConversationScenario[] = [
   runningEmptyScenario,
   loadingHistoryScenario,
   meterOpenScenario,
+  capabilitiesScenario,
   sidebarCollapsedScenario,
   errorCodesScenario,
 ]

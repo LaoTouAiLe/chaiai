@@ -227,12 +227,14 @@ fixture 与视图模型在 `src/fixtures/`。它们是**展示用视图模型**�
   固定视口、`deviceScaleFactor=1`、浅色主题、`zh-CN`、`Asia/Shanghai`、`reduced-motion`。
 - 每次截图前都必须经过 `settle()`：等 `document.fonts.ready` 并等两帧 `requestAnimationFrame`。少了它，
   并行 worker 下截图可能落在字体就绪之前，同一个页面会产出两张不同图片（假回归）。
-- 每个视口 27 张：19 个场景（`shell` / `diff` / `errors` / `tools` / `approval` / `approval-expired` /
-  `settings-models` / `settings-empty` / `model-menu` / `memory-hit` / `memory-miss` / `memory-failed` /
-  `empty-no-workspace` / `empty-session` / `running-empty` / `loading-history` / `meter-open` /
-  `sidebar-collapsed` / `error-codes`）各一张，外加 8 张**证据图**：7 张滚动证据（`diff-bottom` /
-  `errors-bottom` / `error-codes-bottom` / `tools-read` / `tools-bottom` / `settings-models-mid` /
-  `settings-models-confirm`）+ 1 张悬停证据 `context-meter-hover`，共 54 张。
+- 每个视口 33 张：22 个场景（`shell` / `diff` / `errors` / `tools` / `trace` / `long-text` / `approval` /
+  `approval-expired` / `settings-models` / `settings-empty` / `model-menu` / `memory-hit` / `memory-miss` /
+  `memory-failed` / `empty-no-workspace` / `empty-session` / `running-empty` / `loading-history` /
+  `meter-open` / `sidebar-collapsed` / `error-codes` / `capabilities`）各一张，外加 11 张**证据图**：
+  滚动证据（`diff-bottom` / `errors-bottom` / `error-codes-bottom` / `tools-read` / `tools-bottom` /
+  `settings-models-mid` / `settings-models-confirm` / `capabilities-bottom`）、轨迹检查器
+  （`trace-inspector` / `trace-inspector-bottom`）与悬停证据 `context-meter-hover`。三视口合计 **97** 张
+  （`640x800` 少 2 张：`diff-bottom` / `tools-bottom` 在窄窗下元素本身就高于视口，按用例声明 skip）。
 - 滚动证据用 `expect(...).toBeInViewport({ ratio: 1 })` 断言被折叠在首屏之下的内容在滚动后**完整进入视口**：
   第二个 hunk 末行、第三张错误卡的完整提示与"重新发送"按钮、读取卡的窗口与行号、尾部的待办/通用回退/成功终端卡、
   连接列表的中段（"检测中"+ 明文传输标记 / "检测失败" / "能力不支持"，把第三张卡对齐到滚动容器顶部后三张同时完整可见）、

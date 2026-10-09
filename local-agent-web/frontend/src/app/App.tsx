@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import { Composer } from '../components/Composer'
 import { Sidebar } from '../components/Sidebar'
 import { TopBar } from '../components/TopBar'
+import { CapabilitiesPanel } from '../features/capabilities/CapabilitiesPanel'
 import { Conversation } from '../features/conversation/Conversation'
 import { ModelSettingsDialog } from '../features/settings/ModelSettingsDialog'
 import { SettingsDialog } from '../features/settings/SettingsDialog'
@@ -15,7 +16,8 @@ import styles from './App.module.css'
 
 export function App() {
   // 默认是**真实**会话壳（T30）。`?state=` 仍然可达，但它现在只服务一件事：
-  // T26 的静态视觉基线（54 张截图按场景驱动）。产品入口不再经过 fixture。
+  // 静态视觉基线（按场景驱动，张数与场景清单见 `local-agent-web/README.md`）。
+  // 产品入口不再经过 fixture。
   const scenarioId = readScenarioId()
   return scenarioId === null ? (
     <LiveApp />
@@ -49,6 +51,8 @@ function readLiveFlag(): boolean {
 function PrototypeHost({ scenarioId }: { scenarioId: string | null }) {
   const scenario = findScenario(scenarioId)
   const [liveOpen, setLiveOpen] = useState(true)
+  // 「能力与档位」面板的展开态：默认展开，关闭按钮真的能关（基线里要照到它，但不假装它关不掉）。
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(true)
   // 页签是界面状态；`?state=` 只决定初始页（`trace` 场景从轨迹页开始）。
   const [tab, setTab] = useState<'conversation' | 'trace'>(scenario.tab ?? 'conversation')
   const live = readLiveFlag()
@@ -93,6 +97,10 @@ function PrototypeHost({ scenarioId }: { scenarioId: string | null }) {
         ) : scenario.settings === null ? null : (
           <SettingsDialog settings={scenario.settings} />
         )}
+        {/* 只有挂了视图模型的场景才渲染（T56 的 `capabilities`）：其它场景的 DOM 与截图逐字节不变。 */}
+        {scenario.capabilities == null || !capabilitiesOpen
+          ? null
+          : <CapabilitiesPanel view={scenario.capabilities} onClose={() => setCapabilitiesOpen(false)} />}
       </main>
     </div>
   )

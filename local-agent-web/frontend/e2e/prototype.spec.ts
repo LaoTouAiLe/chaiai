@@ -30,6 +30,8 @@ const ALL_SCENARIOS = [
   'meter-open',
   'sidebar-collapsed',
   'error-codes',
+  // v0.5 T56：能力与档位面板（四种不可用原因各一次）。新场景只新增 PNG，不改任何既有基线。
+  'capabilities',
 ] as const
 
 /**
@@ -542,4 +544,27 @@ test('the tail cards are fully visible after scrolling to the end', async ({ pag
   await expect(page.getByText('退出码 0')).toBeInViewport({ ratio: 1 })
   await settle(page)
   await expect(page).toHaveScreenshot('tools-bottom.png')
+})
+
+/**
+ * v0.5 T56：能力面板的尾巴也必须滚动后**完整可读**。
+ *
+ * 第一屏（`capabilities.png`）只证明得了"最后两行在折线以下"——而"缺什么、怎么装"恰恰是下面
+ * 那两行要说的话（§16.6 要求不可用必须给可照做提示）。被切成一半的提示等于没写，所以这里按
+ * `diff|errors|tools-bottom` 的既有做法：滚到尾巴、断言**完整**进视口（`ratio: 1`），再留一张图。
+ *
+ * 面板自己负责滚动（`.dialog { max-height: 80vh; overflow: auto }`），不需要滚页面。
+ */
+test('the capability panel tail is fully readable after scrolling', async ({ page }) => {
+  await page.goto('/?state=capabilities')
+  const dialog = page.getByRole('dialog', { name: '能力与档位' })
+
+  const last = dialog.getByText('提交到 Git')
+  await last.scrollIntoViewIfNeeded()
+  await expect(last).toBeInViewport({ ratio: 1 })
+  // 缺依赖那条的安装提示：这一屏要能读到"缺什么、怎么装"的完整句子。
+  await expect(dialog.getByText(/安装 Git（Windows/)).toBeInViewport({ ratio: 1 })
+
+  await settle(page)
+  await expect(page).toHaveScreenshot('capabilities-bottom.png')
 })
