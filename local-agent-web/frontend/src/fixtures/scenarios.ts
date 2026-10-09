@@ -1056,6 +1056,11 @@ const memoryMiss: MemoryRowView = {
   write: { outcome: 'failed', detail: '记忆存储不可用 · 不影响本轮回答，也未写入任何内容' },
 }
 
+const memorySkipped: MemoryRowView = {
+  retrieval: { outcome: 'miss', note: '本轮没有召回相关记忆。' },
+  write: { outcome: 'skipped', detail: '中期与长期记忆都已关闭，候选没有落库' },
+}
+
 const memoryFailed: MemoryRowView = {
   retrieval: {
     outcome: 'failed',
@@ -1063,6 +1068,40 @@ const memoryFailed: MemoryRowView = {
     note: '本轮按无检索继续：回答中没有引用来源。恢复索引后可重试，重试前不会声称用过检索。',
   },
   write: null,
+}
+
+/**
+ * 有候选但被跳过（v0.5 §10.4 的第三种写入事实）。
+ *
+ * 与 `memory-miss` 的区别只在写入那一行：这里是"想记但一条都没落库"，必须**说明为什么**
+ * （旧行为是整行消失，用户看不出"打开开关就能记上"）。
+ */
+export const memorySkippedScenario: ConversationScenario = {
+  id: 'memory-skipped',
+  sessionId: 's-memory',
+  purpose: '检索与记忆·写入被跳过：有候选但没落库，必须说明为什么（不是"没东西可记"）',
+  session: {
+    title: '检索与记忆的三种结果',
+    workspace: 'local-agent-web',
+    status: 'completed',
+    modelLabel: '模型 A · 上下文 128k',
+  },
+  messages: [
+    { kind: 'user', id: 'u1', text: '记住：我习惯用 pytest。', at: '09:26' },
+    { kind: 'memory', id: 'm1', memory: memorySkipped },
+    {
+      kind: 'assistant',
+      id: 'a1',
+      text: '记下了这条内容，但本轮没有写入任何记忆库——上面那行说明了原因。',
+      at: '09:26',
+    },
+  ],
+  plan: null,
+  stats: retrievalStats,
+  context: { usedTokens: 92_000, windowTokens: 128_000, scope: 'current' },
+  takeover: { kind: 'none' },
+  settings: null,
+  modelMenu: null,
 }
 
 /** Retrieval hit: every source is shown as a locator, never as content. */
@@ -1507,6 +1546,7 @@ export const scenarios: readonly ConversationScenario[] = [
   modelMenuScenario,
   memoryHitScenario,
   memoryMissScenario,
+  memorySkippedScenario,
   memoryFailedScenario,
   emptyNoWorkspaceScenario,
   emptySessionScenario,

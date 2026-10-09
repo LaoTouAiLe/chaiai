@@ -281,7 +281,8 @@ class MemoryRecalledPayload(BaseModel):
 
 class MemoryWrittenPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    outcome: Literal["written", "failed"]
+    #: 与 `MemoryUseView.write_outcome` 同一个闭集（§10.4）：`skipped` = 有候选但一条都没落。
+    outcome: Literal["written", "failed", "skipped"]
     detail: str
 
 

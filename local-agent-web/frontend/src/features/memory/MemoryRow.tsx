@@ -1,4 +1,5 @@
 import type { MemoryRowView, RetrievalSourceView, RetrievalView } from '../../fixtures/types'
+import type { MemoryWriteView } from '../../fixtures/types'
 import styles from './MemoryRow.module.css'
 
 interface MemoryRowProps {
@@ -21,6 +22,24 @@ const KIND_LABEL: Record<RetrievalSourceView['kind'], string> = {
   'workspace-file': '工作区文件',
   'long-term-memory': '长期记忆',
   'session-history': '会话历史',
+}
+
+/**
+ * 写入结果的三种事实，三种说法（§10.4）：写了 / 写失败 / **有候选但被跳过**。
+ *
+ * 第三种必须出现并带上原因——旧行为是这一行整段消失，于是"这轮没东西可记"与"想记但被跳过了"
+ * 看起来一模一样，用户不知道"打开开关就能记上"。
+ */
+const WRITE_LABEL: Record<MemoryWriteView['outcome'], string> = {
+  written: '已写入长期记忆',
+  failed: '写入长期记忆失败',
+  skipped: '本轮未写入长期记忆',
+}
+
+const WRITE_CLASS: Record<MemoryWriteView['outcome'], string> = {
+  written: styles.writeOk ?? '',
+  failed: styles.writeFailed ?? '',
+  skipped: styles.writeSkipped ?? '',
 }
 
 /**
@@ -65,8 +84,8 @@ export function MemoryRow({ memory }: MemoryRowProps) {
       </details>
 
       {write === null ? null : (
-        <p className={write.outcome === 'written' ? styles.writeOk : styles.writeFailed}>
-          {write.outcome === 'written' ? '已写入长期记忆' : '写入长期记忆失败'} · {write.detail}
+        <p className={WRITE_CLASS[write.outcome]}>
+          {WRITE_LABEL[write.outcome]} · {write.detail}
         </p>
       )}
     </section>

@@ -44,6 +44,21 @@ describe('MemoryRow', () => {
     expect(screen.getByText(/不影响本轮回答/)).toBeInTheDocument()
   })
 
+  it('says why nothing was written when the write was skipped', () => {
+    // §10.4 的第三种事实：有候选但一条都没落库。它必须出现并带上原因——旧行为是整行消失，
+    // 于是"这轮没东西可记"与"想记但被跳过了"看起来一样。
+    const memory: MemoryRowView = {
+      retrieval: { outcome: 'miss', note: '本轮没有召回相关记忆。' },
+      write: { outcome: 'skipped', detail: '中期与长期记忆都已关闭，候选没有落库' },
+    }
+    render(<MemoryRow memory={memory} />)
+
+    expect(screen.getByText(/本轮未写入长期记忆/)).toBeInTheDocument()
+    expect(screen.getByText(/中期与长期记忆都已关闭/)).toBeInTheDocument()
+    // 跳过不是失败：不能说成"失败"，否则用户会去找一个并不存在的故障。
+    expect(screen.queryByText(/写入长期记忆失败/)).not.toBeInTheDocument()
+  })
+
   it('carries locators and口径 only — no retrieved text, vectors, scores or keys', () => {
     for (const scenario of [memoryHitScenario, memoryMissScenario, memoryFailedScenario]) {
       const { container, unmount } = render(<MemoryRow memory={memoryOf(scenario)} />)

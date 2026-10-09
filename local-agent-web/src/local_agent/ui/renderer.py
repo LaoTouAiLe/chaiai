@@ -202,8 +202,11 @@ def render_memory_row(memory: MemoryUseView) -> None:
     """渲染本轮的检索/长期记忆结果（miss 与 failed 是两个不同事实）。"""
     outcome_labels = {"hit": "命中", "miss": "未命中", "failed": "检索失败"}
     parts = [f"记忆检索：{outcome_labels.get(memory.retrieval_outcome, memory.retrieval_outcome)}"]
+    write_labels = {"written": "已写入", "failed": "写入失败", "skipped": "本轮未写入"}
     if memory.write_outcome is not None:
-        parts.append("已写入" if memory.write_outcome == "written" else "写入失败")
+        parts.append(write_labels.get(memory.write_outcome, memory.write_outcome))
+        if memory.write_detail:
+            parts.append(memory.write_detail)
     text = "；".join(parts)
     detail = [f"{source.reference}（{source.usage}）" for source in memory.sources]
     body = f"{text}\n{memory.retrieval_note}"

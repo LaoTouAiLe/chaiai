@@ -124,3 +124,10 @@
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-sm);
 }
+
+/* 有候选但被跳过（§10.4）：不是失败，所以不用错误色；但要显眼到能被读到"为什么"。 */
+.writeSkipped {
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}

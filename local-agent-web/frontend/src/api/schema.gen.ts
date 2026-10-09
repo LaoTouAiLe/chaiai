@@ -1534,7 +1534,7 @@ export interface components {
             /** Write Detail */
             write_detail?: string | null;
             /** Write Outcome */
-            write_outcome?: ("written" | "failed") | null;
+            write_outcome?: ("written" | "failed" | "skipped") | null;
         };
         /** MemoryWrittenEvent */
         MemoryWrittenEvent: {
@@ -1573,7 +1573,7 @@ export interface components {
              * Outcome
              * @enum {string}
              */
-            outcome: "written" | "failed";
+            outcome: "written" | "failed" | "skipped";
         };
         /** MessageCompletedEvent */
         MessageCompletedEvent: {

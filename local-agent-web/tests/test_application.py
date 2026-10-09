@@ -1306,6 +1306,50 @@ def test_same_named_workspaces_have_distinct_selectable_ids(
 # ---- T30：记忆纵向切片 ----------------------------------------------------
 
 
+def test_service_reports_a_skipped_memory_write_with_the_reason(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """有候选、但两层记忆都关着：这一行必须出现并说明为什么（§10.4 的 `skipped`）。
+
+    旧行为是这一行整段消失——用户因此分不清"这轮没东西可记"与"想记但被跳过了"，
+    后者其实只要打开开关就能记上，属于"界面要说真话"的范围。
+    """
+    config = _with_long_term_memory(app_config, tmp_path / "data" / "memories.sqlite")
+    disabled = config.model_copy(
+        update={
+            "memory": config.memory.model_copy(
+                update={
+                    "medium_term": config.memory.medium_term.model_copy(update={"enabled": False}),
+                    "long_term": config.memory.long_term.model_copy(update={"enabled": False}),
+                }
+            )
+        }
+    )
+    intent = [
+        {
+            "memory_type": "entity_fact",
+            "content": '{"entity_type": "user", "key": "test_runner", "value": "pytest"}',
+            "subject": "我",
+            "importance": 0.8,
+            "confidence": 0.9,
+        }
+    ]
+    harness = _harness(
+        tmp_path, model_factory, disabled,
+        decision="chat", reply="好的", memory_requested=True, memory_intent=intent,
+    )
+    session_id = _session(harness, mode="chat")
+
+    harness.service.submit_message(session_id, "请记住：我习惯用 pytest", "req-skipped")
+
+    snapshot = harness.service.get_session_snapshot(session_id)
+    assert snapshot.memory is not None
+    assert snapshot.memory.write_outcome == "skipped"
+    assert "都已关闭" in (snapshot.memory.write_detail or "")
+    # 跳过不是失败：不该冒错误事件。
+    assert not any(error.code == app_errors.MEMORY_WRITE_FAILED for error in snapshot.errors)
+
+
 def test_service_projects_a_long_term_memory_hit_after_reopening(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:

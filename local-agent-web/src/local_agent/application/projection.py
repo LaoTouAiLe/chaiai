@@ -1062,6 +1062,13 @@ def project_memory(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) -> 
     elif isinstance(written_this_run, int) and written_this_run > 0:
         write_outcome = "written"
         write_detail = f"{written_this_run} 条 · 来源：本轮对话"
+    else:
+        # 有候选却一条都没落：**必须说出来为什么**（§10.4）。旧行为是这一行整段消失，
+        # 于是用户分不清"这轮没东西可记"与"想记但被跳过了"——那正是"界面要说真话"的反面。
+        skipped_why = state.get("memory_write_skipped")
+        if isinstance(skipped_why, str) and skipped_why.strip():
+            write_outcome = "skipped"
+            write_detail = skipped_why.strip()
 
     if sources:
         note = "只显示来源定位与用途：不展示正文、向量或内部评分。"

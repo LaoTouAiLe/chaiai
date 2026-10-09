@@ -521,8 +521,14 @@ export type RetrievalView =
   | { outcome: 'miss'; note: string }
   | { outcome: 'failed'; reason: string; note: string }
 
+/**
+ * 写入结果的三种事实（§10.4 的闭集）。
+ *
+ * `skipped` = **有候选但一条都没落库**（例如两层记忆都关着，或候选没落进任何库）。它必须出现并带上
+ * 原因：缺了它，用户看到的是"什么都没有"，分不清"这轮没东西可记"与"想记但被跳过了"。
+ */
 export interface MemoryWriteView {
-  outcome: 'written' | 'failed'
+  outcome: 'written' | 'failed' | 'skipped'
   detail: string
 }
 

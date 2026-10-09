@@ -456,6 +456,55 @@ def test_memory_write_row_reports_this_run_count() -> None:
     assert memory.write_detail == "2 条 · 来源：本轮对话"
 
 
+def test_memory_write_row_reports_skipped_with_its_reason() -> None:
+    """有候选却一条都没落：报 `skipped` 并**带上原因**（§10.4）。
+
+    旧行为是这一行整段消失，于是"这轮没东西可记"与"想记但被跳过了"看起来一模一样。
+    """
+    state = _state(
+        memory_refs=[],
+        rag_refs=[],
+        memory_write_count=0,
+        memory_write_skipped="中期与长期记忆都已关闭，候选没有落库",
+    )
+    memory = proj.project_memory(state)
+    assert memory is not None
+    assert memory.write_outcome == "skipped"
+    assert memory.write_detail == "中期与长期记忆都已关闭，候选没有落库"
+
+
+def test_memory_write_row_prefers_written_and_failed_over_skipped() -> None:
+    """优先级 failed > written > skipped：三个事实同时具备时只报最严重的那一个。"""
+    failed = proj.project_memory(
+        _state(
+            memory_refs=[],
+            rag_refs=[],
+            memory_write_count=0,
+            memory_write_skipped="中期与长期记忆都已关闭，候选没有落库",
+            error_events=[
+                {
+                    "run_id": "run-1",
+                    "stage": proj.STAGE_MEMORY_WRITE,
+                    "code": "MEMORY_WRITE_FAILED",
+                    "message": "写入失败",
+                    "created_at": AT,
+                }
+            ],
+        )
+    )
+    assert failed is not None and failed.write_outcome == "failed"
+
+    written = proj.project_memory(
+        _state(
+            memory_refs=[],
+            rag_refs=[],
+            memory_write_count=1,
+            memory_write_skipped="中期与长期记忆都已关闭，候选没有落库",
+        )
+    )
+    assert written is not None and written.write_outcome == "written"
+
+
 def test_prepare_context_resets_the_per_run_memory_write_count() -> None:
     """复位是"本轮口径"的另一半：没走写入节点的轮次必须回到 `None`。
 

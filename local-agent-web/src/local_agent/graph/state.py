@@ -435,6 +435,9 @@ class AgentState(TypedDict, total=False):
     #: 的会话在**之后每一轮**都显示"已写入 N 条"（2026-10-08 用一个只做算术、没有任何记忆的
     #: 轮次实测：快照仍报 `written · 6 条`）。
     memory_write_count: int | None
+    #: **本轮**有候选却一条都没落库时的原因（覆盖语义，同 `memory_write_count`）；没有就 `None`。
+    #: 界面的 `write_outcome="skipped"` 只认它——没有这一条，"想记但被跳过"与"没东西可记"看起来一样。
+    memory_write_skipped: str | None
     rag_refs: list[RAGReference]
 
     # 错误与循环控制
@@ -447,6 +450,8 @@ class AgentState(TypedDict, total=False):
     token_usage: TokenUsage
     context_budget: ContextBudget
     compression_count: int
+    #: 压力阶段保存的工具模型正文，按消息身份及原文指纹定位，跨轮合并。
+    tool_output_overrides: Annotated[dict[str, str], merge_mapping]
 
     # 用量观测（架构 §15.6）：模型调用记录是刷新恢复与事件投影的**唯一用量真源**；
     # 整轮记录只存身份与时间线，Token 汇总由投影层从调用记录加总。

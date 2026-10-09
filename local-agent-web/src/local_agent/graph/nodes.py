@@ -242,6 +242,9 @@ def prepare_context_node(state: AgentState) -> AgentState:
         # 本轮写入口径必须复位：不复位的话，界面会把上一轮的"已写入 N 条"当成这一轮的
         # （`memory_write_candidates` 是追加型审计字段，不能用来回答"本轮写了什么"）。
         "memory_write_count": None,
+        # 有候选却一条都没落库时的**原因**（本轮口径，覆盖语义）：界面要显示它，
+        # 否则用户分不清"这轮没东西可记"与"这轮想记但被跳过了"（§10.4 的 `skipped`）。
+        "memory_write_skipped": None,
         "rag_refs": [],
         "final_response": None,
         "final_evidence": [],
@@ -3568,6 +3571,9 @@ def memory_write_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Ag
                 decision_record_key,
             )
         }
+        # 这一轮**有候选**却一条都没落：必须让界面说得出来（§10.4 的 `skipped`）。
+        update["memory_write_skipped"] = "中期与长期记忆都已关闭，候选没有落库"
+        update["memory_write_count"] = 0
         if chat_mode:
             _apply_chat_memory_answer(
                 update,
@@ -3685,6 +3691,9 @@ def memory_write_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Ag
     # 这里**无条件**写：本节点跑过但一条都没落时必须是 0（不是 None），否则界面会把
     # 上一轮的条数当成这一轮的。没走到本节点的轮次才保持 None。
     update["memory_write_count"] = len(completed)
+    if not completed:
+        # 有候选、也走了写入流程，但一条都没落：把**具体**原因带给界面（§10.4 的 `skipped`）。
+        update["memory_write_skipped"] = _write_skipped_reason(outcomes)
     if errors:
         update["error_events"] = merge_appended(
             state.get("error_events", []), errors, error_event_key
@@ -3796,6 +3805,24 @@ def _completed_candidates(
         if all(o.satisfied for o in grouped[id(item)])
         and any(o.kind in persisted for o in grouped[id(item)])
     ]
+
+
+def _write_skipped_reason(outcomes: Sequence[writer.WriteOutcome]) -> str:
+    """一条都没落库时给界面的**具体**原因（§10.4 的 `skipped` 要说明为什么）。
+
+    只说"没写"等于没说：用户要分辨的是"这轮没东西可记"（根本不产出这一行）与"想记但被跳过了"，
+    以及后者到底是**哪个开关**、还是库打不开、还是与已有记忆重复。
+    """
+    kinds = {outcome.kind for outcome in outcomes}
+    reasons = [outcome.reason for outcome in outcomes if outcome.reason]
+    if "failed" in kinds:
+        return "记忆库不可用，本轮未写入任何内容（不影响回答）"
+    if kinds and kinds <= {"disabled"}:
+        # writer 的那句话最具体（它写着是哪个开关），直接用。
+        return reasons[0] if reasons else "目标记忆层未启用，本轮未写入"
+    if kinds & {"duplicate", "conflict"}:
+        return "候选与已有记忆重复或冲突，本轮没有新增"
+    return "候选没有落进任何记忆库，本轮未写入（详情见本轮轨迹）"
 
 
 def _write_summary(outcome: writer.WriteOutcome) -> str:

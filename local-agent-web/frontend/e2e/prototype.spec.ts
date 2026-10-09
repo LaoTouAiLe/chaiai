@@ -22,6 +22,8 @@ const ALL_SCENARIOS = [
   'model-menu',
   'memory-hit',
   'memory-miss',
+  // v0.5 §10.4：写入被跳过（有候选但一条都没落）——第三种写入事实也要有像素证据。
+  'memory-skipped',
   'memory-failed',
   'empty-no-workspace',
   'empty-session',

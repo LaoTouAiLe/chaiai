@@ -432,7 +432,9 @@ class MemoryUseView(_Dto):
     retrieval_outcome: RetrievalOutcome
     sources: list[RetrievalSourceView] = Field(default_factory=list)
     retrieval_note: str = Field(min_length=1)
-    write_outcome: Literal["written", "failed"] | None = None
+    #: 闭集：`written`（真落了库）/ `failed`（写了但失败）/ `skipped`（有候选但一条都没落，必须说明为什么）；
+    #: `None` = 本轮没走到写入节点（§10.4）。
+    write_outcome: Literal["written", "failed", "skipped"] | None = None
     write_detail: str | None = None
 
 

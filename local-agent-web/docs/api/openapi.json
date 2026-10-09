@@ -2124,7 +2124,8 @@
               {
                 "enum": [
                   "written",
-                  "failed"
+                  "failed",
+                  "skipped"
                 ],
                 "type": "string"
               },
@@ -2210,7 +2211,8 @@
           "outcome": {
             "enum": [
               "written",
-              "failed"
+              "failed",
+              "skipped"
             ],
             "title": "Outcome",
             "type": "string"
