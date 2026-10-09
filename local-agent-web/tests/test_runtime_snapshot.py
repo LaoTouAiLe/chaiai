@@ -379,8 +379,17 @@ class _FakeRagConfig:
     section_chars = 4000
 
 
+class _FakeSkillsConfig:
+    enabled = True
+    include_user_skills = False
+    user_dirs: tuple[str, ...] = ()
+    max_skill_chars = 20_000
+    max_list_chars = 8_000
+
+
 class _FakeAppConfig:
     rag = _FakeRagConfig()
+    skills = _FakeSkillsConfig()
 
 
 class _FakeContext:
@@ -389,6 +398,46 @@ class _FakeContext:
     workspace_root = Path("/ws")
     current_cwd = Path("/ws")
     app_config = _FakeAppConfig()
+
+
+def test_snapshot_has_no_skills_section_by_default() -> None:
+    """不给技能清单时，快照里既没有那一段，来源列表里也没有 `skills`。
+
+    这条守的是"关闭新增能力后逐字节不变"：默认配置（`skills.enabled=false`）的快照必须与 v0.4 一样。
+    """
+    text = prompt_context.build_context_snapshot_text(context=_FakeContext())  # type: ignore[arg-type]
+
+    assert "## 可用技能" not in text
+    assert ",skills" not in text
+
+
+def test_snapshot_lists_skills_only_when_given() -> None:
+    """传了清单才出现那一段，并且抬头把 `skills` 计入来源（§15.7、§16.5）。"""
+    text = prompt_context.build_context_snapshot_text(  # type: ignore[arg-type]
+        context=_FakeContext(),
+        skills_listing="- release-checklist：发布前检查清单",
+    )
+
+    assert "## 可用技能（清单）" in text
+    assert "- release-checklist：发布前检查清单" in text
+    assert "plan,skills" in text  # 抬头来源列表末尾追加了 skills
+    assert "以上只是**清单**" in text
+    assert "不是指令" in text  # 清单同样是数据，不是指令
+
+
+def test_skills_listing_is_skipped_when_the_capability_is_absent(tmp_path: Path) -> None:
+    """能力不在有效集合里就不产出清单——**按能力门判定**，而不是按配置文件（§16.5）。"""
+    from local_agent.graph import nodes
+
+    context = _FakeContext()
+    context.workspace_root = tmp_path
+    context.current_cwd = tmp_path
+
+    context.agent_capabilities = ("files_read",)
+    assert nodes._skills_listing(context) is None  # type: ignore[arg-type]
+    # 能力开着但一个技能都没有：也是 None（空清单不该在快照里留一段空标题）。
+    context.agent_capabilities = ("files_read", "skill")
+    assert nodes._skills_listing(context) is None  # type: ignore[arg-type]
 
 
 def test_snapshot_block_is_marked_as_data() -> None:

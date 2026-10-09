@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from langchain_core.tools import BaseTool
 
 from local_agent.capabilities import CAPABILITY_TOOLS, tool_names_for
-from local_agent.config import GitConfig, WebAccessConfig
+from local_agent.config import GitConfig, SkillsConfig, WebAccessConfig
 from local_agent.exceptions import LocalAgentError
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.file_tools import build_file_tools
@@ -21,6 +21,7 @@ from local_agent.tools.git_tools import build_git_tools, git_availability
 from local_agent.tools.plan_tools import build_plan_tools
 from local_agent.tools.search_tools import build_search_tools
 from local_agent.tools.shell_tools import build_shell_tools
+from local_agent.tools.skill_tools import build_skill_tools
 from local_agent.tools.web_tools import build_web_tools
 
 
@@ -43,6 +44,7 @@ class ToolRegistry:
         web_access: WebAccessConfig | None = None,
         git: GitConfig | None = None,
         git_available: bool | None = None,
+        skills: SkillsConfig | None = None,
     ) -> ToolRegistry:
         """构造注册表（文件工具 + 计划工具 + 检索工具 + 安全 Shell + Web 工具）。
 
@@ -83,6 +85,9 @@ class ToolRegistry:
                     timeout_seconds=git_config.timeout_seconds,
                     max_output_chars=git_config.max_output_chars,
                 ),
+                # v0.5 T55：技能工具没有"环境依赖"这一层（不像 git 要看本机有没有可执行文件），
+                # 只有一个配置开关，因此这里不需要探测结果。
+                *build_skill_tools(skills or SkillsConfig()),
             ]
         )
         registry.git_available = available

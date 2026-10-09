@@ -37,13 +37,14 @@ from langgraph.runtime import Runtime
 from langgraph.types import interrupt
 
 from local_agent.capabilities import is_visible, untrusted_tool_names
-from local_agent.config import EmbeddingConfig, MediumTermMemoryConfig, resolve_api_key
+from local_agent.config import AppConfig, EmbeddingConfig, MediumTermMemoryConfig, resolve_api_key
 from local_agent.context.agents_loader import load_agents
 from local_agent.context.prompt_context import (
     PromptContext,
     build_context_snapshot_text,
     build_stable_system_prompt,
 )
+from local_agent.context.skills_loader import discover_skills
 from local_agent.context.token_budget import (
     ContextBudget,
     TokenUsage,
@@ -107,8 +108,11 @@ from local_agent.memory import long_term, medium_term, recall, writer
 from local_agent.memory.schemas import ORIGIN_OWNER, ORIGIN_UNTRUSTED, MemoryReference
 from local_agent.memory.short_term import (
     PromptWindow,
+    project_tool_messages,
     recent_turns_start,
     select_prompt_window,
+    tool_summary_boundary,
+    turns_fitting_tokens,
 )
 from local_agent.memory.summarizer import summarize_conversation
 from local_agent.rag.retriever import retrieve_code
@@ -501,6 +505,18 @@ def retrieve_code_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> A
     return update
 
 
+def _retain_tokens(config: AppConfig) -> int:
+    """``memory.compression.retain_ratio`` 折算出的保留 token 预算。
+
+    ``AppConfig.llm`` 允许缺省（Web 初始设置模式），此时不做窗口联动（返回 0，等价改动前行为）；
+    运行期 :class:`~local_agent.config.RunConfig` 里 ``llm`` 必定存在。窗口与压缩边界用同一个
+    函数取值，避免两处口径漂移。
+    """
+    if config.llm is None:
+        return 0
+    return int(config.llm.context_window_tokens * config.memory.compression.retain_ratio)
+
+
 def _prompt_window(
     state: AgentState, context: RuntimeContext, *, covered: int | None = None
 ) -> PromptWindow:
@@ -514,26 +530,32 @@ def _prompt_window(
     与用户看到的就不一致了（复审实证）。
     """
     config = context.app_config
-    def select(*, prune: bool) -> PromptWindow:
+    messages = state.get("messages") or []
+    new_loop = state.get("agent_loop_version") == 1
+
+    def select(*, prune_results: bool) -> PromptWindow:
         return select_prompt_window(
-            state.get("messages") or [], enabled=config.memory.compression.enabled,
-            max_messages=config.memory.short_term.prompt_window_messages,
+            messages, enabled=config.memory.compression.enabled,
+            max_messages=max(1, len(messages)) if new_loop
+                         else config.memory.short_term.prompt_window_messages,
             preserve_recent_turns=config.memory.compression.preserve_recent_turns,
+            retain_tokens=_retain_tokens(config),
             preserve_recent_tool_steps=config.memory.compression.preserve_recent_tool_steps,
             preserve_recent_tool_step_chars=config.memory.compression.tool_step_budget_chars,
             tool_result_keep_chars=config.memory.compression.tool_result_keep_chars,
             covered_messages=_covered_messages(state) if covered is None else covered,
-            prune_tool_steps=prune,
+            prune_tool_steps=not new_loop,
+            prune_tool_results=prune_results,
+            tool_output_overrides=state.get("tool_output_overrides"),
         )
 
-    append_only = state.get("agent_loop_version") == 1 and config.llm is not None
-    window = select(prune=not append_only)
-    if append_only and config.memory.compression.enabled and config.llm is not None:
-        # 先按真实出站组成估算空间；窗口充裕时不移动工具历史边界。
+    window = select(prune_results=False)
+    if config.memory.compression.enabled and config.llm is not None:
         snapshot = _runtime_snapshot(state, context)
+        model_messages = project_messages(window.messages, state.get("reply_overrides") or {})
         estimated = (
             _stable_prompt(state, context).estimated_tokens
-            + estimate_messages_tokens(_with_snapshot(window.messages, snapshot, state))
+            + estimate_messages_tokens(_with_snapshot(model_messages, snapshot, state))
             + _tool_definition_tokens(state, context)
         )
         budget = prompt_budget_tokens(
@@ -541,7 +563,8 @@ def _prompt_window(
             completion_reserve_tokens=config.llm.max_tokens,
         )
         if estimated >= budget * config.memory.compression.trigger_ratio:
-            window = select(prune=True)  # 接近窗口上限时保留原有字符预算安全网。
+            # DSH 次序：压力达标后才替换大正文；是否摘要由节点重测决定。
+            window = select(prune_results=True)
     overrides = state.get("reply_overrides") or {}
     if not overrides:
         return window
@@ -633,6 +656,29 @@ def _stable_prompt(state: AgentState, context: RuntimeContext) -> PromptContext:
     return build_stable_system_prompt(mode=state.get("mode", "chat"), context=context)
 
 
+def _skills_listing(context: RuntimeContext) -> str | None:
+    """本轮技能清单（**只有名字与描述**）；`skill` 能力不在有效集合里时返回 `None`。
+
+    两件事刻意放在这里做：
+
+    1. **按能力门判定**（不是按配置文件）：能力关掉时返回 `None`，快照因此与 v0.4 逐字节相同；
+    2. **每轮现算**（不装文件监视器，见 §16.5）：代价是同一轮内新建的技能下一轮才可见。
+
+    发现只读目录与 frontmatter，不读正文——正文要模型用工具按需取（那才是"按需加载"）。
+    """
+    # 能力门读**运行上下文**（与工具绑定同源），不读 State：两处各判一次迟早会分家。
+    if "skill" not in context.agent_capabilities:
+        return None
+    skills_config = context.app_config.skills
+    catalog = discover_skills(
+        skills_config,
+        workspace_root=context.workspace_root,
+        current_cwd=context.current_cwd,
+    )
+    listing, _truncated = catalog.render_listing(skills_config.max_list_chars)
+    return listing or None
+
+
 def _snapshot_text(state: AgentState, context: RuntimeContext, *, summary: str | None = None) -> str:
     """本轮运行上下文快照正文（§15.7 的 ``canonical_text``）。
 
@@ -652,6 +698,8 @@ def _snapshot_text(state: AgentState, context: RuntimeContext, *, summary: str |
         ),
         task_goal=state.get("task_goal"),
         plan=state.get("plan") or (),
+        # v0.5 T55：技能清单进快照（正文仍由工具按需取），两者都不进稳定前缀（§15.7、§16.5）。
+        skills_listing=_skills_listing(context),
     )
 
 
@@ -678,6 +726,10 @@ def _snapshot_source_versions(
         ("task_goal", state.get("task_goal") or ""),
         ("plan", state.get("plan") or []),
     )
+    # 技能清单只在它真的出现在快照里时才记来源：关掉技能时来源清单**逐字节不变**（§16.7）。
+    skills_listing = _skills_listing(context)
+    if skills_listing:
+        values = (*values, ("skills", skills_listing))
     versions: list[tuple[str, str]] = []
     for name, value in values:
         if value is None or value == "" or value == [] or value == ():
@@ -801,6 +853,54 @@ def _with_snapshot(
     ]
 
 
+#: "超出预算且压不动"告警的稳定前缀：同一轮（run）只报一条，避免工具循环里每一步都刷屏。
+_COMPRESSION_OVER_BUDGET_MARKER = "上下文已超出模型预算，无法再压缩"
+
+
+def _compression_over_budget_update(state: AgentState) -> AgentState:
+    """压缩触发后仍超出预算时的**可见告警**（同一轮只记一条）。
+
+    "没有可摘要的旧消息"与"压到极限后仍超预算"两种情况都会走到这里。原实现在前一种情况是
+    静默 ``return update``，于是"设了小窗口、聊几轮就超却一直没有任何压缩动作"这件事在页面上
+    完全没有信号（复审实证）。事件挂在 ``compression_node`` 这个 stage 上，投影层会把它换成
+    公开码 ``CONTEXT_COMPRESSION_FAILED`` 并附可执行的提示。
+    """
+    if _compression_warning_reported(state):
+        return {}
+    return {
+        "error_events": merge_appended(
+            state.get("error_events", []),
+            [
+                _error(
+                    state,
+                    stage=COMPRESSION_NODE,
+                    message=(
+                        f"{_COMPRESSION_OVER_BUDGET_MARKER}"
+                        "（没有可摘要的旧消息，或压到极限后仍超限）：本轮按现有上下文继续，"
+                        "建议缩短输入、开启新会话或调大 llm.context_window_tokens"
+                    ),
+                )
+            ],
+            error_event_key,
+        )
+    }
+
+
+def _compression_warning_reported(state: AgentState) -> bool:
+    """本轮是否已经报过同一条压缩告警。
+
+    ``error_events`` 的 id 含 ``loop_count``，工具循环里每一步都会得到新 id，``merge_appended``
+    因此吃不下重复项——只能按"本轮是否已有同前缀的告警"去重，保证一轮最多一条。
+    """
+    run_id = _run_id(state)
+    prefix = f"{run_id}:error:{COMPRESSION_NODE}:"
+    return any(
+        str(event.get("event_id", "")).startswith(prefix)
+        and str(event.get("message", "")).startswith(_COMPRESSION_OVER_BUDGET_MARKER)
+        for event in state.get("error_events", [])
+    )
+
+
 def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
     """上下文预算与摘要压缩（架构 §10.1、§10.5）。
 
@@ -816,10 +916,16 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
 
     降级口径：
     - ``compression.enabled=false``：只统计预算，不裁剪窗口、不生成摘要；
-    - 没有"更早的旧消息"可摘要（典型是第一轮）：静默跳过，不记错误事件、不改压缩计数；
+    - 没有"更早的旧消息"可摘要（典型是第一轮）：**仍在预算内**时静默跳过，不记错误事件、
+      不改压缩计数；**已超出预算**（比值 ≥ 1）时不静默——记一条可见告警（同见下条），
+      否则"触发也压不动"在页面上毫无信号；
+    - 压到极限后仍超预算：同样记一条可见告警（同一轮最多一条），本轮按已压缩的上下文继续；
+      不额外丢弃消息——压缩运行在"生成回答之前"，窗口最后一轮就是**当前问题**，丢弃它等于
+      丢掉用户诉求，且超预算通常由固定系统前缀/摘要长度决定，丢历史也救不回来；
     - 摘要生成失败：**只记 ErrorEvent**，不更新 ``conversation_summary`` / ``context_version``
       / ``compression_count``，本轮继续用裁剪后的窗口；
-    - 窗口按完整轮次裁剪（见 :mod:`local_agent.memory.short_term`），不切开工具调用对。
+    - 窗口按完整轮次裁剪（见 :mod:`local_agent.memory.short_term`），不切开工具调用对；
+      保留轮数按 ``retain_ratio`` 与窗口联动，窗口小时自动收紧，避免保留下限大于窗口导致压不动。
     """
     context = runtime.context
     config = context.app_config
@@ -880,7 +986,7 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
         )
 
     usage, current_budget = snapshot(
-        triggered_now=triggered,
+        triggered_now=triggered or bool(window.tool_result_overrides),
         summary_chars=len(existing_summary),
         covered_now=covered,
         window_now=window,
@@ -890,16 +996,45 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
         ratio_now=ratio,
     )
     update: AgentState = {"token_usage": usage, "context_budget": current_budget}
+    saved_outputs = {**(state.get("tool_output_overrides") or {}), **window.tool_result_overrides}
+    projection_state: AgentState = {**state, "tool_output_overrides": saved_outputs}
+    if window.tool_result_overrides:
+        update["tool_output_overrides"] = window.tool_result_overrides
+        update["decision_trace"] = merge_appended(
+            state.get("decision_trace", []),
+            [_decision(state, stage=COMPRESSION_NODE, salt="tool-result-prune",
+                       summary=f"上下文压力达标，保存 {len(window.tool_result_overrides)} 条工具正文替换；"
+                               "原始审计保留，后续重放该视图；裁剪后已重新测量预算")],
+            decision_record_key,
+        )
     if not triggered:
         return update
 
-    # 只摘要"已覆盖边界之后、最近 preserve_recent_turns 轮之前"的旧消息：既不重复摘要同一批
-    # 历史，也不会出现"既没进窗口、也没进摘要"的消息。
-    boundary = recent_turns_start(messages, compression.preserve_recent_turns)
-    older = messages[covered:boundary]
+    # 优先摘要已覆盖边界之后、保留轮次之前的旧消息；单个长任务仍有压力时，
+    # 可覆盖已完成的工具前缀。覆盖边界落盘，不重复摘要，也不拆开工具配对。
+    # 保留轮数按 ``retain_ratio`` 与窗口联动（窗口小则收紧），与窗口选择共用同一函数，
+    # 边界因此不会漂移。
+    boundary = recent_turns_start(
+        messages,
+        turns_fitting_tokens(
+            messages, max_turns=compression.preserve_recent_turns,
+            retain_tokens=_retain_tokens(config),
+        ),
+    )
+    projected_messages, _ = project_tool_messages(messages, overrides=saved_outputs)
+    if state.get("agent_loop_version") == 1 and boundary <= covered:
+        # 单个长任务也可压缩其已完成工具前缀；边界只能落在完整工具步之后。
+        boundary = covered + tool_summary_boundary(
+            projected_messages[covered:], keep=compression.preserve_recent_tool_steps,
+            max_chars=compression.tool_step_budget_chars,
+        )
+    older = projected_messages[covered:boundary]
     if not older:
-        # 还没有"更早的旧消息"可摘要（典型是第一轮）：这不是故障，**静默跳过本轮**——
-        # 不记错误事件，也不动 conversation_summary / context_version / compression_count。
+        # 没有"更早的旧消息"可摘要（典型是第一轮）。触发但**仍超预算**（比值 ≥ 1）时这不是
+        # "还没到时候"而是"压不动"——必须留下可见信号（本轮按未压缩的上下文继续）；仍在预算内
+        # 时静默跳过：压缩本就只是机会性动作，不值得每一轮都报警。
+        if ratio >= 1.0:
+            return {**update, **_compression_over_budget_update(state)}
         return update
     try:
         summary = summarize_conversation(
@@ -929,7 +1064,7 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
 
     # 摘要成功：被覆盖的旧消息不再进窗口，按新边界与新摘要重算预算
     new_covered = covered + len(older)
-    new_window = _prompt_window(state, context, covered=new_covered)
+    new_window = _prompt_window(projection_state, context, covered=new_covered)
     new_prompt = _stable_prompt(state, context)
     new_snapshot_tokens = _snapshot_tokens(
         state, context, summary=summary, messages=new_window.messages,
@@ -953,7 +1088,7 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
         estimated_now=new_estimated,
         ratio_now=new_ratio,
     )
-    return {
+    result: AgentState = {
         **update,
         "token_usage": new_usage,
         "context_budget": new_budget,
@@ -961,6 +1096,10 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
         "context_version": int(state.get("context_version", 0)) + 1,
         "compression_count": int(state.get("compression_count", 0)) + 1,
     }
+    if new_ratio >= 1.0:
+        # 压到极限仍超预算：不再静默照发，留下可见告警（本轮按已压缩的上下文继续）。
+        result.update(_compression_over_budget_update(state))
+    return result
 
 
 def chat_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:

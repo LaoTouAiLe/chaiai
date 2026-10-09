@@ -840,6 +840,9 @@ def test_registry_exposes_only_read_tools_in_chat_mode(app_config: AppConfig, tm
         "git_diff",
         "git_log",
         "git_commit",
+        # v0.5 T55：技能工具同样追加在末尾，且是**只读**的（登记在 READ_ONLY_TOOLS，不需要审批）。
+        "skill_list",
+        "skill_load",
     ]
     assert registry.get("nope") is None
 

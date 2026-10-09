@@ -61,6 +61,9 @@ V04_CHAT_ORDER = ("list_dir", "read_file")
 #: v0.5 T54 给默认档追加的 Git 工具（**追加在末尾**：前面的字节不变，前缀缓存前半段仍可复用）。
 GIT_TOOL_ORDER = ("git_status", "git_diff", "git_log", "git_commit")
 
+#: v0.5 T55 追加的技能工具，同样追加在末尾（只读，见 §6.12、§16.5）。
+SKILL_TOOL_ORDER = ("skill_list", "skill_load")
+
 
 def _registry(app_config: AppConfig, workspace: Path) -> ToolRegistry:
     policy = SecurityPolicy.from_config(app_config, workspace_root=workspace, environ={})
@@ -72,7 +75,7 @@ def _names(tools: Sequence[BaseTool]) -> list[str]:
     return [tool.name for tool in tools]
 
 
-def test_default_profile_keeps_the_v04_prefix_and_appends_git(
+def test_default_profile_keeps_the_v04_prefix_and_appends_new_capabilities(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
     """默认 Profile：v0.4 的九个工具**顺序与位置都不变**，新能力追加在末尾。"""
@@ -82,7 +85,7 @@ def test_default_profile_keeps_the_v04_prefix_and_appends_git(
     tool_mode = _names(registry.tools_for("tool"))
     # 前缀逐项相等是**成本约束**：前面的字节不变，供应商前缀缓存的前半段仍可复用（架构 §6.9）。
     assert tool_mode[: len(V04_TOOL_ORDER)] == list(V04_TOOL_ORDER)
-    assert tool_mode == [*V04_TOOL_ORDER, *GIT_TOOL_ORDER]
+    assert tool_mode == [*V04_TOOL_ORDER, *GIT_TOOL_ORDER, *SKILL_TOOL_ORDER]
     assert _names(registry.tools_for("tool", PROFILES[DEFAULT_PROFILE])) == tool_mode
 
 
@@ -97,9 +100,13 @@ def test_builtin_profiles_are_declared_read_only_subsets(tmp_path: Path) -> None
         # T54：Git 读写都进默认档（写的那一半仍要过人工审批，见 §16.4）。
         "git_read",
         "git_write",
+        # T55：技能清单与正文是只读的，三档都给（§16.5）。
+        "skill",
     )
-    assert PROFILES["researcher"] == ("plan", "files_read", "code_search", "web", "git_read")
-    assert PROFILES["reviewer"] == ("files_read", "code_search")
+    assert PROFILES["researcher"] == (
+        "plan", "files_read", "code_search", "web", "git_read", "skill",
+    )
+    assert PROFILES["reviewer"] == ("files_read", "code_search", "skill")
     # 最小权限用**显式枚举**表达，不假设"researcher 一定是 coder 的子集"：T53 起 researcher 多了 `web`
     # （coder 没有），两者是各取所需，而不是包含关系；T54 又多了 Git 的**读**能力。
     assert set(PROFILES["reviewer"]) < set(PROFILES["researcher"])
@@ -107,6 +114,8 @@ def test_builtin_profiles_are_declared_read_only_subsets(tmp_path: Path) -> None
     assert "web" in PROFILES["researcher"] and "web" not in PROFILES["coder"]
     # 读 / 写分成两个能力就是为了能这样分别表态：研究档看得到差异，但**不能提交**。
     assert "git_read" in PROFILES["researcher"] and "git_write" not in PROFILES["researcher"]
+    # T55：技能是只读的，只读档也该能按需读手册——所以三档都有 `skill`。
+    assert all("skill" in PROFILES[name] for name in ("coder", "researcher", "reviewer"))
 
 
 def test_only_read_tools_are_visible_to_read_only_profiles(
@@ -131,8 +140,11 @@ def test_only_read_tools_are_visible_to_read_only_profiles(
         "git_status",
         "git_diff",
         "git_log",
+        # T55：技能（只读）
+        "skill_list",
+        "skill_load",
     ]
-    assert reviewer == ["list_dir", "read_file", "grep", "glob"]
+    assert reviewer == ["list_dir", "read_file", "grep", "glob", "skill_list", "skill_load"]
     # `git_commit` 是写类：只读档里连"看得见"都不该有（§16.4）。
     for forbidden in ("edit_file", "write_file", "delete_file", "run_shell", "git_commit"):
         assert forbidden not in researcher
@@ -147,13 +159,15 @@ def test_tool_order_is_stable_across_calls_and_profiles(
 
     first = _names(registry.tools_for("tool", PROFILES["coder"]))
     second = _names(registry.tools_for("tool", PROFILES["coder"]))
-    assert first == second == [*V04_TOOL_ORDER, *GIT_TOOL_ORDER]
+    assert first == second == [*V04_TOOL_ORDER, *GIT_TOOL_ORDER, *SKILL_TOOL_ORDER]
 
     assert _names(registry.tools_for("tool", PROFILES["reviewer"])) == [
         "list_dir",
         "read_file",
         "grep",
         "glob",
+        "skill_list",
+        "skill_load",
     ]
     # 再切回来仍是原顺序：顺序由常量决定，不受访问顺序影响
     assert _names(registry.tools_for("tool", PROFILES["coder"])) == first
@@ -163,16 +177,37 @@ def test_git_capability_is_gated_by_config_and_by_the_environment() -> None:
     """Git 能力进不进有效集合，取决于**配置开关**与**本机有没有 git** 两件事（架构 §16.4）。"""
     coder = PROFILES["coder"]
 
-    enabled = effective_capabilities(coder, web_access_enabled=False, git_enabled=True)
+    enabled = effective_capabilities(
+        coder, web_access_enabled=False, git_enabled=True, skills_enabled=False
+    )
     assert {"git_read", "git_write"} <= set(enabled)
 
-    disabled = effective_capabilities(coder, web_access_enabled=False, git_enabled=False)
+    disabled = effective_capabilities(
+        coder, web_access_enabled=False, git_enabled=False, skills_enabled=False
+    )
     assert not {"git_read", "git_write"} & set(disabled)
     # 关掉 Git 之后剩下的正是 v0.4 那九个工具的能力映射——"关闭新增能力后基础行为不变"。
     assert tool_names_for("tool", disabled) == V04_TOOL_ORDER
 
     # 默认关闭：示例配置里的开关就是 false，因此默认档与 v0.4 的工具集一致（不含 Git）。
     assert AppConfig().git.enabled is False
+
+
+def test_skill_capability_is_gated_by_config_only() -> None:
+    """技能能力只看**配置开关**（不像 git 还要看本机有没有可执行文件）；默认关闭。"""
+    coder = PROFILES["coder"]
+
+    on = effective_capabilities(
+        coder, web_access_enabled=False, git_enabled=False, skills_enabled=True
+    )
+    assert "skill" in on
+    off = effective_capabilities(
+        coder, web_access_enabled=False, git_enabled=False, skills_enabled=False
+    )
+    assert "skill" not in off
+    # 关掉它之后，默认档正好回到 v0.4 的九个工具——"关闭新增能力后基础行为不变"。
+    assert tool_names_for("tool", off) == V04_TOOL_ORDER
+    assert AppConfig().skills.enabled is False
 
 
 def test_registry_keeps_git_tools_even_when_the_environment_lacks_git(
@@ -187,7 +222,10 @@ def test_registry_keeps_git_tools_even_when_the_environment_lacks_git(
     assert registry.git_available is False
     assert not {"git_read", "git_write"} & set(
         effective_capabilities(
-            PROFILES["coder"], web_access_enabled=False, git_enabled=registry.git_available
+            PROFILES["coder"],
+            web_access_enabled=False,
+            git_enabled=registry.git_available,
+            skills_enabled=False,
         )
     )
 
@@ -198,14 +236,16 @@ def _status_rows(
     web_access_enabled: bool = False,
     git_access_enabled: bool = False,
     git_available: bool = True,
+    skills_enabled: bool = False,
     git_hint: str | None = None,
 ) -> dict[str, CapabilityStatus]:
-    """默认按"web 关、git 关"算一遍能力状态，用例按需覆盖。"""
+    """默认按"web 关、git 关、技能关"算一遍能力状态，用例按需覆盖。"""
     rows = capability_status(
         PROFILES["coder"] if capabilities is None else capabilities,
         web_access_enabled=web_access_enabled,
         git_access_enabled=git_access_enabled,
         git_available=git_available,
+        skills_enabled=skills_enabled,
         git_hint=git_hint,
     )
     return {row.capability: row for row in rows}

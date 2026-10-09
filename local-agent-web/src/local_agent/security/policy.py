@@ -60,6 +60,10 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
     "git_status",
     "git_diff",
     "git_log",
+    # v0.5 T55：技能清单与正文——只读用户机器上已有的技能说明，不写盘、不执行其中的脚本
+    # （脚本只作为文本资源；要执行得走 shell 能力与人工审批，见 §16.5）。
+    "skill_list",
+    "skill_load",
 )
 CONTROL_TOOLS: tuple[str, ...] = ("update_plan",)
 

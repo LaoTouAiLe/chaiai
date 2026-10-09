@@ -36,6 +36,9 @@ CAPABILITY_TOOLS: Mapping[str, tuple[str, ...]] = {
     # researcher 只该"看得见工作区的差异"，不该"能提交"（§16.4）。
     "git_read": ("git_status", "git_diff", "git_log"),
     "git_write": ("git_commit",),
+    # v0.5 T55：技能清单与正文（只读，见 §6.12、§16.5）。新增能力一律追加在末尾：前面的字节不变，
+    # 前缀缓存的前半段仍可复用（与 profiles 里追能力的口径一致）。
+    "skill": ("skill_list", "skill_load"),
 }
 
 #: **会带进外部内容**的能力（架构 §6.10、§16.2、§16.3）。
@@ -49,9 +52,13 @@ UNTRUSTED_CAPABILITIES: tuple[str, ...] = ("web",)
 #: ``coder`` 与 v0.4 ``tool`` 模式的工具集**逐项等价**（含顺序），因此它是默认 Profile，既有行为不变；
 #: ``researcher`` / ``reviewer`` 是只读子集，后续任务（Web、Git）再往它们身上加能力。
 PROFILES: Mapping[str, tuple[str, ...]] = {
-    "coder": ("plan", "files_read", "code_search", "files_write", "shell", "git_read", "git_write"),
-    "researcher": ("plan", "files_read", "code_search", "web", "git_read"),
-    "reviewer": ("files_read", "code_search"),
+    "coder": (
+        "plan", "files_read", "code_search", "files_write", "shell",
+        "git_read", "git_write",
+        "skill",
+    ),
+    "researcher": ("plan", "files_read", "code_search", "web", "git_read", "skill"),
+    "reviewer": ("files_read", "code_search", "skill"),
 }
 
 #: 默认 Profile：等价于 v0.4 的工具集，保证升级后行为不变。
@@ -125,7 +132,7 @@ def resolve_capabilities(
 
 
 def effective_capabilities(
-    capabilities: Sequence[str], *, web_access_enabled: bool, git_enabled: bool
+    capabilities: Sequence[str], *, web_access_enabled: bool, git_enabled: bool, skills_enabled: bool
 ) -> tuple[str, ...]:
     """按配置开关与运行环境收窄能力集合（架构 §16.3、§16.4）。
 
@@ -136,7 +143,12 @@ def effective_capabilities(
     `git_enabled` 由调用方把两件事合起来：配置开关 **且** `git` 可用（见 `tools.git_tools.git_availability`）。
     两台机器上"看起来配置一样却行为不同"的根因就藏在这里，所以这个参数没有默认值。
     """
-    switch = {"web": web_access_enabled, "git_read": git_enabled, "git_write": git_enabled}
+    switch = {
+        "web": web_access_enabled,
+        "git_read": git_enabled,
+        "git_write": git_enabled,
+        "skill": skills_enabled,
+    }
     return tuple(capability for capability in capabilities if switch.get(capability, True))
 
 
@@ -151,6 +163,7 @@ CAPABILITY_LABELS: Mapping[str, str] = {
     "web": "联网检索与抓取",
     "git_read": "查看 Git 状态与差异",
     "git_write": "提交到 Git",
+    "skill": "按需加载技能",
 }
 
 #: 能力状态的原因类型。**只有这四种**：DTO 直接复用它，页面因此不会遇到"没见过的原因"。
@@ -185,6 +198,7 @@ def capability_status(
     web_access_enabled: bool,
     git_access_enabled: bool,
     git_available: bool,
+    skills_enabled: bool,
     git_hint: str | None = None,
 ) -> tuple[CapabilityStatus, ...]:
     """把当前档位的能力集合展开成**可解释的状态列表**（§16.6）。
@@ -253,6 +267,21 @@ def capability_status(
                     hint=git_hint
                     or "安装 Git（Windows: https://git-scm.com/download/win ；macOS: brew install git ；"
                     "Debian/Ubuntu: sudo apt install git）后重启本应用。",
+                )
+            )
+            continue
+        if capability == "skill" and not skills_enabled:
+            rows.append(
+                CapabilityStatus(
+                    capability=capability,
+                    label=label,
+                    available=False,
+                    reason=REASON_DISABLED,
+                    detail=(
+                        "技能开关关着：默认不让 Agent 读取本机已有的技能说明"
+                        "（清单会占提示预算，内容也不一定是为你这个项目写的）。"
+                    ),
+                    hint="把 skills.enabled 设为 true（并按 §16.5 的发现根与边界使用）。",
                 )
             )
             continue

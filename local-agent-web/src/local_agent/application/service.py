@@ -1095,6 +1095,7 @@ class ApplicationService:
                     git_access_enabled=config.git.enabled,
                     git_available=probe.available,
                     git_hint=probe.hint,
+                    skills_enabled=config.skills.enabled,
                 )
             ],
         )

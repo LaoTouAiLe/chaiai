@@ -288,6 +288,7 @@ def main() -> int:
             PROFILES[profile],
             web_access_enabled=config.web_access.enabled,
             git_enabled=config.git.enabled and git_availability().available,
+            skills_enabled=config.skills.enabled,
         ),
     )
     print(f"[task-set] {args.task_set}：{task_set.purpose}", flush=True)

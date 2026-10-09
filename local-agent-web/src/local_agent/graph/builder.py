@@ -359,6 +359,8 @@ def build_runtime_context(
             web_access_enabled=app_config.web_access.enabled,
             # 本机找不到 git 可执行文件时能力同样不进有效集合：工具存在，但不会绑给模型。
             git_enabled=app_config.git.enabled and registry.git_available,
+            # 技能没有"本机能不能跑"这一层：开关就是全部条件（§16.5）。
+            skills_enabled=app_config.skills.enabled,
         ),
         security_policy=policy,
         tool_registry=registry,

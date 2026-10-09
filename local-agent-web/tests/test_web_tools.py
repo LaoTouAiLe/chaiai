@@ -283,9 +283,11 @@ def test_web_capability_is_gated_by_config(app_config: AppConfig) -> None:
     assert "web" in declared
     # Git 那条支路在这一组里固定为开启，只考察 web 自己的开关（T54 起 effective_capabilities 还管 git）。
     assert "web" not in effective_capabilities(
-        declared, web_access_enabled=False, git_enabled=True
+        declared, web_access_enabled=False, git_enabled=True, skills_enabled=False
     )
-    assert "web" in effective_capabilities(declared, web_access_enabled=True, git_enabled=True)
+    assert "web" in effective_capabilities(
+        declared, web_access_enabled=True, git_enabled=True, skills_enabled=False
+    )
 
     closed = AppConfig()
     assert closed.web_access.enabled is False, "联网必须是显式 opt-in"
