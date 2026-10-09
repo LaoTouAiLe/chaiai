@@ -23,16 +23,26 @@ T51 起多了 ``--profile``：同一份固定场景在 ``coder`` / ``researcher`
 再用 ``scripts/report_prefix_cache.py`` 看逐调用缓存回落与工具 Schema 指纹的变化。**换 Profile 就是换
 工具集、也就是换前缀**，所以跨 Profile 的两次运行之间不做增量比较，各自看自己那一份。
 
-退出码：0 成功；2 缺密钥 / 缺配置 / Profile 名不存在；3 场景里出现了未预期的终态（见 stderr）。
+T56 多了 ``--task-set profile``：跑 `local_agent.profile_tasks` 里三档各自的**固定任务集**，
+逐条按有效能力集决定跑或跳过（默认 `web_access.enabled=false` 时，联网那条会被跳过并写明原因），
+并把"这一轮有没有改工作区"记进结果——只读档改了工作区（或写类档没改）会以退出码 4 拦下。
+``--task-set baseline``（默认）仍是 T34 的那四轮，历史基线靠它可比。
+
+``--list`` 只打印选定任务集与逐轮判定，不联网、不调用模型（用来在跑真模型之前核对）。
+
+退出码：0 成功；2 缺密钥 / 缺配置 / Profile 名不存在；3 场景里出现了未预期的终态；4 固定任务集的
+写入预期未达成（见 stderr）。
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 import tempfile
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -98,10 +108,31 @@ def _write_config(data_dir: Path, profile: str) -> Path:
     return config_path
 
 
-def _seed_workspace(data_dir: Path) -> None:
-    """种下固定的种子文件（工作区根就是数据目录，示例配置里 ``workspace.root: "."``）。"""
+def _seed_workspace(data_dir: Path, extra: Mapping[str, str] | None = None) -> None:
+    """种下固定的种子文件（工作区根就是数据目录，示例配置里 ``workspace.root: "."``）。
+
+    ``extra`` 是任务集自带的额外种子（例如 `researcher` 的 `reference.md`）：内容随任务集固定，
+    因此跨次运行的基线仍然可比。
+    """
     (data_dir / "notes.md").write_text(NOTES_MD, encoding="utf-8")
     (data_dir / "AGENTS.md").write_text(AGENTS_MD, encoding="utf-8")
+    for name, text in (extra or {}).items():
+        path = data_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def _fingerprint(data_dir: Path, names: Sequence[str]) -> dict[str, str | None]:
+    """逐轮核对的工作区指纹：**只算被点名的文件**。
+
+    为什么不整个目录一起哈希：数据目录里同时住着 Checkpoint、会话索引与各记忆库，它们本来就每轮都在
+    变——混进来之后"这一轮有没有改工作区"这个判定就没意义了（永远为真）。
+    """
+    out: dict[str, str | None] = {}
+    for name in names:
+        path = data_dir / name
+        out[name] = None if not path.is_file() else hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    return out
 
 
 def _dump(snapshot: Any) -> dict[str, Any]:
@@ -139,6 +170,20 @@ def main() -> int:
             "不检测就测不到首 Token 时间（ttft），等于少覆盖 T34 改动过的流式链路"
         ),
     )
+    parser.add_argument(
+        "--task-set",
+        choices=("baseline", "profile"),
+        default="baseline",
+        help=(
+            "跑哪一套任务：baseline = T34 的固定四轮（默认，历史基线靠它可比）；"
+            "profile = v0.5 T56 的三档固定任务集（逐条按有效能力集决定跑或跳过）"
+        ),
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="只打印选定任务集与逐轮判定（是否需要跳过），不联网、不调用模型",
+    )
     args = parser.parse_args()
 
     _load_env(ROOT / ".env")
@@ -154,18 +199,59 @@ def main() -> int:
 
     # 放在这里 import：路径与依赖都就绪后再导入，`--help` 不需要装齐环境。
     from local_agent.api.container import open_runtime
-    from local_agent.capabilities import DEFAULT_PROFILE, PROFILES, profile_names, tool_names_for
+    from local_agent.capabilities import (
+        DEFAULT_PROFILE,
+        PROFILES,
+        effective_capabilities,
+        profile_names,
+        tool_names_for,
+    )
     from local_agent.config import load_config
+    from local_agent.profile_tasks import PROFILE_TASK_SETS, ProfileTaskSet, Task, select_tasks
+    from local_agent.tools.git_tools import git_availability
 
     profile = args.profile or DEFAULT_PROFILE
     if profile not in PROFILES:
         print(f"未知 Profile：{profile}（可用：{'、'.join(profile_names())}）", file=sys.stderr)
         return 2
     tool_names = tool_names_for("tool", PROFILES[profile])
+    # 两套任务走**同一条执行路径**：T34 的四轮包成同一套 `Task` 结构，否则就会有两处会漂移的判定。
+    baseline_set = ProfileTaskSet(
+        profile="baseline",
+        purpose="T34/T35 的固定四轮（文本冻结：改了就等于换了基线）",
+        tasks=tuple(Task(text=text) for text in TURNS),
+        # 第 3 轮会新建 notes_copy.md，所以两个文件都要在核对清单里（否则那一轮的"有没有改工作区"
+        # 会报 False，记录的是不实的信息）。
+        watched_files=("notes.md", "notes_copy.md"),
+    )
+    task_set = PROFILE_TASK_SETS[profile] if args.task_set == "profile" else baseline_set
+    session_title = "T56 固定任务集" if args.task_set == "profile" else "T34 真实基线"
     config_path = _write_config(data_dir, profile)
-    _seed_workspace(data_dir)
+    _seed_workspace(data_dir, extra=task_set.seed_files)
     config = load_config(config_path)
     print(f"[profile] {profile} 可见工具：{'、'.join(tool_names)}", flush=True)
+
+    # 能力门与运行时**同源**（同一个 `effective_capabilities`）：开关关着（默认的 web / git）时，
+    # 那条注定做不到的任务会被跳过，并在结果里写清缺的是哪个能力——而不是跑出一次误导人的失败。
+    plan = select_tasks(
+        task_set,
+        effective_capabilities(
+            PROFILES[profile],
+            web_access_enabled=config.web_access.enabled,
+            git_enabled=config.git.enabled and git_availability().available,
+        ),
+    )
+    print(f"[task-set] {args.task_set}：{task_set.purpose}", flush=True)
+    for index, item in enumerate(plan, start=1):
+        print(
+            f"  第 {index} 轮[{'执行' if item.runs else '跳过'}]：{item.task.text}",
+            flush=True,
+        )
+        if item.skip_reason is not None:
+            print(f"          原因：{item.skip_reason}", flush=True)
+    if args.list:
+        return 0
+    print(f"[task-set] 待执行 {sum(1 for item in plan if item.runs)} 轮 / 共 {len(plan)} 轮", flush=True)
     runtime = open_runtime(config, base_dir=data_dir, instance_lock=False)
     try:
         service = runtime.service
@@ -181,11 +267,25 @@ def main() -> int:
                     "capabilities": [item.model_dump(mode="json") for item in view.capabilities],
                 }
                 print(f"[probe] {capability}", flush=True)
-        summary = service.create_session(workspace_root=data_dir, title="T34 真实基线")
+        summary = service.create_session(workspace_root=data_dir, title=session_title)
         session_id = summary.session_id
         turns: list[dict[str, Any]] = []
-        for index, text in enumerate(TURNS, start=1):
-            result = service.submit_message(session_id, text, f"t34-baseline-{index}")
+        watched = task_set.watched_files
+        for index, item in enumerate(plan, start=1):
+            if not item.runs:
+                # 跳过也要留痕：否则"少跑了一轮"在结果里看不出来，会被当成"测过了且没问题"。
+                turns.append(
+                    {
+                        "turn": index,
+                        "input": item.task.text,
+                        "skipped": True,
+                        "skip_reason": item.skip_reason,
+                        "task_note": item.task.note,
+                    }
+                )
+                continue
+            before = _fingerprint(data_dir, watched)
+            result = service.submit_message(session_id, item.task.text, f"t34-baseline-{index}")
             # 需要人工审批的操作按"允许一次"放行；这本身也是基线的一部分（审批等待耗时）。
             approves = 0
             while result.status == "awaiting_approval" and approves < 5:
@@ -200,10 +300,13 @@ def main() -> int:
                     f"t34-baseline-{index}-approve-{approves}",
                 )
             snapshot = service.get_session_snapshot(session_id)
+            changed = before != _fingerprint(data_dir, watched)
             turns.append(
                 {
                     "turn": index,
-                    "input": text,
+                    "input": item.task.text,
+                    "skipped": False,
+                    "task_note": item.task.note,
                     "result": {
                         "status": result.status,
                         "run_id": result.run_id,
@@ -214,6 +317,12 @@ def main() -> int:
                         else result.error.model_dump(mode="json"),
                     },
                     "approvals": approves,
+                    # 固定任务集的机械验收点：这一轮**是否**改了工作区（只读档必须为 False）。
+                    # 只算被点名的文件（`watched`）——数据目录里的 Checkpoint 与各库本来就每轮都在变。
+                    "workspace_changed": changed,
+                    "write_expectation_met": None
+                    if args.task_set != "profile"
+                    else changed is item.task.expects_write,
                     **_dump(snapshot),
                 }
             )
@@ -234,6 +343,10 @@ def main() -> int:
             "capability": capability,
             "turns": turns,
             "turns_count": len(turns),
+            # T56：跑的是哪一套任务、跳过了哪几轮（跳过必须留痕，否则"少跑一轮"看不出来）。
+            "task_set": args.task_set,
+            "task_set_purpose": task_set.purpose,
+            "turns_skipped": [turn["turn"] for turn in turns if turn.get("skipped") is True],
             "lines": "notes.md / AGENTS.md",
             "no_compaction_expected": True,
         }
@@ -243,10 +356,22 @@ def main() -> int:
         )
         print(f"数据目录：{data_dir}")
         print(f"结果：{out_path}")
-        failed = [turn["turn"] for turn in turns if turn["result"]["status"] == "failed"]
+        failed = [
+            turn["turn"] for turn in turns if (turn.get("result") or {}).get("status") == "failed"
+        ]
         if failed:
             print(f"有轮次失败：{failed}", file=sys.stderr)
             return 3
+        # T56 的机械验收点：只读档**不得**改动工作区，写类任务**必须**真的改动。
+        # 达不到就是档位边界或提示词出了问题（T51 的 reviewer 事件正是这一类）。
+        deviations = [turn["turn"] for turn in turns if turn.get("write_expectation_met") is False]
+        if deviations:
+            print(
+                f"固定任务集的写入预期未达成：{deviations}"
+                "（只读档改了工作区，或写类档没改——按 §16.1 的能力边界核对）",
+                file=sys.stderr,
+            )
+            return 4
         return 0
     finally:
         runtime.close()
