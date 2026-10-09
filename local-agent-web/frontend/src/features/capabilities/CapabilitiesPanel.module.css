@@ -1,0 +1,139 @@
+/* 「能力与档位」面板样式。只用 `--law-*` 设计令牌，深浅色随主题自动切换。 */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--law-space-xl);
+  background: var(--law-bg-mask);
+}
+
+.dialog {
+  width: min(560px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  padding: var(--law-space-2xl);
+  background: var(--law-bg-layer-1);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+  box-shadow: var(--law-shadow-lv3);
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--law-space-lg);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--law-text-lg);
+  line-height: var(--law-leading-lg);
+  font-weight: var(--law-weight-semibold);
+  color: var(--law-text-primary);
+}
+
+.note {
+  margin: var(--law-space-sm) 0 0;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-text-secondary);
+}
+
+.close {
+  flex: none;
+  padding: var(--law-space-xs) var(--law-space-md);
+  font-size: var(--law-text-sm);
+  color: var(--law-text-secondary);
+  background: var(--law-button-ghost-fill);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-sm);
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--law-button-ghost-hover);
+}
+
+.error {
+  margin: var(--law-space-lg) 0 0;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-state-error);
+}
+
+.profile {
+  margin: var(--law-space-lg) 0 0;
+  font-size: var(--law-text-sm);
+  color: var(--law-text-secondary);
+}
+
+.profileValue {
+  font-family: var(--law-font-mono);
+  color: var(--law-text-primary);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-md);
+  margin: var(--law-space-lg) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  padding: var(--law-space-lg);
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-md);
+}
+
+.rowHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--law-space-md);
+}
+
+.label {
+  font-size: var(--law-text-md);
+  color: var(--law-text-primary);
+}
+
+.chip {
+  flex: none;
+  padding: 0 var(--law-space-sm);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  color: var(--law-text-secondary);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-pill);
+}
+
+.ok {
+  color: var(--law-state-success);
+  border-color: var(--law-state-success-subtle);
+}
+
+.off {
+  color: var(--law-state-warn-label);
+  border-color: var(--law-state-warn-subtle);
+}
+
+.detail {
+  margin: var(--law-space-sm) 0 0;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-text-secondary);
+}
+
+.hint {
+  margin: var(--law-space-xs) 0 0;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-state-info);
+}

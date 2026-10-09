@@ -381,6 +381,21 @@ export function getPreferences(): Promise<PreferencesDto> {
   return request('/api/preferences')
 }
 
+// ---- 能力状态（T56；§16.6）---------------------------------------------------
+
+export type CapabilitiesDto = components['schemas']['CapabilitiesView']
+export type CapabilityStatusDto = components['schemas']['CapabilityStatusView']
+
+/**
+ * 当前档位与每个能力的可用性（原因 + 可照做的下一步）。
+ *
+ * 服务端**每次现算**（取决于配置开关与这台机器上装没装 git），所以这里不做长缓存：
+ * 改完配置或装好依赖后刷新即得，页面不保存一份可能已经过期的结论。
+ */
+export function getCapabilities(): Promise<CapabilitiesDto> {
+  return request<CapabilitiesDto>('/api/capabilities')
+}
+
 export type MemoryFilters = NonNullable<paths['/api/data-center/memories']['get']['parameters']['query']>
 export type UsageFilters = NonNullable<paths['/api/data-center/usage']['get']['parameters']['query']>
 function filterQuery(filters: MemoryFilters | UsageFilters): string {

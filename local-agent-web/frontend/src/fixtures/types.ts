@@ -421,6 +421,37 @@ export interface PermissionsView {
   storeUnavailable: boolean
 }
 
+/**
+ * 能力不可用的原因（v0.5 T56；契约 §16.6）。
+ *
+ * 后端给的是**闭集**，页面不许自造第五种：`profile` = 当前档位没声明（换档即可）、
+ * `disabled` = 配置开关关着、`missing_dependency` = 这台机器缺东西（例如没装 git）。
+ */
+export type CapabilityReason = 'available' | 'profile' | 'disabled' | 'missing_dependency'
+
+/**
+ * 一条能力状态。
+ *
+ * 这里**只有能力与解释，没有工具名**：用户要判断的是"现在能不能联网、能不能提交"，
+ * 不是内部绑了哪几个工具。`available` 为假时 `hint` 必须有——只灰掉不解释，
+ * 用户会以为功能坏了。
+ */
+export interface CapabilityStatusView {
+  capability: string
+  label: string
+  available: boolean
+  reason: CapabilityReason
+  detail: string
+  hint: string | null
+}
+
+/** 当前档位与每个能力的可用性；列表每次由服务端现算（取决于配置与本机环境）。 */
+export interface CapabilitiesView {
+  /** 当前 Agent 档位名（`coder` / `researcher` / `reviewer`，或自定义名）。 */
+  profile: string
+  capabilities: readonly CapabilityStatusView[]
+}
+
 export interface SettingsView {
   /**
    * v0.4 settings has two usable sections — chat connections and permissions — so

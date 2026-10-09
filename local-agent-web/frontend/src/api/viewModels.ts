@@ -11,6 +11,8 @@
 // - **密钥只报存在性**：`key_status` 三态直接映射——DTO 里本来就没有承载密钥值的字段。
 
 import type {
+  CapabilitiesView,
+  CapabilityStatusView,
   CapabilityView,
   ConnectionStatus,
   ExternalPathGrantView,
@@ -19,7 +21,7 @@ import type {
   PermissionsView,
   SettingsView,
 } from '../fixtures/types'
-import type { HealthDto, ModelConnectionDto, PermissionsDto } from './client'
+import type { CapabilitiesDto, HealthDto, ModelConnectionDto, PermissionsDto } from './client'
 
 const CAPABILITY_ORDER = ['chat', 'tools', 'streaming'] as const
 
@@ -119,6 +121,28 @@ export function toPermissionsView(dto: PermissionsDto): PermissionsView {
       (grant): ExternalPathGrantView => ({ path: grant.path, access: grant.access }),
     ),
     storeUnavailable: dto.store_unavailable,
+  }
+}
+
+/**
+ * 「当前档位与能力状态」（v0.5 T56；§16.6）：DTO 说什么就是什么。
+ *
+ * `reason` 与 `capability` 都是稳定键，页面按 `reason` 分支说"下一步怎么做"；`hint` 原样带过去
+ * ——不可用时服务端保证它有话，**页面不替后端编一句"为什么用不了"**（那正是这个面板要消灭的东西）。
+ */
+export function toCapabilitiesView(dto: CapabilitiesDto): CapabilitiesView {
+  return {
+    profile: dto.profile,
+    capabilities: (dto.capabilities ?? []).map(
+      (row): CapabilityStatusView => ({
+        capability: row.capability,
+        label: row.label,
+        available: row.available,
+        reason: row.reason,
+        detail: row.detail,
+        hint: row.hint ?? null,
+      }),
+    ),
   }
 }
 

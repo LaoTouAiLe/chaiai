@@ -37,6 +37,7 @@ import { traceFromMessages } from '../features/trace/adapters'
 import { TraceView } from '../features/trace/TraceView'
 import { ConversationMapPanel } from '../features/conversation-map/ConversationMapPanel'
 import { DataCenter } from '../features/data-center/DataCenter'
+import { CapabilitiesSection } from '../features/capabilities/CapabilitiesSection'
 import type { components } from '../api/schema.gen'
 import { ApiError, archiveSession, listSessions, removeWorkspace, renameSession, renameWorkspace, restoreSession, selectSession } from '../api/client'
 import { queryKeys, useHealth, useModelConnections, useSessions, useSnapshot, useSubmitMessage, useWorkspaces, useCreateSession, useSelectWorkspace, useSelectSessionModel, useResolveApproval, usePickWorkspaceDirectory, useSetSessionMode, useEndInterruptedRequest } from '../api/queries'
@@ -85,6 +86,8 @@ export function LiveApp() {
 
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [dataCenterOpen, setDataCenterOpen] = useState(false)
+  // 「能力与档位」面板：纯界面状态，每次打开都重新取一次（服务端现算，页面不留旧结论）。
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   const [archivedOpen, setArchivedOpen] = useState(false)
   // 上下文详情面板的展开态：**界面状态**，不入服务端契约（刷新后回到收起）。
   const [meterOpen, setMeterOpen] = useState(false)
@@ -507,6 +510,8 @@ export function LiveApp() {
           },
           onOpenSettings: () => setSettingsOpen(true),
           onOpenDataCenter: () => { setSettingsOpen(false); setDataCenterOpen(true) },
+          // 三个入口互斥：同时叠两个面板会让用户以为"设置里也能改能力"。
+          onOpenCapabilities: () => { setSettingsOpen(false); setDataCenterOpen(false); setCapabilitiesOpen(true) },
           onToggleCollapse: () => setCollapsedPref(!sidebarCollapsed),
         }}
       />
@@ -670,6 +675,7 @@ export function LiveApp() {
           }}
         /> : null}
         </>}
+        {capabilitiesOpen ? <CapabilitiesSection onClose={() => setCapabilitiesOpen(false)} /> : null}
         {settingsOpen ? <ModelSettingsDialog onClose={() => {
           setSettingsOpen(false)
           void queryClient.invalidateQueries({ queryKey: queryKeys.modelConnections })

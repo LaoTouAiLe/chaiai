@@ -4,6 +4,29 @@
  */
 
 export interface paths {
+    "/api/capabilities": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 当前档位与能力状态
+         * @description 当前 Profile 与每个能力的可用性、原因与下一步。
+         *
+         *     **只讲能力不讲工具**（§16.6）：用户要判断的是"现在能不能联网、能不能提交"。答案每次现算，
+         *     因此改完配置或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。
+         */
+        get: operations["capabilities_api_capabilities_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/data-center/memories": {
         parameters: {
             query?: never;
@@ -822,6 +845,16 @@ export interface components {
             text: string;
         };
         /**
+         * CapabilitiesView
+         * @description 当前 Agent 档位与每个能力的状态（T56；§16.6）。
+         */
+        CapabilitiesView: {
+            /** Capabilities */
+            capabilities?: components["schemas"]["CapabilityStatusView"][];
+            /** Profile */
+            profile: string;
+        };
+        /**
          * CapabilityCheckView
          * @description 单项能力检测结果。未检测就是 `unknown`，不能写成 `passed`。
          */
@@ -836,6 +869,31 @@ export interface components {
              * @enum {string}
              */
             result: "passed" | "failed" | "unknown";
+        };
+        /**
+         * CapabilityStatusView
+         * @description 一个能力的对外状态（T56；§16.6）。
+         *
+         *     **只有能力与解释，没有工具名**（§15.8 的字段门槛）：用户要判断的是"这台机器现在能不能联网、
+         *     能不能提交"，不是内部绑了哪几个工具。原因取值直接复用 `capabilities.CapabilityReason`，
+         *     页面因此不会遇到"没见过的原因"。
+         */
+        CapabilityStatusView: {
+            /** Available */
+            available: boolean;
+            /** Capability */
+            capability: string;
+            /** Detail */
+            detail: string;
+            /** Hint */
+            hint?: string | null;
+            /** Label */
+            label: string;
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "available" | "profile" | "disabled" | "missing_dependency";
         };
         /**
          * CommandResultView
@@ -3096,6 +3154,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    capabilities_api_capabilities_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapabilitiesView"];
+                };
+            };
+        };
+    };
     memory_page_api_data_center_memories_get: {
         parameters: {
             query?: {

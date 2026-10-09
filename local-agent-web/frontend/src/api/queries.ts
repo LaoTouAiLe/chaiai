@@ -11,6 +11,7 @@ import {
   setSessionMode,
   endInterruptedRequest,
   createSession,
+  getCapabilities,
   getHealth,
   getMemoryPage,
   getUsagePage,
@@ -42,6 +43,17 @@ export const queryKeys = {
   sessions: (workspaceId: string | null) => ['sessions', workspaceId] as const,
   snapshot: (sessionId: string) => ['snapshot', sessionId] as const,
   modelConnections: ['model-connections'] as const,
+  capabilities: ['capabilities'] as const,
+}
+
+/**
+ * 当前档位与能力状态（T56；§16.6）。
+ *
+ * 服务端每次现算，所以这里不设 `staleTime`：打开面板就会取一次最新的，
+ * 用户改完配置再打开就能看到新结论（缓存一份过期答案比不显示更糟）。
+ */
+export function useCapabilities() {
+  return useQuery({ queryKey: queryKeys.capabilities, queryFn: getCapabilities })
 }
 
 export function useHealth() {

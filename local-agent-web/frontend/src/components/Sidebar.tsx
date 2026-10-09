@@ -44,6 +44,13 @@ export interface SidebarActions {
   onNewSession: () => void
   onOpenSettings: () => void
   onOpenDataCenter?: () => void
+  /**
+   * 打开「能力与档位」面板（v0.5 T56；§16.6）。
+   *
+   * **可选**：不传就不渲染入口。原型宿主（`app/App.tsx`）不传，因此原型与视觉基线的 DOM、
+   * 截图一字不变——新增的产品面不该悄悄改动已有基线。
+   */
+  onOpenCapabilities?: () => void
   /** 展开态与窄轨态共用的同一个动作：收起 / 展开是同一枚开关。 */
   onToggleCollapse: () => void
 }
@@ -250,6 +257,11 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
       )}
 
       <div className={styles.footer}>
+        {actions?.onOpenCapabilities ? <button type="button" className={styles.footerButton} onClick={actions.onOpenCapabilities} aria-label="能力与档位" title={collapsed ? '能力与档位' : undefined}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+            <rect x="4" y="5" width="16" height="14" rx="2" /><path d="M8 10h8M8 14h5" />
+          </svg>{collapsed ? null : <span>能力与档位</span>}
+        </button> : null}
         {actions?.onOpenDataCenter ? <button type="button" className={styles.footerButton} onClick={actions.onOpenDataCenter} aria-label="数据中台" title={collapsed ? '数据中台' : undefined}>
           <Doc size={18} />{collapsed ? null : <span>数据中台</span>}
         </button> : null}
