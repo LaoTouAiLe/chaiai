@@ -300,6 +300,15 @@ class CompressionConfig(_StrictModel):
     enabled: bool = True
     trigger_ratio: float = Field(default=0.8, gt=0.0, le=1.0)
     preserve_recent_turns: int = Field(default=8, ge=1)
+    #: 「最近保留轮次」的**窗口比例**（2026-10-09 新增，对齐 dsh 的 ``retainRatio``）。
+    #:
+    #: ``preserve_recent_turns`` 是硬编码条数：窗口很小时"至少保留 8 轮"会恒等于"整段历史都
+    #: 留下"——保留下限大于窗口，压缩因此**触发也压不动**，而且完全没有可见信号（实测：设了很小
+    #: 的 ``context_window_tokens``，聊两三句就超，却一直没有任何压缩动作）。
+    #: 这一条把保留下限与窗口联动：实际保留轮数 = ``preserve_recent_turns`` 之内、且 token 总量
+    #: 不超过 ``retain_ratio × llm.context_window_tokens`` 的**最近**轮数（下限 1 轮）。
+    #: 窗口大时按 ``preserve_recent_turns`` 走，行为不变；窗口小时自动收紧，给压缩留出空间。
+    retain_ratio: float = Field(default=0.16, gt=0.0, le=1.0)
     #: 窗口里最多保留的**最近完整工具步**数量，更早的整步省略并留一条带摘要的说明占位。
     #: 轮次保底对"一个用户请求内的长工具循环"无效（只有 1 个人类轮次），靠这条才能收缩单个长任务。
     #: ``0`` 表示**所有工具步都被省略**（窗口里只剩人类消息与那条说明占位）。
@@ -331,18 +340,27 @@ class CompressionConfig(_StrictModel):
     #:   48,512 塌到 3,456。
     #: - **验收观测量**：逐调用缓存读的**回落次数**（目标 0~1 次）——不是命中率。
     tool_step_budget_chars: int = Field(default=160_000, gt=0)
-    #: **单条工具结果**的字符阈值（2026-09-30 新增，成本修复）：超过它的结果无条件压成
-    #: 「头 :data:`~local_agent.memory.short_term.TOOL_RESULT_HEAD_CHARS` + 中段标记 +
-    #: 尾 :data:`~local_agent.memory.short_term.TOOL_RESULT_TAIL_CHARS`」（当前 3072 / 768），
-    #: ``0`` 表示不压。
-    #:
-    #: 为什么要有它（而不是只靠上面的预算）：实测一次真实对话，未命中的大头正是"大工具结果**第一次**
-    #: 进历史"那几次——单个 2 万字符的读取约 1.2 万 token，全价未命中，那一跳的命中率只有 **22.6%**；
-    #: 而窗口当时才约 45k token，**远没到 80k 的预算线**，按预算触发的裁剪一次都没跑，机制等于不存在。
-    #: 阈值改成**按单条结果**判定后，一条结果在被发出去之前就已经是压过的形态，因而**不破坏前缀**
-    #: （同一输入每次都压成同一份字节）。取值对标 dsh 的 ``compaction-tool-result-pruner``（8192）。
+    #: 上下文压力达标后才裁剪超过此字符阈值的工具正文（DSH 的压力阶段策略）。
+    #: ``0`` 禁止正文裁剪；行号与目录投影仍可用。实际替换保存进 Checkpoint，预算
+    #: 下降后不重新展开历史；裁剪后重新测量，仍有压力才摘要完整前缀。
     tool_result_keep_chars: int = Field(default=8_192, ge=0)
     summary_max_chars: int = Field(default=12_000, gt=0)
+
+    @model_validator(mode="after")
+    def _retain_must_be_below_trigger(self) -> CompressionConfig:
+        """保留比例必须小于触发比例（同 dsh 的 ``retainRatio < thresholdRatio`` 校验）。
+
+        否则"触发压缩时至少保留的比例"已经不小于"触发阈值"，压缩一触发就没有可压缩的空间——
+        这正是本文件中 ``retain_ratio`` 想避免的"触发也压不动"，配置阶段就失败闭合比运行时
+        静默压不动好。
+        """
+        if self.retain_ratio >= self.trigger_ratio:
+            raise ValueError(
+                f"memory.compression.retain_ratio（{self.retain_ratio}）必须小于 "
+                f"trigger_ratio（{self.trigger_ratio}）：保留比例不小于触发比例时，"
+                "压缩一触发就没有可压缩的空间"
+            )
+        return self
 
 
 class MemoryConfig(_StrictModel):
@@ -589,6 +607,39 @@ class GitConfig(_StrictModel):
     max_output_chars: int = Field(default=20_000, ge=500, le=500_000)
 
 
+class SkillsConfig(_StrictModel):
+    """技能能力（v0.5 T55；契约 §16.5、工具定义 §6.12）。
+
+    **默认关闭**：关闭时 `skill` 能力完全不可见（提示里没有清单、工具不绑给模型），行为与 v0.4 一致。
+
+    ``user_dirs`` **只接受绝对路径**：`~` 不展开（与 §8 一致，`~` 属于"相对路径逃逸"），写相对路径在
+    启动时失败并说明——相对路径会随进程当前目录漂移，那正是 2026-10-09 修过的记忆库路径缺陷的成因。
+
+    「个人级默认根」在这里**不出现**：它们是代码里的常量表（§16.5 的 rank 表），`include_user_skills`
+    只控制"读不读那一组"。市场缓存目录（本机实测一处 295 个技能）**默认不读**，要读就写进 `user_dirs`。
+    """
+
+    enabled: bool = False
+    #: 是否读取默认的个人级根（`~/.agents/skills` 等，见 §16.5 的 rank 表）。
+    include_user_skills: bool = True
+    #: 追加的发现根：**只接受绝对路径**；要读市场缓存目录就写在这里。
+    user_dirs: list[str] = Field(default_factory=list)
+    #: 单个技能正文上限（字符）：超过即截断，并在结果 ``note`` 里写明原文长度。
+    max_skill_chars: int = Field(default=20_000, ge=500, le=500_000)
+    #: 清单上限（字符）：超过即截断并如实标注（§6.7 口径）。
+    max_list_chars: int = Field(default=8_000, ge=200, le=100_000)
+
+    @model_validator(mode="after")
+    def _user_dirs_must_be_absolute(self) -> SkillsConfig:
+        for value in self.user_dirs:
+            if not Path(value).is_absolute():
+                raise ValueError(
+                    "skills.user_dirs 只接受绝对路径（`~` 不展开，§16.5）："
+                    f"{value!r}。相对路径会随进程当前目录漂移，请写成绝对路径"
+                )
+        return self
+
+
 class ProfilesConfig(_StrictModel):
     """Agent Profile（v0.5 T50；契约 §16.1）。
 
@@ -662,6 +713,7 @@ class AppConfig(_StrictModel):
     profiles: ProfilesConfig = Field(default_factory=ProfilesConfig)
     web_access: WebAccessConfig = Field(default_factory=WebAccessConfig)
     git: GitConfig = Field(default_factory=GitConfig)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
 
     def as_run_config(self) -> RunConfig:
         """收窄成运行期配置；``llm`` 缺省时抛可执行的 `ConfigError`。

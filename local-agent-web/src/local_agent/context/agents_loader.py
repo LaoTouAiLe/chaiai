@@ -167,11 +167,15 @@ def _read_truncated(path: Path, max_chars: int) -> tuple[str, bool]:
         return f"（该文件无法读取：{type(exc).__name__}）", False
     if len(text) <= max_chars:
         return text, False
-    return _truncate(text, max_chars), True
+    return truncate_middle(text, max_chars), True
 
 
-def _truncate(text: str, max_chars: int) -> str:
-    """保留头部与尾部，中间用截断标记代替。"""
+def truncate_middle(text: str, max_chars: int) -> str:
+    """保留头部与尾部，中间用截断标记代替。
+
+    公开给技能加载复用（v0.5 T55）：AGENTS 与技能正文的截断必须是**同一套口径与同一条标记**，
+    否则同一份内容在两处会给出不同的"省略了多少字符"，那就成了两套截断实现。
+    """
     if max_chars <= 0:
         return TRUNCATION_MARKER.format(omitted=len(text))
     head_chars = max_chars // 2

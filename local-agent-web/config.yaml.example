@@ -93,6 +93,11 @@ memory:
     enabled: true                  # 默认启用 Prompt 窗口压缩；Checkpoint 原始 messages 不删
     trigger_ratio: 0.8
     preserve_recent_turns: 8
+    # 保留下限的**窗口比例**：实际保留轮数 = preserve_recent_turns 之内、且 token 总量不超过
+    # retain_ratio × context_window_tokens 的**最近**轮数（下限 1 轮）。窗口大时按
+    # preserve_recent_turns 走（行为不变）；窗口小时自动收紧，避免"保留下限大于窗口"导致压缩
+    # 触发也压不动。必须小于 trigger_ratio（配置校验会拦截）。
+    retain_ratio: 0.16
     # 窗口里「工具步内容」的字符预算：从最新一步往回累计，超预算的**更早**步骤才整步省略。
     # 短循环因此一个字都不省 → 历史保持追加式 → 供应商的前缀缓存可复用（成本相关，别随手调小：
     # 只按条数省略会让窗口每步重写中段，实测把缓存命中率从可用的七成打到 19.9%）。
@@ -104,7 +109,7 @@ memory:
     preserve_recent_tool_steps: 3  # 下限：预算再紧也至少保留这么多最近完整工具步
     # 单条工具结果的字符阈值：超过就压成「头 + 中段标记 + 尾」，0 表示不压。
     # 按**单条结果**判定（不是等窗口超预算）：结果在被发出去之前就压好了，因此不破坏前缀缓存。
-    tool_result_keep_chars: 8192
+    tool_result_keep_chars: 8192   # 压力达标后单条正文裁剪阈值；0 禁止正文裁剪
     summary_max_chars: 12000
 
 security:
@@ -231,6 +236,23 @@ git:
   enabled: false
   timeout_seconds: 20
   max_output_chars: 20000
+
+# 技能（v0.5 T55，契约 §16.5、工具定义 §6.12）。把"指令"从"每轮都发"变成"按需加载"：
+# 清单（只有名字与描述）随运行时快照发给模型，正文由 skill_load 按需取——两者都不进稳定前缀，
+# 所以关掉它时前缀与快照逐字节不变。**默认关闭**，关闭时 skill 能力完全不可见。
+# 发现顺序（rank 由小到大，同名先到者赢）见 §16.5；下面两个开关控制"读哪些根"：
+#   - include_user_skills：读默认的个人级根（~/.agents/skills、~/.codex/skills（跳过 .system）、
+#     以及本机已装的厂商目录）。这些被当成**用户自己的**内容（来源 owner）。
+#   - user_dirs：追加根，**只接受绝对路径**（`~` 不展开）。市场缓存目录（例如
+#     `~/.codebuddy/skills-marketplace/skills`，实测一处 295 个技能）**默认不读**——
+#     全列出来约 6 万字符，一份就吃光 agents.max_total_chars；要读请显式写在这里。
+# 本轮**不读工作区内的项目级技能**（仓库可能是别人给的），见 §16.5 的"明确不做"。
+skills:
+  enabled: false
+  include_user_skills: true
+  user_dirs: []
+  max_skill_chars: 20000
+  max_list_chars: 8000
 
 # v0.4 独立 Web 前端与 HTTP API（T29，契约 §15.3）。
 # 默认只绑定回环地址：v0.4 没有鉴权，改 host 必须同时打开 allow_non_loopback，
