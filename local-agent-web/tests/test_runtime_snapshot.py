@@ -453,6 +453,23 @@ def test_snapshot_block_is_marked_as_data() -> None:
     assert "## 当前目录" in text and "## 当前计划" in text
 
 
+def test_current_directory_outside_the_workspace_says_so(tmp_path: Path) -> None:
+    """工作区之外的当前目录必须**明确标注**，并说清可读写范围仍是工作区根。
+
+    2026-10-09 的真实运行里，`reviewer` 档因为"快照写着 `local-agent-web`、而我的工作区根在别处"
+    专门花了一段解释这个差异——对模型来说那看着像矛盾，其实只是"从别的目录启动"的正常形态。
+    """
+    context = _FakeContext()
+    context.workspace_root = tmp_path / "ws"
+    context.current_cwd = tmp_path / "elsewhere"
+
+    text = prompt_context.current_cwd_text(context)  # type: ignore[arg-type]
+
+    assert text.startswith(context.current_cwd.as_posix())
+    assert "不在工作区内" in text
+    assert "可读写范围仍是工作区根" in text
+
+
 def test_snapshot_sits_right_before_the_current_user_input(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:

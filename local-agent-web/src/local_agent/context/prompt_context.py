@@ -272,12 +272,18 @@ def build_context_snapshot_text(
 
 
 def current_cwd_text(context: RuntimeContext) -> str:
-    """当前目录的展示文本：在工作区根目录之内时用相对路径（不含私人绝对路径前缀）。"""
+    """当前目录的展示文本。
+
+    在工作区根目录之内时用相对路径（不含私人绝对路径前缀）；**在工作区之外时明确标注**——
+    2026-10-09 的真实运行里，`reviewer` 档因为"快照写着 `local-agent-web`、而我的工作区根在别处"
+    花了一段解释这个差异。对模型来说那看着像矛盾，其实只是"从别的目录启动"的正常形态：
+    **工具的可读写范围仍是工作区根**，这一点必须同时说出来，否则它会以为能去那个目录读写。
+    """
     cwd = context.current_cwd
     try:
         relative = cwd.relative_to(context.workspace_root)
     except ValueError:
-        return cwd.as_posix()
+        return f"{cwd.as_posix()}（不在工作区内：可读写范围仍是工作区根）"
     return relative.as_posix() or "."
 
 
