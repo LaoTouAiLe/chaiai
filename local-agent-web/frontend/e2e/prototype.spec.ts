@@ -559,7 +559,7 @@ test('the capability panel tail is fully readable after scrolling', async ({ pag
   await page.goto('/?state=capabilities')
   const dialog = page.getByRole('dialog', { name: '能力与档位' })
 
-  const last = dialog.getByText('提交到 Git')
+  const last = dialog.getByText('按需加载技能')
   await last.scrollIntoViewIfNeeded()
   await expect(last).toBeInViewport({ ratio: 1 })
   // 缺依赖那条的安装提示：这一屏要能读到"缺什么、怎么装"的完整句子。

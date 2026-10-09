@@ -1352,6 +1352,14 @@ export const capabilitiesScenario: ConversationScenario = {
         detail: '当前 Agent 档位没有包含这个能力。',
         hint: '把 profiles.active 切到包含它的档位（coder / researcher / reviewer），或改 profiles.custom。',
       },
+      {
+        capability: 'skill',
+        label: '按需加载技能',
+        available: true,
+        reason: 'available',
+        detail: '当前可用。',
+        hint: null,
+      },
     ],
   },
 }
