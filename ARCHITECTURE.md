@@ -883,6 +883,11 @@ glob(
 | `files_write` | `edit_file`、`write_file`、`delete_file` |
 | `shell` | `run_shell` |
 | `web`（v0.5 T53） | `web_search`、`web_fetch` |
+| `git_read`（v0.5 T54） | `git_status`、`git_diff`、`git_log` |
+| `git_write`（v0.5 T54） | `git_commit` |
+
+**Git 的读与写分成两个能力是刻意的**：可见性不等于授权（安全门仍逐个工具判定），但 Profile 的成员资格要能
+分别表态——`researcher` 只该"看得见工作区的差异"，不该"能提交"（§16.4）。
 
 规则：
 
@@ -1891,7 +1896,25 @@ v0.4 管理的是**聊天模型连接**（`provider=openai_compatible`）。连�
   结果**"决定候选的来源级别（§16.2 的最保守一侧）。外部内容因此不能通过"记忆"这条回流路径变成长期可信，
   也不能凭内容里的指令自动授权任何工具调用。
 
-### 16.4 Git 能力（未冻结，T54）
+### 16.4 Git 能力（T54，2026-10-09 冻结）
+
+- 工具定义见 §6.11；能力名 `git_read`（`git_status` / `git_diff` / `git_log`）与 `git_write`（`git_commit`）。
+  档位：`coder` 两个都加；`researcher` 只加 `git_read`；`reviewer` 都不加。
+- **作用域是工作区，不是仓库**（2026-10-09 本机实测的形态问题）：工作区常常是仓库的**子目录**（`local-agent-web`
+  的仓库根就在它的上一级）。所以读类工具只报告**工作区路径下**的变化，实现用 `git -C <workspace_root>` 加路径
+  限定；`git_commit` 只暂存**显式列出、且位于工作区内**的路径，绝不 `git add -A`。工作区不是仓库、或仓库在其更上层
+  时，必须在结果里说清是哪一种，不得让用户把"我看到的 diff"当成"仓库的全部改动"。
+- **`git` 不存在就明确失败**：构造工具时用 `shutil.which("git")` 判定；缺失时工具不绑定给模型，能力状态里写明
+  "缺什么、怎么装"。不静默降级、不返回伪造的空结果。
+- **任何路径都不出现 `git push`**：工具不接受任意子命令，也不接受"改环境"的开关（`-c`、`--git-dir`、`--work-tree`、
+  `--exec-path`、`upload-pack` 之类一律拒绝），参数是**闭集**；实现一律 `shell=False` + 参数列表，不经 shell。
+- **`git_commit` 必须人工审批**（安全门按写类判定）：审批卡片写清"分支、暂存的文件清单、message"；在 `main` /
+  `master` 上提交需要**额外确认**；提交后回读 `git log -1` 自证结果；**不做** amend、force、rebase、分支切换。
+  提交**不加** `--no-verify`——尊重仓库自身的 hook；hook 失败按"提交未成功"如实报告，不重试、不绕过。
+- 输出上限与截断沿用 §6.7 口径：大 diff 截断并在 `note` 里说明"结果不完整"；超时按 `security.shell` 的语义处理。
+- 配置段 `git`：`enabled`（**默认 `false`**）、`timeout_seconds`、`max_output_chars`。关闭时两个能力**完全不可见**，
+  基础行为与 v0.4 一致（同"关闭新增能力后行为不变"）。
+- **明确不做**：分支管理、merge / rebase、远程操作、冲突自动解决、`git add -A`、hook 绕过。
 
 ### 16.5 Skill 能力（未冻结，T55）
 
