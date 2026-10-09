@@ -340,7 +340,12 @@ def build_runtime_context(
         app_config, workspace_root=workspace_root, external_policy=external_policy
     )
     registry = tool_registry or ToolRegistry.build(
-        policy, web_access=app_config.web_access, git=app_config.git
+        policy,
+        web_access=app_config.web_access,
+        git=app_config.git,
+        # 技能段必须传进来：漏传的话工具会退回"默认关闭"的配置，而快照读的是真实配置——
+        # 2026-10-09 的真实运行验收撞到的正是这个：**清单里列出了技能，`skill_load` 却说没有**。
+        skills=app_config.skills,
     )
     capabilities = model_capabilities or probe_capabilities(
         model_adapter, provider_name=provider_name or app_config.llm.model

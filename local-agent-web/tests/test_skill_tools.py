@@ -168,3 +168,39 @@ def test_tools_are_still_constructed_when_disabled(tmp_path: Path) -> None:
     built: Sequence[BaseTool] = build_skill_tools(settings, home=tmp_path)
 
     assert [tool.name for tool in built] == ["skill_list", "skill_load"]
+
+
+def test_registry_tools_see_the_same_skills_config_as_the_snapshot(
+    app_config: AppConfig, tmp_path: Path, model_factory: Any
+) -> None:
+    """走**真实装配路径**：配置里开着的技能，必须能被注册表里的工具取到。
+
+    这条守的是"两个消费方同源"。2026-10-09 的真实运行验收撞到过相反的结果：快照里**列出了**技能
+    （它读的是真实配置），而 `skill_load` 说"没有这个技能"（工具拿到的是**默认关闭**的配置）——
+    根因是 `build_runtime_context` 漏传 `skills=app_config.skills`。清单与工具看同一份配置，缺一不可。
+    """
+    from local_agent.graph import builder
+
+    root = tmp_path / "skills-root"
+    _write(root, "release-checklist", "发布前检查清单")
+    config = app_config.model_copy(
+        update={
+            "skills": SkillsConfig(
+                enabled=True, include_user_skills=False, user_dirs=[str(root)]
+            )
+        }
+    )
+    context = builder.build_runtime_context(
+        app_config=config,
+        model_adapter=model_factory(decision="tool", reply="好"),
+        workspace_root=tmp_path,
+        current_cwd=tmp_path,
+    )
+    registry = context.tool_registry
+    assert registry is not None
+
+    listing = _payload(registry.get("skill_list").invoke({}))
+    assert [item["name"] for item in listing["skills"]] == ["release-checklist"]
+
+    loaded = _payload(registry.get("skill_load").invoke({"name": "release-checklist"}))
+    assert "release-checklist 的正文" in loaded["content"]
