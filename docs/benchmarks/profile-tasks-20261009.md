@@ -79,10 +79,12 @@ uv run python scripts/measure_usage_baseline.py --task-set profile --profile rev
 
 ## 四、这轮真实运行暴露/确认的四个点
 
-1. **换行符**：跑器的种子文件在 Windows 上按文本模式写入（CRLF），而 `write_file` 落盘是 LF，于是
-   "原样复制"在字节层面不等价（289 → 283）。这是**跑器种子**造成的差异，不是产品缺陷；但由此可确认
-   产品行为是"读进来的文本按 LF 落盘"。是否要让"复制"保字节，留给后续按需决定（本轮不改：改了会
-   动到 T34 基线那份种子）。
+1. **换行符**：跑器的种子文件在 Windows 上按文本模式写入（CRLF），"原样复制"却在字节层面不等价
+   （289 → 283）。**2026-10-09 查证：不是产品行为**——`read_file_content` 用 `data.decode("utf-8-sig")`
+   （**不做换行翻译**），`write_file_content` 用 `content.encode("utf-8")`（**原样落盘**），产品这一半是
+   保字节的；差异出在**模型复述时**把 `\r\n` 写成了 `\n`。当时那句"产品行为是按 LF 落盘"是错的，
+   已在 `tests/test_tools.py::test_read_then_write_round_trip_keeps_crlf_bytes` 用往返保字节钉住
+   （免得日后有人"顺手"加一层换行归一化）。因此**无需为"复制"做任何产品改动**。
 2. **策略拒绝是无声可解释的**：`edit_file` 的"没有需要修改的内容"与 `run_shell` 的"找不到可执行文件"
    都给了**具体理由**，模型据此停止重试并上报，没有绕道。
 3. **运行时快照的"当前目录"可以是进程 CWD**：`reviewer` 第 1 轮主动指出"快照里写的当前目录是

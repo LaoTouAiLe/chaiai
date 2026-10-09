@@ -1201,6 +1201,25 @@ def test_write_file_creates_new_file(tmp_path: Path, policy: SecurityPolicy) -> 
     assert result.reason == "新建"
 
 
+def test_read_then_write_round_trip_keeps_crlf_bytes(tmp_path: Path, policy: SecurityPolicy) -> None:
+    """读→写往返**保字节**：产品不会自作主张改换行（2026-10-09 澄清的一条事实）。
+
+    来由：一次真实运行里模型把 CRLF 文件"原样复制"成 LF（289 → 283 字节），看起来像工具改了换行。
+    查证后不是——`read_file_content` 用 ``data.decode("utf-8-sig")``（**不做换行翻译**），
+    `write_file_content` 用 ``content.encode("utf-8")``（**原样落盘**）；差异出在**模型复述时**把 ``\\r\\n``
+    写成了 ``\\n``，不是产品行为。这条把产品这一半钉住，免得日后有人"顺手"加一层换行归一化。
+    """
+    source = tmp_path / "crlf.txt"
+    source.write_bytes("第一行\r\n第二行\r\n".encode())
+
+    read = read_file_content("crlf.txt", policy=policy)
+    assert "\r\n" in read.content  # 读进来时换行没有被翻译掉
+
+    write_file_content("copy.txt", policy=policy, content=read.content, reason="往返保字节")
+
+    assert (tmp_path / "copy.txt").read_bytes() == source.read_bytes()
+
+
 def test_write_file_refuses_existing_file(tmp_path: Path, policy: SecurityPolicy) -> None:
     (tmp_path / "exists.txt").write_text("old", encoding="utf-8", newline="")
 
