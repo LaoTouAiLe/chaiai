@@ -245,6 +245,10 @@ fixture 与视图模型在 `src/fixtures/`。它们是**展示用视图模型**�
   基线也一并重写（默认的 `--update-snapshots` 只在差异超出容差时才写），因此要用 `-g` / `--project` 限定到确实改过的
   那几条测试，不要整目录刷。重采后**必须人工看新图**，不允许用批量更新掩盖回归（`V0_4_DEVELOPMENT_PLAN.md` §4.2）。
 - 截图依赖本机字体（`Microsoft YaHei` 等），因此基线是**本机环境产物**；换机器需要重新确认。
+- 跑 e2e 时控制台会出现 `vite http proxy error: /api/preferences`（`ECONNREFUSED`）：这是**测试环境**的现象——
+  `vite preview` 是静态服务、没有后端，而页面最外层的 `PreferencesProvider` 会读一次偏好来设置
+  `data-theme` / `data-font-size` / `data-motion`。真实产品由 Python 后端提供该端点；Playwright 又已用
+  `colorScheme: 'light'` + `reducedMotion: 'reduce'` 固定了这些取值，因此**不影响像素与判定**，不需要为它改生产代码。
 - 参考资产的对照方法见 [docs/ui-reference/README.md](docs/ui-reference/README.md) 与
   [state-matrix.md](docs/ui-reference/state-matrix.md)。
 
