@@ -339,7 +339,9 @@ def build_runtime_context(
     policy = security_policy or SecurityPolicy.from_config(
         app_config, workspace_root=workspace_root, external_policy=external_policy
     )
-    registry = tool_registry or ToolRegistry.build(policy, web_access=app_config.web_access)
+    registry = tool_registry or ToolRegistry.build(
+        policy, web_access=app_config.web_access, git=app_config.git
+    )
     capabilities = model_capabilities or probe_capabilities(
         model_adapter, provider_name=provider_name or app_config.llm.model
     )
@@ -351,10 +353,12 @@ def build_runtime_context(
         user_id=user_id,
         config_profile=config_profile,
         agent_profile=app_config.profiles.active,
-        # 有效能力 = Profile 声明 ∩ 配置开关：关掉的开关对应的能力对模型完全不可见（架构 §16.3）。
+        # 有效能力 = Profile 声明 ∩ 配置开关（∩ Git 的**环境**条件）：关掉的能力对模型完全不可见（§16.3、§16.4）。
         agent_capabilities=effective_capabilities(
             app_config.profiles.capabilities(),
             web_access_enabled=app_config.web_access.enabled,
+            # 本机找不到 git 可执行文件时能力同样不进有效集合：工具存在，但不会绑给模型。
+            git_enabled=app_config.git.enabled and registry.git_available,
         ),
         security_policy=policy,
         tool_registry=registry,

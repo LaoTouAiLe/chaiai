@@ -55,6 +55,11 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
     "glob",
     "web_search",
     "web_fetch",
+    # v0.5 T54：Git 只读三件套——只报告状态与差异，不写盘、不改索引，不需要人工审批。
+    # 能改仓库的是 ``git_commit``，它在下面单独按"始终需要审批"处理（§16.4）。
+    "git_status",
+    "git_diff",
+    "git_log",
 )
 CONTROL_TOOLS: tuple[str, ...] = ("update_plan",)
 
@@ -67,9 +72,18 @@ SHELL_TOOLS: tuple[str, ...] = ("run_shell",)
 #: 始终需要人工审批的工具。
 ALWAYS_APPROVAL_TOOLS: tuple[str, ...] = ("delete_file",)
 
+#: Git 写类工具（v0.5 T54）：它改的是**仓库历史**，不是工作区某个文件，因此不套用写文件的
+#: 大小/覆盖判定，而是**始终需要人工审批**（§16.4）。
+GIT_WRITE_TOOLS: tuple[str, ...] = ("git_commit",)
+
 #: 本版本已实现、可绑定给模型的全部工具。
 KNOWN_TOOLS: tuple[str, ...] = (
-    READ_ONLY_TOOLS + CONTROL_TOOLS + WRITE_TOOLS + SHELL_TOOLS + ALWAYS_APPROVAL_TOOLS
+    READ_ONLY_TOOLS
+    + CONTROL_TOOLS
+    + WRITE_TOOLS
+    + SHELL_TOOLS
+    + ALWAYS_APPROVAL_TOOLS
+    + GIT_WRITE_TOOLS
 )
 
 
@@ -243,6 +257,8 @@ class SecurityPolicy:
             return self._classify_write(args)
         if tool_name in SHELL_TOOLS:
             return self._classify_shell(args)
+        if tool_name in GIT_WRITE_TOOLS:
+            return self._classify_git_commit(args)
         if tool_name in ALWAYS_APPROVAL_TOOLS:
             concern = self._external_side_effect_decision(
                 str(args.get("path", "")), verb="删除"
@@ -297,6 +313,26 @@ class SecurityPolicy:
                 ),
             )
         return None
+
+    def _classify_git_commit(self, args: Mapping[str, Any]) -> SafetyDecision:
+        """提交到 Git 仓库：**始终需要人工审批**（架构 §16.4）。
+
+        它改的是**仓库历史**而不是工作区某个文件，所以不走写文件那套"大小/覆盖"判定。理由里必须带出
+        "哪些路径、什么信息"——审批卡片据此展示（投影层会把参数展平给用户看）；分支由 `git_status`
+        给出，且默认分支上 `git_commit` 会先返回"需要额外确认"（见 `tools.git_tools`）。
+        """
+        raw_paths = args.get("paths")
+        paths = [str(item) for item in raw_paths] if isinstance(raw_paths, (list, tuple)) else []
+        listed = "、".join(paths) if paths else "未列出（必须显式给出）"
+        message = str(args.get("message") or "").strip()
+        return SafetyDecision(
+            allowed=False,
+            requires_approval=True,
+            reason=(
+                f"提交到当前 Git 分支：路径 {listed}；提交信息「{message[:80]}」。"
+                "这改动仓库历史而不是单个文件，必须人工批准后才执行"
+            ),
+        )
 
     def _classify_edit(self, args: Mapping[str, Any]) -> SafetyDecision:
         # 输入模式：精确串替换（默认）或 unified diff（T22）。安全判定与工具执行**共用**

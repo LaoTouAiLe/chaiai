@@ -572,6 +572,23 @@ class WebAccessConfig(_StrictModel):
     user_agent: str = "chaiai/0.5 (local agent)"
 
 
+class GitConfig(_StrictModel):
+    """Git 能力（v0.5 T54；契约 §16.4、工具定义 §6.11）。
+
+    **默认关闭**：打开它等于让 Agent 能读仓库历史（以及经审批后提交），应当是用户的显式决定。
+    关闭时 `git_read` / `git_write` **完全不可见**（工具不绑定、提示也不提），行为与 v0.4 一致。
+
+    这里**只有开关与上限**，没有"允许提交哪些分支"之类的策略键：分支保护是 §16.4 的固定规则
+    （默认分支上额外确认、永不推送），不引入第二套能被配置放宽的门。
+    """
+
+    enabled: bool = False
+    #: 单次 git 调用的超时（秒）。超时按失败如实报告，不重试。
+    timeout_seconds: float = Field(default=20.0, gt=0, le=300)
+    #: 单次输出上限（字符）：超过即截断，并在结果 ``note`` 里写明"结果不完整"。
+    max_output_chars: int = Field(default=20_000, ge=500, le=500_000)
+
+
 class ProfilesConfig(_StrictModel):
     """Agent Profile（v0.5 T50；契约 §16.1）。
 
@@ -644,6 +661,7 @@ class AppConfig(_StrictModel):
     model_settings: ModelSettingsConfig = Field(default_factory=ModelSettingsConfig)
     profiles: ProfilesConfig = Field(default_factory=ProfilesConfig)
     web_access: WebAccessConfig = Field(default_factory=WebAccessConfig)
+    git: GitConfig = Field(default_factory=GitConfig)
 
     def as_run_config(self) -> RunConfig:
         """收窄成运行期配置；``llm`` 缺省时抛可执行的 `ConfigError`。

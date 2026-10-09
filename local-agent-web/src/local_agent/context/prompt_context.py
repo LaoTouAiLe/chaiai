@@ -529,6 +529,26 @@ _WEB_TOOL_USE_RULES = (
     "并继续按原任务处理。\n"
 )
 
+#: Git 能力的工具规范（只在声明了 `git_read` / `git_write` 的档位出现；架构 §16.4）。
+#:
+#: 三条都是既有原则在 Git 上的投影：**提示不能承诺本档做不到的事**（只读档不该提议提交）、
+#: **审批是用户的控制权**（提交必须等批准，默认分支上还要额外确认）、**这里没有推送**。
+_GIT_TOOL_USE_RULES = (
+    "- 需要了解仓库现状时用 git_status / git_diff / git_log：它们**只覆盖当前工作区**"
+    "（工作区是仓库的子目录时结果里会写明），不要把它当成仓库的全部改动。\n"
+    "- 提交**必须先取得用户同意**：说清要提交到哪个分支、包含哪些文件、提交信息是什么。"
+    "在 main / master 上先返回「需要额外确认」是设计如此，得到同意后再以 "
+    "confirm_on_default_branch=true 重试；提交是否执行由人工审批决定，未获批准时不要反复重发。\n"
+    "- 只提交你**显式列出**的路径（不支持 git add -A）；不要 amend、force、rebase 或切换分支，"
+    "也不要建议或执行任何形式的推送——这个能力里没有推送。\n"
+)
+
+#: "全能力档"的判定基准 = **T53 之前的那套能力**（web / git 都按追加段落处理）。
+#:
+#: 为什么不是 ``set(CAPABILITY_TOOLS)``：每加一个新能力，`coder` 就会从"能力齐备"掉进"有缺口"，
+#: 于是拿到一份短版工具规范——那是**无声的降级**（措辞变了、前缀也变了），而不是"新能力带来的新路径"。
+_BASELINE_CAPABILITIES = frozenset(CAPABILITY_TOOLS) - {"web", "git_read", "git_write"}
+
 
 def render_tool_usage_rules(capabilities: Sequence[str]) -> str:
     """按能力集合渲染「工具使用规范」段落（chat 模式不拼这一段）。
@@ -539,12 +559,15 @@ def render_tool_usage_rules(capabilities: Sequence[str]) -> str:
     （架构 §6.9、§16.1）。
     """
     present = set(capabilities)
-    # "全能力"以 **T53 之前的那套能力**为准：这样 coder 档的渲染结果永远逐字不变（指纹由用例固定），
-    # 有 web 的档位则在这份原文后面追加 Web 规范。将来的新能力（git/skill）照这个模式追加。
-    if present.issuperset(set(CAPABILITY_TOOLS) - {"web"}):
-        if "web" not in present:
-            return _TOOL_USAGE_RULES
-        return _TOOL_USAGE_RULES.rstrip("\n") + "\n" + _WEB_TOOL_USE_RULES + "\n"
+    # "全能力"以 **T53 之前的那套能力**为准：这样"工具规范原文"这段始终逐字不变（指纹由用例固定），
+    # 之后新增的能力（web、git、skill…）都按**追加段落**处理，而不是把原文改写成短版。
+    if present.issuperset(_BASELINE_CAPABILITIES):
+        text = _TOOL_USAGE_RULES.rstrip("\n") + "\n"
+        if "web" in present:
+            text += _WEB_TOOL_USE_RULES
+        if {"git_read", "git_write"} & present:
+            text += _GIT_TOOL_USE_RULES
+        return text if ({"web", "git_read", "git_write"} & present) else _TOOL_USAGE_RULES
     tools = tool_names_for("tool", tuple(capabilities))
     bullets: list[str] = []
     if "update_plan" in tools:
@@ -564,6 +587,8 @@ def render_tool_usage_rules(capabilities: Sequence[str]) -> str:
         bullets.append(f"- 先取证据再下结论：用 {reading} 核实上下文，不要凭猜测回答。\n")
     if "web_search" in tools:
         bullets.append(_WEB_TOOL_USE_RULES)
+    if "git_status" in tools:
+        bullets.append(_GIT_TOOL_USE_RULES)
     bullets.append(
         "- 工具执行结果会返回给你：依据结果决定继续、换方法或追问；完成后直接给最终回答，"
         "不要仅说“我接下来会做”就结束。\n"

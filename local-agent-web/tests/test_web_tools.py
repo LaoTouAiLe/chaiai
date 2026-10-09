@@ -281,8 +281,11 @@ def test_web_capability_is_gated_by_config(app_config: AppConfig) -> None:
     """默认关闭：`web` 不进有效能力集（工具因此对模型完全不可见）。"""
     declared = PROFILES["researcher"]
     assert "web" in declared
-    assert "web" not in effective_capabilities(declared, web_access_enabled=False)
-    assert "web" in effective_capabilities(declared, web_access_enabled=True)
+    # Git 那条支路在这一组里固定为开启，只考察 web 自己的开关（T54 起 effective_capabilities 还管 git）。
+    assert "web" not in effective_capabilities(
+        declared, web_access_enabled=False, git_enabled=True
+    )
+    assert "web" in effective_capabilities(declared, web_access_enabled=True, git_enabled=True)
 
     closed = AppConfig()
     assert closed.web_access.enabled is False, "联网必须是显式 opt-in"
@@ -311,10 +314,8 @@ def test_web_tools_are_only_visible_to_the_researcher_profile(
 
 def test_web_tools_are_declared_as_untrusted_sources() -> None:
     assert set(untrusted_tool_names()) == {"web_search", "web_fetch"}
-    assert tool_names_for("tool", PROFILES["researcher"])[-2:] == (
-        "web_search",
-        "web_fetch",
-    )
+    # 不写 `[-2:]`：新增能力一律**追加在末尾**（T54 追加了 Git），位置断言会随每次新增而失效。
+    assert {"web_search", "web_fetch"} <= set(tool_names_for("tool", PROFILES["researcher"]))
 
 
 def test_turn_with_a_successful_web_result_marks_candidates_untrusted() -> None:

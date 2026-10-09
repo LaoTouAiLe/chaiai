@@ -23,6 +23,7 @@ from local_agent.capabilities import (
     MODE_CAPABILITIES,
     PROFILES,
     capability_names,
+    effective_capabilities,
     profile_names,
     tool_names_for,
 )
@@ -50,35 +51,55 @@ V04_TOOL_ORDER = (
 #: v0.4 ``chat`` 模式：闲聊也能列目录与读文件，是既有行为，v0.5 不改。
 V04_CHAT_ORDER = ("list_dir", "read_file")
 
+#: v0.5 T54 给默认档追加的 Git 工具（**追加在末尾**：前面的字节不变，前缀缓存前半段仍可复用）。
+GIT_TOOL_ORDER = ("git_status", "git_diff", "git_log", "git_commit")
+
 
 def _registry(app_config: AppConfig, workspace: Path) -> ToolRegistry:
     policy = SecurityPolicy.from_config(app_config, workspace_root=workspace, environ={})
-    return ToolRegistry.build(policy)
+    # 注入确定的 git 可用性：用例不该因为"跑测试的机器上装没装 git"而结果不同。
+    return ToolRegistry.build(policy, git_available=True)
 
 
 def _names(tools: Sequence[BaseTool]) -> list[str]:
     return [tool.name for tool in tools]
 
 
-def test_default_profile_reproduces_v04_tool_order(app_config: AppConfig, tmp_path: Path) -> None:
-    """默认 Profile 与 chat 模式的绑定结果必须与 v0.4 逐项一致（含顺序）。"""
+def test_default_profile_keeps_the_v04_prefix_and_appends_git(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    """默认 Profile：v0.4 的九个工具**顺序与位置都不变**，新能力追加在末尾。"""
     registry = _registry(app_config, tmp_path)
 
     assert _names(registry.tools_for("chat")) == list(V04_CHAT_ORDER)
-    assert _names(registry.tools_for("tool")) == list(V04_TOOL_ORDER)
-    assert _names(registry.tools_for("tool", PROFILES[DEFAULT_PROFILE])) == list(V04_TOOL_ORDER)
+    tool_mode = _names(registry.tools_for("tool"))
+    # 前缀逐项相等是**成本约束**：前面的字节不变，供应商前缀缓存的前半段仍可复用（架构 §6.9）。
+    assert tool_mode[: len(V04_TOOL_ORDER)] == list(V04_TOOL_ORDER)
+    assert tool_mode == [*V04_TOOL_ORDER, *GIT_TOOL_ORDER]
+    assert _names(registry.tools_for("tool", PROFILES[DEFAULT_PROFILE])) == tool_mode
 
 
 def test_builtin_profiles_are_declared_read_only_subsets(tmp_path: Path) -> None:
     """三档内置 Profile 的能力集合（名字固定，配置与验收都用它们）。"""
-    assert PROFILES["coder"] == ("plan", "files_read", "code_search", "files_write", "shell")
-    assert PROFILES["researcher"] == ("plan", "files_read", "code_search", "web")
+    assert PROFILES["coder"] == (
+        "plan",
+        "files_read",
+        "code_search",
+        "files_write",
+        "shell",
+        # T54：Git 读写都进默认档（写的那一半仍要过人工审批，见 §16.4）。
+        "git_read",
+        "git_write",
+    )
+    assert PROFILES["researcher"] == ("plan", "files_read", "code_search", "web", "git_read")
     assert PROFILES["reviewer"] == ("files_read", "code_search")
     # 最小权限用**显式枚举**表达，不假设"researcher 一定是 coder 的子集"：T53 起 researcher 多了 `web`
-    # （coder 没有），两者是各取所需，而不是包含关系。
+    # （coder 没有），两者是各取所需，而不是包含关系；T54 又多了 Git 的**读**能力。
     assert set(PROFILES["reviewer"]) < set(PROFILES["researcher"])
     assert set(PROFILES["reviewer"]) < set(PROFILES["coder"])
     assert "web" in PROFILES["researcher"] and "web" not in PROFILES["coder"]
+    # 读 / 写分成两个能力就是为了能这样分别表态：研究档看得到差异，但**不能提交**。
+    assert "git_read" in PROFILES["researcher"] and "git_write" not in PROFILES["researcher"]
 
 
 def test_only_read_tools_are_visible_to_read_only_profiles(
@@ -99,9 +120,14 @@ def test_only_read_tools_are_visible_to_read_only_profiles(
         # T53：Web 能力只给 researcher（架构 §16.3）
         "web_search",
         "web_fetch",
+        # T54：Git 的**读**能力（`git_read`）也给它——看差异可以，提交不行（见下面的 forbidden）
+        "git_status",
+        "git_diff",
+        "git_log",
     ]
     assert reviewer == ["list_dir", "read_file", "grep", "glob"]
-    for forbidden in ("edit_file", "write_file", "delete_file", "run_shell"):
+    # `git_commit` 是写类：只读档里连"看得见"都不该有（§16.4）。
+    for forbidden in ("edit_file", "write_file", "delete_file", "run_shell", "git_commit"):
         assert forbidden not in researcher
         assert forbidden not in reviewer
 
@@ -114,7 +140,7 @@ def test_tool_order_is_stable_across_calls_and_profiles(
 
     first = _names(registry.tools_for("tool", PROFILES["coder"]))
     second = _names(registry.tools_for("tool", PROFILES["coder"]))
-    assert first == second == list(V04_TOOL_ORDER)
+    assert first == second == [*V04_TOOL_ORDER, *GIT_TOOL_ORDER]
 
     assert _names(registry.tools_for("tool", PROFILES["reviewer"])) == [
         "list_dir",
@@ -124,6 +150,39 @@ def test_tool_order_is_stable_across_calls_and_profiles(
     ]
     # 再切回来仍是原顺序：顺序由常量决定，不受访问顺序影响
     assert _names(registry.tools_for("tool", PROFILES["coder"])) == first
+
+
+def test_git_capability_is_gated_by_config_and_by_the_environment() -> None:
+    """Git 能力进不进有效集合，取决于**配置开关**与**本机有没有 git** 两件事（架构 §16.4）。"""
+    coder = PROFILES["coder"]
+
+    enabled = effective_capabilities(coder, web_access_enabled=False, git_enabled=True)
+    assert {"git_read", "git_write"} <= set(enabled)
+
+    disabled = effective_capabilities(coder, web_access_enabled=False, git_enabled=False)
+    assert not {"git_read", "git_write"} & set(disabled)
+    # 关掉 Git 之后剩下的正是 v0.4 那九个工具的能力映射——"关闭新增能力后基础行为不变"。
+    assert tool_names_for("tool", disabled) == V04_TOOL_ORDER
+
+    # 默认关闭：示例配置里的开关就是 false，因此默认档与 v0.4 的工具集一致（不含 Git）。
+    assert AppConfig().git.enabled is False
+
+
+def test_registry_keeps_git_tools_even_when_the_environment_lacks_git(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    """缺 git 时工具**仍然构造**（能力覆盖校验要求），只是能力不进有效集合、不会绑给模型。"""
+    policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+
+    registry = ToolRegistry.build(policy, git_available=False)
+
+    assert "git_status" in registry.names() and "git_commit" in registry.names()
+    assert registry.git_available is False
+    assert not {"git_read", "git_write"} & set(
+        effective_capabilities(
+            PROFILES["coder"], web_access_enabled=False, git_enabled=registry.git_available
+        )
+    )
 
 
 def test_capability_table_covers_registered_tools_exactly(

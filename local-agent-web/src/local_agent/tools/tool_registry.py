@@ -13,10 +13,11 @@ from collections.abc import Sequence
 from langchain_core.tools import BaseTool
 
 from local_agent.capabilities import CAPABILITY_TOOLS, tool_names_for
-from local_agent.config import WebAccessConfig
+from local_agent.config import GitConfig, WebAccessConfig
 from local_agent.exceptions import LocalAgentError
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.file_tools import build_file_tools
+from local_agent.tools.git_tools import build_git_tools, git_availability
 from local_agent.tools.plan_tools import build_plan_tools
 from local_agent.tools.search_tools import build_search_tools
 from local_agent.tools.shell_tools import build_shell_tools
@@ -28,10 +29,20 @@ class ToolRegistry:
 
     def __init__(self, tools: Sequence[BaseTool]) -> None:
         self._tools: dict[str, BaseTool] = {tool.name: tool for tool in tools}
+        #: 本机是否找得到 ``git`` 可执行文件（§16.4）。由 :meth:`build` 探测后覆盖；直接构造
+        #: 注册表的测试与调用点保持"假定可用"——缺失是环境事实，不该由"没人告诉我"推导出来。
+        self.git_available: bool = True
+        #: 环境不可用时给用户看的可照做提示（缺失 git 时的安装说明）；能力状态页用它。
+        self.git_unavailable_hint: str | None = None
 
     @classmethod
     def build(
-        cls, policy: SecurityPolicy, *, web_access: WebAccessConfig | None = None
+        cls,
+        policy: SecurityPolicy,
+        *,
+        web_access: WebAccessConfig | None = None,
+        git: GitConfig | None = None,
+        git_available: bool | None = None,
     ) -> ToolRegistry:
         """构造注册表（文件工具 + 计划工具 + 检索工具 + 安全 Shell + Web 工具）。
 
@@ -39,17 +50,27 @@ class ToolRegistry:
         名字也必须都已实现。漏登记的后果是"注册了但永远不给模型"，或"配了但没有实现"——两者都要等到
         很久以后才以"模型怎么不调用它"的形式暴露，所以在构造时失败闭合。
 
-        `web` 的工具**总是被构造**（否则覆盖校验会失败），但"对模型可见"由两处决定：
-        `web_access.enabled`（关掉时能力不进有效集合，见 `capabilities.effective_capabilities`）与
-        Profile 是否声明 `web`。
+        `web` 与 `git` 的工具**总是被构造**（否则覆盖校验会失败），但"对模型可见"由两处决定：
+        配置开关（关掉时能力不进有效集合，见 `capabilities.effective_capabilities`）与 Profile 是否
+        声明该能力。`git` 还多一层**环境**条件：本机没有 `git` 可执行文件时同样不进有效集合（§16.4），
+        这时工具仍然存在——调用它会得到"缺什么、怎么装"的明确失败，而不是静默空结果。
 
         Args:
             policy: 安全策略。
             web_access: 外部访问配置；省略时按默认（关闭）构造，工具存在但不会可见。
+            git: Git 配置；省略时按默认（关闭 + 默认超时/上限）构造。
+            git_available: 本机是否存在 ``git``；省略时用 :func:`~local_agent.tools.git_tools.git_availability`
+                探测一次（测试与脚本可以注入确定的结果）。
 
         Raises:
             LocalAgentError: 能力归属不完整（重复归属、登记未实现、实现未登记）。
         """
+        git_config = git or GitConfig()
+        if git_available is None:
+            probe = git_availability()
+            available, hint = probe.available, probe.hint
+        else:
+            available, hint = git_available, None
         registry = cls(
             [
                 *build_file_tools(policy),
@@ -57,8 +78,15 @@ class ToolRegistry:
                 *build_search_tools(policy),
                 *build_shell_tools(policy),
                 *build_web_tools(web_access or WebAccessConfig()),
+                *build_git_tools(
+                    policy,
+                    timeout_seconds=git_config.timeout_seconds,
+                    max_output_chars=git_config.max_output_chars,
+                ),
             ]
         )
+        registry.git_available = available
+        registry.git_unavailable_hint = hint
         registry.assert_capability_coverage()
         return registry
 

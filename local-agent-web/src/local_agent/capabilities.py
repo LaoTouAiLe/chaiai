@@ -30,6 +30,10 @@ CAPABILITY_TOOLS: Mapping[str, tuple[str, ...]] = {
     "files_write": ("edit_file", "write_file", "delete_file"),
     "shell": ("run_shell",),
     "web": ("web_search", "web_fetch"),
+    # Git 的读与写分成两个能力（§6.9）：安全门仍逐个工具判定，但档位成员资格要能分别表态——
+    # researcher 只该"看得见工作区的差异"，不该"能提交"（§16.4）。
+    "git_read": ("git_status", "git_diff", "git_log"),
+    "git_write": ("git_commit",),
 }
 
 #: **会带进外部内容**的能力（架构 §6.10、§16.2、§16.3）。
@@ -43,8 +47,8 @@ UNTRUSTED_CAPABILITIES: tuple[str, ...] = ("web",)
 #: ``coder`` 与 v0.4 ``tool`` 模式的工具集**逐项等价**（含顺序），因此它是默认 Profile，既有行为不变；
 #: ``researcher`` / ``reviewer`` 是只读子集，后续任务（Web、Git）再往它们身上加能力。
 PROFILES: Mapping[str, tuple[str, ...]] = {
-    "coder": ("plan", "files_read", "code_search", "files_write", "shell"),
-    "researcher": ("plan", "files_read", "code_search", "web"),
+    "coder": ("plan", "files_read", "code_search", "files_write", "shell", "git_read", "git_write"),
+    "researcher": ("plan", "files_read", "code_search", "web", "git_read"),
     "reviewer": ("files_read", "code_search"),
 }
 
@@ -119,16 +123,19 @@ def resolve_capabilities(
 
 
 def effective_capabilities(
-    capabilities: Sequence[str], *, web_access_enabled: bool
+    capabilities: Sequence[str], *, web_access_enabled: bool, git_enabled: bool
 ) -> tuple[str, ...]:
-    """按配置开关收窄能力集合（架构 §16.3）。
+    """按配置开关与运行环境收窄能力集合（架构 §16.3、§16.4）。
 
-    关掉的开关对应的能力对模型**完全不可见**：`web_access.enabled=false` 时 `web` 被移除，于是提示词
-    不会提到它、工具也不会绑给模型——"关闭新增能力后基础行为不变"就是靠这一条成立的。
+    关掉的开关对应的能力对模型**完全不可见**：`web_access.enabled=false` 时 `web` 被移除；
+    `git.enabled=false`（或本机**没有 git 可执行文件**）时 `git_read` / `git_write` 被移除——
+    于是提示词不会提到它们、工具也不会绑给模型。"关闭新增能力后基础行为不变"靠的就是这一条。
+
+    `git_enabled` 由调用方把两件事合起来：配置开关 **且** `git` 可用（见 `tools.git_tools.git_availability`）。
+    两台机器上"看起来配置一样却行为不同"的根因就藏在这里，所以这个参数没有默认值。
     """
-    return tuple(
-        capability for capability in capabilities if capability != "web" or web_access_enabled
-    )
+    switch = {"web": web_access_enabled, "git_read": git_enabled, "git_write": git_enabled}
+    return tuple(capability for capability in capabilities if switch.get(capability, True))
 
 
 def untrusted_tool_names() -> tuple[str, ...]:

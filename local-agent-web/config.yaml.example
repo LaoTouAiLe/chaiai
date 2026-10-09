@@ -197,7 +197,8 @@ agent:
 
 # Agent Profile（v0.5 T50，契约 §16.1）：决定**模型能看见哪些工具**。
 # 可见性不是授权——写类工具与 Shell 照旧要过安全门与人工审批（架构 §6.9）。
-# 内置三档（名字固定）：coder（= v0.4 的工具集，默认）| researcher（只读 + 计划）| reviewer（只读）。
+# 内置三档（名字固定）：coder（v0.4 工具集 + Git 读写，默认）| researcher（只读 + 计划 + Web + Git 只读）|
+# reviewer（只读）。新增能力一律**追加在末尾**：前面的字节不变，前缀缓存的前半段仍可复用。
 # custom 用于不改代码地定义自己的组合；不能覆盖内置名，能力名必须是架构 §6.9 闭集里的，
 # 写错会在启动时失败并列出可选项（不静默退回默认档）。
 profiles:
@@ -220,6 +221,16 @@ web_access:
   max_results: 5
   max_chars: 8000
   user_agent: "chaiai/0.5 (local agent)"
+
+# Git 能力（v0.5 T54，契约 §16.4、工具定义 §6.11）。**默认关闭**：打开它等于让 Agent 能读仓库历史
+# （以及经审批后提交），应当是显式决定；关闭时 git_read / git_write 完全不可见（工具不绑定、提示也不提）。
+# 本机找不到 git 可执行文件时同样不可见（能力不进有效集合），此时工具会如实说明"缺什么、怎么装"。
+# 边界：作用域是**工作区**（仓库在上一层时结果只覆盖工作区）；参数是闭集，任何路径都不出现 push；
+# 提交必须人工审批，main/master 上还要额外确认；只 add 显式列出的路径（不支持 git add -A）。
+git:
+  enabled: false
+  timeout_seconds: 20
+  max_output_chars: 20000
 
 # v0.4 独立 Web 前端与 HTTP API（T29，契约 §15.3）。
 # 默认只绑定回环地址：v0.4 没有鉴权，改 host 必须同时打开 allow_non_loopback，

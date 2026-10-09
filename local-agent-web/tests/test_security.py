@@ -833,8 +833,37 @@ def test_registry_exposes_only_read_tools_in_chat_mode(app_config: AppConfig, tm
         "write_file",
         "delete_file",
         "run_shell",
+        # v0.5 T54：新增能力一律**追加在末尾**（前面的字节不变，前缀缓存的前半段仍可复用）。
+        # 注意这里问的是**注册表**（不看配置开关），所以 git 工具会出现；真正绑定给模型时还要过
+        # `capabilities.effective_capabilities`——默认 `git.enabled=false`，于是"默认档与 v0.4 一致"。
+        "git_status",
+        "git_diff",
+        "git_log",
+        "git_commit",
     ]
     assert registry.get("nope") is None
+
+
+def test_git_commit_always_needs_approval_and_says_what_gets_committed(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    """提交改的是**仓库历史**：始终需要人工审批，且理由里带出路径与提交信息（架构 §16.4）。
+
+    审批卡片靠 ``redacted_arguments`` 展示参数，而"要不要审批"由安全门判定；这里钉住后者，
+    顺便证明只读三件套**不**需要审批（它们不写盘、不改索引）。
+    """
+    policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+
+    decision = policy.classify_tool(
+        "git_commit", {"paths": ["notes.md", "docs/a.md"], "message": "补一段说明"}
+    )
+    assert decision.requires_approval is True
+    assert decision.allowed is False  # "不自动放行"，与 delete_file 同一口径
+    assert "notes.md" in decision.reason and "补一段说明" in decision.reason
+
+    for name in ("git_status", "git_diff", "git_log"):
+        read = policy.classify_tool(name, {})
+        assert read.allowed is True and read.requires_approval is False
 
 
 # --------------------------------------------------------------------------- 工具分支
