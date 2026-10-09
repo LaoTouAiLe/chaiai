@@ -1,0 +1,474 @@
+{
+  "model": "deepseek-flash",
+  "base_url": "https://api.deepseek.com",
+  "streaming": true,
+  "workspace": "E:\\tmp\\t56-researcher",
+  "profile": "researcher",
+  "profile_tool_names": [
+    "update_plan",
+    "list_dir",
+    "read_file",
+    "grep",
+    "glob",
+    "web_search",
+    "web_fetch",
+    "git_status",
+    "git_diff",
+    "git_log"
+  ],
+  "capability": {
+    "connection_id": "mc-ccf65db01d76",
+    "capabilities": [
+      {
+        "capability": "chat",
+        "result": "passed"
+      },
+      {
+        "capability": "tool_calling",
+        "result": "passed"
+      },
+      {
+        "capability": "streaming",
+        "result": "passed"
+      }
+    ]
+  },
+  "turns": [
+    {
+      "turn": 1,
+      "input": "读取 notes.md，列出它的前两条内容。",
+      "skipped": false,
+      "task_note": "基本读取。",
+      "transcript": [
+        {
+          "kind": "user",
+          "message_id": "a15fc94c150849cd93bb3968b82cf066:user",
+          "text": "读取 notes.md，列出它的前两条内容。"
+        },
+        {
+          "kind": "memory",
+          "message_id": "memory:a15fc94c150849cd93bb3968b82cf066",
+          "detail": "{\"kind\": \"memory\", \"message_id\": \"memory:a15fc94c150849cd93bb3968b82cf066\", \"memory\": {\"retrieval_outcome\": \"hit\", \"sources\": [{\"kind\": \"workspace_file\", \"reference\": \"notes.md:1-6\", \"usage\": \"代码片段已注入本轮上下文\"}], \"retrieval_note\": \"只显示来源定位与用途：不展示正文、向量或内部评分。\", \"write_outcome\": \"written\", \"write_detail\":…（已截断，原长 318）"
+        },
+        {
+          "kind": "assistant",
+          "message_id": "a15fc94c150849cd93bb3968b82cf066:final-message:1",
+          "text": ""
+        },
+        {
+          "kind": "tool",
+          "message_id": "tool:a15fc94c150849cd93bb3968b82cf066:call_00_foKAY1ia1bKS5Nxkm0cv5768",
+          "tool": {
+            "tool_name": "read_file",
+            "status": "ok",
+            "output_preview": "6 行"
+          }
+        },
+        {
+          "kind": "assistant",
+          "message_id": "a15fc94c150849cd93bb3968b82cf066:final-message:2",
+          "text": "notes.md 已读取（共 6 行，未截断），前两条内容为：\n\n1. 这份笔记用于 T34 的真实用量基线。（notes.md:3）\n2. 模型、端点、工作区与工具集在四轮之间保持不变。（notes.md:4）\n\n文件标题是「T34 基线笔记」（notes.md:1），后面还有第 3、4 条：观测点是供应商在 usage 里上报的实际 token 与缓存命中（notes.md:5）、没有命中也要如实记录，不省略、不改写（notes.md:6）。"
+        }
+      ],
+      "result": {
+        "status": "completed",
+        "run_id": "a15fc94c150849cd93bb3968b82cf066",
+        "snapshot_id": "1f1c392b-4d66-6268-8014-e0781ec7ee40",
+        "replayed": false,
+        "error": null
+      },
+      "approvals": 0,
+      "workspace_changed": false,
+      "write_expectation_met": true,
+      "session_state": "completed",
+      "approval": null,
+      "context": {
+        "used_tokens": 7500,
+        "window_tokens": 1048576,
+        "scope": "previous",
+        "completion_reserve_tokens": 4096
+      },
+      "usage": {
+        "run_id": "a15fc94c150849cd93bb3968b82cf066",
+        "submitted_at": "2026-10-09T03:37:05.023910Z",
+        "final_at": "2026-10-09T03:37:07.259613Z",
+        "final_state": "completed",
+        "model_call_ids": [
+          "a15fc94c150849cd93bb3968b82cf066:model:1",
+          "a15fc94c150849cd93bb3968b82cf066:model:2",
+          "a15fc94c150849cd93bb3968b82cf066:model:3"
+        ],
+        "tool_event_ids": [
+          "a15fc94c150849cd93bb3968b82cf066:call_00_foKAY1ia1bKS5Nxkm0cv5768"
+        ],
+        "approval_wait_ms": null,
+        "turn_elapsed_ms": 2235,
+        "model_elapsed_ms": 3679,
+        "tool_elapsed_ms": 3,
+        "time_to_first_token_ms": 500,
+        "estimated_prompt_tokens": 22757,
+        "actual_uncached_input_tokens": 4923,
+        "actual_cache_read_tokens": 10624,
+        "actual_cache_write_tokens": null,
+        "actual_output_tokens": 608,
+        "actual_reasoning_tokens": 227,
+        "cache_metrics_reported": true,
+        "cache_hit_ratio": 0.6833472695696919,
+        "context_used_tokens": 8029,
+        "context_window_tokens": 1048576,
+        "context_usage_ratio": 0.007657051086425781,
+        "usage_recorded": true
+      },
+      "model_calls": [
+        {
+          "model_call_id": "a15fc94c150849cd93bb3968b82cf066:model:1",
+          "run_id": "a15fc94c150849cd93bb3968b82cf066",
+          "purpose": "tool_decision",
+          "connection_id": "mc-ccf65db01d76",
+          "config_version": "1",
+          "provider": "openai_compatible",
+          "model_id": "deepseek-flash",
+          "retry_of": null,
+          "started_at": "2026-10-09T03:37:05.232158Z",
+          "first_token_at": "2026-10-09T03:37:05.732074Z",
+          "finished_at": "2026-10-09T03:37:06.173593Z",
+          "status": "ok",
+          "estimated_prompt_tokens": 7228,
+          "actual_uncached_input_tokens": 4264,
+          "actual_cache_read_tokens": 512,
+          "actual_cache_write_tokens": null,
+          "actual_output_tokens": 130,
+          "actual_reasoning_tokens": 91,
+          "cache_metrics_reported": true,
+          "model_elapsed_ms": 941,
+          "time_to_first_token_ms": 500,
+          "context_window_tokens": 1048576,
+          "context_used_tokens": 7228
+        },
+        {
+          "model_call_id": "a15fc94c150849cd93bb3968b82cf066:model:2",
+          "run_id": "a15fc94c150849cd93bb3968b82cf066",
+          "purpose": "tool_decision",
+          "connection_id": "mc-ccf65db01d76",
+          "config_version": "1",
+          "provider": "openai_compatible",
+          "model_id": "deepseek-flash",
+          "retry_of": null,
+          "started_at": "2026-10-09T03:37:06.280115Z",
+          "first_token_at": "2026-10-09T03:37:06.826472Z",
+          "finished_at": "2026-10-09T03:37:07.210311Z",
+          "status": "ok",
+          "estimated_prompt_tokens": 7500,
+          "actual_uncached_input_tokens": 322,
+          "actual_cache_read_tokens": 4864,
+          "actual_cache_write_tokens": null,
+          "actual_output_tokens": 125,
+          "actual_reasoning_tokens": 0,
+          "cache_metrics_reported": true,
+          "model_elapsed_ms": 930,
+          "time_to_first_token_ms": 546,
+          "context_window_tokens": 1048576,
+          "context_used_tokens": 7500
+        },
+        {
+          "model_call_id": "a15fc94c150849cd93bb3968b82cf066:model:3",
+          "run_id": "a15fc94c150849cd93bb3968b82cf066",
+          "purpose": "memory_extraction",
+          "connection_id": "mc-ccf65db01d76",
+          "config_version": "1",
+          "provider": "openai_compatible",
+          "model_id": "deepseek-flash",
+          "retry_of": null,
+          "started_at": "2026-10-09T03:37:07.303937Z",
+          "first_token_at": null,
+          "finished_at": "2026-10-09T03:37:09.111858Z",
+          "status": "ok",
+          "estimated_prompt_tokens": 8029,
+          "actual_uncached_input_tokens": 337,
+          "actual_cache_read_tokens": 5248,
+          "actual_cache_write_tokens": null,
+          "actual_output_tokens": 353,
+          "actual_reasoning_tokens": 136,
+          "cache_metrics_reported": true,
+          "model_elapsed_ms": 1808,
+          "time_to_first_token_ms": null,
+          "context_window_tokens": 1048576,
+          "context_used_tokens": 8029
+        }
+      ]
+    },
+    {
+      "turn": 2,
+      "input": "在 reference.md 里找出提到 Embedding 实现的那一行，给出文件名与行号。",
+      "skipped": false,
+      "task_note": "检索：需要跑器额外种下 reference.md。",
+      "transcript": [
+        {
+          "kind": "user",
+          "message_id": "73ad433731b749ed9cd207bee060661d:user",
+          "text": "在 reference.md 里找出提到 Embedding 实现的那一行，给出文件名与行号。"
+        },
+        {
+          "kind": "memory",
+          "message_id": "memory:73ad433731b749ed9cd207bee060661d",
+          "detail": "{\"kind\": \"memory\", \"message_id\": \"memory:73ad433731b749ed9cd207bee060661d\", \"memory\": {\"retrieval_outcome\": \"hit\", \"sources\": [{\"kind\": \"workspace_file\", \"reference\": \"reference.md:1-4\", \"usage\": \"代码片段已注入本轮上下文\"}, {\"kind\": \"long_term_memory\", \"reference\": \"记忆 conclusion-2efb44aa0151beac · 写入于 2026-10…（已截断，原长 437）"
+        },
+        {
+          "kind": "assistant",
+          "message_id": "73ad433731b749ed9cd207bee060661d:final-message:1",
+          "text": ""
+        },
+        {
+          "kind": "tool",
+          "message_id": "tool:73ad433731b749ed9cd207bee060661d:call_00_5X5cE5wXJ32nhUY8ne5i9683",
+          "tool": {
+            "tool_name": "read_file",
+            "status": "ok",
+            "output_preview": "4 行"
+          }
+        },
+        {
+          "kind": "assistant",
+          "message_id": "73ad433731b749ed9cd207bee060661d:final-message:2",
+          "text": "提到 Embedding 实现的是 **reference.md:3**：\n\n> - 本地 Embedding 走 fastembed，模型权重只落在 cache_dir。\n\n说明：reference.md 全文只有 4 行（未截断），其中只有第 3 行描述 Embedding 的实现方式（用 fastembed、权重只落在 cache_dir）；第 1 行是标题、第 4 行讲的是检索跳过目录清单，均未涉及 Embedding 实现。"
+        }
+      ],
+      "result": {
+        "status": "completed",
+        "run_id": "73ad433731b749ed9cd207bee060661d",
+        "snapshot_id": "1f1c392b-7b58-6e71-802a-3619ac0cf0ac",
+        "replayed": false,
+        "error": null
+      },
+      "approvals": 0,
+      "workspace_changed": false,
+      "write_expectation_met": true,
+      "session_state": "completed",
+      "approval": null,
+      "context": {
+        "used_tokens": 8609,
+        "window_tokens": 1048576,
+        "scope": "previous",
+        "completion_reserve_tokens": 4096
+      },
+      "usage": {
+        "run_id": "73ad433731b749ed9cd207bee060661d",
+        "submitted_at": "2026-10-09T03:37:09.238998Z",
+        "final_at": "2026-10-09T03:37:11.026943Z",
+        "final_state": "completed",
+        "model_call_ids": [
+          "73ad433731b749ed9cd207bee060661d:model:1",
+          "73ad433731b749ed9cd207bee060661d:model:2",
+          "73ad433731b749ed9cd207bee060661d:model:3"
+        ],
+        "tool_event_ids": [
+          "73ad433731b749ed9cd207bee060661d:call_00_5X5cE5wXJ32nhUY8ne5i9683"
+        ],
+        "approval_wait_ms": null,
+        "turn_elapsed_ms": 1787,
+        "model_elapsed_ms": 4293,
+        "tool_elapsed_ms": 3,
+        "time_to_first_token_ms": 313,
+        "estimated_prompt_tokens": 26092,
+        "actual_uncached_input_tokens": 1266,
+        "actual_cache_read_tokens": 17152,
+        "actual_cache_write_tokens": null,
+        "actual_output_tokens": 717,
+        "actual_reasoning_tokens": 311,
+        "cache_metrics_reported": true,
+        "cache_hit_ratio": 0.9312628949940276,
+        "context_used_tokens": 9105,
+        "context_window_tokens": 1048576,
+        "context_usage_ratio": 0.008683204650878906,
+        "usage_recorded": true
+      },
+      "model_calls": [
+        {
+          "model_call_id": "73ad433731b749ed9cd207bee060661d:model:1",
+          "run_id": "73ad433731b749ed9cd207bee060661d",
+          "purpose": "tool_decision",
+          "connection_id": "mc-ccf65db01d76",
+          "config_version": "1",
+          "provider": "openai_compatible",
+          "model_id": "deepseek-flash",
+          "retry_of": null,
+          "started_at": "2026-10-09T03:37:09.422030Z",
+          "first_token_at": "2026-10-09T03:37:09.735431Z",
+          "finished_at": "2026-10-09T03:37:09.888850Z",
+          "status": "ok",
+          "estimated_prompt_tokens": 8378,
+          "actual_uncached_input_tokens": 582,
+          "actual_cache_read_tokens": 5248,
+          "actual_cache_write_tokens": null,
+          "actual_output_tokens": 46,
+          "actual_reasoning_tokens": 7,
+          "cache_metrics_reported": true,
+          "model_elapsed_ms": 467,
+          "time_to_first_token_ms": 313,
+          "context_window_tokens": 1048576,
+          "context_used_tokens": 8378
+        },
+        {
+          "model_call_id": "73ad433731b749ed9cd207bee060661d:model:2",
+          "run_id": "73ad433731b749ed9cd207bee060661d",
+          "purpose": "tool_decision",
+          "connection_id": "mc-ccf65db01d76",
+          "config_version": "1",
+          "provider": "openai_compatible",
+          "model_id": "deepseek-flash",
+          "retry_of": null,
+          "started_at": "2026-10-09T03:37:10.046130Z",
+          "first_token_at": "2026-10-09T03:37:10.693971Z",
+          "finished_at": "2026-10-09T03:37:11.017471Z",
+          "status": "ok",
+          "estimated_prompt_tokens": 8609,
+          "actual_uncached_input_tokens": 347,
+          "actual_cache_read_tokens": 5760,
+          "actual_cache_write_tokens": null,
+          "actual_output_tokens": 100,
+          "actual_reasoning_tokens": 0,
+          "cache_metrics_reported": true,
+          "model_elapsed_ms": 971,
+          "time_to_first_token_ms": 648,
+          "context_window_tokens": 1048576,
+          "context_used_tokens": 8609
+        },
+        {
+          "model_call_id": "73ad433731b749ed9cd207bee060661d:model:3",
+          "run_id": "73ad433731b749ed9cd207bee060661d",
+          "purpose": "memory_extraction",
+          "connection_id": "mc-ccf65db01d76",
+          "config_version": "1",
+          "provider": "openai_compatible",
+          "model_id": "deepseek-flash",
+          "retry_of": null,
+          "started_at": "2026-10-09T03:37:11.071157Z",
+          "first_token_at": null,
+          "finished_at": "2026-10-09T03:37:13.925689Z",
+          "status": "ok",
+          "estimated_prompt_tokens": 9105,
+          "actual_uncached_input_tokens": 337,
+          "actual_cache_read_tokens": 6144,
+          "actual_cache_write_tokens": null,
+          "actual_output_tokens": 571,
+          "actual_reasoning_tokens": 304,
+          "cache_metrics_reported": true,
+          "model_elapsed_ms": 2855,
+          "time_to_first_token_ms": null,
+          "context_window_tokens": 1048576,
+          "context_used_tokens": 9105
+        }
+      ]
+    },
+    {
+      "turn": 3,
+      "input": "用 web_search 查一下 Python 3.14 是否已发布，给出一个可核对来源的 URL。",
+      "skipped": true,
+      "skip_reason": "当前有效能力集缺少 web：该轮在本次环境下无法成立，跳过（不是档位缺陷）",
+      "task_note": "联网：web_access.enabled=false 时会被跳过（跳过原因会写进结果）。"
+    },
+    {
+      "turn": 4,
+      "input": "用一句话说明你刚才做了哪两件事，并说明有没有联网。",
+      "skipped": false,
+      "task_note": "自述：不得虚构联网（没开就必须说没有）。",
+      "transcript": [
+        {
+          "kind": "user",
+          "message_id": "f20c8aff9a8e4b12be06388971b7d99e:user",
+          "text": "用一句话说明你刚才做了哪两件事，并说明有没有联网。"
+        },
+        {
+          "kind": "memory",
+          "message_id": "memory:f20c8aff9a8e4b12be06388971b7d99e",
+          "detail": "{\"kind\": \"memory\", \"message_id\": \"memory:f20c8aff9a8e4b12be06388971b7d99e\", \"memory\": {\"retrieval_outcome\": \"hit\", \"sources\": [{\"kind\": \"long_term_memory\", \"reference\": \"记忆 conclusion-2efb44aa0151beac · 写入于 2026-10-09\", \"usage\": \"已注入本轮上下文\"}], \"retrieval_note\": \"只显示来源定位与用途：不展示正文、向量或内部评分。\", \"write_out…（已截断，原长 335）"
+        },
+        {
+          "kind": "assistant",
+          "message_id": "f20c8aff9a8e4b12be06388971b7d99e:final-message:1",
+          "text": "我这轮只做了两件只读操作：读取 notes.md 并列出前两条（notes.md:3、notes.md:4），以及读取 reference.md 并定位到提到 Embedding 实现的那一行（reference.md:3）；全程没有联网——我没有网络类工具，也没有访问工作区之外的文件。"
+        }
+      ],
+      "result": {
+        "status": "completed",
+        "run_id": "f20c8aff9a8e4b12be06388971b7d99e",
+        "snapshot_id": "1f1c392b-878f-6701-8035-2e7dffdaac3c",
+        "replayed": false,
+        "error": null
+      },
+      "approvals": 0,
+      "workspace_changed": false,
+      "write_expectation_met": true,
+      "session_state": "completed",
+      "approval": null,
+      "context": {
+        "used_tokens": 9400,
+        "window_tokens": 1048576,
+        "scope": "previous",
+        "completion_reserve_tokens": 4096
+      },
+      "usage": {
+        "run_id": "f20c8aff9a8e4b12be06388971b7d99e",
+        "submitted_at": "2026-10-09T03:37:14.058970Z",
+        "final_at": "2026-10-09T03:37:15.277009Z",
+        "final_state": "completed",
+        "model_call_ids": [
+          "f20c8aff9a8e4b12be06388971b7d99e:model:1"
+        ],
+        "tool_event_ids": [],
+        "approval_wait_ms": null,
+        "turn_elapsed_ms": 1218,
+        "model_elapsed_ms": 1013,
+        "tool_elapsed_ms": null,
+        "time_to_first_token_ms": 427,
+        "estimated_prompt_tokens": 9400,
+        "actual_uncached_input_tokens": 518,
+        "actual_cache_read_tokens": 6144,
+        "actual_cache_write_tokens": null,
+        "actual_output_tokens": 120,
+        "actual_reasoning_tokens": 53,
+        "cache_metrics_reported": true,
+        "cache_hit_ratio": 0.9222455719003302,
+        "context_used_tokens": 9400,
+        "context_window_tokens": 1048576,
+        "context_usage_ratio": 0.00896453857421875,
+        "usage_recorded": true
+      },
+      "model_calls": [
+        {
+          "model_call_id": "f20c8aff9a8e4b12be06388971b7d99e:model:1",
+          "run_id": "f20c8aff9a8e4b12be06388971b7d99e",
+          "purpose": "tool_decision",
+          "connection_id": "mc-ccf65db01d76",
+          "config_version": "1",
+          "provider": "openai_compatible",
+          "model_id": "deepseek-flash",
+          "retry_of": null,
+          "started_at": "2026-10-09T03:37:14.254105Z",
+          "first_token_at": "2026-10-09T03:37:14.680847Z",
+          "finished_at": "2026-10-09T03:37:15.267419Z",
+          "status": "ok",
+          "estimated_prompt_tokens": 9400,
+          "actual_uncached_input_tokens": 518,
+          "actual_cache_read_tokens": 6144,
+          "actual_cache_write_tokens": null,
+          "actual_output_tokens": 120,
+          "actual_reasoning_tokens": 53,
+          "cache_metrics_reported": true,
+          "model_elapsed_ms": 1013,
+          "time_to_first_token_ms": 427,
+          "context_window_tokens": 1048576,
+          "context_used_tokens": 9400
+        }
+      ]
+    }
+  ],
+  "turns_count": 4,
+  "task_set": "profile",
+  "task_set_purpose": "研究档：读 + 检索 + 联网；联网开关关着时联网那条**跳过并说明原因**。",
+  "turns_skipped": [
+    3
+  ],
+  "lines": "notes.md / AGENTS.md",
+  "no_compaction_expected": true
+}

@@ -30,6 +30,9 @@ T56 多了 ``--task-set profile``：跑 `local_agent.profile_tasks` 里三档各
 
 ``--list`` 只打印选定任务集与逐轮判定，不联网、不调用模型（用来在跑真模型之前核对）。
 
+逐轮记进结果的是：状态与错误、审批次数、**本轮新增的截断轨迹**（模型说了什么——只读档"如实说
+做不到"这类判据只能从这里看出来）、用量与缓存回落，以及工作区有没有被改动。
+
 退出码：0 成功；2 缺密钥 / 缺配置 / Profile 名不存在；3 场景里出现了未预期的终态；4 固定任务集的
 写入预期未达成（见 stderr）。
 """
@@ -135,6 +138,49 @@ def _fingerprint(data_dir: Path, names: Sequence[str]) -> dict[str, str | None]:
     return out
 
 
+#: 回答与工具输出的截断长度。验收要看"模型说了什么"，但不该把整段对话抄进仓库。
+TRANSCRIPT_TEXT_LIMIT = 600
+TRANSCRIPT_PREVIEW_LIMIT = 300
+
+
+def _trim(value: Any, limit: int) -> Any:
+    if not isinstance(value, str) or len(value) <= limit:
+        return value
+    return value[:limit] + f"…（已截断，原长 {len(value)}）"
+
+
+def _message_row(message: Any) -> dict[str, Any]:
+    """把一条展示消息裁成一行记录（不含推理正文，工具输出只留预览）。"""
+    row = message.model_dump(mode="json")
+    kind = row.get("kind")
+    entry: dict[str, Any] = {"kind": kind, "message_id": row.get("message_id")}
+    if kind in ("user", "assistant"):
+        entry["text"] = _trim(row.get("text"), TRANSCRIPT_TEXT_LIMIT)
+    elif kind == "tool":
+        tool = row.get("tool") or {}
+        entry["tool"] = {
+            key: _trim(tool.get(key), TRANSCRIPT_PREVIEW_LIMIT)
+            for key in ("tool_name", "status", "title", "output_preview")
+            if key in tool
+        }
+    else:
+        # 其余类型（记忆/错误行）不单独建模：留一份截断后的原文，够核对即可。
+        entry["detail"] = _trim(json.dumps(row, ensure_ascii=False), TRANSCRIPT_PREVIEW_LIMIT)
+    return entry
+
+
+def _transcript(messages: Sequence[Any], seen: set[str]) -> list[dict[str, Any]]:
+    """**本轮新增**的消息轨迹（截断）。
+
+    为什么必须记：固定任务集的验收点常常就在"模型自己怎么说的"——只读档被要求改文件时，正确结果
+    是**如实说做不到**，而状态码只说得出"这一轮没失败"。只按 `seen` 收新增，避免每轮把整段会话
+    重复抄一遍。
+    """
+    return [
+        _message_row(message) for message in messages if str(message.message_id) not in seen
+    ]
+
+
 def _dump(snapshot: Any) -> dict[str, Any]:
     """把快照裁成记录用得上的那几段（不把整份 messages 抄进基线）。"""
     usage = snapshot.usage
@@ -226,6 +272,9 @@ def main() -> int:
     )
     task_set = PROFILE_TASK_SETS[profile] if args.task_set == "profile" else baseline_set
     session_title = "T56 固定任务集" if args.task_set == "profile" else "T34 真实基线"
+    # request id 必须带上任务集：同一个数据目录里换一套任务却沿用同一批 id，等于"同一请求不同内容"，
+    # 产品会（正确地）按幂等冲突拒掉——2026-10-09 实测过一次，别再把产品行为当成跑器故障。
+    request_prefix = "t56-profile" if args.task_set == "profile" else "t34-baseline"
     config_path = _write_config(data_dir, profile)
     _seed_workspace(data_dir, extra=task_set.seed_files)
     config = load_config(config_path)
@@ -271,6 +320,8 @@ def main() -> int:
         session_id = summary.session_id
         turns: list[dict[str, Any]] = []
         watched = task_set.watched_files
+        # 已记过的消息 id：每轮只收**新增**的那几条（快照带的是整条会话的展示轨迹）。
+        seen_ids: set[str] = set()
         for index, item in enumerate(plan, start=1):
             if not item.runs:
                 # 跳过也要留痕：否则"少跑了一轮"在结果里看不出来，会被当成"测过了且没问题"。
@@ -285,7 +336,29 @@ def main() -> int:
                 )
                 continue
             before = _fingerprint(data_dir, watched)
-            result = service.submit_message(session_id, item.task.text, f"t34-baseline-{index}")
+            try:
+                result = service.submit_message(session_id, item.task.text, f"{request_prefix}-{index}")
+            except Exception as exc:  # noqa: BLE001 - 产品级拒绝也要**记成一条结果**，不要只留 traceback
+                # 例如幂等冲突：跑器沿用旧 id 提交了不同内容。这种时候最该留下的信息是"哪一轮、因为什么"，
+                # 而不是一屏栈——栈会让读结果的人以为是产品坏了。
+                print(f"[turn {index}] 提交被拒绝：{type(exc).__name__}: {exc}", file=sys.stderr)
+                turns.append(
+                    {
+                        "turn": index,
+                        "input": item.task.text,
+                        "skipped": False,
+                        "task_note": item.task.note,
+                        "result": {
+                            "status": "failed",
+                            "error": {"type": type(exc).__name__, "message": str(exc)},
+                        },
+                        "approvals": 0,
+                        "workspace_changed": before != _fingerprint(data_dir, watched),
+                        "write_expectation_met": None,
+                        "transcript": [],
+                    }
+                )
+                continue
             # 需要人工审批的操作按"允许一次"放行；这本身也是基线的一部分（审批等待耗时）。
             approves = 0
             while result.status == "awaiting_approval" and approves < 5:
@@ -297,9 +370,11 @@ def main() -> int:
                     session_id,
                     snapshot.approval.approval_id,
                     "approve",
-                    f"t34-baseline-{index}-approve-{approves}",
+                    f"{request_prefix}-{index}-approve-{approves}",
                 )
             snapshot = service.get_session_snapshot(session_id)
+            transcript = _transcript(snapshot.messages, seen_ids)
+            seen_ids.update(str(message.message_id) for message in snapshot.messages)
             changed = before != _fingerprint(data_dir, watched)
             turns.append(
                 {
@@ -307,6 +382,8 @@ def main() -> int:
                     "input": item.task.text,
                     "skipped": False,
                     "task_note": item.task.note,
+                    # 本轮的截断轨迹：验收要看模型**说了什么**（例如只读档有没有如实说做不到）。
+                    "transcript": transcript,
                     "result": {
                         "status": result.status,
                         "run_id": result.run_id,
