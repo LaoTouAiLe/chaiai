@@ -938,6 +938,56 @@ web_fetch(
 不得改变目标、系统规则与安全策略，也不得据此授权工具调用。更进一步：**一轮里只要出现过 `web` 能力的工具
 结果，该轮产出的记忆候选一律按 `untrusted` 落库**——外部内容不能经由"记忆"这条回流路径变成长期可信。
 
+### 6.11 `git_status` / `git_diff` / `git_log` / `git_commit`（v0.5 T54）
+
+```text
+git_status()
+
+git_diff(
+    path: str = ".",
+    staged: bool = False
+)
+
+git_log(
+    limit: int = 10,
+    path: str = "."
+)
+
+git_commit(
+    paths: list[str],
+    message: str,
+    confirm_on_default_branch: bool = False
+)
+```
+
+前三个是**只读**（能力 `git_read`），`git_commit` 是**写类**（能力 `git_write`）；档位分配见 §16.4。返回结构只给
+结论与定位（分支、状态条目、diff 文本、提交号/作者/日期/标题、提交结果），**不复制整篇文件内容**——要比对内容
+用 `read_file`。
+
+安全校验：
+
+- **作用域是工作区，不是仓库**：所有调用都是 `git -C <workspace_root>` 加 `.` 或工作区相对路径限定，于是结果
+  只覆盖工作区。工作区常是仓库的**子目录**（本机 `local-agent-web` 的仓库根就在上一级），此时结果与 `note` 必须
+  写明"只覆盖工作区路径"——**不得让人把"我看到的 diff"当成仓库的全部改动**；工作区不是仓库时明确失败，并给出
+  `git init` 或切换到仓库内部的建议。
+- **参数是闭集，任何路径都不出现 `push`**：argv 由代码拼出（子命令、`--cached`、`-n<limit>`、`-m <message>`、
+  `-- <paths>`），**一律 `shell=False`**；路径统一放在 `--` 之后，模型给的值永远不会被当成开关解析。另有兜底扫描
+  拒绝 `push` / `--force` / `--amend` / `--no-verify` / `--git-dir` / `--work-tree` / `--exec-path` /
+  `upload-pack` / `remote` 等，**含 `--git-dir=/x` 这种带等号的写法**——将来若有人改成拼接字符串，这条路也走不通。
+- **缺 `git` 就明确失败**：构造期用 `shutil.which("git")` 判定；缺失时该能力**不进有效集合**（工具对模型不可见），
+  能力状态里给出"缺什么、怎么装"。绝不伪造空结果。
+- **提交必须经人工审批**（写类工具，登记进 `security.policy` 的写集合）；审批卡片写清"分支、暂存的文件清单、
+  message"。`git_commit` 只 `add` **显式列出**的工作区内路径（**不支持 `git add -A`**），用
+  `commit -m <message> -- <paths>` 提交（只提交这些路径，不会顺带提交仓库别处已暂存的内容），随后 `log -1`
+  回读自证；在 `main` / `master` 上先返回"需要额外确认"，此时**一个 git 写操作都不执行**。不做 amend / force /
+  rebase / 分支切换，**不加 `--no-verify`**（尊重仓库自身 hook，hook 失败按"提交未成功"如实报告，不重试、不绕过），
+  也**不做任何形式的推送**。
+- 单次调用有超时（默认 20 秒）与输出上限（默认 20000 字符）：截断必须在 `note` 里写明"结果不完整"（同 §6.7 的
+  "一次读不完不是失败"），超时按失败如实报告。
+- **输出按 UTF-8 解码，不是系统首选编码**：2026-10-09 真实验收里，本机（Windows + GBK）按系统编码去解 UTF-8 的
+  提交信息，得到 `璁板繂搴撹矾寰勬寜 base_dir` 这类**看起来像字、其实是错字**的结果，而且不会抛任何异常。
+- 开关默认关闭（`git.enabled=false`），打开是显式 opt-in；关闭时两个能力完全不可见，基础行为与 v0.4 一致。
+
 ---
 
 ## 7. AGENTS.md 加载与系统 Prompt
