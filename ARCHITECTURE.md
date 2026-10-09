@@ -1060,6 +1060,24 @@ AGENTS 文件可以约束工作方式，但不能覆盖系统安全策略、人�
 
 模型、工作区、AGENTS、记忆、安全、RAG 和 Agent 的配置键及可运行样例统一维护在 [开发文档 §8](docs/archive/v0.1-v0.3-development.md#8-配置文件与密钥)。`workspace.root` 是启动时默认工作区，网页运行时选择结果保存在会话索引中；`workspace.allow_external_paths` 只放宽显式绝对路径的工具访问，不扩大 AGENTS、记忆或 RAG 作用域。架构硬约束：密钥仅来自环境变量；本地 Embedding 必须显式指定模型缓存目录且不需要 API Key；v0.1a/v0.1b 中长期记忆与压缩关闭；危险操作不得仅靠配置或 Prompt 绕过代码级安全检查。
 
+**承载文件系统路径的配置键，解析基准是"配置文件所在目录"（即装配时传入的 `base_dir`），不是进程当前
+目录**（2026-10-09 定，契约级）。展开发生在**装配/入口**，不发生在 `load_config`：`load_config` 原样保留
+配置里的相对路径；`container.open_runtime` 用 `resolve_under(base_dir, …)` 解析工作区、聊天库、设置库与
+静态目录，并用 `resolve_memory_paths(base_dir, …)` 把三条记忆库路径一并钉住；`cli`、`web.py`、
+`scripts/init_db.py` 这些自己开库的入口同样按各自配置文件的目录展开。
+
+为什么三条记忆库要单独点名：它们的消费方是**图内节点**（`graph/nodes.py` 直接拿
+`context.app_config.memory.*.path` 去 `open_store`），节点拿不到 `base_dir`，于是它们成了全项目唯一
+"按进程当前目录解析"的路径。实测后果：换一个目录启动，聊天库还在原地、**长期记忆却换成了另一个库**
+——正是 T40 的"解压双击"场景。
+
+**展开不能放进 `load_config`**：那会架空 `base_dir` 这个参数——测试与工具正是靠它把数据放进临时目录
+（2026-10-09 试过那一版：12 个用例立刻读到了仓库里**真实的**设置库，出现用户自己的连接名）。新增这类
+路径键必须遵守同一条规则并在 `tests/test_config_paths.py` 登记。`~` 不展开：与工具侧一致，`~` 属于
+"相对路径逃逸"。
+
+
+
 ## 9. 依赖与 Python 版本
 
 依赖、版本范围、可选依赖和 `pyproject.toml` / `requirements.txt` 示例统一维护在 [开发文档 §9](docs/archive/v0.1-v0.3-development.md#9-依赖与环境)。实现不得使用旧版 LangChain Agent；聊天模型接入基于 `langchain-core`、`langchain-openai`，本地 Embedding 通过 `memory` 可选依赖提供，编排基于 LangGraph。
