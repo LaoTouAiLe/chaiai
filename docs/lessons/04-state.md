@@ -4,14 +4,14 @@
 >
 > 读完你应该能回答：**State 里为什么有的字段用 `Annotated`、有的不用？节点往 State 里写东西时，为什么有的直接返回、有的要先 `merge_appended`？**
 
-文件：[state.py](../../local-agent-web/src/local_agent/graph/state.py)，394 行，四块内容：
+文件：[state.py](../../local-agent-web/src/local_agent/graph/state.py)，511 行，四块内容：
 
 | 行范围 | 内容 | 数量 |
 |---|---|---|
-| [35-92](../../local-agent-web/src/local_agent/graph/state.py#L35-L92) | 类型别名 + 三个 TypedDict | 4 个 `Literal` + `RAGReference` / `DecisionRecord` / `ErrorEvent` |
-| [98-219](../../local-agent-web/src/local_agent/graph/state.py#L98-L219) | reducer 与去重键工厂函数 | 2 个 reducer + 5 个 key + 2 个构造器 |
-| [222-300](../../local-agent-web/src/local_agent/graph/state.py#L222-L300) | 5 个 `@dataclass(frozen=True)` | 计划步骤、工具事件、证据、记忆候选、反思结果 |
-| [303-394](../../local-agent-web/src/local_agent/graph/state.py#L303-L394) | **`AgentState`（35 字段）+ `RuntimeContext`（13 字段）** | 本文重点 |
+| [38-101](../../local-agent-web/src/local_agent/graph/state.py#L38-L101) | 类型别名 + 三个 TypedDict | 5 个 `Literal` + `RAGReference` / `DecisionRecord` / `ErrorEvent` |
+| [108-241](../../local-agent-web/src/local_agent/graph/state.py#L108-L241) | reducer 与去重键工厂函数 | 3 个 reducer + 6 个 key + 2 个构造器 |
+| [244-355](../../local-agent-web/src/local_agent/graph/state.py#L244-L355) | 6 个 `@dataclass(frozen=True)` | 计划步骤、工具事件、证据、记忆候选、反思结果、运行上下文快照 |
+| [378-508](../../local-agent-web/src/local_agent/graph/state.py#L378-L508) | **`AgentState`（49 字段）+ `RuntimeContext`（16 字段）** | 本文重点 |
 
 ---
 
@@ -42,12 +42,12 @@ AgentState()          # 报错！TypedDict 不能实例化
 >>> AgentState.__required_keys__
 frozenset()
 >>> AgentState.__optional_keys__
-frozenset({'thread_id', 'session_id', ... 共 35 个})
+frozenset({'thread_id', 'session_id', ... 共 49 个})
 ```
 
-为什么必须这样？因为 `total=True` 时，LangGraph 会要求**每个节点返回完整的 35 个字段**——那就没法"只提交局部更新"了。
+为什么必须这样？因为 `total=True` 时，LangGraph 会要求**每个节点返回完整的 49 个字段**——那就没法"只提交局部更新"了。
 
-`state.py:304` 的注释原话：*"`total=False` 允许节点只提交局部更新"*。
+`state.py:379` 的注释原话：*"`total=False` 允许节点只提交局部更新"*。
 
 ### 1.3 实测：State 是**稀疏**的
 
@@ -85,18 +85,19 @@ state.get("task_goal")       # 覆盖语义 → 可能不存在 → 必须 get
 
 ## 2. 三种更新语义（本文件的核心）
 
-35 个字段实测分桶：
+49 个字段实测分桶：
 
 | 语义 | 数量 | 字段 | 声明方式 |
 |---|---|---|---|
-| **覆盖**（后写覆盖先写） | **26** | `thread_id` `session_id` `run_id` `user_input` `normalized_request` `mode` `route_reason` `conversation_summary` `context_version` `task_goal` `task_status` `plan` `current_step_index` `pending_tool_calls` `reflection_result` `pending_approval` `memory_refs` `rag_refs` `retry_count` `loop_count` `max_loop_count` `token_usage` `context_budget` `compression_count` `final_response` `final_evidence` | 裸类型 |
-| **追加** | **7** | `completed_steps` `tool_events` `tool_results` `decision_trace` `approval_history` `memory_write_candidates` `error_events` | `Annotated[list[X], operator.add]` |
+| **覆盖**（后写覆盖先写） | **36** | `thread_id` `session_id` `run_id` `model_binding` `runtime_preferences` `user_input` `session_mode` `normalized_request` `mode` `route_reason` `conversation_summary` `context_version` `task_goal` `task_status` `plan` `current_step_index` `agent_loop_version` `plan_managed` `pending_tool_calls` `reflection_result` `pending_approval` `approval_requested_at` `memory_refs` `memory_write_count` `memory_write_skipped` `rag_refs` `retry_count` `loop_count` `max_loop_count` `token_usage` `context_budget` `compression_count` `run_user_message_id` `run_submitted_at` `final_response` `final_evidence` | 裸类型 |
+| **追加** | **9** | `completed_steps` `tool_events` `tool_results` `decision_trace` `approval_history` `memory_write_candidates` `error_events` `model_call_records` `runtime_context_snapshots` | `Annotated[list[X], operator.add]` |
 | **消息合并** | **1** | `messages` | `Annotated[list[AnyMessage], add_messages]` |
-| **字典合并** | **1** | `reply_overrides` | `Annotated[dict[str, str], merge_mapping]` |
+| **字典合并** | **2** | `tool_output_overrides` `reply_overrides` | `Annotated[dict[str, str], merge_mapping]` |
+| **整轮合并** | **1** | `turn_records` | `Annotated[dict[str, TurnRecord], merge_turn_records]` |
 
 `Annotated[X, f]` 的读法是：**类型是 X，但更新时用 f 合并**。L2 §3 讲过 `Annotated` 本身只是"给类型贴标签"，LangGraph 是那个读标签的人。
 
-### 2.1 覆盖语义：为什么 26 个字段敢用裸类型
+### 2.1 覆盖语义：为什么 36 个字段敢用裸类型
 
 因为它们**在图上永远不会被并发写**。这不是猜测，LangGraph 会强制：
 
@@ -135,7 +136,7 @@ g.compile().invoke({"completed_steps": ["init"]})
 
 这是整个 `state.py` 后半部分存在的唯一理由。
 
-`state.py:10` 的注释写得很直接：
+`state.py:8-9` 的注释写得很直接：
 
 > 追加型列表使用 `operator.add`，**写入方需按事件 ID 去重**（`operator.add` 本身不去重）。
 
@@ -151,7 +152,7 @@ g.compile().invoke({"completed_steps": ["init"]})
 
 ### 2.4 `merge_appended`：幂等追加
 
-[state.py:109-128](../../local-agent-web/src/local_agent/graph/state.py#L109-L128)，实测：
+[state.py:119-138](../../local-agent-web/src/local_agent/graph/state.py#L119-L138)，实测：
 
 ```python
 existing = ["evt-1", "evt-2"]
@@ -160,7 +161,7 @@ merge_appended(existing, incoming, key=lambda s: s)
 # -> ['evt-3']
 ```
 
-读源码就三行逻辑（[120-128](../../local-agent-web/src/local_agent/graph/state.py#L120-L128)）：
+读源码就三行逻辑（[130-138](../../local-agent-web/src/local_agent/graph/state.py#L130-L138)）：
 
 ```python
 seen = {key(item) for item in existing}   # 已有的事件 ID 集合
@@ -173,23 +174,25 @@ for item in incoming:
 
 **Java 类比**：像一个带 `Set` 去重的 `BatchInserter`，或者数据库的 `INSERT ... ON CONFLICT DO NOTHING`。
 
-### 2.5 7 个追加通道里，只有 5 个用 `merge_appended`
+### 2.5 9 个追加通道里，只有 7 个用 `merge_appended`
 
-我把 7 个通道的写入点全查了一遍，实测结果：
+我把 9 个通道的写入点全查了一遍，实测结果：
 
 | 通道 | 去重方式 | 写入位置 |
 |---|---|---|
-| `tool_events` | `merge_appended(..., tool_event_key)` | [nodes.py:1065](../../local-agent-web/src/local_agent/graph/nodes.py#L1065)、[1310](../../local-agent-web/src/local_agent/graph/nodes.py#L1310) |
-| `tool_results` | `merge_appended(..., tool_result_key)` | [nodes.py:1068](../../local-agent-web/src/local_agent/graph/nodes.py#L1068)、[1313](../../local-agent-web/src/local_agent/graph/nodes.py#L1313) |
+| `tool_events` | `merge_appended(..., tool_event_key)` | [nodes.py:1496](../../local-agent-web/src/local_agent/graph/nodes.py#L1496)、[1817](../../local-agent-web/src/local_agent/graph/nodes.py#L1817) |
+| `tool_results` | `merge_appended(..., tool_result_key)` | [nodes.py:1499](../../local-agent-web/src/local_agent/graph/nodes.py#L1499)、[1820](../../local-agent-web/src/local_agent/graph/nodes.py#L1820) |
 | `decision_trace` | `merge_appended(..., decision_record_key)` | 9 处，见 §3.4 |
 | `error_events` | `merge_appended(..., error_event_key)` | 9 处 |
-| `approval_history` | `merge_appended(..., approval_key)` | [nodes.py:3077](../../local-agent-web/src/local_agent/graph/nodes.py#L3077) |
-| **`completed_steps`** | **写入方自己算增量** | [nodes.py:1493-1495](../../local-agent-web/src/local_agent/graph/nodes.py#L1493-L1495) |
-| **`memory_write_candidates`** | **写入方自己算增量** | [nodes.py:2781-2782](../../local-agent-web/src/local_agent/graph/nodes.py#L2781-L2782) |
+| `approval_history` | `merge_appended(..., approval_key)` | [nodes.py:3957](../../local-agent-web/src/local_agent/graph/nodes.py#L3957) |
+| `model_call_records` | `merge_appended(..., model_call_key)` | [builder.py:216-217](../../local-agent-web/src/local_agent/graph/builder.py#L216-L217) |
+| `runtime_context_snapshots` | `merge_appended(..., snapshot_key)` | [nodes.py:769-770](../../local-agent-web/src/local_agent/graph/nodes.py#L769-L770) |
+| **`completed_steps`** | **写入方自己算增量** | [nodes.py:2033](../../local-agent-web/src/local_agent/graph/nodes.py#L2033) |
+| **`memory_write_candidates`** | **写入方自己算增量** | [nodes.py:3653](../../local-agent-web/src/local_agent/graph/nodes.py#L3653) |
 
 后两个不是偷懒，是**必须那样**——看代码：
 
-`completed_steps`（[nodes.py:1807-1814](../../local-agent-web/src/local_agent/graph/nodes.py#L1807-L1814)）：
+`completed_steps`（[nodes.py:2549-2556](../../local-agent-web/src/local_agent/graph/nodes.py#L2549-L2556)）：
 
 ```python
 known = set(state.get("completed_steps") or ())
@@ -199,7 +202,7 @@ if goal_achieved:
         completed = (step.id,)
 ```
 
-`memory_write_candidates`（[nodes.py:2742-2754](../../local-agent-web/src/local_agent/graph/nodes.py#L2742-L2754)）：
+`memory_write_candidates`（[nodes.py:3612-3625](../../local-agent-web/src/local_agent/graph/nodes.py#L3612-L3625)）：
 
 ```python
 # 判重键含候选身份（不是只看来源事件）：同一事件下的其它候选不会被误伤（复审实证）
@@ -222,7 +225,7 @@ completed = _completed_candidates(intents, outcomes)
 
 ### 2.6 `add_messages`：唯一的"有智能"的 reducer
 
-它来自 LangGraph（[state.py:24](../../local-agent-web/src/local_agent/graph/state.py#L24)），不在这里定义。行为在 L1 §2 讲过，这里只补一句关键区别：
+它来自 LangGraph（[state.py:23](../../local-agent-web/src/local_agent/graph/state.py#L23)），不在这里定义。行为在 L1 §2 讲过，这里只补一句关键区别：
 
 `add_messages` 遇到**同 ID** 的消息是**替换**（L1 实测：输入 1 条 → 输出 1 条，内容是改写后的），而 `operator.add` 是**无脑追加**。
 
@@ -230,7 +233,7 @@ completed = _completed_candidates(intents, outcomes)
 
 ### 2.7 `merge_mapping`：为什么单独造一个
 
-[state.py:98-106](../../local-agent-web/src/local_agent/graph/state.py#L98-L106)：
+[state.py:108-116](../../local-agent-web/src/local_agent/graph/state.py#L108-L116)：
 
 ```python
 merged = dict(existing or {})
@@ -238,7 +241,7 @@ merged.update(incoming or {})
 return merged
 ```
 
-只有 6 行，但它和 `merge_appended` 的区别是本质的（[state.py:101-102](../../local-agent-web/src/local_agent/graph/state.py#L101-L102) 的原话）：
+只有 6 行，但它和 `merge_appended` 的区别是本质的（[state.py:111-112](../../local-agent-web/src/local_agent/graph/state.py#L111-L112) 的原话）：
 
 > 这里要的是**覆盖语义**（同一条消息被再次修正时以最新为准），而不是"只追加没出现过的"。
 
@@ -253,19 +256,19 @@ g.compile().invoke({"reply_overrides": {"m0": "原始"}})
 
 `m0` 保留、`m1` 被后写的覆盖。**这是对的**：`reply_overrides` 是"消息 id → 修正文本"，同一条消息被修正两次，当然以最后一次为准。
 
-`reply_overrides` 到底是什么、为什么需要它，看 [state.py:361-367](../../local-agent-web/src/local_agent/graph/state.py#L361-L367) 那段注释，值得逐字读一遍：
+`reply_overrides` 到底是什么、为什么需要它，看 [state.py:466-472](../../local-agent-web/src/local_agent/graph/state.py#L466-L472) 那段注释，值得逐字读一遍：
 
 > `messages` 必须保留模型原文（架构 §10.1：审计与恢复用的原始记录），但**用户看到的内容**与**下一轮送模型的窗口**要用修正后的文本——否则记忆保存失败时页面仍显示"我记住了"，下一轮模型也照着假承诺继续对话（复审实证）。
 
 这段话是整份文档里最有信息量的一段之一。它讲的是一个**真实发生过的 bug**：模型说"我记住了"，但实际写入失败。修法不是"改掉模型的话"（那会破坏审计），而是**保留原文 + 加一层投影**。
 
-**Java 类比**：事件溯源里的"原始事件 + 读时投影"。存储层永远是 append-only 的事实，展示层可以有自己的视图。谁读它（实测）：[nodes.py:494](../../local-agent-web/src/local_agent/graph/nodes.py#L494)（拼下一轮窗口）、[nodes.py:672](../../local-agent-web/src/local_agent/graph/nodes.py#L672)（压缩时投影）、[web.py:236](../../local-agent-web/src/local_agent/web.py#L236)（页面渲染）。
+**Java 类比**：事件溯源里的"原始事件 + 读时投影"。存储层永远是 append-only 的事实，展示层可以有自己的视图。谁读它（实测）：[nodes.py:554](../../local-agent-web/src/local_agent/graph/nodes.py#L554)（拼下一轮窗口）、[nodes.py:1015](../../local-agent-web/src/local_agent/graph/nodes.py#L1015)（压缩时投影）、[application/projection.py:418](../../local-agent-web/src/local_agent/application/projection.py#L418)（页面渲染）。
 
 ---
 
 ## 3. 事件 ID：为什么这里有一整套 key 函数
 
-[state.py:141-167](../../local-agent-web/src/local_agent/graph/state.py#L141-L167) 有 5 个几乎一样的函数：
+[state.py:141-172](../../local-agent-web/src/local_agent/graph/state.py#L141-L172) 有 6 个几乎一样的函数：
 
 ```python
 def tool_event_key(event: ToolEvent) -> str:      return tool_scope_key(event.run_id, event.tool_call_id)
@@ -273,6 +276,7 @@ def tool_result_key(record: ToolResultRecord) -> str: return tool_scope_key(reco
 def decision_record_key(record: DecisionRecord) -> str: return record["record_id"]
 def error_event_key(record: ErrorEvent) -> str:    return record["event_id"]
 def approval_key(record: ApprovalDecision) -> str: return record["approval_id"]
+def model_call_key(record: ModelCallRecord) -> str: return record.model_call_id
 ```
 
 看起来冗余（为什么不直接 `lambda x: x.id`）？三个理由：
@@ -283,7 +287,7 @@ def approval_key(record: ApprovalDecision) -> str: return record["approval_id"]
 
 ### 3.1 `tool_scope_key`：轮次 + 调用 ID
 
-[state.py:131-138](../../local-agent-web/src/local_agent/graph/state.py#L131-L138)，实测：
+[scope.py:16](../../local-agent-web/src/local_agent/graph/scope.py#L16)，实测：
 
 ```text
 tool_scope_key('run-1', 'call-1') = run-1:call-1
@@ -300,7 +304,7 @@ tool_scope_key('run-2', 'call-1') = run-2:call-1
 
 ### 3.2 `make_decision_record` 与 `salt`
 
-[state.py:170-192](../../local-agent-web/src/local_agent/graph/state.py#L170-L192)。实测：
+[state.py:192-214](../../local-agent-web/src/local_agent/graph/state.py#L192-L214)。实测：
 
 ```text
 make_decision_record("run-1", stage="reflection", summary="x", loop_count=2, tool_call_id="call-1")
@@ -310,7 +314,7 @@ make_decision_record("run-1", stage="reflection", summary="x", loop_count=2, too
 加 salt="cand#1" -> run-1:decision:reflection:2:call-1:cand#1
 ```
 
-**后半段是这个文件里最阴险的坑**，docstring 原话（[state.py:182-183](../../local-agent-web/src/local_agent/graph/state.py#L182-L183)）：
+**后半段是这个文件里最阴险的坑**，docstring 原话（[state.py:204-205](../../local-agent-web/src/local_agent/graph/state.py#L204-L205)）：
 
 > 否则同 stage + 同轮次 + 同 `tool_call_id` 的记录会得到同一个 ID，`merge_appended` 只保留第一条、**其余静默消失**。
 
@@ -318,7 +322,7 @@ make_decision_record("run-1", stage="reflection", summary="x", loop_count=2, too
 
 **这就是 `merge_appended` 的代价**：它保护你免受重放影响，但也把"ID 撞车"变成了静默数据丢失。所以每个调用点都要问一句：**"这个节点在这次执行里会不会产生两条 ID 相同的记录？"**
 
-顺带记住这个模式：`_record_scope`（[216-219](../../local-agent-web/src/local_agent/graph/state.py#L216-L219)）把 ID 拼成
+顺带记住这个模式：`_record_scope`（[238-241](../../local-agent-web/src/local_agent/graph/state.py#L238-L241)）把 ID 拼成
 
 ```text
 {run_id}:{kind}:{stage}:{loop_count}:{tool_call_id}:{salt}
@@ -352,15 +356,16 @@ make_decision_record("run-1", stage="reflection", summary="x", loop_count=2, too
 
 ---
 
-## 4. 五个 `@dataclass(frozen=True)`
+## 4. 六个 `@dataclass(frozen=True)`
 
 | 类 | 行 | 用途 | 谁在用 |
 |---|---|---|---|
-| `PlanStep` | [222-241](../../local-agent-web/src/local_agent/graph/state.py#L222-L241) | 计划的一步 | `plan: list[PlanStep]` |
-| `ToolEvent` | [244-259](../../local-agent-web/src/local_agent/graph/state.py#L244-L259) | 一次工具调用的事件 | `tool_events` |
-| `EvidenceReference` | [262-270](../../local-agent-web/src/local_agent/graph/state.py#L262-L270) | 证据引用 | `final_evidence` / `ReflectionResult.evidence` |
-| `MemoryCandidate` | [273-287](../../local-agent-web/src/local_agent/graph/state.py#L273-L287) | 记忆候选 | `memory_write_candidates` |
-| `ReflectionResult` | [290-300](../../local-agent-web/src/local_agent/graph/state.py#L290-L300) | 反思结论 | `reflection_result` |
+| `PlanStep` | [244-263](../../local-agent-web/src/local_agent/graph/state.py#L244-L263) | 计划的一步 | `plan: list[PlanStep]` |
+| `ToolEvent` | [266-281](../../local-agent-web/src/local_agent/graph/state.py#L266-L281) | 一次工具调用的事件 | `tool_events` |
+| `EvidenceReference` | [284-292](../../local-agent-web/src/local_agent/graph/state.py#L284-L292) | 证据引用 | `final_evidence` / `ReflectionResult.evidence` |
+| `MemoryCandidate` | [295-313](../../local-agent-web/src/local_agent/graph/state.py#L295-L313) | 记忆候选 | `memory_write_candidates` |
+| `ReflectionResult` | [316-326](../../local-agent-web/src/local_agent/graph/state.py#L316-L326) | 反思结论 | `reflection_result` |
+| `RuntimeContextSnapshot` | [333-355](../../local-agent-web/src/local_agent/graph/state.py#L333-L355) | 运行上下文快照 | `runtime_context_snapshots` |
 
 ### 4.1 为什么是 `dataclass` 而不是 `TypedDict` 或 pydantic
 
@@ -384,7 +389,7 @@ make_decision_record("run-1", stage="reflection", summary="x", loop_count=2, too
 
 **Java 类比**：`record` 与普通 POJO 的区别。你已经在 Java 里熟悉"不可变值对象"的好处了，这里是同一个理由，加上一条框架约束。
 
-那怎么改字段值？用 `dataclasses.replace`——实测出现在 [nodes.py:1825](../../local-agent-web/src/local_agent/graph/nodes.py#L1825)：
+那怎么改字段值？用 `dataclasses.replace`——实测出现在 [nodes.py:2567](../../local-agent-web/src/local_agent/graph/nodes.py#L2567)：
 
 ```python
 plan[next_index] = replace(plan[next_index], status="running")
@@ -394,28 +399,28 @@ plan[next_index] = replace(plan[next_index], status="running")
 
 ### 4.3 逐字段要点（只讲会导致 bug 的）
 
-**`PlanStep`**（[222-241](../../local-agent-web/src/local_agent/graph/state.py#L222-L241)）——六个 `status` 取值，docstring 里有：
+**`PlanStep`**（[244-263](../../local-agent-web/src/local_agent/graph/state.py#L244-L263)）——六个 `status` 取值，docstring 里有：
 
 `pending` / `running` / `completed` / `failed` / `skipped` / `blocked`
 
 注意它**不是** `Literal`，就是个 `str`（`status: str = "pending"`）。这与 §5.4 的 `MemoryCandidate.memory_type` 不同——那里用了 `Literal`。为什么这里不用？因为 `status` 会被 reflection 层按字符串处理，而且取值集合还在演进（docstring 里写"T20 定稿"）。**这是一处不一致，属于实现演进的痕迹**，读代码时别指望它被类型系统保护。
 
-还有一句值得记住的设计（[230-232](../../local-agent-web/src/local_agent/graph/state.py#L230-L232)）：
+还有一句值得记住的设计（[252-254](../../local-agent-web/src/local_agent/graph/state.py#L252-L254)）：
 
 > `retry_count` 是**本步骤**的重试次数：进入下一步后从 0 重新开始（`agent.max_retries_per_step` 按步骤判定，`agent.max_tool_loops` 仍是整个任务的总上限）。
 > `id` 含 `run_id`，所以 `completed_steps` 里留下的历史任务步骤不会让新任务误判"这一步已完成"。
 
 **"ID 含 run_id"是这里第二个"防历史串味"的设计**（第一个是 §3.1 的 `tool_scope_key`）。三个地方都在防同一件事：**上一个任务的数据污染这一个任务**。
 
-**`MemoryCandidate`**（[273-287](../../local-agent-web/src/local_agent/graph/state.py#L273-L287)）——`memory_type` 用了 `Literal`，三个取值：`conversation_summary` / `task_fragment` / `entity_fact`。
+**`MemoryCandidate`**（[295-313](../../local-agent-web/src/local_agent/graph/state.py#L295-L313)）——`memory_type` 用了 `Literal`，三个取值：`conversation_summary` / `task_fragment` / `entity_fact`。
 
-docstring 特别强调（[277-279](../../local-agent-web/src/local_agent/graph/state.py#L277-L279)）：
+docstring 特别强调（[299-300](../../local-agent-web/src/local_agent/graph/state.py#L299-L300)）：
 
 > **字段集合与架构 §4.3 逐字一致**（架构 §10.4 明确"`MemoryCandidate` 不新增作用域字段"）：作用域不是候选的属性，而是写入时按"已验证意图 + 候选类型 + 当前用户/项目"推导的结果。
 
 **这是"架构文档约束代码"的一个实例**——注意这个项目里 `架构 §x.x` 这样的引用到处都是，你可以顺着它们回到 `ARCHITECTURE.md` 验证。这也是你作为架构设计者该有的读法：**代码是否偏离了你的设计**。
 
-**`ReflectionResult.next_action`**（[298](../../local-agent-web/src/local_agent/graph/state.py#L298)）——四个取值 `continue` / `retry` / `ask_user` / `finish`，默认 `finish`。
+**`ReflectionResult.next_action`**（[324](../../local-agent-web/src/local_agent/graph/state.py#L324)）——四个取值 `continue` / `retry` / `ask_user` / `finish`，默认 `finish`。
 
 **这个默认值是"保守"还是"危险"？** 想一想：如果反思节点构造 `ReflectionResult` 时忘了传 `next_action`，默认 `finish` 会让任务直接收尾。而 `reflection_result.result_trust` 是必填的（无默认），所以至少模型说的"可信度"必须显式给。这是个**刻意的偏保守设计**——宁可早收尾，也不无限循环（后面 `loop_limit_reached` 还有一道兜底，见 L5）。
 
@@ -423,7 +428,7 @@ docstring 特别强调（[277-279](../../local-agent-web/src/local_agent/graph/s
 
 ## 5. 几个 `Literal` 类型别名
 
-[state.py:35-46](../../local-agent-web/src/local_agent/graph/state.py#L35-L46)：
+[state.py:38-55](../../local-agent-web/src/local_agent/graph/state.py#L38-L55)：
 
 ```python
 AgentMode    = Literal["chat", "tool"]
@@ -443,13 +448,13 @@ RAGSource    = Literal["rg", "python_scan", "ast"]
 
 ### 5.3 `RAGMatchType` / `RAGSource` 里的 `ast`
 
-`ast` 是**预留值**：[state.py:43](../../local-agent-web/src/local_agent/graph/state.py#L43) 明确说"`ast` 是局部 AST 解析预留的取值，T21 的基础路径不产生它"。L3 §5.3 讲过这个决定。
+`ast` 是**预留值**：[state.py:52](../../local-agent-web/src/local_agent/graph/state.py#L52) 明确说"`ast` 是局部 AST 解析预留的取值，T21 的基础路径不产生它"。L3 §5.3 讲过这个决定。
 
 **这是"契约先行"的一个实例**：类型定义里先把未来的取值留出来，实现分阶段填。好处是升级时不用改类型；风险是**读到 `Literal` 里有个值不等于这个值真的会产生**——查一下代码里谁产生它，别假设。
 
 ### 5.4 `RAGReference` 的三条硬约束
 
-[state.py:49-64](../../local-agent-web/src/local_agent/graph/state.py#L49-L64) 的 docstring 值得单独列（它把三件事讲死了）：
+[state.py:58-73](../../local-agent-web/src/local_agent/graph/state.py#L58-L73) 的 docstring 值得单独列（它把三件事讲死了）：
 
 1. `path` 是**相对当前工作区**的规范化路径；`line_start` / `line_end` 是 **1 基闭区间**，且必须与实际返回的片段一致（**截断后也要如实收窄**）。
 2. `rank` 只是本轮结果的顺序（从 1 开始），**不是相似度或置信度**——这里没有向量。
@@ -461,16 +466,18 @@ RAGSource    = Literal["rg", "python_scan", "ast"]
 
 ## 6. `RuntimeContext`：不进 Checkpoint 的那一半
 
-[state.py:371-394](../../local-agent-web/src/local_agent/graph/state.py#L371-L394)，13 个字段：
+[state.py:479-508](../../local-agent-web/src/local_agent/graph/state.py#L479-L508)，16 个字段：
 
 | 字段 | 类型 | 有默认值 | 作用 |
 |---|---|---|---|
 | `workspace_root` | `Path` | 否 | 工作区根（安全策略的边界） |
 | `current_cwd` | `Path` | 否 | 当前工作目录 |
 | `model_adapter` | `BaseChatModel` | 否 | 模型客户端 |
-| `app_config` | `AppConfig` | 否 | 完整配置，节点按需读取 |
+| `app_config` | `RunConfig` | 否 | 完整配置，节点按需读取 |
 | `user_id` | `str \| None` | 是 | 多用户作用域 |
 | `config_profile` | `str` | 是 | 配置档名，默认 `"default"` |
+| `agent_profile` | `str` | 是 | 当前 Agent Profile 名，默认取 `DEFAULT_PROFILE` |
+| `agent_capabilities` | `tuple[str, ...]` | 是 | Profile 解析出的能力集合 |
 | `agents_context` | `str \| None` | 是 | **`load_agents` 节点写入**的合并规则文本 |
 | `model_capabilities` | `ModelCapabilities \| None` | 是 | 启动时探测的能力 |
 | `tool_registry` | `ToolRegistry \| None` | 是 | 工具注册表 |
@@ -478,12 +485,13 @@ RAGSource    = Literal["rg", "python_scan", "ast"]
 | `approval_channel` | `object \| None` | 是 | 审批通道（**类型还是 `object`**） |
 | `current_time` | `datetime \| None` | 是 | 注入的时间（可测性） |
 | `request_id` | `str` | 是 | 本次请求 ID |
+| `usage_recorder` | `ModelCallRecorder \| None` | 是 | 用量录音机（`None` 时不记录用量） |
 
 三个必须记住的点：
 
 ### 6.1 它是**可变**的（没有 `frozen=True`）
 
-注意上面 5 个类是 `@dataclass(frozen=True)`，而 `RuntimeContext` 是 `@dataclass` **裸的**——因为它要**被节点改**：`load_agents_node` 会把合并好的 `AGENTS.md` 文本写进 `rt.agents_context`（[state.py:386-387](../../local-agent-web/src/local_agent/graph/state.py#L386-L387) 的注释明说）。
+注意上面 6 个类是 `@dataclass(frozen=True)`，而 `RuntimeContext` 是 `@dataclass` **裸的**——因为它要**被节点改**：`load_agents_node` 会把合并好的 `AGENTS.md` 文本写进 `rt.agents_context`（[state.py:498](../../local-agent-web/src/local_agent/graph/state.py#L498) 的注释明说）。
 
 **这也是它不能进 Checkpoint 的原因之一**：它的生命周期是"一次调用"，State 的生命周期是"一个会话"。
 
@@ -555,7 +563,7 @@ L0 §7 讲过：节点函数第二个参数名叫 `runtime` 时，LangGraph 注�
 | `pending_tool_calls` | `safety_gate_node` `tool_execution_node` `approval_interrupt_node` `route_after_decision` `route_after_safety` |
 | `approval_history` | `safety_gate_node` `tool_execution_node` `approval_interrupt_node` `_approval_target_changed` `stale_side_effects` `route_after_approval` |
 | `reflection_result` | `memory_write_node` `final_response_node` `_has_memory_candidates` `_next_action` |
-| `reply_overrides` | `_prompt_window` `compression_node` `web.py:236` |
+| `reply_overrides` | `_prompt_window` `compression_node` `application/projection.py:418` |
 | `loop_count` / `max_loop_count` | `agent_decision_node` / `_reflect_decision` / `loop_limit_reached` / `mode_router_node` |
 | `context_budget` | `_covered_messages` |
 
@@ -594,10 +602,10 @@ L0 §7 讲过：节点函数第二个参数名叫 `runtime` 时，LangGraph 注�
 
 ## 10. 自查清单
 
-1. `AgentState` 有几个字段？三种更新语义各多少个？ → §2（35 / 26 / 7 / 1 / 1）
+1. `AgentState` 有几个字段？三种更新语义各多少个？ → §2（49 / 36 / 9 / 1 / 2 / 1）
 2. 首次 `invoke` 时传入的列表，是被"设为初始值"还是"追加进去"？ → §2.2（追加）
 3. `operator.add` 为什么不够用？ → §2.3（重放 + 不去重）
-4. 7 个追加通道里，哪两个不走 `merge_appended`？为什么？ → §2.5
+4. 9 个追加通道里，哪两个不走 `merge_appended`？为什么？ → §2.5
 5. 为什么 `tool_scope_key` 要带 `run_id`，只用 `tool_call_id` 会怎样？ → §3.1（第二轮被误判"已执行"，静默跳过）
 6. `make_decision_record` 的 `salt` 参数是干什么的？不加会怎样？ → §3.2（ID 撞车 → 记录静默消失）
 7. 为什么 `RuntimeContext` 没有 `frozen=True`？ → §6.1（`load_agents` 要写 `agents_context`）
@@ -611,7 +619,7 @@ L0 §7 讲过：节点函数第二个参数名叫 `runtime` 时，LangGraph 注�
 
 State 讲完了，接下来是它的**骨架**——节点怎么被连起来、什么条件下走哪条路。
 
-- **L5 · 流程骨架**：[edges.py](../../local-agent-web/src/local_agent/graph/edges.py)（143 行，11 条固定边 + 6 组条件边）+ [routers.py](../../local-agent-web/src/local_agent/graph/routers.py)（350 行，7 个路由判断函数）。
+- **L5 · 流程骨架**：[edges.py](../../local-agent-web/src/local_agent/graph/edges.py)（161 行，9 条固定边 + 9 组条件边）+ [routers.py](../../local-agent-web/src/local_agent/graph/routers.py)（382 行，8 个路由判断函数）。
 - 你会看到 L0 讲过的"条件边不能改 State"这个限制，是怎么被"节点 + 条件边两段式"绕过去的（`completion_router_node` + `completion_route`）。
 
 建议接着写 **L5**。

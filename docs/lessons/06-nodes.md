@@ -1,31 +1,31 @@
 # L6 · 编排主干：`nodes.py`
 
-> L5 讲了流程的**形状**（谁连着谁），这一篇讲流程里的**内容**——14 个节点各自在干什么。
+> L5 讲了流程的**形状**（谁连着谁），这一篇讲流程里的**内容**——15 个节点各自在干什么。
 >
 > 读完你应该能回答：**"模型说'任务完成了'，系统凭什么信？""工具执行到一半进程崩了，重启后会不会重复删文件？""为什么闲聊模式连工具都不绑定？"**
 
-文件：[nodes.py](../../local-agent-web/src/local_agent/graph/nodes.py)，**3470 行**。这是全项目最大的单个文件。
+文件：[nodes.py](../../local-agent-web/src/local_agent/graph/nodes.py)，**4419 行**。这是全项目最大的单个文件。
 
 ---
 
 ## 0. 先说读法：不要从头读到尾
 
-3470 行里，14 个节点函数只占约 **1600 行**（平均 114 行），剩下的是**60 多个辅助函数和常量**。分布大致是：
+4419 行里，15 个节点函数只占约 **1750 行**（平均 117 行），剩下的是**90 多个辅助函数和常量**。分布大致是：
 
 | 区段 | 内容 | 行数 |
 |---|---|---|
-| L141-171 | 14 个节点名常量 + 3 个回复模板常量 | ~30 |
-| L177-470 | 开场四节点 + 记忆库缓存 + 召回合并 | ~290 |
-| L473-570 | 系统提示与窗口的 5 个辅助函数 | ~100 |
-| L573-816 | 压缩、闲聊、规划三节点 + 拆步 | ~240 |
-| L819-1320 | 决策、安全门、工具执行（**最重的三块**） | ~500 |
-| L1323-1558 | **反思节点**（单函数 236 行） | ~236 |
-| L1561-2275 | 反思与合成的辅助函数（机械压制、计划推进、证据渲染） | ~700 |
-| L2282-2617 | 闲聊记忆的审核与收尾文案 | ~330 |
-| L2620-2910 | 记忆写入节点 + 完成判定 | ~290 |
-| L2914-2996 | 召回失败兜底、最终回答节点 | ~80 |
-| L3002-3164 | 审批节点 + 审批辅助函数 | ~160 |
-| L3167-3470 | 作用域、决策/错误构造、副作用追踪、工具调用 | ~300 |
+| L165-196 | 15 个节点名常量 + 2 个回复模板常量 | ~32 |
+| L202-509 | 开场四节点 + 记忆库缓存 + 召回合并 | ~308 |
+| L511-905 | 系统提示、快照与窗口的辅助函数 | ~395 |
+| L907-1217 | 压缩、闲聊、规划三节点 + 拆步 | ~311 |
+| L1219-1861 | 决策、安全门、工具执行（**最重的三块**） | ~643 |
+| L1863-2133 | **反思节点**（单函数 271 行） | ~271 |
+| L2136-3176 | 反思与合成的辅助函数（机械压制、计划推进、证据渲染） | ~1041 |
+| L3179-3521 | 闲聊记忆的审核与收尾文案 | ~343 |
+| L3524-3865 | 记忆写入节点 + 完成判定 | ~342 |
+| L3867-3942 | 召回失败兜底、最终回答节点 | ~76 |
+| L3945-4138 | 审批节点 + 审批辅助函数 | ~194 |
+| L4141-4419 | 作用域、决策/错误构造、副作用追踪、工具调用 | ~279 |
 
 **推荐的读法**（后面每一节都按这个来）：
 
@@ -42,13 +42,13 @@
 
 | 类型 | 命名 | 例子 | 特点 |
 |---|---|---|---|
-| **节点函数** | `xxx_node` 或 `xxx`（14 个） | `prepare_context_node`、`chat_node`、`last_ai_text` | 第一个参数是 `state`，返回 State 更新字典。**只有这 14 个会被 `builder.py` 注册** |
-| **辅助函数** | `_xxx`（约 50 个） | `_system_prompt`、`_advance_plan`、`_merge_references` | 纯逻辑，不返回 State 更新，可单独测试 |
+| **节点函数** | `xxx_node`（15 个） | `prepare_context_node`、`chat_node`、`final_response_node` | 第一个参数是 `state`，返回 State 更新字典。**只有这 15 个会被 `builder.py` 注册** |
+| **辅助函数** | `_xxx`（约 90 个） | `_stable_prompt`、`_advance_plan`、`_merge_references` | 纯逻辑，不返回 State 更新，可单独测试 |
 | **构造器** | `_decision` / `_error` | 见 §4.5 | 造 `DecisionRecord` / `ErrorEvent`，几乎所有节点都用 |
 
-**注意一个命名细节**：有 3 个**公开**辅助函数不带下划线——`medium_term_store`、`long_term_store`、`current_task_scope`、`unconfirmed_calls`、`stale_side_effects`、`last_ai_text`。
+**注意一个命名细节**：有 6 个**公开**辅助函数不带下划线——`medium_term_store`、`long_term_store`、`current_task_scope`、`unconfirmed_calls`、`stale_side_effects`、`last_ai_text`。
 
-**为什么公开？** 因为它们要被**别的模块**用（测试、`web.py`、其他包）。带下划线的只在文件内用。这是 Python 的约定：**下划线 = 文件私有**，不是 Java 的 `private`（Python 没有真正的访问控制，全靠约定 + 工具检查）。
+**为什么公开？** 因为它们要被**别的模块**用（测试、其他包）。带下划线的只在文件内用。这是 Python 的约定：**下划线 = 文件私有**，不是 Java 的 `private`（Python 没有真正的访问控制，全靠约定 + 工具检查）。
 
 ---
 
@@ -60,11 +60,11 @@ prepare_context → load_agents → recall_memory → (mode_router)
                               retrieve_code_node
 ```
 
-### 2.1 `prepare_context_node`（L177-216，40 行）
+### 2.1 `prepare_context_node`（L202-254，53 行）
 
 全图**第一个**执行的节点，也是最能体现"一次提交 = 一个任务"的地方。
 
-它返回的字典里有 **17 个字段**（[L194-215](../../local-agent-web/src/local_agent/graph/nodes.py#L194-L215)），分成三组：
+它返回的字典里有 **24 个字段**（[L220-251](../../local-agent-web/src/local_agent/graph/nodes.py#L220-L251)），分成三组：
 
 ```python
 update: AgentState = {
@@ -72,18 +72,25 @@ update: AgentState = {
     "thread_id":    state.get("thread_id") or uuid4().hex,
     "session_id":   state.get("session_id") or uuid4().hex,
     "run_id":       uuid4().hex,              # ← 每轮都新建，不复用
+    "run_user_message_id": f"{run_id}:user",
+    "run_submitted_at": datetime.now(timezone.utc),
     "normalized_request": user_input.strip(),
     "task_status":  "running",
     # ② "本轮"字段：覆盖语义，新一轮必须回到初始值
     "task_goal": None,
     "plan": [],
     "current_step_index": 0,
+    "agent_loop_version": 1,
+    "plan_managed": False,
     "pending_tool_calls": [],
     "pending_approval": None,
+    "approval_requested_at": None,
     "reflection_result": None,
     "retry_count": 0,
     "loop_count": 0,
     "memory_refs": [],
+    "memory_write_count": None,
+    "memory_write_skipped": None,
     "rag_refs": [],
     "final_response": None,
     "final_evidence": [],
@@ -92,7 +99,7 @@ if user_input.strip():
     update["messages"] = [HumanMessage(content=user_input)]
 ```
 
-**第 ② 组那 12 行是这一节的重点。** 注释只写了一句（[L200](../../local-agent-web/src/local_agent/graph/nodes.py#L200)）：*"以下都是'本轮'字段（覆盖语义），新一轮必须回到初始值"*。但 docstring 交代了**不这么写会怎样**（[L184-186](../../local-agent-web/src/local_agent/graph/nodes.py#L184-L186)）：
+**第 ② 组那 17 行是这一节的重点。** 注释只写了一句（[L229](../../local-agent-web/src/local_agent/graph/nodes.py#L229)）：*"以下都是'本轮'字段（覆盖语义），新一轮必须回到初始值"*。但 docstring 交代了**不这么写会怎样**（[L209-211](../../local-agent-web/src/local_agent/graph/nodes.py#L209-L211)）：
 
 > **一次提交 = 一个任务**：本节点同时把上一轮的"本轮作用域"字段全部复位（循环计数、任务目标、计划、待执行调用、挂起审批、反思结果等），否则多轮工具任务会**累计到 `agent.max_tool_loops`**，新任务还会**带着旧目标与旧审批继续跑**。
 
@@ -101,11 +108,11 @@ if user_input.strip():
 - **`loop_count` 不复位** → 用户第二轮问个新问题，`loop_count` 还是上一轮的 5，直接撞上循环上限被拦。
 - **`pending_approval` 不复位** → 上一轮挂起的审批会带到新任务，用户可能批准一个**已经无关的动作**。
 
-**第 ③ 个细节：`messages` 是条件写入**（[L214-215](../../local-agent-web/src/local_agent/graph/nodes.py#L214-L215)）——空输入不产生消息。这是为了让"用户直接回车"不污染历史。
+**第 ③ 个细节：`messages` 是条件写入**（[L252-253](../../local-agent-web/src/local_agent/graph/nodes.py#L252-L253)）——空输入不产生消息。这是为了让"用户直接回车"不污染历史。
 
 **第 ④ 个细节，也是最重要的：为什么追加型字段不在这里清理？**
 
-docstring 最后一句（[L189-191](../../local-agent-web/src/local_agent/graph/nodes.py#L189-L191)）：
+docstring 最后一句（[L214-216](../../local-agent-web/src/local_agent/graph/nodes.py#L214-L216)）：
 
 > 追加型字段（`messages`、`tool_events`、`tool_results`、`decision_trace`、`approval_history`、`error_events`、`completed_steps`）属于**历史审计记录**，不在这里清理。
 
@@ -118,13 +125,13 @@ docstring 最后一句（[L189-191](../../local-agent-web/src/local_agent/graph/
 
 **Java 类比**：像 `HttpServletRequest` 的 attributes（每次请求清空）与 Session（跨请求保留）的区别。**放错一边就会出 bug，而且症状很隐蔽。**
 
-**最后一个关键点**（[L188-189](../../local-agent-web/src/local_agent/graph/nodes.py#L188-L189)）：
+**最后一个关键点**（[L213-214](../../local-agent-web/src/local_agent/graph/nodes.py#L213-L214)）：
 
 > 注意本节点只在**新请求**时执行：审批恢复（`Command(resume=...)`）从断点继续，**不会重跑这里**，所以复位不会打断同一任务的后续步骤。
 
 这是 Checkpoint 恢复的一个直接后果：**恢复时不从 `START` 走**，而是从挂起的那个节点继续。所以 `prepare_context` 的复位**不会**在审批恢复时把任务状态清掉。
 
-### 2.2 `load_agents_node`（L219-232，14 行）——唯一不写 State 的节点
+### 2.2 `load_agents_node`（L257-276，20 行）——唯一不写 State 的节点
 
 ```python
 def load_agents_node(state, runtime) -> AgentState:
@@ -150,9 +157,9 @@ def load_agents_node(state, runtime) -> AgentState:
 - 一次调用内不变（AGENTS 规则、模型客户端、工作区路径）→ RuntimeContext
 - 一次调用内会被多个节点改（计划、工具结果、循环计数）→ State
 
-### 2.3 `recall_memory_node`（L331-397，67 行）——"互不牵连"
+### 2.3 `recall_memory_node`（L369-435，67 行）——"互不牵连"
 
-三层记忆里**中期（Chroma 向量）和长期（SQLite）在这里汇合**。docstring 的核心是四个字：**互不牵连**（[L333-340](../../local-agent-web/src/local_agent/graph/nodes.py#L333-L340)）：
+三层记忆里**中期（Chroma 向量）和长期（SQLite）在这里汇合**。docstring 的核心是四个字：**互不牵连**（[L372-379](../../local-agent-web/src/local_agent/graph/nodes.py#L372-L379)）：
 
 > - 中期（Chroma 向量）与长期（SQLite 结构化）**各自判断启用、各自捕获异常**：一层打不开只丢这一层的结果并记一条错误事件，另一层照常召回；
 > - 两层都关闭时**直接透传**：不打开任何库、不加载 embedding 模型；
@@ -162,19 +169,19 @@ def load_agents_node(state, runtime) -> AgentState:
 
 | 层 | 捕获 | 位置 |
 |---|---|---|
-| 中期 | `EmbeddingError` / `MemoryStoreError` | [L364](../../local-agent-web/src/local_agent/graph/nodes.py#L364) |
-| 长期 | `MemoryStoreError` / `sqlite3.Error` / `OSError` | [L386](../../local-agent-web/src/local_agent/graph/nodes.py#L386) |
+| 中期 | `EmbeddingError` / `MemoryStoreError` | [L402](../../local-agent-web/src/local_agent/graph/nodes.py#L402) |
+| 长期 | `MemoryStoreError` / `sqlite3.Error` / `OSError` | [L424](../../local-agent-web/src/local_agent/graph/nodes.py#L424) |
 
 中期会抛 `EmbeddingError`（模型加载失败），长期不会——**异常类型本身就是分层的证据**。
 
-**"两层都关时直接 `return {}`"**（[L346-347](../../local-agent-web/src/local_agent/graph/nodes.py#L346-L347)）是个性能决策：中期库要**加载 embedding 模型**（L3 §5.4 讲过"启动慢"），不关的话每次调用都要加载一次。所以：
+**"两层都关时直接 `return {}`"**（[L384-385](../../local-agent-web/src/local_agent/graph/nodes.py#L384-L385)）是个性能决策：中期库要**加载 embedding 模型**（L3 §5.4 讲过"启动慢"），不关的话每次调用都要加载一次。所以：
 
 ```python
 if not medium_enabled and not long_enabled:
     return {}                    # 一行都不多走
 ```
 
-**`_merge_references`（L400-416）的排序口径值得单独记**（docstring [L402-405](../../local-agent-web/src/local_agent/graph/nodes.py#L402-L405)）：
+**`_merge_references`（L438-454）的排序口径值得单独记**（docstring [L439-444](../../local-agent-web/src/local_agent/graph/nodes.py#L439-L444)）：
 
 > 两类分数量纲不同…**只做同一列表内排序，不把它们当成可比量互相校准**。
 
@@ -182,9 +189,9 @@ if not medium_enabled and not long_enabled:
 
 **Java 类比**：把两个不同来源的 `relevance` 直接比较，就像把"百分比"和"绝对分"混在一起排序——数字能排，但意义是假的。
 
-### 2.4 `retrieve_code_node`（L419-470，52 行）——三个"不"
+### 2.4 `retrieve_code_node`（L457-508，52 行）——三个"不"
 
-这个节点有三条容易忽略的规矩，docstring 全写了（[L421-432](../../local-agent-web/src/local_agent/graph/nodes.py#L421-L432)）：
+这个节点有三条容易忽略的规矩，docstring 全写了（[L458-470](../../local-agent-web/src/local_agent/graph/nodes.py#L458-L470)）：
 
 **① `rag.enabled=false` 时什么都不做**
 
@@ -194,7 +201,7 @@ if not medium_enabled and not long_enabled:
 
 **② 查询素材只取当前轮的输入，绝不读 `task_goal`**
 
-原因在注释里（[L426-428](../../local-agent-web/src/local_agent/graph/nodes.py#L426-L428)）：
+原因在注释里（[L464-466](../../local-agent-web/src/local_agent/graph/nodes.py#L464-L466)）：
 
 > 这个节点在 `planner_node` **之前**，`task_goal` 此刻还没生成（`prepare_context` 每轮把它复位为 `None`），更不能读上一轮遗留的目标。
 
@@ -211,7 +218,7 @@ if not medium_enabled and not long_enabled:
 
 如果都写成"没找到"，模型会把"工具坏了"当成"确实没有"，然后基于不完整信息给出结论。
 
-**还有一个防御性设计**（[L438-442](../../local-agent-web/src/local_agent/graph/nodes.py#L438-L442)）：
+**还有一个防御性设计**（[L476-477](../../local-agent-web/src/local_agent/graph/nodes.py#L476-L477)）：
 
 ```python
 # 正常路径下 context 一定带 security_policy；这里缺了就现建一个，
@@ -224,9 +231,9 @@ if not medium_enabled and not long_enabled:
 
 ## 3. 预算与规划：`compression_node` / `planner_node`
 
-### 3.1 `compression_node`（L573-718，146 行）——只压缩"送模型的窗口"
+### 3.1 `compression_node`（L907-1105，199 行）——只压缩"送模型的窗口"
 
-这是全文件最"抠细节"的节点之一。docstring 里最该记住的一句（[L575-577](../../local-agent-web/src/local_agent/graph/nodes.py#L575-L577)）：
+这是全文件最"抠细节"的节点之一。docstring 里最该记住的一句（[L910](../../local-agent-web/src/local_agent/graph/nodes.py#L910)）：
 
 > **只压缩送模型的窗口：Checkpoint 里的 `messages` 一条都不删**（架构 §10.1）。
 
@@ -238,9 +245,9 @@ if not medium_enabled and not long_enabled:
 | 送模型的窗口 | **压** | 省 token |
 | 页面展示 | 用投影 | 原文留存、读时替换 |
 
-**三个副本，三种用途。** 你在 `nodes.py` 里会反复看到 `_prompt_window` 这个辅助函数（[L473-497](../../local-agent-web/src/local_agent/graph/nodes.py#L473-L497)），它就是"生成送模型的那一份"。
+**三个副本，三种用途。** 你在 `nodes.py` 里会反复看到 `_prompt_window` 这个辅助函数（[L523-575](../../local-agent-web/src/local_agent/graph/nodes.py#L523-L575)），它就是"生成送模型的那一份"。
 
-**触发口径**（[L579-583](../../local-agent-web/src/local_agent/graph/nodes.py#L579-L583)）：
+**触发口径**（[L912-914](../../local-agent-web/src/local_agent/graph/nodes.py#L912-L914)）：
 
 ```text
 estimated_prompt_tokens / (context_window_tokens - max_tokens) >= memory.compression.trigger_ratio
@@ -250,13 +257,13 @@ estimated_prompt_tokens / (context_window_tokens - max_tokens) >= memory.compres
 
 1. 系统提示（含 AGENTS、会话摘要、召回记忆）
 2. 消息窗口
-3. **工具模式下绑定给模型的工具定义**（`_tool_definition_tokens`，[L508-515](../../local-agent-web/src/local_agent/graph/nodes.py#L508-L515)）
+3. **工具模式下绑定给模型的工具定义**（`_tool_definition_tokens`，[L585-594](../../local-agent-web/src/local_agent/graph/nodes.py#L585-L594)）
 
-**第 3 项最容易漏**：工具定义也是 Prompt 的一部分，会真的占 token。工具多的时候（L8 会讲有 6 个工具）这一块不小。**估算口径必须和实际出站一致**，否则预算永远算不准。
+**第 3 项最容易漏**：工具定义也是 Prompt 的一部分，会真的占 token。工具多的时候（L8 会讲有 17 个工具）这一块不小。**估算口径必须和实际出站一致**，否则预算永远算不准。
 
 **`covered` 边界：防重复摘要**
 
-摘要成功后，把"覆盖到哪条消息"记进 `context_budget.summary_covered_messages`（[L692-718](../../local-agent-web/src/local_agent/graph/nodes.py#L692-L718)）。注释解释了为什么（[L658-659](../../local-agent-web/src/local_agent/graph/nodes.py#L658-L659)）：
+摘要成功后，把"覆盖到哪条消息"记进 `context_budget.summary_covered_messages`（[L1068-1093](../../local-agent-web/src/local_agent/graph/nodes.py#L1068-L1093)）。注释解释了为什么（[L916-918](../../local-agent-web/src/local_agent/graph/nodes.py#L916-L918)）：
 
 > 既不重复摘要同一批历史，也**不会出现"既没进窗口、也没进摘要"的消息**。
 
@@ -265,7 +272,7 @@ estimated_prompt_tokens / (context_window_tokens - max_tokens) >= memory.compres
 - 没有边界 → 每轮都摘要同一批历史，**摘要越滚越长**
 - 边界算错 → 有一段消息既被裁掉又没进摘要，**永久丢失**
 
-**降级的四种情况**（docstring [L585-593](../../local-agent-web/src/local_agent/graph/nodes.py#L585-L593)）：
+**降级的四种情况**（docstring [L920-931](../../local-agent-web/src/local_agent/graph/nodes.py#L920-L931)）：
 
 | 情况 | 处理 |
 |---|---|
@@ -278,13 +285,13 @@ estimated_prompt_tokens / (context_window_tokens - max_tokens) >= memory.compres
 
 **第四行呼应 L1 §2**：一个"工具步"是 `AIMessage(tool_calls)` + `ToolMessage` 的组合，从中间切开会让模型看到残缺序列。
 
-**一个很容易忽略的细节**（[L669-672](../../local-agent-web/src/local_agent/graph/nodes.py#L669-L672)）：
+**一个很容易忽略的细节**（[L1045-1047](../../local-agent-web/src/local_agent/graph/nodes.py#L1045-L1047)）：
 
 > 摘要输入也必须**投影**，否则"被纠正的那句'我记住了'"会进摘要，再经 `conversation_summary` 影响**之后每一轮的 Prompt**。
 
 **这是个"污染放大"的 bug**：投影只用在"当前展示"上还不够——如果不投影摘要输入，假承诺会被固化进摘要，然后每轮都带上。**修法：所有"送模型"的路径都要投影。**
 
-### 3.2 `planner_node`（L762-804，43 行）——计划只在"没有计划"时生成
+### 3.2 `planner_node`（L1152-1201，50 行）——计划只在"没有计划"时生成
 
 ```python
 if not plan:
@@ -293,7 +300,7 @@ if not plan:
     # 第一步立刻 running，其余 pending
 ```
 
-**这一句 `if not plan` 是全部的重点**（docstring [L768-771](../../local-agent-web/src/local_agent/graph/nodes.py#L768-L771)）：
+**这一句 `if not plan` 是全部的重点**（docstring [L1159-1162](../../local-agent-web/src/local_agent/graph/nodes.py#L1159-L1162)）：
 
 > 计划只在**没有计划**时生成：同一任务内的后续轮次沿用已有计划，**重启恢复（重入）也不会重新拆步**，所以已完成步骤不会被新计划覆盖。
 
@@ -306,19 +313,19 @@ if not plan:
 
 **这就是 L4 §7.1 说"`planner_node` 是 `max_loop_count` 的写入方"的原因**：上限只在真正规划时设定一次。
 
-**`id` 里的 `run_id`**（[L781](../../local-agent-web/src/local_agent/graph/nodes.py#L781)）：
+**`id` 里的 `run_id`**（[L1178](../../local-agent-web/src/local_agent/graph/nodes.py#L1178)）：
 
 ```python
 id=f"{run_id}:step-{i+1}"        # 形如 "a1b2c3:step-1"
 ```
 
-docstring 解释了为什么（[L770-771](../../local-agent-web/src/local_agent/graph/nodes.py#L770-L771)）：
+docstring 解释了为什么（[L1160-1161](../../local-agent-web/src/local_agent/graph/nodes.py#L1160-L1161)）：
 
 > 步骤 id 形如 `<run_id>:step-N`，`completed_steps` 里留下的**历史任务步骤因此不会让新任务误判"这一步已完成"**。
 
 **这是 L4 §3.1 / §4.3 那个"防串味"主题的第三次出现**：`tool_scope_key` 防跨轮次串味、`PlanStep.retry_count` 防跨步骤串味、这里防跨任务串味。**三个地方防的是同一件事。**
 
-**拆步失败是"合法退化"**（[L807-816](../../local-agent-web/src/local_agent/graph/nodes.py#L807-L816)）：
+**拆步失败是"合法退化"**（[L1204-1217](../../local-agent-web/src/local_agent/graph/nodes.py#L1204-L1217)）：
 
 ```python
 def _draft_steps(context, goal) -> tuple[str, ...]:
@@ -331,9 +338,9 @@ def _draft_steps(context, goal) -> tuple[str, ...]:
 
 ## 4. 决策 → 安全 → 执行：最重的三块
 
-### 4.1 `agent_decision_node`（L819-856，38 行）——模型提出，不代表会执行
+### 4.1 `agent_decision_node`（L1219-1287，69 行）——模型提出，不代表会执行
 
-docstring 只有两句（[L820-823](../../local-agent-web/src/local_agent/graph/nodes.py#L820-L823)）：
+docstring 只有两句（[L1220-1223](../../local-agent-web/src/local_agent/graph/nodes.py#L1220-L1223)）：
 
 > 决策节点：把当前模式允许的工具绑定给模型，取回工具调用或回答。
 >
@@ -341,7 +348,7 @@ docstring 只有两句（[L820-823](../../local-agent-web/src/local_agent/graph/
 
 **第二句是整个安全设计的核心。** 模型输出 `tool_calls` 只是**"申请"**，真正的"批准"在下一个节点。
 
-流程（[L826-856](../../local-agent-web/src/local_agent/graph/nodes.py#L826-L856)）：
+流程（[L1225-1289](../../local-agent-web/src/local_agent/graph/nodes.py#L1225-L1289)）：
 
 ```text
 ① registry 缺失 → 抛 LocalAgentError          （不能没注册表还往下走）
@@ -353,7 +360,7 @@ docstring 只有两句（[L820-823](../../local-agent-web/src/local_agent/graph/
 ⑦ 写回 messages / pending_tool_calls / loop_count+1 / decision_trace
 ```
 
-**第 ③ 步的"失败闭合"值得单独讲**（[L831-833](../../local-agent-web/src/local_agent/graph/nodes.py#L831-L833)）：
+**第 ③ 步的"失败闭合"值得单独讲**（[L1240-1242](../../local-agent-web/src/local_agent/graph/nodes.py#L1240-L1242)）：
 
 ```python
 # 架构 §11.7：不支持 Tool Calling 时不得静默退化成闲聊，要明确告知
@@ -365,9 +372,9 @@ docstring 只有两句（[L820-823](../../local-agent-web/src/local_agent/graph/
 
 **第 ⑦ 步的 `loop_count + 1`** 是循环上限的计数点。所以 `loop_count` 的语义是"**模型被调用的次数**"，不是"反思轮数"。
 
-### 4.2 `safety_gate_node`（L879-1075，197 行）——把"待执行"收敛成覆盖语义
+### 4.2 `safety_gate_node`（L1325-1539，215 行）——把"待执行"收敛成覆盖语义
 
-docstring 有一句关键的设计说明（[L881-884](../../local-agent-web/src/local_agent/graph/nodes.py#L881-L884)）：
+docstring 有一句关键的设计说明（[L1328-1330](../../local-agent-web/src/local_agent/graph/nodes.py#L1328-L1330)）：
 
 > 被拒绝的调用立刻回填 `ToolMessage` 与工具事件，让模型看到拒绝原因；`pending_tool_calls` 是**覆盖语义**，这里把它收敛为"仍需执行"的调用，这样**后续条件边无须再访问策略对象**即可判断有没有要执行的动作。
 
@@ -386,7 +393,7 @@ docstring 有一句关键的设计说明（[L881-884](../../local-agent-web/src/
 
 **这是个很好的分层实践**：把"判断"集中在安全门，把"结果"用覆盖语义暴露给路由。路由保持成一个纯读 State 的函数（L5 §5.3 强调过它们可以单独测）。
 
-**"只在确实要审批时才算指纹"**（[L903-906](../../local-agent-web/src/local_agent/graph/nodes.py#L903-L906)）：
+**"只在确实要审批时才算指纹"**（[L1361-1363](../../local-agent-web/src/local_agent/graph/nodes.py#L1361-L1363)）：
 
 ```python
 # T14C 复审：指纹只在确实要进审批时才算……对用户主目录这类目标会把页面卡死
@@ -396,7 +403,7 @@ docstring 有一句关键的设计说明（[L881-884](../../local-agent-web/src/
 
 **所以判断顺序是**：先分类（要不要审批）→ 只有"要审批"的才算指纹。
 
-**同一回复里多个审批动作只提交第一个**（[L950-992](../../local-agent-web/src/local_agent/graph/nodes.py#L950-L992)）：
+**同一回复里多个审批动作只提交第一个**（[L1409-1450](../../local-agent-web/src/local_agent/graph/nodes.py#L1409-L1450)）：
 
 ```python
 # 否则模型会看到"有 tool_call 却没有 ToolMessage"的残缺序列
@@ -404,15 +411,15 @@ docstring 有一句关键的设计说明（[L881-884](../../local-agent-web/src/
 
 **这是 L1 §2 那个"工具步不能切开"规则的应用**：一个 `AIMessage` 里的 3 个 `tool_calls`，如果只给 1 个 `ToolMessage`，序列就是残缺的。所以**其余两个要回填"等下一轮审批"的 `ToolMessage`**，让模型知道它们没被丢弃、只是排队。
 
-**放行标记写在安全门结束时**（[L995-996](../../local-agent-web/src/local_agent/graph/nodes.py#L995-L996)）：
+**放行标记写在安全门结束时**（[L1453-1454](../../local-agent-web/src/local_agent/graph/nodes.py#L1453-L1454)）：
 
 > 放行标记在本节点结束时就写入 Checkpoint……恢复时能识别出"已放行但结果未知"。
 
 这句话是 §4.3 那个"副作用追踪"的前置条件。**先记"我放行了"，再去执行**——如果执行中崩溃，重启时能看到"放行了但没结果"。
 
-### 4.3 `tool_execution_node`（L1078-1320，243 行）——最难的幂等设计
+### 4.3 `tool_execution_node`（L1542-1860，319 行）——最难的幂等设计
 
-docstring 很短（[L1079-1081](../../local-agent-web/src/local_agent/graph/nodes.py#L1079-L1081)）：
+docstring 很短（[L1543-1545](../../local-agent-web/src/local_agent/graph/nodes.py#L1543-L1545)）：
 
 > 执行放行的工具调用，并把结果回填成 `ToolMessage`（架构 §6）。
 >
@@ -432,7 +439,7 @@ if (run_id, call_id) in confirmed:
 
 #### 第二环：`stale_side_effects` —— 检查必须在**执行前**
 
-这是最值得琢磨的一环。注释写得很明确（[L1103-1105](../../local-agent-web/src/local_agent/graph/nodes.py#L1103-L1105)）：
+这是最值得琢磨的一环。注释写得很明确（[L1569-1570](../../local-agent-web/src/local_agent/graph/nodes.py#L1569-L1570)）：
 
 > 检查放在这里而不是反思里：反思发生时**副作用已经又跑过一次了**……按**工具名**匹配而不是动作指纹——副作用可能已经改过目标文件，指纹必然已经变了。
 
@@ -453,7 +460,7 @@ if (run_id, call_id) in confirmed:
 
 #### 第三环：批准后目标变了 → 批准失效
 
-`_approval_target_changed`（[L3167-3189](../../local-agent-web/src/local_agent/graph/nodes.py#L3167-L3189)）——用户批准的是"删 `a.txt`"，但等到执行时 `a.txt` 已经变了。**批准的语义是"批准这个具体动作"，动作变了批准就无效。**
+`_approval_target_changed`（[L4116-4138](../../local-agent-web/src/local_agent/graph/nodes.py#L4116-L4138)）——用户批准的是"删 `a.txt`"，但等到执行时 `a.txt` 已经变了。**批准的语义是"批准这个具体动作"，动作变了批准就无效。**
 
 **Java 类比**：乐观锁。你读的时候 version=5，提交的时候发现 version=7 了——**拒绝提交**，而不是"反正你批准过"。
 
@@ -473,19 +480,19 @@ finally:
 
 #### 防永久阻断：`SIDE_EFFECT_RECHECK_STAGE`
 
-最后一环是"不要过度保护"。注释（[L1290-1291](../../local-agent-web/src/local_agent/graph/nodes.py#L1290-L1291)）：
+最后一环是"不要过度保护"。注释（[L1829-1830](../../local-agent-web/src/local_agent/graph/nodes.py#L1829-L1830)）：
 
 > 没有这一步，一次异常结束会让**之后每一次运行都拒绝执行副作用**（永久阻断，用户没有任何解除手段）。
 
 **这是一个"安全机制反噬"的经典案例**：为了保护用户而加的"未确认副作用"拦截，如果没有"已提醒过"的标记，就会变成**永久瘫痪**——因为那条"未确认"的记录永远在 State 里。
 
-修法：对每个遗留项写一条 `side_effect_recheck` 决策记录（[L3290-3292](../../local-agent-web/src/local_agent/graph/nodes.py#L3290-L3292)），**提醒过一次就不再重复拦**。
+修法：对每个遗留项写一条 `side_effect_recheck` 决策记录（[L1831-1835](../../local-agent-web/src/local_agent/graph/nodes.py#L1831-L1835)），**提醒过一次就不再重复拦**。
 
 **给你的经验**：任何"基于历史状态拒绝操作"的机制，都必须有一个**退出路径**。否则一次异常 = 永久不可用。
 
-### 4.4 `reflection_node`（L1323-1558，236 行）——三层顺序不能颠倒
+### 4.4 `reflection_node`（L1863-2133，271 行）——三层顺序不能颠倒
 
-这是全文件**最长的节点函数**，也是最核心的。docstring 直接给出三层结构（[L1324-1338](../../local-agent-web/src/local_agent/graph/nodes.py#L1324-L1338)）：
+这是全文件**最长的节点函数**，也是最核心的。docstring 直接给出三层结构（[L1866-1875](../../local-agent-web/src/local_agent/graph/nodes.py#L1866-L1875)）：
 
 > 三层职责，**顺序不能颠倒**：
 >
@@ -517,39 +524,39 @@ LLM 决策（模型说）  ──→  得出 goal_achieved / next_action
 
 **三个实测踩过的坑，都写成了注释**：
 
-**坑 1：证据只取前 N 个字符会让模型误判**（[L1380-1382](../../local-agent-web/src/local_agent/graph/nodes.py#L1380-L1382)）：
+**坑 1：证据只取前 N 个字符会让模型误判**（[L1922-1923](../../local-agent-web/src/local_agent/graph/nodes.py#L1922-L1923)）：
 
 > 工具输出是 JSON（元数据在前、正文在后），只取前 N 个字符会让模型看到 `path` / `line_count` 就以为"**正文被截断、任务没完成**"（**实测因此连续空转并反过来问用户**）。
 
 **这是个特别值得学的 bug**：截断本身没问题，问题是**截断的位置让模型误解了内容**。修法是"按可判读摘要渲染"（`tool_evidence_text`），截断时带明确标注。
 
-**坑 2：按工具名取最后一次，而不是汇总全量**（[L1392-1395](../../local-agent-web/src/local_agent/graph/nodes.py#L1392-L1395)）：
+**坑 2：按工具名取最后一次，而不是汇总全量**（[L1934-1937](../../local-agent-web/src/local_agent/graph/nodes.py#L1934-L1937)）：
 
 > `tool_events` 覆盖整个任务，所以直接汇总全量会让**第二步的失败永久留在集合里**：即使重试或换了做法已经成功，"第二步失败、调整后成功"也**一辈子判不成完成**（复审实证）。
 >
 > 因此按**工具名**取最后一次结果——它表达的正是"后续尝试有没有修复这个工具的失败"。
 
-**`latest_by_tool` 这个字典（[L1354](../../local-agent-web/src/local_agent/graph/nodes.py#L1354)、[L1368](../../local-agent-web/src/local_agent/graph/nodes.py#L1368)）就是干这个的。** 但注释特别强调（[L1395](../../local-agent-web/src/local_agent/graph/nodes.py#L1395)）：
+**`latest_by_tool` 这个字典（[L1894](../../local-agent-web/src/local_agent/graph/nodes.py#L1894)、[L1910](../../local-agent-web/src/local_agent/graph/nodes.py#L1910)）就是干这个的。** 但注释特别强调（[L1937](../../local-agent-web/src/local_agent/graph/nodes.py#L1937)）：
 
 > 注意只影响整体可信度：`final_evidence` 仍按 §4.2 **全量重算**，异常清单也照旧**全量记录**。
 
 **"可信度取最后一次，证据和异常全量"**——这是个精细的区分：判定"现在可信吗"看最后一次，但**审计要看全部**。
 
-**坑 3：`final_evidence` 按当前任务重算**（docstring [L1337-1338](../../local-agent-web/src/local_agent/graph/nodes.py#L1337-L1338)）：
+**坑 3：`final_evidence` 按当前任务重算**（docstring [L1877-1878](../../local-agent-web/src/local_agent/graph/nodes.py#L1877-L1878)）：
 
 > `final_evidence` 按架构 §4.2 从**当前任务**的工具事件重算后**整体覆盖**：历史任务的事件与错误不再混进本轮证据。
 
 注意是**整体覆盖**（`final_evidence` 是覆盖语义，L4 §2 的 26 个之一），不是追加。所以每轮都重算一份，历史任务的东西不会混进来。
 
-### 4.5 `_advance_plan`（L1772-1870，99 行）——三条硬语义
+### 4.5 `_advance_plan`（L2547-2657，111 行）——三条硬语义
 
-反思节点调它推进计划（[L1437](../../local-agent-web/src/local_agent/graph/nodes.py#L1437)）。docstring 标题就写着"**T20 的三条硬语义，复审定稿**"（[L1779-1791](../../local-agent-web/src/local_agent/graph/nodes.py#L1779-L1791)）：
+反思节点调它推进计划（[L2004](../../local-agent-web/src/local_agent/graph/nodes.py#L2004)）。docstring 标题就写着"**T20 的三条硬语义，复审定稿**"（[L2554-2565](../../local-agent-web/src/local_agent/graph/nodes.py#L2554-L2565)）：
 
 **语义 1：完成一步 ≠ 完成整个任务**
 
 > 当前步完成、但计划里还有未走完的步骤时，即使模型给了 `finish` 也**改成 `continue`**——这是机械规则，不接受"第一步做完就宣布收尾"。
 
-代码（[L1812-1825](../../local-agent-web/src/local_agent/graph/nodes.py#L1812-L1825)）：
+代码（[L2587-2598](../../local-agent-web/src/local_agent/graph/nodes.py#L2587-L2598)）：
 
 ```python
 if goal_achieved:
@@ -562,7 +569,7 @@ if goal_achieved:
         note = f"步骤 {index+1}「{step.description}」已完成，计划还有 {len(remaining)} 步，继续执行（完成一步不等于完成整个任务）"
 ```
 
-**注意 `achieved = False` 那一行**——注释（[L1818](../../local-agent-web/src/local_agent/graph/nodes.py#L1818)）解释了：
+**注意 `achieved = False` 那一行**——注释（[L2593](../../local-agent-web/src/local_agent/graph/nodes.py#L2593)）解释了：
 
 > 计划没走完就不是"任务完成"：否则 `task_status` 会显示 `completed`，与"仍在继续"矛盾。
 
@@ -574,7 +581,7 @@ if goal_achieved:
 
 **"只写摘要不算重规划"**——这句话点出了一个很隐蔽的失败模式：模型说"我打算换个方法"，你把这句话记下来了，但**计划没变**，下一步还是老方法。**用户看到的和实际发生的脱节。**
 
-**然后是一个"实测"出来的上限**（[L1830-1833](../../local-agent-web/src/local_agent/graph/nodes.py#L1830-L1833)）：
+**然后是一个"实测"出来的上限**（[L2562-2564](../../local-agent-web/src/local_agent/graph/nodes.py#L2562-L2564)）：
 
 > 计划已达 `MAX_PLAN_STEPS` 时**不再插入**：改为原地按调整重做当前步骤并计一次重试……否则计划会**无限增长，任务永远收不了尾**（实测）。
 >
@@ -590,20 +597,20 @@ if goal_achieved:
 
 ---
 
-## 5. 审批节点：`approval_interrupt_node`（L3008-3111）
+## 5. 审批节点：`approval_interrupt_node`（L3945-4060）
 
 单独一节，因为它是**全项目唯一会"挂起"的节点**，也是重放语义最微妙的地方。
 
 ### 5.1 四条注意事项（docstring 原文）
 
-[L3011-3018](../../local-agent-web/src/local_agent/graph/nodes.py#L3011-L3018)：
+[L3950-3955](../../local-agent-web/src/local_agent/graph/nodes.py#L3950-L3955)：
 
 > - 本节点在 resume 时会被**整体重放**，因此 `interrupt()` **之前不能有任何副作用**；
 > - 递归删除需要**两次独立恢复**：第一次恢复无论传入什么都不构成授权，只有第二次独立的 `interrupt()` 返回"批准 + 显式二次确认"才授权（架构 §6.5）。**阶段不能用"决策内容"推断**，否则一次伪造的带标记恢复就能跳过二次确认；
 > - 第一阶段选择拒绝 / 修改参数时立即按该决策结束，不再要求第二次确认；
 > - 决策写入 `approval_history`，条件是"**同一次审批只记一次**"，重放不会重复追加。
 
-### 5.2 代码结构（L3020-3038）
+### 5.2 代码结构（L3957-3975）
 
 ```python
 del runtime                                    # ← 审批不访问运行上下文
@@ -647,7 +654,7 @@ if bool(request.get("requires_second_confirmation")) and (
 
 **Java 类比**：你不会用"请求体里有没有 `step=2` 字段"来判断走到第几步，而是让框架的调用栈决定。数据可以被伪造，控制流不能。
 
-**④ 第二次没勾确认 → 一律按拒绝**（[L3035-3036](../../local-agent-web/src/local_agent/graph/nodes.py#L3035-L3036)）：
+**④ 第二次没勾确认 → 一律按拒绝**（[L3972](../../local-agent-web/src/local_agent/graph/nodes.py#L3972)）：
 
 ```python
 # 第二次没有显式勾选"确认删除"→ 一律按拒绝处理（失败闭合）
@@ -657,7 +664,7 @@ if bool(request.get("requires_second_confirmation")) and (
 
 ### 5.3 放行标记：一个复审发现的漏洞
 
-[L3060-3073](../../local-agent-web/src/local_agent/graph/nodes.py#L3060-L3073) 是全文件最值得读的注释之一：
+[L3998-4010](../../local-agent-web/src/local_agent/graph/nodes.py#L3998-L4010) 是全文件最值得读的注释之一：
 
 ```python
 if choice == "approve":
@@ -688,11 +695,11 @@ if choice == "approve":
 
 **这个 bug 的教训**：**"所有路径都经过 X"这个假设必须验证**。加一条边（`approval_interrupt → tool_execution`）就绕过了原本"唯一"的标记点。L5 §10.3 讲的"入边/出边表"就是验证这类假设的工具。
 
-**注意 `salt=approved_name`**（[L3071](../../local-agent-web/src/local_agent/graph/nodes.py#L3071)）——L4 §3.2 讲过：没有 `salt` 时同轮多条记录会 ID 撞车被 `merge_appended` **静默丢弃**。这里必须区分"审批决策"和"放行标记"两条记录。
+**注意 `salt=approved_name`**（[L4008](../../local-agent-web/src/local_agent/graph/nodes.py#L4008)）——L4 §3.2 讲过：没有 `salt` 时同轮多条记录会 ID 撞车被 `merge_appended` **静默丢弃**。这里必须区分"审批决策"和"放行标记"两条记录。
 
 ### 5.4 恢复时"只替换被审批的那一个调用"
 
-[L3093-3102](../../local-agent-web/src/local_agent/graph/nodes.py#L3093-L3102)：
+[L4030-4031](../../local-agent-web/src/local_agent/graph/nodes.py#L4030-L4031)：
 
 ```python
 # 只替换被审批的这一个调用：同批次里已经放行的免审调用必须留在待执行列表里，
@@ -712,9 +719,9 @@ if choice == "approve":
 
 ## 6. 收尾三节点：`memory_write_node` / `chat_node` / `final_response_node`
 
-### 6.1 `memory_write_node`（L2620-2801，182 行）——五条硬语义
+### 6.1 `memory_write_node`（L3524-3715，192 行）——五条硬语义
 
-docstring 标题写着"**四条硬语义（复审定稿）**"，但正文列了 5 条（[L2624-2641](../../local-agent-web/src/local_agent/graph/nodes.py#L2624-L2641)）。逐条看：
+docstring 标题写着"**四条硬语义（复审定稿）**"，但正文列了 5 条（[L3533-3546](../../local-agent-web/src/local_agent/graph/nodes.py#L3533-L3546)）。逐条看：
 
 **第 1 条：两层各自打开、各自降级，且"启用但打不开"≠"配置关闭"**
 
@@ -727,7 +734,7 @@ docstring 标题写着"**四条硬语义（复审定稿）**"，但正文列了 
 | 配置关闭 | "我没打算用记忆" —— 正常 |
 | 启用但打不开 | **"我本来要记，但没记住"** —— 必须告知 |
 
-注释里有个复审实证（[L2712](../../local-agent-web/src/local_agent/graph/nodes.py#L2712)）：
+注释里有个复审实证（[L3619](../../local-agent-web/src/local_agent/graph/nodes.py#L3619)）：
 
 > 混为一谈会让**零写入的候选也登记完成**（复审实证：长期库打不开时仍标成完成）。
 
@@ -737,7 +744,7 @@ docstring 标题写着"**四条硬语义（复审定稿）**"，但正文列了 
 
 > 只有该候选的**所有**目标都 `satisfied` **且至少有一个目标真正落库**（`written` / `duplicate` / `conflict`）才登记进 `memory_write_candidates`；**部分成功或零写入都不登记**，下一轮还能补写。
 
-**"至少有一个真正落库"这个附加条件就是修上面的 bug**（[L2633-2634](../../local-agent-web/src/local_agent/graph/nodes.py#L2633-L2634)）：
+**"至少有一个真正落库"这个附加条件就是修上面的 bug**（[L3537](../../local-agent-web/src/local_agent/graph/nodes.py#L3537)）：
 
 > 复审实证：只按 satisfied 判会让"库打不开"的候选以零写入登记完成。
 
@@ -771,11 +778,11 @@ docstring 标题写着"**四条硬语义（复审定稿）**"，但正文列了 
 
 **症状很有意思**：实际只存了 1 条，但文案说"已保存 3 条"。**因为去重发生在写库层（稳定 id 相同会合并），但计数发生在别处。**
 
-**这类 bug 的通用形态**：**"我处理了几个"和"实际存了几个"用两套计数**。修法是**在进入处理前就去重**（`_distinct_candidates`，[L2804-2819](../../local-agent-web/src/local_agent/graph/nodes.py#L2804-L2819)）。
+**这类 bug 的通用形态**：**"我处理了几个"和"实际存了几个"用两套计数**。修法是**在进入处理前就去重**（`_distinct_candidates`，[L3718-3733](../../local-agent-web/src/local_agent/graph/nodes.py#L3718-L3733)）。
 
-### 6.2 `chat_node`（L721-756，36 行）——不绑定工具
+### 6.2 `chat_node`（L1108-1149，42 行）——不绑定工具
 
-docstring（[L722-726](../../local-agent-web/src/local_agent/graph/nodes.py#L722-L726)）：
+docstring（[L1109-1113](../../local-agent-web/src/local_agent/graph/nodes.py#L1109-L1113)）：
 
 > 架构 §1.3-3 要求闲聊模式**不注册文件与 Shell 工具**，因此本节点**不调用 `bind_tools`**；模型实例来自 RuntimeContext（架构 §4.1），不在图内持有。
 
@@ -783,15 +790,15 @@ docstring（[L722-726](../../local-agent-web/src/local_agent/graph/nodes.py#L722
 
 **Java 类比**：不是"告诉调用方别调这个方法"，而是**这个类上根本没有这个方法**。
 
-**它用 `stream_answer` 而不是 `model.invoke`**（[L734-739](../../local-agent-web/src/local_agent/graph/nodes.py#L734-L739)），因为闲聊回答可以直接流式展示给用户。注释（[L733](../../local-agent-web/src/local_agent/graph/nodes.py#L733)）：
+**它用 `stream_answer` 而不是 `model.invoke`**（[L1124-1129](../../local-agent-web/src/local_agent/graph/nodes.py#L1124-L1129)），因为闲聊回答可以直接流式展示给用户。注释（[L1123](../../local-agent-web/src/local_agent/graph/nodes.py#L1123)）：
 
 > 闲聊回答就是"最终回答"之一：开了流式就增量展示（**不逐块写 Checkpoint**，见 `ui.streaming`）。
 
 **"不逐块写 Checkpoint"是个重要细节**：流式只影响**页面显示**，最终回答仍然是**一条** AI 消息写进 State。这样 Checkpoint 里不会有一堆 `AIMessageChunk`。
 
-### 6.3 `final_response_node`（L2952-2986，35 行）——`task_status` 的四条规则
+### 6.3 `final_response_node`（L3884-3923，40 行）——`task_status` 的四条规则
 
-docstring 直接给了规则表（[L2954-2961](../../local-agent-web/src/local_agent/graph/nodes.py#L2954-L2961)）：
+docstring 直接给了规则表（[L3887-3896](../../local-agent-web/src/local_agent/graph/nodes.py#L3887-L3896)）：
 
 > `task_status` 的更新规则（架构 §5.4：**有回答不等于任务完成**）：
 >
@@ -811,7 +818,7 @@ docstring 直接给了规则表（[L2954-2961](../../local-agent-web/src/local_a
 
 **第 2 条特别值得注意**：`final_response_node` 是**唯一**写 `task_status` 终值的地方，如果它无条件写 `completed`，那 `completion_router_node` 辛苦标记的 `failed`（L5 §6.3 的循环上限）就白费了。
 
-**一个精确比较的细节**（[L2972-2974](../../local-agent-web/src/local_agent/graph/nodes.py#L2972-L2974)）：
+**一个精确比较的细节**（[L3908](../../local-agent-web/src/local_agent/graph/nodes.py#L3908)）：
 
 > 用精确比较：没有 `mode` 的 State（直接调用节点的单测）按**工具语义**处理，避免"默认按闲聊"把 `running` 变成 `completed`。
 
@@ -821,11 +828,11 @@ docstring 直接给了规则表（[L2954-2961](../../local-agent-web/src/local_a
 
 ## 7. 贯穿全文件的 8 个模式
 
-看完 14 个节点，有 8 个模式反复出现。**记住它们比记住任何单个节点更有用。**
+看完 15 个节点，有 8 个模式反复出现。**记住它们比记住任何单个节点更有用。**
 
 ### 模式 1：`_decision` / `_error` 的 `salt` —— 每条记录都要问"会不会撞车"
 
-[L3216-3236](../../local-agent-web/src/local_agent/graph/nodes.py#L3216-L3236) 和 [L3239-3255](../../local-agent-web/src/local_agent/graph/nodes.py#L3239-L3255) 两个构造器。
+[L4165-4185](../../local-agent-web/src/local_agent/graph/nodes.py#L4165-L4185) 和 [L4188-4204](../../local-agent-web/src/local_agent/graph/nodes.py#L4188-L4204) 两个构造器。
 
 **同一个节点、同一轮次产生多条记录时，必须给 `salt`**，否则 `merge_appended` 会**静默丢弃**后面的（L4 §3.2）。
 
@@ -864,7 +871,7 @@ docstring 直接给了规则表（[L2954-2961](../../local-agent-web/src/local_a
 ### 模式 4：鸭子类型避免硬依赖
 
 ```python
-# _invoke_tool（L3411-3412）
+# _invoke_tool（L4354-4360）
 invoke = getattr(tool, "invoke", None)      # ← 不 import BaseTool
 ```
 
@@ -874,10 +881,10 @@ invoke = getattr(tool, "invoke", None)      # ← 不 import BaseTool
 
 ### 模式 5：估算与实际共用同一个函数
 
-`_system_prompt`（[L548-570](../../local-agent-web/src/local_agent/graph/nodes.py#L548-L570)）被**两处**调用：
+`_stable_prompt`（[L654-660](../../local-agent-web/src/local_agent/graph/nodes.py#L654-L660)）被**两处**调用：
 
-1. `compression_node` 里**估算 token**（L599）
-2. `agent_decision_node` / `chat_node` 里**真的发给模型**（L835、L728）
+1. `compression_node` 里**估算 token**（L939）
+2. `agent_decision_node` / `chat_node` 里**真的发给模型**（L1245、L1115）
 
 **如果估算用一份逻辑、发送用另一份，预算就永远算不准。** 这是 L4 §6 讲 `RuntimeContext` 时提过的同一原则。
 
@@ -887,10 +894,10 @@ invoke = getattr(tool, "invoke", None)      # ← 不 import BaseTool
 
 | 位置 | 用途 |
 |---|---|
-| `_prompt_window`（L481-483） | 拼送模型的窗口 |
-| `compression_node`（L669-672） | 摘要的输入 |
-| `_chat_memory_final_text`（L2471-2473） | 闲聊收尾重写 |
-| `web.py:236` | 页面渲染 |
+| `_prompt_window`（L558） | 拼送模型的窗口 |
+| `compression_node`（L1048） | 摘要的输入 |
+| `_chat_memory_final_text`（L3490） | 闲聊收尾重写 |
+| `application/projection.py:419` | 页面渲染 |
 
 **漏掉任何一处，假承诺就会从那个口子漏进去**——尤其摘要那条，漏了会**影响之后每一轮**（§3.1）。
 
@@ -900,9 +907,9 @@ invoke = getattr(tool, "invoke", None)      # ← 不 import BaseTool
 
 | 函数 | 压制什么 |
 |---|---|
-| `_apply_mechanical_guard`（[L1678-1700](../../local-agent-web/src/local_agent/graph/nodes.py#L1678-L1700)） | 三条自相矛盾组合 |
-| `_apply_retry_limit`（[L1703-1717](../../local-agent-web/src/local_agent/graph/nodes.py#L1703-L1717)） | 重试超上限 |
-| `_apply_stall_guard`（[L1894-1927](../../local-agent-web/src/local_agent/graph/nodes.py#L1894-L1927)） | 连续空转 |
+| `_apply_mechanical_guard`（[L2453-2476](../../local-agent-web/src/local_agent/graph/nodes.py#L2453-L2476)） | 三条自相矛盾组合 |
+| `_apply_retry_limit`（[L2478-2493](../../local-agent-web/src/local_agent/graph/nodes.py#L2478-L2493)） | 重试超上限 |
+| `_apply_stall_guard`（[L2680-2736](../../local-agent-web/src/local_agent/graph/nodes.py#L2680-L2736)） | 连续空转 |
 
 加上 `_advance_plan` 的"完成一步 ≠ 完成整个任务"——**四处都是"模型说了不算"**。
 
@@ -914,9 +921,9 @@ invoke = getattr(tool, "invoke", None)      # ← 不 import BaseTool
 |---|---|---|
 | `tool_scope_key` | `run_id:tool_call_id` | 跨轮次 |
 | `PlanStep.id` | `{run_id}:step-N` | 跨任务 |
-| `current_task_scope`（[L3196-3203](../../local-agent-web/src/local_agent/graph/nodes.py#L3196-L3203)） | `run_id` | 跨任务 |
+| `current_task_scope`（[L4145-4152](../../local-agent-web/src/local_agent/graph/nodes.py#L4145-L4152)） | `run_id` | 跨任务 |
 
-`_in_current_task`（[L3206-3213](../../local-agent-web/src/local_agent/graph/nodes.py#L3206-L3213)）在 `reflection_node` 里用了 **3 次**（L1350、L1360、L1398）——**每条读历史记录的地方都要过滤作用域**。
+`_in_current_task`（[L4155-4162](../../local-agent-web/src/local_agent/graph/nodes.py#L4155-L4162)）在 `reflection_node` 里用了 **3 次**（L1890、L1900、L1940）——**每条读历史记录的地方都要过滤作用域**。
 
 **规律：凡是从"追加型字段"里读数据，都要问一句"这条是这一轮的吗"。**
 
@@ -928,13 +935,13 @@ invoke = getattr(tool, "invoke", None)      # ← 不 import BaseTool
 
 这个项目的 docstring 里有大量**"为什么"和"踩过的坑"**，而这些在代码里看不出来。举几个例子：
 
-- L184-186：不复位"本轮字段"会累计到 `max_tool_loops`
-- L669-671：摘要输入不投影会污染之后每一轮
-- L1380-1382：只取前 N 字符让模型以为正文被截断
-- L1392-1395：全量汇总会让"第二步失败"永久留存
-- L1831-1833：真实模型会连续插入调整步骤直到走不完
-- L3060-3064：审批路径没有放行标记 → 重复执行副作用
-- L1290-1291：没有 recheck 标记 → 永久阻断
+- L209-211：不复位"本轮字段"会累计到 `max_tool_loops`
+- L1045-1047：摘要输入不投影会污染之后每一轮
+- L1922-1923：只取前 N 字符让模型以为正文被截断
+- L1934-1935：全量汇总会让"第二步失败"永久留存
+- L2618-2619：真实模型会连续插入调整步骤直到走不完
+- L3998-4001：审批路径没有放行标记 → 重复执行副作用
+- L1829-1830：没有 recheck 标记 → 永久阻断
 
 **这些都是"复审实证"——是被测试或人工复核抓出来的真实 bug。** 读它们等于免费获得一份"这个项目踩过的坑"清单。
 
@@ -948,7 +955,7 @@ rg -n "复审|实证|实测" src/local_agent/graph/nodes.py
 
 ### 技巧 3：用 L4 §7.1 的表当索引
 
-`nodes.py` 的 3470 行不该通读。正确的用法是：
+`nodes.py` 的 4419 行不该通读。正确的用法是：
 
 ```text
 "我想知道 plan 是谁改的"     → 查 L4 §7.1 的写入方 → planner_node / reflection_node
@@ -985,9 +992,9 @@ rg -n "复审|实证|实测" src/local_agent/graph/nodes.py
 
 接下来进入**支撑模块**，可以按兴趣挑：
 
-- **L7 · 安全层**（`security/`，2001 行，6 文件）——最推荐接着看。因为 L6 里反复出现"安全门""指纹""审批""放行标记"，但**具体怎么判定**全在 `security/` 里。讲清 `classify_tool` 的三类判定、`action_fingerprint` 到底算了什么、`shell_guard` 怎么拦危险命令、递归删除的二次确认怎么触发。
-- **L8 · 能力层**（`tools/`，1203 行）——6 个工具怎么做出来的。
+- **L7 · 安全层**（`security/`，2162 行，6 文件）——最推荐接着看。因为 L6 里反复出现"安全门""指纹""审批""放行标记"，但**具体怎么判定**全在 `security/` 里。讲清 `classify_tool` 的三类判定、`action_fingerprint` 到底算了什么、`shell_guard` 怎么拦危险命令、递归删除的二次确认怎么触发。
+- **L8 · 能力层**（`tools/`，3195 行）——17 个工具怎么做出来的。
 - **L9 · 记忆·反思·上下文·检索**（`memory/` + `reflection/` + `context/` + `rag/`）——L6 里调用最多的那些能力。
-- **L10 · 启动与界面**（`web.py` + `ui/` + `persistence/` + `llm/`）——从点击到落盘的完整一次调用。
+- **L10 · 启动与界面**（`api/`（FastAPI）+ `frontend/`（React）+ `web.py`（可选 Streamlit 调试）+ `ui/` + `persistence/` + `llm/`）——从点击到落盘的完整一次调用。
 
 建议接着写 **L7**——它能把 L6 里所有"安全门说不行"的悬念一次性结清。

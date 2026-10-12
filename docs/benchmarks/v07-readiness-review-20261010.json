@@ -1,0 +1,134 @@
+{
+  "review_date": "2026-10-10",
+  "verdict": "request_changes",
+  "v07_implementation_ready": false,
+  "planning_may_start": true,
+  "confirmed_must_fix": 3,
+  "source_modified_this_review": false,
+  "paid_calls": 0,
+  "semantic_quality_review": "excluded_by_user",
+  "previous_fix_hash_matches": {
+    "src/local_agent/application/jobs.py": true,
+    "src/local_agent/application/service.py": true,
+    "src/local_agent/application/errors.py": true,
+    "src/local_agent/tools/git_tools.py": true,
+    "src/local_agent/tools/result_spill.py": true,
+    "tests/test_jobs.py": true,
+    "tests/test_api.py": true,
+    "tests/test_git_tools.py": true,
+    "tests/test_search_spill.py": true,
+    "../ARCHITECTURE.md": true,
+    "../V0_5_DEVELOPMENT_PLAN.md": true,
+    "../V0_6_DEVELOPMENT_PLAN.md": true
+  },
+  "reviewed_sha256": {
+    "src/local_agent/application/service.py": "aa57697cdc88be2fc6fd1270569f0e61e8e9832e600fb2bffad7107612227ee6",
+    "src/local_agent/application/jobs.py": "42a1fc8b99485a7ab58e0bbf1daea93171a5fea6e98403e82ba175368d93173e",
+    "src/local_agent/security/policy.py": "12fed177b36ef694f92b5d3e40c2067e42222900dbf46d1c16cd63c9add26102",
+    "src/local_agent/tools/web_tools.py": "786fabe3586209290555bcd029bce4c3a1841ddc6e41c9d06dc1f49fdd62877a",
+    "src/local_agent/session_kind.py": "833eec132b93b0227533b50c39eaf2ba576c52b7c2bfc47facc0028a7beca158",
+    "tests/test_api.py": "936a1d2bcc3717eb0787cac6baa34cab8bca2249f368c41021667fd5813c02eb",
+    "tests/test_web_tools.py": "0d669f0b9daca30b425d45da523e95fbc5f337da7acca247607e28971a852e71",
+    "../docs/planning/FUTURE_WORK.md": "c9c012be8706f46b26d1b590d8c4b260d8b31f9043c1c481886e3e602b26aae8",
+    "../V0_5_DEVELOPMENT_PLAN.md": "68ebc8c151d3e7f497c5e976ca622fa12c64c54016c029f9f9e77f5ea3018fc9",
+    "../V0_6_DEVELOPMENT_PLAN.md": "99aaccdb3d4ce3788e20cc8d50c6a01606532c4eef0e5c0f6855aed2c6ceed7d",
+    "../ARCHITECTURE.md": "722c187244aec1818fd08cd54f12aed5361fd1922291d1894e7eb8a99474bae3"
+  },
+  "verification": {
+    "python": {
+      "passed": 1469,
+      "skipped": 8,
+      "failed": 0,
+      "warnings": 38,
+      "seconds": 687.18,
+      "exit_code": 0,
+      "log": "eval/v07-readiness-20261010/pytest.log"
+    },
+    "frontend_unit": {
+      "passed": 339,
+      "files": 38,
+      "exit_code": 0
+    },
+    "playwright_default": {
+      "passed": 180,
+      "skipped": 3,
+      "exit_code": 0,
+      "limitations": "prototype and browser regression; not live background crash proof"
+    },
+    "ruff": "passed",
+    "mypy": "passed: 122 source files",
+    "openapi": "passed",
+    "frontend_typecheck": "passed",
+    "frontend_lint": "passed",
+    "frontend_api_drift": "passed"
+  },
+  "probes": {
+    "stale-timeout": {
+      "new_token_cancelled_before": false,
+      "expired": [
+        "d780fa4933274848ba4ca2136abfd9ac"
+      ],
+      "old_state": "completed",
+      "new_state": "queued",
+      "new_job_id": "b41f64a16b224a2ebf92b017f70cffa8",
+      "new_token_cancelled_after": true,
+      "new_refusal_reason": "本轮已被取消，不再启动新的工具调用（超过 max_task_seconds=5 秒）",
+      "old_job_reported_expired": true,
+      "model_calls": 0
+    },
+    "unbound-cancel": {
+      "paid_calls": 0,
+      "cancelled_job_state": "cancelled",
+      "cancelled_job_run_id": null,
+      "token_after_first_restart": true,
+      "token_after_second_restart": false,
+      "approval_http_status": 200,
+      "file_preserved": false,
+      "token_after_approval": false,
+      "job_states": [
+        "cancelled",
+        "waiting_user"
+      ]
+    },
+    "dns-rebind": {
+      "paid_calls": 0,
+      "external_http_requests": 0,
+      "blocked": false,
+      "returned_owned_loopback_body": true,
+      "dns_answers": [
+        {
+          "stage": "validation",
+          "address": "8.8.8.8"
+        },
+        {
+          "stage": "validation",
+          "address": "8.8.8.8"
+        },
+        {
+          "stage": "connection",
+          "address": "127.0.0.1"
+        },
+        {
+          "stage": "validation",
+          "address": "8.8.8.8"
+        }
+      ],
+      "owned_loopback_visits": [
+        "/owned"
+      ]
+    }
+  },
+  "probe_exit_codes": {
+    "stale-timeout": 1,
+    "unbound-cancel": 1,
+    "dns-rebind": 1
+  },
+  "probe_failures_are_expected_for_current_defects": true,
+  "zip_exists": false,
+  "v07_plan_exists": false,
+  "files_added_this_review": [
+    "docs/benchmarks/v07-readiness-review-20261010.md",
+    "docs/benchmarks/v07-readiness-review-20261010.json",
+    "local-agent-web/eval/v07-readiness-20261010/"
+  ]
+}

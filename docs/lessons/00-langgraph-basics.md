@@ -58,7 +58,7 @@ langchain-openai             1.6.2
 | 概念 | 是什么 | 本项目里的位置 |
 |---|---|---|
 | **State** | 流程中携带的数据（一个 dict） | [`graph/state.py`](../../local-agent-web/src/local_agent/graph/state.py) 的 `AgentState` |
-| **Node** | 一个"只做一件事"的函数 | [`graph/nodes.py`](../../local-agent-web/src/local_agent/graph/nodes.py) 里 16 个 |
+| **Node** | 一个"只做一件事"的函数 | [`graph/nodes.py`](../../local-agent-web/src/local_agent/graph/nodes.py) 里 17 个 |
 | **Edge** | 节点之间的连接（顺序或条件） | [`graph/edges.py`](../../local-agent-web/src/local_agent/graph/edges.py) |
 | **Reducer** | 同一字段被多次更新时的合并规则 | `state.py` 里的 `Annotated[...]` |
 | **Runtime** | 一次调用的依赖容器（模型、策略、配置） | `state.py` 的 `RuntimeContext` |
@@ -72,7 +72,7 @@ langchain-openai             1.6.2
 ### 2.1 第一步：声明图的类型
 
 ```python
-# 本项目的真实写法：src/local_agent/graph/builder.py:76
+# 本项目的真实写法：src/local_agent/graph/builder.py:101
 graph: ChatStateGraph = StateGraph(AgentState, context_schema=RuntimeContext)
 ```
 
@@ -102,7 +102,7 @@ __init__(
 ### 2.2 第二步：加节点 `add_node`
 
 ```python
-# 本项目的真实写法：builder.py:77-92
+# 本项目的真实写法：builder.py:107-123
 graph.add_node(PREPARE_CONTEXT, prepare_context_node)   # 名字在前，函数在后
 ```
 
@@ -145,7 +145,7 @@ add_edge(self, start_key: str | list[str], end_key: str) -> Self
 ```
 
 ```python
-# 本项目的真实写法：edges.py:75-78
+# 本项目的真实写法：edges.py:80-83
 graph.add_edge(START, PREPARE_CONTEXT)
 graph.add_edge(PREPARE_CONTEXT, LOAD_AGENTS)
 graph.add_edge(LOAD_AGENTS, RECALL_MEMORY)
@@ -170,7 +170,7 @@ add_conditional_edges(
 **三个参数，记住"从哪出发 / 怎么判断 / 去哪"**：
 
 ```python
-# 本项目的真实写法：edges.py:80-84
+# 本项目的真实写法：edges.py:85-89
 graph.add_conditional_edges(
     MODE_ROUTER,                                              # ① 从哪个节点出发
     route_by_mode,                                            # ② 用哪个函数判断
@@ -181,7 +181,7 @@ graph.add_conditional_edges(
 判断函数要做的事非常简单——**返回一个字符串**：
 
 ```python
-# edges.py 引用的判断函数，定义在 routers.py:223-225
+# edges.py 引用的判断函数，定义在 routers.py:236-238
 def route_by_mode(state: AgentState) -> str:
     return ROUTE_TOOL if state.get("mode") == "tool" else ROUTE_CHAT
 ```
@@ -210,7 +210,7 @@ compile(
 ```
 
 ```python
-# 本项目的真实写法：builder.py:94
+# 本项目的真实写法：builder.py:125
 return graph.compile(checkpointer=checkpointer)
 ```
 
@@ -220,7 +220,7 @@ return graph.compile(checkpointer=checkpointer)
 | `interrupt_before` / `interrupt_after` | 在指定节点前后强制暂停（静态中断） |
 | `store` | 跨会话的长期存储（本项目用的是自己的 `memory/`，没用它） |
 
-**"编译"发生在程序启动时，不是每次对话时。** 本项目在 `web.py` 里启动时编译一次，之后每轮对话都调用同一张编译好的图。
+**"编译"发生在程序启动时，不是每次对话时。** 本项目在 [`api/container.py`](../../local-agent-web/src/local_agent/api/container.py) 里启动时编译一次，之后每轮对话都调用同一张编译好的图。
 
 ---
 
@@ -281,7 +281,7 @@ c -> {'out': '名叫 config: dict'}
 ### 3.2 返回值：只写你改过的字段
 
 ```python
-# 本项目的真实写法：nodes.py 里的 mode_router_node（routers.py:139-145）
+# 本项目的真实写法：nodes.py 里的 mode_router_node（routers.py:146-152）
 return {
     "mode": result.mode,
     "route_reason": result.reason,
@@ -297,11 +297,11 @@ return {
 
 ```python
 return {"mode": "tool"}      # 改了 mode
-return {}                    # 什么都没改（合法，见 routers.py:276）
+return {}                    # 什么都没改（合法，见 routers.py:333）
 return {"a": 1, "b": 2}      # 改多个
 ```
 
-**为什么要 `return {}` 而不是 `return None`？** 本项目 [`completion_router_node`](../../local-agent-web/src/local_agent/graph/routers.py#L264) 就是用 `return {}` 表示"这次判断结果是不需要改任何状态"。写 None 语义上不自明。
+**为什么要 `return {}` 而不是 `return None`？** 本项目 [`completion_router_node`](../../local-agent-web/src/local_agent/graph/routers.py#L321) 就是用 `return {}` 表示"这次判断结果是不需要改任何状态"。写 None 语义上不自明。
 
 ### 3.3 节点里**不能**做的事
 
@@ -440,7 +440,7 @@ class RuntimeContext(TypedDict, total=False):
     app_config: AppConfig
     ...
 
-# builder.py:137-149 在每次调用前构造它
+# builder.py:348-369 在每次调用前构造它
 return RuntimeContext(
     workspace_root=workspace_root,
     model_adapter=model_adapter,
@@ -449,7 +449,7 @@ return RuntimeContext(
     ...
 )
 
-# 节点里取用（routers.py:127-132）
+# 节点里取用（routers.py:127-139）
 def mode_router_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
     result = decide_mode(user_text=..., context=runtime.context)
 ```
@@ -467,12 +467,13 @@ def mode_router_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
 ## 6. 跑图：`invoke` 的三个参数
 
 ```python
-# 本项目的真实写法：src/local_agent/web.py:213-217
-result = app.graph.invoke(
+# 本项目的真实写法：src/local_agent/application/service.py:1608-1613
+for chunk in app.graph.stream(
     payload,                                              # ① 输入：初始 State 的一部分
     config={"configurable": {"thread_id": thread_id}},     # ② 配置：会话键在这里
     context=context,                                      # ③ 依赖：RuntimeContext 实例
-)
+    stream_mode="updates",
+):
 ```
 
 | 参数 | 传什么 | 说明 |
@@ -489,16 +490,16 @@ result = app.graph.invoke(
 所以本项目所有涉及状态的读写都带着它：
 
 ```python
-# builder.py:162 读某个会话当前的状态
+# builder.py:382 读某个会话当前的状态
 snapshot = graph.get_state({"configurable": {"thread_id": thread_id}})
 return dict(snapshot.values or {})      # .values 就是当前的 State
 ```
 
-`get_state` 返回的 `snapshot` 有两个常用属性：`values`（当前 State）和 `config`（含 `checkpoint_id`，见 `web.py:389-391`）。
+`get_state` 返回的 `snapshot` 有两个常用属性：`values`（当前 State）和 `config`（含 `checkpoint_id`，见 `builder.py:162`）。
 
-### 本项目为什么用 `invoke` 而不是 `stream`
+### 本项目为什么用 `stream` 而不是 `invoke`
 
-`invoke` 是"跑完整张图，一次性拿到最终 State"。本项目图层面用 `invoke`；需要在页面上**逐字显示**的流式效果发生在**模型层**（每次 LLM 调用的内部），不是图层。两者不要混淆。
+`invoke` 是"跑完整张图，一次性拿到最终 State"。但本项目要在图一交出本轮 `run_id` 时就把它绑定到台账，这一绑定必须**早于任何副作用**；而 `invoke` 只在整轮结束后才返回，那时再绑定已经太晚，所以图层面改用 `stream(..., stream_mode="updates")` 逐节点收更新（见 [`application/service.py`](../../local-agent-web/src/local_agent/application/service.py#L1580-L1582) 的注释）。需要在页面上**逐字显示**的流式效果仍发生在**模型层**（每次 LLM 调用的内部），不是图层。两者不要混淆。
 
 ---
 
@@ -515,7 +516,7 @@ return dict(snapshot.values or {})      # .values 就是当前的 State
 这直接决定了两条项目约束：
 
 1. **有副作用的节点必须幂等**：所以项目里到处是 `merge_appended` 去重，而不是简单 `operator.add`。
-2. **`interrupt()` 之前不能有任何副作用**：[`nodes.py:3013`](../../local-agent-web/src/local_agent/graph/nodes.py#L3013) 的注释原话是"本节点在 resume 时会被整体重放，因此 `interrupt()` 之前不能有任何副作用"。
+2. **`interrupt()` 之前不能有任何副作用**：[`nodes.py:3893`](../../local-agent-web/src/local_agent/graph/nodes.py#L3893) 的注释原话是"本节点在 resume 时会被整体重放，因此 `interrupt()` 之前不能有任何副作用"。
 
 **Java 类比**：像消息队列的"至少一次投递"——消费者必须幂等。这里同理：节点是"至少执行一次"的。
 
@@ -544,7 +545,7 @@ Command(*, graph=None, update=None, resume=None, goto=())
 ### 8.2 本项目怎么用
 
 ```python
-# nodes.py:3025-3031（简化）
+# nodes.py:3905-3911（简化）
 first = _as_mapping(interrupt(_approval_prompt(request, stage=1)))
 if _approved(first) and request["requires_second_confirmation"]:
     second = _as_mapping(interrupt(_approval_prompt(request, stage=2)))
@@ -555,21 +556,17 @@ if _approved(first) and request["requires_second_confirmation"]:
 恢复侧的代码：
 
 ```python
-# web.py:366-370
-result = app.graph.invoke(
-    Command(resume=dict(resume_value)),                    # 注意：输入位置放的是 Command
-    config={"configurable": {"thread_id": thread_id}},
-    context=context,
-)
+# application/service.py:1356
+payload = Command(resume=resume)                           # 注意：输入位置放的是 Command
 ```
 
 ### 8.3 挂起状态下不能干的事
 
-[`web.py:10`](../../local-agent-web/src/local_agent/web.py#L10) 的注释说明了这条约束：
+[`persistence/session_store.py:11`](../../local-agent-web/src/local_agent/persistence/session_store.py#L11) 的注释说明了这条约束：
 
 > 待审批的会话只能经 `Command(resume=...)` 恢复，不能用普通用户输入覆盖挂起状态。
 
-判断某个会话是否处于挂起状态，用的是 `get_state` 里有没有中断信息（`web.py:329` 的 `thread_interrupt`）。**这是"状态机"思维：挂起是一种显式状态，不是"没反应"。**
+判断某个会话是否处于挂起状态，用的是 `get_state` 里有没有中断信息（`application/service.py:1843-1854` 的 `has_live_interrupt`）。**这是"状态机"思维：挂起是一种显式状态，不是"没反应"。**
 
 ---
 
@@ -621,18 +618,18 @@ print(app.invoke({"n": 0, "log": ["init"]}))      # ⑤ 跑
 
 | 想干的事 | 写法 | 本项目位置 |
 |---|---|---|
-| 声明图 | `StateGraph(State类, context_schema=Context类)` | `builder.py:76` |
-| 加节点 | `add_node("名字", 函数)` | `builder.py:77-92` |
-| 固定跳转 | `add_edge(A, B)` ／ `add_edge(START, 第一个节点)` | `edges.py:75-78` |
-| 条件跳转 | `add_conditional_edges(A, 判断函数, {返回值: 目标})` | `edges.py:80-84` |
-| 编译 | `graph.compile(checkpointer=...)` | `builder.py:94` |
+| 声明图 | `StateGraph(State类, context_schema=Context类)` | `builder.py:101` |
+| 加节点 | `add_node("名字", 函数)` | `builder.py:107-123` |
+| 固定跳转 | `add_edge(A, B)` ／ `add_edge(START, 第一个节点)` | `edges.py:80-83` |
+| 条件跳转 | `add_conditional_edges(A, 判断函数, {返回值: 目标})` | `edges.py:85-89` |
+| 编译 | `graph.compile(checkpointer=...)` | `builder.py:125` |
 | 节点读 State | 第一个参数 `state`，用 `state.get("字段")` | 所有节点 |
 | 节点读依赖 | 第二个参数必须**叫 `runtime`**，用 `runtime.context.xxx` | `routers.py:127` |
 | 节点改 State | `return {"字段": 新值}` | 所有节点 |
-| 跑一次 | `graph.invoke(输入, config=..., context=...)` | `web.py:213` |
-| 读状态 | `graph.get_state({"configurable": {"thread_id": ...}}).values` | `builder.py:162` |
-| 挂起问人 | 节点内 `interrupt(数据)` | `nodes.py:3025` |
-| 恢复 | `graph.invoke(Command(resume=数据), config=...)` | `web.py:366` |
+| 跑一次 | `graph.stream(输入, config=..., context=...)` | `application/service.py:1608` |
+| 读状态 | `graph.get_state({"configurable": {"thread_id": ...}}).values` | `builder.py:382` |
+| 挂起问人 | 节点内 `interrupt(数据)` | `nodes.py:3905` |
+| 恢复 | `graph.stream(Command(resume=数据), config=...)` | `application/service.py:1356` |
 | 消息追加 | `Annotated[list[AnyMessage], add_messages]` | `state.py:24` |
 | 列表追加 | `Annotated[list[X], operator.add]` | `state.py` 多处 |
 

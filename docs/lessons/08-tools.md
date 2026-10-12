@@ -19,32 +19,40 @@ L7 讲的是"**能不能做**"——一次 `delete_file` 要过十道关，每�
 
 一句话：**`security/` 说能不能做，`tools/` 说怎么做。**
 
-`tools/` 是唯一真正**碰磁盘、碰子进程**的包。它的每一行都在"动真格"，所以它的代码密度很高——1203 行里塞了大量"为什么这里必须这样写"的注释。
+`tools/` 是唯一真正**碰磁盘、碰子进程**的包。它的每一行都在"动真格"，所以它的代码密度很高——3195 行里塞了大量"为什么这里必须这样写"的注释。
 
 ---
 
-## §0 全景：5 个文件、1203 行
+## §0 全景：10 个文件、3195 行
 
 ```
 tools/
 ├── __init__.py        1 行    包声明
-├── tool_registry.py  69 行    工具注册表：有哪些工具、给谁看
-├── result_types.py  122 行    7 个 Pydantic 结果模型 + State 记录结构
-├── shell_tools.py   193 行    run_shell：起子进程、截断输出
-└── file_tools.py    818 行    5 个文件工具：list_dir / read_file / edit_file / write_file / delete_file
+├── tool_registry.py  150 行   工具注册表：有哪些工具、给谁看
+├── result_types.py   221 行   14 个 Pydantic 结果模型 + State 记录结构
+├── plan_tools.py      45 行   update_plan：维护当前计划
+├── search_tools.py   429 行   检索工具：grep / glob
+├── shell_tools.py    193 行   run_shell：起子进程、截断输出
+├── web_tools.py      464 行   Web 工具：web_search / web_fetch
+├── skill_tools.py    204 行   技能工具：skill_list / skill_load
+├── git_tools.py      634 行   Git 工具：git_status / git_diff / git_log / git_commit
+└── file_tools.py     854 行   5 个文件工具：list_dir / read_file / edit_file / write_file / delete_file
 ```
 
-### 5 个文件的关系
+### 10 个文件的关系
 
 ```mermaid
 graph LR
     A["tool_registry.py<br/>ToolRegistry.build(policy)"] --> B["file_tools.py<br/>build_file_tools(policy)"]
     A --> C["shell_tools.py<br/>build_shell_tools(policy)"]
+    A --> G["plan / search / web / git tools<br/>build_plan_tools … build_git_tools"]
     B --> D["result_types.py<br/>ListDirResult … DeleteFileResult"]
     C --> D
+    G --> D
     D --> E["ToolResultRecord<br/>（进入 State）"]
     B --> F["security/<br/>policy · path_guard · diff_guard"]
     C --> F
+    G --> F
 ```
 
 三条依赖，注意方向：
@@ -55,7 +63,7 @@ graph LR
 
 ### 一个容易困惑的点：为什么工具要"拿着" policy？
 
-看 [build_file_tools](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L507-L624) 的写法：
+看 [build_file_tools](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L535-L660) 的写法：
 
 ```python
 def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
@@ -124,10 +132,10 @@ MODE_CAPABILITIES = {"chat": ("files_read",), "tool": PROFILES["coder"]}
 
 **闲聊模式（`chat`）不是一个工具都不给**：它固定绑定 `files_read`（`list_dir` / `read_file`），这是 v0.1 起就有的行为。（本节早期版本写的"chat 模式零工具"与源码矛盾，已按 `capabilities.py` 订正；由此暴露的"chat 绑着工具却拿不到工具规范"是另一个问题，记在 `docs/planning/FUTURE_WORK.md` B-28。）
 
-绑定工具不是免费的：每绑一个工具，它的 JSON Schema 就进入出站 Prompt，按 token 计费。`nodes.py` 的 `_estimate_tool_tokens` 专门统计这部分开销：
+绑定工具不是免费的：每绑一个工具，它的 JSON Schema 就进入出站 Prompt，按 token 计费。`nodes.py` 的 `_tool_definition_tokens` 专门统计这部分开销：
 
 ```python
-def _estimate_tool_tokens(state, context) -> int:
+def _tool_definition_tokens(state, context) -> int:
     registry = context.tool_registry
     if registry is None:
         return 0
@@ -140,7 +148,7 @@ def _estimate_tool_tokens(state, context) -> int:
 
 ### 1.2 看得见 ≠ 能执行
 
-模块注释（`tool_registry.py:6-7`）明确：
+模块注释（`tool_registry.py:5`）明确：
 
 > 放行与否由 `SecurityPolicy` 在 `safety_gate_node` 判定；注册表只负责"有哪些工具、给谁看"。
 
@@ -186,7 +194,7 @@ class ToolRegistry:
 | 位置 | 用途 |
 |---|---|
 | [nodes.py](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py) | `agent_decision_node`：`tools_for(state["mode"], context.agent_capabilities)` → `bind_tools` |
-| [nodes.py:513](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py#L506-L513) | `_tool_definition_tokens`：估算工具定义占用的 token |
+| [nodes.py:581](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py#L581-L590) | `_tool_definition_tokens`：估算工具定义占用的 token |
 | `tool_execution_node` | 按 `call["name"]` 取工具执行 |
 
 ---
@@ -202,7 +210,7 @@ class ToolRegistry:
 | 工具 | `required` | 参数（类型 / 默认值） |
 |---|---|---|
 | `list_dir` | `[]` | `path='.'`、`recursive=False`、`include_hidden=False`、`max_entries=200` |
-| `read_file` | `['path']` | `start_line=None`、`end_line=None`、`max_chars=50000` |
+| `read_file` | `['path']` | `start_line=None`、`end_line=None`、`max_chars=20000` |
 | `edit_file` | `['path']` | `old_text=''`、`new_text=''`、`patch=''`、`replace_all=False`、`expected_sha256=None`、`reason=''` |
 | `write_file` | `['path','content']` | `overwrite=False`、`reason=''` |
 | `delete_file` | `['path']` | `recursive=False`、`reason=''` |
@@ -229,7 +237,7 @@ class ToolRegistry:
 
 ### 2.3 docstring 就是给模型的说明书
 
-`@tool` 会把 docstring 里的 `Args:` 段解析成每个参数的描述。所以 [edit_file 的 docstring](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L570-L585) 写得像一份契约：
+`@tool` 会把 docstring 里的 `Args:` 段解析成每个参数的描述。所以 [edit_file 的 docstring](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L606-L621) 写得像一份契约：
 
 ```
 两种输入模式**互斥**，请只用其中一种：
@@ -262,7 +270,7 @@ if not resolved.is_dir():
 
 ### 3.2 关键辅助：`_bounded_children`
 
-[file_tools.py:705-723](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L705-L723)：
+[file_tools.py:741-759](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L741-L759)：
 
 ```python
 def _bounded_children(directory: Path, limit: int) -> tuple[list[Path], bool]:
@@ -403,7 +411,7 @@ max_entries=3（目录里 2 个可见文件）
 
 `total_entries` 来自 `total = len(candidates)`，而 `candidates` 是**已经读进内存的那一部分**。所以它是"我看过 6 条"，不是"磁盘上一共 500 条"。
 
-对比 [run_shell 的 `_describe_target`](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L726-L750)——它碰到同样的困境，但选择了**显式说明**：
+对比 [run_shell 的 `_describe_target`](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L762-L786)——它碰到同样的困境，但选择了**显式说明**：
 
 ```python
 if files + directories >= DELETE_IMPACT_SCAN_LIMIT:
@@ -464,7 +472,7 @@ class DirEntry(BaseModel):
 
 ### 3.9 死代码（顺带一提）
 
-`_is_hidden_relative`（[file_tools.py:797](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L797-L803)）和 `_depth`（[file_tools.py:806](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L806-L810)）**在全项目里没有任何调用点**（已 grep 确认）。
+`_is_hidden_relative`（[file_tools.py:833](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L833-L839)）和 `_depth`（[file_tools.py:842](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L842-L846)）**在全项目里没有任何调用点**（已 grep 确认）。
 
 它们是递归遍历的早期版本遗留：隐藏判定改成内联的 `child.name.startswith(".")`，深度改成栈里的 `depth` 变量后，这两个函数就没人用了。`_is_hidden_relative` 还带着"路径任一段以点开头"的额外语义（比内联版更严格），`_depth` 甚至有 `MAX_RECURSIVE_DEPTH + 1` 的兜底返回——都是好想法，但没接上。
 
@@ -474,7 +482,7 @@ class DirEntry(BaseModel):
 
 ## §4 `read_file`：编码、二进制与"Hash 悖论"
 
-[read_file_content](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L149-L214) 只有 65 行，但里面藏着一个非常漂亮的设计。
+[read_file_content](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L149-L242) 只有 94 行，但里面藏着一个非常漂亮的设计。
 
 ### 4.1 第一行就有讲究
 
@@ -555,7 +563,7 @@ start_line=2,end_line=4 -> content='line2\r\nline3\r\nline4\r\n'，但 line_coun
 
 **为什么这样设计？** 因为它要回答的问题是"这个文件多大"，而不是"这次返回了多少行"。模型拿到 `line_count=5, start_line=2, end_line=4` 就知道"文件还有第 1 行和第 5 行没给我"，可以决定要不要继续读。
 
-`_select_lines` 的参数校验（[file_tools.py:753-765](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L753-L765)）实测：
+`_select_lines` 的参数校验（[file_tools.py:789-801](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L789-L801)）实测：
 
 | 调用 | 结果 |
 |---|---|
@@ -566,7 +574,7 @@ start_line=2,end_line=4 -> content='line2\r\nline3\r\nline4\r\n'，但 line_coun
 
 ### 4.5 核心设计：`_read_prefix_and_sha256` 的"Hash 悖论"
 
-这是 `read_file` 最值得学的一段。[file_tools.py:637-654](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L637-L654)：
+这是 `read_file` 最值得学的一段。[file_tools.py:673-690](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L673-L690)：
 
 ```python
 def _read_prefix_and_sha256(path: Path, max_bytes: int) -> tuple[bytes, str, bool]:
@@ -644,7 +652,7 @@ if size_limited:
 
 ## §5 `edit_file` 精确替换模式
 
-[edit_file_content](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L217-L353) 是全包第二长的函数（137 行），它把"改文件"这件事拆成了 8 道机械检查。
+[edit_file_content](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L245-L381) 是全包第二长的函数（137 行），它把"改文件"这件事拆成了 8 道机械检查。
 
 ### 5.1 执行链路
 
@@ -668,7 +676,7 @@ current_sha256 = hashlib.sha256(data).hexdigest()
 expected = (expected_sha256 or "").strip().lower()      # ⑥ 版本校验（见 5.2）
 ```
 
-顺序要点：**安全判定在读写之前**。注释（`file_tools.py:269-270`）明确：
+顺序要点：**安全判定在读写之前**。注释（`file_tools.py:297-298`）明确：
 
 > 先解析目标：越界（`WorkspaceBoundaryError`）、敏感文件与受保护目标（`SecurityError`）必须在看审批之前就失败闭合。
 
@@ -786,7 +794,7 @@ _atomic_write(resolved, new_data)
 三件事：
 
 1. **写盘前先算 diff**：diff 为空 → 拒绝。这是最后一道"无变化"守卫（前面已经查过 `old_text != new_text`，但 patch 模式可能算出空结果）。
-2. **BOM 还原**：`codecs.BOM_UTF8` 显式写回。注释（`file_tools.py:336-337`）：
+2. **BOM 还原**：`codecs.BOM_UTF8` 显式写回。注释（`file_tools.py:364-365`）：
    > `utf-8-sig` 解码会有意移除 BOM；编辑已有文件时必须把原来的编码标记写回去，否则一次普通文本替换会静默改变文件格式。
 3. **`_atomic_write`**（见 §7.2）。
 
@@ -805,7 +813,7 @@ return EditFileResult(
 )
 ```
 
-`old_sha256` / `new_sha256` 成对返回，是为了让**反思节点做机械校验**（[result_types.py:55-56](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/result_types.py#L52-L67)）：
+`old_sha256` / `new_sha256` 成对返回，是为了让**反思节点做机械校验**（[result_types.py:162-163](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/result_types.py#L151-L166)）：
 
 > `old_sha256` / `new_sha256` 供反思阶段机械校验"Hash 是否真的变了"。
 
@@ -1056,7 +1064,7 @@ if raw_name in _NULL_TARGETS or raw_name.startswith("a/dev/null"): ...
 | `\ No newline at end of file` | ❌（`parse_patch` 阶段就拒绝） |
 | 应用后无变化 | ❌ "patch 应用后内容没有变化，已拒绝写入" |
 
-**注意 `replaced_count` 的语义在两种模式下不同**——代码里专门写进了 `note`（`file_tools.py:302-304`）：
+**注意 `replaced_count` 的语义在两种模式下不同**——代码里专门写进了 `note`（`file_tools.py:330-332`）：
 
 ```python
 # replaced_count 在 patch 模式下表示**应用的 hunk 数**（不是替换处数）。字段语义写进
@@ -1072,7 +1080,7 @@ note = f"补丁模式：已应用 {replaced_count} 个 hunk（replaced_count 为
 
 ### 7.1 `write_file`：只创建，不覆盖
 
-[write_file_content](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L356-L423) 的实测表：
+[write_file_content](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L384-L451) 的实测表：
 
 | 调用 | 结果 |
 |---|---|
@@ -1089,7 +1097,7 @@ note = f"补丁模式：已应用 {replaced_count} 个 hunk（replaced_count 为
 
 ### 7.2 `_atomic_write`：临时文件 + `os.replace`
 
-[file_tools.py:657-670](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L657-L670)：
+[file_tools.py:693-706](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L693-L706)：
 
 ```python
 def _atomic_write(path: Path, data: bytes) -> None:
@@ -1123,7 +1131,7 @@ def _atomic_write(path: Path, data: bytes) -> None:
 
 ### 7.3 `_create_new_file`：`O_EXCL` 关掉时间窗
 
-[file_tools.py:673-698](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L673-L698)：
+[file_tools.py:709-735](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L709-L735)：
 
 ```python
 flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
@@ -1162,7 +1170,7 @@ os.open(path, O_CREAT | O_EXCL)   # 检查和创建是同一次系统调用
 
 ### 7.4 `delete_file`：三层防护 + 一次扫描
 
-[delete_file_target](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L426-L480) 的结构：
+[delete_file_target](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L454-L508) 的结构：
 
 ```python
 arguments = {"path": path, "recursive": recursive}
@@ -1181,7 +1189,7 @@ resolved = policy.resolve_path(path)
 _assert_deletable(resolved, policy.workspace_root, recursive)
 ```
 
-**"不算指纹、不描述目标"这句话很重要**（`file_tools.py:447-448`）：
+**"不算指纹、不描述目标"这句话很重要**（`file_tools.py:475-476`）：
 
 > 硬拒绝（受保护目标、越界、敏感文件…）：立即失败，**不算指纹、不描述目标**——这两件事都要遍历目标目录，对主目录那种目标会直接卡死（T14C 复审）。
 
@@ -1209,7 +1217,7 @@ _assert_deletable(resolved, policy.workspace_root, recursive)
 
 ### 7.6 `_assert_deletable`：执行前复核
 
-[file_tools.py:483-497](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L483-L497)：
+[file_tools.py:511-525](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/file_tools.py#L511-L525)：
 
 ```python
 def _assert_deletable(path: Path, workspace_root: Path, recursive: bool) -> None:
@@ -1224,7 +1232,7 @@ def _assert_deletable(path: Path, workspace_root: Path, recursive: bool) -> None
         raise SecurityError("删除目录必须显式设置 recursive=true")
 ```
 
-注释（`file_tools.py:486-487`）：
+注释（`file_tools.py:514-515`）：
 
 > 这里是**执行前**的复核：即使已经拿到人工批准，受保护目标也照样拒绝（架构 §1.5 的"不可审批目标"），因此判定、指纹与执行三处都以同一个规范化路径为准。
 
@@ -1241,7 +1249,7 @@ if path.name == ".git" or ".git" in path.parts:
 
 **`path.parts` 是什么？** `Path` 的每一段名字组成的 tuple。`Path("a/.git/config").parts` → `('a', '.git', 'config')`。**Java 类比**：相当于 `Path.getName(i)` 的集合。
 
-**注意 `_normalized_root` 的存在**（`file_tools.py:500-504`）：
+**注意 `_normalized_root` 的存在**（`file_tools.py:528-532`）：
 
 ```python
 def _normalized_root(workspace_root: Path) -> Path:
@@ -1275,7 +1283,7 @@ requested_timeout = (
 
 **这是"approval fingerprint 一致性"问题**：审批时算指纹用了 `timeout_seconds=30`（默认值），执行时如果算出 `timeout_seconds=None`（没填），指纹就不同 → 合法批准被判为无效。
 
-对应的工具 Schema 也把这个语义写进了 docstring（`shell_tools.py:158-159`）：
+对应的工具 Schema 也把这个语义写进了 docstring（`shell_tools.py:159-160`）：
 
 ```python
 # 省略（None）时用 security.shell.default_timeout_seconds，不写死常量，
@@ -1327,7 +1335,7 @@ completed = subprocess.run(
 
 | 参数 | 为什么 |
 |---|---|
-| `shell=False` | **模块头注释（`shell_tools.py:2`）**："执行方式固定为 `shell=False` + argv 数组"。含 Shell 语法的命令由**平台适配器**（`cmd.exe /d /s /c` 或 `pwsh -NoProfile -NonInteractive -Command`）执行，适配器本身仍以 argv 数组启动 |
+| `shell=False` | **模块头注释（`shell_tools.py:3`）**："执行方式固定为 `shell=False` + argv 数组"。含 Shell 语法的命令由**平台适配器**（`cmd.exe /d /s /c` 或 `pwsh -NoProfile -NonInteractive -Command`）执行，适配器本身仍以 argv 数组启动 |
 | `capture_output=True` | 结果要回填给模型，不能被打到终端 |
 | `timeout=...` | 超时抛 `TimeoutExpired`，进入专门的处理分支 |
 | `check=False` | **退出码非 0 不算异常**，见 §8.5 |
@@ -1405,7 +1413,7 @@ run_shell_command("git status", timeout=999)  -> ❌ "超时时间不能超过�
 
 ### 8.8 结果结构
 
-[ShellResult](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/result_types.py#L81-L95)：
+[ShellResult](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/result_types.py#L180-L194)：
 
 ```python
 class ShellResult(BaseModel):
@@ -1440,7 +1448,7 @@ class ShellResult(BaseModel):
 
 ### 9.1 `_invoke_tool`：三态归一
 
-[nodes.py:3405-3423](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py#L3405-L3423)：
+[nodes.py:4297-4315](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py#L4297-L4315)：
 
 ```python
 def _invoke_tool(tool, call, policy) -> tuple[str, ToolResultStatus]:
@@ -1485,7 +1493,7 @@ def _invoke_tool(tool, call, policy) -> tuple[str, ToolResultStatus]:
 
 ### 9.2 `ToolResultRecord`：进 State 的那条记录
 
-[result_types.py:109-122](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/result_types.py#L109-L122)：
+[result_types.py:208-221](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/tools/result_types.py#L208-L221)：
 
 ```python
 class ToolResultRecord(TypedDict):
@@ -1531,7 +1539,7 @@ class ToolResultRecord(TypedDict):
 
 ### 9.3 `_result_truncated`：从 JSON 里捞标记
 
-[nodes.py:3435-3441](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py#L3435-L3441)：
+[nodes.py:4327-4333](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py#L4327-L4333)：
 
 ```python
 def _result_truncated(content: str) -> bool:
@@ -1555,7 +1563,7 @@ def _result_truncated(content: str) -> bool:
 
 ### 9.4 `_evidence_type`：工具产出什么证据
 
-[nodes.py:3444-3452](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py#L3444-L3452)：
+[nodes.py:4336-4344](file:///e:/pylianxi/chaiai/local-agent-web/src/local_agent/graph/nodes.py#L4336-L4344)：
 
 ```python
 def _evidence_type(tool_name: str) -> EvidenceType:
@@ -1631,11 +1639,11 @@ sequenceDiagram
 |---|---|---|---|
 | `OUTPUT_PREVIEW_CHARS` | `2000` | `file_tools.py:48` | 预览进 State / 进事件的长度上限 |
 | `MAX_RECURSIVE_DEPTH` | `5` | `file_tools.py:45` | 递归列目录深度上限 |
-| `DELETE_IMPACT_SCAN_LIMIT` | `500` | `file_tools.py:702` | 删除影响范围摘要的扫描上限 |
+| `DELETE_IMPACT_SCAN_LIMIT` | `500` | `file_tools.py:738` | 删除影响范围摘要的扫描上限 |
 | `MAX_PATCH_CHARS` | `200000` | `diff_guard.py:27` | patch 文本长度上限 |
 | `MAX_PATCH_HUNKS` | `200` | `diff_guard.py:30` | 单次 patch 的 hunk 数上限 |
 
-注意 `OUTPUT_PREVIEW_CHARS` **定义在 `file_tools.py`，却被 `nodes.py:137` import**：
+注意 `OUTPUT_PREVIEW_CHARS` **定义在 `file_tools.py`，却被 `nodes.py:158` import**：
 
 ```python
 from local_agent.tools.file_tools import OUTPUT_PREVIEW_CHARS
@@ -1704,14 +1712,14 @@ L8 讲完了"**具体怎么做**"——工具怎么改文件、怎么起进程�
 
 但还有一条**更长的链路**没讲：模型在提议工具调用**之前**，它的 Prompt 是怎么攒出来的？工具执行完**之后**，谁来判断"这一步到底成没成功"？下次对话怎么记得上次做了什么？
 
-这就是 L9 的四个包（共 5762 行）：
+这就是 L9 的四个包（共 7427 行）：
 
 | 包 | 行数 | 干什么 |
 |---|---|---|
-| `context/` | 736 | 出站 Prompt 怎么组装、怎么按预算裁剪 |
-| `memory/` | 3329 | 三层记忆：工作记忆 / 长期记忆 / 召回 |
-| `reflection/` | 879 | 机械校验 + LLM 反思：判断"这次任务成了吗" |
-| `rag/` | 819 | 代码检索（Chroma 向量库） |
+| `context/` | 1692 | 出站 Prompt 怎么组装、怎么按预算裁剪 |
+| `memory/` | 3856 | 三层记忆：工作记忆 / 长期记忆 / 召回 |
+| `reflection/` | 1056 | 机械校验 + LLM 反思：判断"这次任务成了吗" |
+| `rag/` | 823 | 代码检索（Chroma 向量库） |
 
 **为什么这四个放一起？** 因为它们都围绕一个核心问题：**模型看不到全部真相，我们怎么决定"给它看什么"**。
 

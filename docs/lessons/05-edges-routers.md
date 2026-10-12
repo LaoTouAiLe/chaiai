@@ -8,9 +8,9 @@
 
 | 文件 | 行数 | 管什么 | 类比 |
 |---|---|---|---|
-| [builder.py](../../local-agent-web/src/local_agent/graph/builder.py) | 163 | **装配**：注册 16 个节点、编译图 | Spring 的 `@Configuration` |
-| [edges.py](../../local-agent-web/src/local_agent/graph/edges.py) | 143 | **接线**：11 条固定边 + 6 组条件边 | `application.yml` 里的路由规则 |
-| [routers.py](../../local-agent-web/src/local_agent/graph/routers.py) | 350 | **判定**：走哪条路的函数 | 一堆 `Predicate<T>` |
+| [builder.py](../../local-agent-web/src/local_agent/graph/builder.py) | 383 | **装配**：注册 17 个节点、编译图 | Spring 的 `@Configuration` |
+| [edges.py](../../local-agent-web/src/local_agent/graph/edges.py) | 161 | **接线**：9 条固定边 + 9 组条件边 | `application.yml` 里的路由规则 |
+| [routers.py](../../local-agent-web/src/local_agent/graph/routers.py) | 382 | **判定**：走哪条路的函数 | 一堆 `Predicate<T>` |
 
 **关键点：接线和判定是分开的。** `edges.py` 只写"从 A 到 B 有哪些出口"，`routers.py` 只写"这个状态该走哪个出口"。改流程形状看前者，改判定规则看后者。
 
@@ -18,7 +18,7 @@
 
 ## 1. 全景图（实测生成，非手绘）
 
-下面这张图不是从 `edges.py` 的注释抄的——是我编译出真实图、把 `graph.get_graph().edges` 全部导出后画的。**11 条固定边 + 17 条条件边展开 = 28 条边**。
+下面这张图不是从 `edges.py` 的注释抄的——是我编译出真实图、把 `graph.get_graph().edges` 全部导出后画的。**9 条固定边 + 26 条条件边展开 = 35 条边**。
 
 ```mermaid
 flowchart TD
@@ -38,29 +38,38 @@ flowchart TD
     AD -->|tools| SG{safety_gate_node}
     AD -->|reflect| RF[reflection_node]
     AD -->|final| FR[final_response_node]
+    AD -->|chat| CH
 
-    SG -->|execute| TE[tool_execution_node]
+    SG -->|execute| TE{tool_execution_node}
     SG -->|approval| AI[approval_interrupt_node]
     SG -->|reflect| RF
-    TE --> RF
+    SG -->|chat| CP
 
     AI -->|approve| TE
     AI -->|edit| PL
     AI -->|reject| FR
 
+    TE -->|tool| RF
+    TE -->|chat| CP
     RF --> CR{completion_router}
-    CH --> RF
+
+    CH -->|chat| RF
+    CH -->|final| FR
 
     CR -->|continue| PL
     CR -->|retry| CP
     CR -->|memory_write| MW[memory_write_node]
-    CR -->|ask_user / finish / loop_limit| FR
+    CR -->|ask_user / loop_limit| FR
+    CR -->|finish| TM{task_memory_node}
+
+    TM -->|memory_write| MW
+    TM -->|finish| FR
 
     MW --> FR
     FR --> END([END])
 ```
 
-> `{花括号}` 是"有条件出口的节点"，`[方括号]` 是普通节点。图里 `agent_decision_node` / `safety_gate_node` / `approval_interrupt_node` / `completion_router` 都是前者。
+> `{花括号}` 是"有条件出口的节点"，`[方括号]` 是普通节点。图里 `mode_router` / `compression_node` / `agent_decision_node` / `safety_gate_node` / `approval_interrupt_node` / `tool_execution_node` / `completion_router` / `task_memory_node` / `chat_node` 都是前者。
 
 **先把这张图记住，后面全是它的细节。**
 
@@ -68,12 +77,12 @@ flowchart TD
 
 ## 2. 图的装配：`builder.py`
 
-[build_chat_graph](../../local-agent-web/src/local_agent/graph/builder.py#L66-L94) 只有 19 行，干三件事：
+[build_chat_graph](../../local-agent-web/src/local_agent/graph/builder.py#L91-L125) 只有 35 行，干三件事：
 
 ```python
 graph: ChatStateGraph = StateGraph(AgentState, context_schema=RuntimeContext)  # ① 声明类型
-graph.add_node(PREPARE_CONTEXT, prepare_context_node)                          # ② 注册 16 个节点
-...  # 共 16 行
+graph.add_node(PREPARE_CONTEXT, prepare_context_node)                          # ② 注册 17 个节点
+...  # 共 17 行
 add_minimal_chat_edges(graph)                                                  # ③ 接线（在 edges.py）
 return graph.compile(checkpointer=checkpointer)                                # ④ 编译
 ```
@@ -88,7 +97,7 @@ graph.add_node(PREPARE_CONTEXT, prepare_context_node)
 #                字符串常量（来自 routers.py）  函数（来自 nodes.py）
 ```
 
-`PREPARE_CONTEXT = "prepare_context"` 这 16 个常量分两处定义：**14 个业务节点名在 [nodes.py](../../local-agent-web/src/local_agent/graph/nodes.py)**，**2 个路由节点名（`MODE_ROUTER` / `COMPLETION_ROUTER`）在 [routers.py:34-35](../../local-agent-web/src/local_agent/graph/routers.py#L34-L35)**。看 [builder.py:21-56](../../local-agent-web/src/local_agent/graph/builder.py#L21-L56) 的 import 清单就能确认这个分工。
+`PREPARE_CONTEXT = "prepare_context"` 这 17 个常量分两处定义：**15 个业务节点名在 [nodes.py](../../local-agent-web/src/local_agent/graph/nodes.py)**，**2 个路由节点名（`MODE_ROUTER` / `COMPLETION_ROUTER`）在 [routers.py:34-35](../../local-agent-web/src/local_agent/graph/routers.py#L34-L35)**。看 [builder.py:27-64](../../local-agent-web/src/local_agent/graph/builder.py#L27-L64) 的 import 清单就能确认这个分工。
 
 **为什么要用常量而不是直接写字面量？** 因为同一个名字出现在三个地方：`add_node` 注册、`add_edge` 连线、`route_*` 函数返回。三处手写字符串，改一处漏两处就会出问题。用常量，至少 IDE 能改名。
 
@@ -106,50 +115,48 @@ graph.add_node(PREPARE_CONTEXT, prepare_context_node)
 return graph.compile(checkpointer=checkpointer)
 ```
 
-`checkpointer=None` 时图**无状态**——不保存任何历史。这就是 [web.py:112-118](../../local-agent-web/src/local_agent/web.py#L112-L118) 里那个分支：
+`checkpointer=None` 时图**无状态**——不保存任何历史。这就是 [container.py:161-178](../../local-agent-web/src/local_agent/api/container.py#L161-L178) 里那个分支：
 
 ```python
-if app_config.memory.short_term.enabled:
-    checkpointer = database.checkpointer
-    ...
-graph=builder.build_chat_graph(checkpointer)
+if not app_config.memory.short_term.enabled:
+    raise ConfigError(msg)          # Web 服务必须开短时会话库
+...
+graph=builder.build_chat_graph(database.checkpointer)
 ```
 
 **同一份图代码，两种运行模式**（有状态/无状态），靠编译参数切换。这是 L3 §6 取舍 A 的实现基础。
 
 ### 2.4 `build_runtime_context`：DI 容器的工厂
 
-[builder.py:97-149](../../local-agent-web/src/local_agent/graph/builder.py#L97-L149)，13 个参数全带默认值或 `| None`。三个默认行为值得注意：
+[builder.py:298-369](../../local-agent-web/src/local_agent/graph/builder.py#L298-L369)，13 个参数中有 3 个必填（`app_config` / `model_adapter` / `workspace_root`），其余都带默认值或 `| None`。三个默认行为值得注意：
 
 | 参数省略时 | 行为 |
 |---|---|
-| `security_policy` | 按配置现造一个（[130-132](../../local-agent-web/src/local_agent/graph/builder.py#L130-L132)） |
-| `tool_registry` | 按策略现造（[133](../../local-agent-web/src/local_agent/graph/builder.py#L133)） |
-| `model_capabilities` | **现探测一次模型能力**（[134-136](../../local-agent-web/src/local_agent/graph/builder.py#L134-L136)） |
+| `security_policy` | 按配置现造一个（[339-341](../../local-agent-web/src/local_agent/graph/builder.py#L339-L341)） |
+| `tool_registry` | 按策略现造（[342-344](../../local-agent-web/src/local_agent/graph/builder.py#L342-L344)） |
+| `model_capabilities` | **现探测一次模型能力**（[345-347](../../local-agent-web/src/local_agent/graph/builder.py#L345-L347)） |
 
-最后一条有实际代价：`probe_capabilities` 会真的发一次请求（L1 §4 提过）。所以生产代码里 [web.py:129](../../local-agent-web/src/local_agent/web.py#L129) 是**在启动时探测一次、存进 `ChatApp`**，每次调用复用——而不是每次 `build_runtime_context` 都探一遍。
+最后一条有实际代价：`probe_capabilities` 会真的发一次请求（L1 §4 提过）。所以生产代码里会把模型能力探测一次并复用（探测入口见 [builder.py:345-347](../../local-agent-web/src/local_agent/graph/builder.py#L345-L347)）——而不是每次 `build_runtime_context` 都探一遍。
 
 **这是"默认参数带来隐藏开销"的经典案例**：省略参数很方便，但省略的是"一次网络请求"就不方便了。
 
 ---
 
-## 3. `edges.py`：11 条固定边
+## 3. `edges.py`：9 条固定边
 
 固定边 = `add_edge(A, B)`，**A 执行完必定去 B，没有任何判断**。
 
 | # | 边 | 位置 | 为什么是固定的 |
 |---|---|---|---|
-| 1 | `START → prepare_context` | [76](../../local-agent-web/src/local_agent/graph/edges.py#L76) | 每轮固定从复位开始 |
-| 2 | `prepare_context → load_agents` | [77](../../local-agent-web/src/local_agent/graph/edges.py#L77) | 复位完必加载规则 |
-| 3 | `load_agents → recall_memory` | [78](../../local-agent-web/src/local_agent/graph/edges.py#L78) | 加载完必召回记忆 |
-| 4 | `recall_memory → mode_router` | [79](../../local-agent-web/src/local_agent/graph/edges.py#L79) | 召回完必判模式 |
-| 5 | `retrieve_code_node → planner_node` | [87](../../local-agent-web/src/local_agent/graph/edges.py#L87) | 检索完必进规划 |
-| 6 | `planner_node → compression_node` | [88](../../local-agent-web/src/local_agent/graph/edges.py#L88) | 规划完必过压缩 |
-| 7 | `tool_execution_node → reflection_node` | [123](../../local-agent-web/src/local_agent/graph/edges.py#L123) | 执行完必反思 |
-| 8 | `reflection_node → completion_router` | [124](../../local-agent-web/src/local_agent/graph/edges.py#L124) | 反思完必过完成判定 |
-| 9 | `memory_write_node → final_response_node` | [137](../../local-agent-web/src/local_agent/graph/edges.py#L137) | 写完记忆必收尾 |
-| 10 | `chat_node → reflection_node` | [142](../../local-agent-web/src/local_agent/graph/edges.py#L142) | **见下** |
-| 11 | `final_response_node → END` | [143](../../local-agent-web/src/local_agent/graph/edges.py#L143) | 唯一出口 |
+| 1 | `START → prepare_context` | [80](../../local-agent-web/src/local_agent/graph/edges.py#L80) | 每轮固定从复位开始 |
+| 2 | `prepare_context → load_agents` | [81](../../local-agent-web/src/local_agent/graph/edges.py#L81) | 复位完必加载规则 |
+| 3 | `load_agents → recall_memory` | [82](../../local-agent-web/src/local_agent/graph/edges.py#L82) | 加载完必召回记忆 |
+| 4 | `recall_memory → mode_router` | [83](../../local-agent-web/src/local_agent/graph/edges.py#L83) | 召回完必判模式 |
+| 5 | `retrieve_code_node → planner_node` | [91](../../local-agent-web/src/local_agent/graph/edges.py#L91) | 检索完必进规划 |
+| 6 | `planner_node → compression_node` | [92](../../local-agent-web/src/local_agent/graph/edges.py#L92) | 规划完必过压缩 |
+| 7 | `reflection_node → completion_router` | [134](../../local-agent-web/src/local_agent/graph/edges.py#L134) | 反思完必过完成判定 |
+| 8 | `memory_write_node → final_response_node` | [147](../../local-agent-web/src/local_agent/graph/edges.py#L147) | 写完记忆必收尾 |
+| 9 | `final_response_node → END` | [161](../../local-agent-web/src/local_agent/graph/edges.py#L161) | 唯一出口 |
 
 ### 3.1 前 4 条：固定前缀，一轮的开场白
 
@@ -161,9 +168,9 @@ prepare_context → load_agents → recall_memory → mode_router
 
 为什么不能把 `load_agents` / `recall_memory` 放到模式判断之后？因为它们的结果**影响模式判断和后续所有 Prompt**：AGENTS 规则里可能写着"本项目所有测试用 pytest"，召回的记忆里可能有"用户偏好中文回答"。判模式之前就必须有这些信息。
 
-### 3.2 第 10 条：为什么闲聊也要过反思
+### 3.2 闲聊分支的出口：为什么闲聊也要过反思
 
-这是全图最反直觉的一条边，[edges.py:139-141](../../local-agent-web/src/local_agent/graph/edges.py#L139-L141) 的注释解释了：
+这是全图最反直觉的一条边——它是 `chat_node` 的**条件边**（[edges.py:156-160](../../local-agent-web/src/local_agent/graph/edges.py#L156-L160)），[edges.py:153-155](../../local-agent-web/src/local_agent/graph/edges.py#L153-L155) 的注释解释了：
 
 > 闲聊也要过一次反思校验：按架构 §5.2，识别到用户要求记住时 `chat_node` 只产生 `memory_write_intent`，**转入现有 `reflection_node` 校验**，再由 `completion_router` 决定是否走 `memory_write_node`。普通闲聊在反思里得到空候选 → 直接进 `final_response_node`。
 
@@ -175,16 +182,17 @@ prepare_context → load_agents → recall_memory → mode_router
 
 **Java 类比**：就像你只允许一个 `@Transactional` 的 service 方法写某张表，不允许第二个入口绕过它——哪怕多绕一层调用。
 
-### 3.3 第 11 条：`final_response_node` 是唯一出口
+### 3.3 第 9 条：`final_response_node` 是唯一出口
 
 实测入边表：
 
 ```text
 final_response_node  <- ['agent_decision_node', 'approval_interrupt_node',
-                         'completion_router', 'memory_write_node']
+                         'chat_node', 'completion_router',
+                         'memory_write_node', 'task_memory_node']
 ```
 
-**4 个不同的节点都指向它**，而它只指向 `END`。这是个好设计：
+**6 个不同的节点都指向它**，而它只指向 `END`。这是个好设计：
 
 - **收尾逻辑只有一处**——`final_response_node` 负责把 `final_response` 写出来、把 `task_status` 定下来。
 - **所有分支最终都汇到同一点**——没有"某个分支忘了收尾"的可能。
@@ -193,7 +201,7 @@ final_response_node  <- ['agent_decision_node', 'approval_interrupt_node',
 
 ---
 
-## 4. `edges.py`：6 组条件边
+## 4. `edges.py`：9 组条件边
 
 条件边 = `add_conditional_edges(源节点, 判定函数, {出口名: 目标节点})`。
 
@@ -207,37 +215,45 @@ graph.add_conditional_edges(          # ← 1 次注册
         ROUTE_CONTINUE: PLANNER_NODE,
         ROUTE_RETRY: COMPRESSION_NODE,
         ROUTE_ASK_USER: FINAL_RESPONSE_NODE,
-        ROUTE_FINISH: FINAL_RESPONSE_NODE,
+        ROUTE_FINISH: TASK_MEMORY_NODE,
         ROUTE_LOOP_LIMIT: FINAL_RESPONSE_NODE,
         ROUTE_MEMORY_WRITE: MEMORY_WRITE_NODE,
-    },                                 # ← 6 个出口，但只连到 4 个不同节点
+    },                                 # ← 6 个出口，但只连到 5 个不同节点
 )
 ```
 
 所以：
 
-- **`edges.py` 里 `add_conditional_edges` 出现 6 次**（实测 AST 计数）
-- **编译后展开成 17 条边**（实测 `get_graph().edges`），因为 6 个出口里 `ask_user` / `finish` / `loop_limit` 都指向 `final_response_node`，去重后是 4 条
-- **总边数 = 11 固定 + 17 条件 = 28**
+- **`edges.py` 里 `add_conditional_edges` 出现 9 次**（实测 AST 计数）
+- **编译后展开成 26 条边**（实测 `get_graph().edges`），因为缺省出口里 `ask_user` / `loop_limit` 都指向 `final_response_node`，去重后少几条
+- **总边数 = 9 固定 + 26 条件 = 35**
 
-6 组条件边的完整清单（全部实测）：
+9 组条件边的完整清单（全部实测）：
 
 | 源节点 | 判定函数 | 出口 → 目标 |
 |---|---|---|
 | `mode_router` | `route_by_mode` | `chat`→compression_node、`tool`→retrieve_code_node |
 | `compression_node` | `route_after_compression` | `chat`→chat_node、`tool`→agent_decision_node |
-| `agent_decision_node` | `route_after_decision` | `tools`→safety_gate_node、`reflect`→reflection_node、`final`→final_response_node |
-| `safety_gate_node` | `route_after_safety` | `execute`→tool_execution_node、`approval`→approval_interrupt_node、`reflect`→reflection_node |
+| `agent_decision_node` | `route_after_decision` | `tools`→safety_gate_node、`reflect`→reflection_node、`final`→final_response_node、`chat`→chat_node |
+| `safety_gate_node` | `route_after_safety` | `execute`→tool_execution_node、`approval`→approval_interrupt_node、`reflect`→reflection_node、`chat`→compression_node |
 | `approval_interrupt_node` | `route_after_approval` | `approve`→tool_execution_node、`edit`→planner_node、`reject`→final_response_node |
-| `completion_router` | `completion_route` | `continue`→planner_node、`retry`→compression_node、`ask_user`/`finish`/`loop_limit`→final_response_node、`memory_write`→memory_write_node |
+| `tool_execution_node` | `route_after_tool_execution` | `chat`→compression_node、`tool`→reflection_node |
+| `completion_router` | `completion_route` | `continue`→planner_node、`retry`→compression_node、`ask_user`/`loop_limit`→final_response_node、`finish`→task_memory_node、`memory_write`→memory_write_node |
+| `task_memory_node` | `route_after_task_memory` | `memory_write`→memory_write_node、`finish`→final_response_node |
+| `chat_node` | （内联 lambda） | `final`→final_response_node、`reflect`→reflection_node |
 
 ### 4.1 两条边共享同一个判定函数
 
-注意前两组：`route_by_mode` 和 `route_after_compression` 的**函数体一模一样**（[routers.py:229-236](../../local-agent-web/src/local_agent/graph/routers.py#L229-L236)）：
+注意前两组：`route_by_mode` 和 `route_after_compression` 的**函数体几乎一样**（[routers.py:236-245](../../local-agent-web/src/local_agent/graph/routers.py#L236-L245)）：
 
 ```python
-def route_by_mode(state):            return ROUTE_TOOL if state.get("mode") == "tool" else ROUTE_CHAT
-def route_after_compression(state):  return ROUTE_TOOL if state.get("mode") == "tool" else ROUTE_CHAT
+def route_by_mode(state):
+    return ROUTE_TOOL if state.get("mode") == "tool" else ROUTE_CHAT
+
+def route_after_compression(state):
+    if state.get("session_mode") == "chat":
+        return ROUTE_TOOL  # 固定闲聊会话通过只读工具决策取得文件证据
+    return ROUTE_TOOL if state.get("mode") == "tool" else ROUTE_CHAT
 ```
 
 为什么写两个而不是共用一个？因为**出口名不同、语义不同**：
@@ -245,13 +261,13 @@ def route_after_compression(state):  return ROUTE_TOOL if state.get("mode") == "
 - `mode_router` 之后：`chat` 去压缩、`tool` 去检索。这是"两个分支的起点"。
 - `compression_node` 之后：`chat` 去闲聊节点、`tool` 去决策节点。这是"两个分支合流后再分开"。
 
-两处的 `mode` 值虽然相同，但**将来可能分化**（比如工具分支压缩后想加一个"先查记忆"的步骤）。写成两个函数，改动时不会互相牵连。
+两处的 `mode` 值虽然相同，但**已经分化**——`route_after_compression` 多了一条"固定闲聊会话"的短路。写成两个函数，改动时不会互相牵连。
 
 **这是"看起来重复但故意的重复"**——判断标准是：它们会不会独立变化？会，就别合并。
 
 ### 4.2 出口名的命名规律
 
-看 [routers.py:37-53](../../local-agent-web/src/local_agent/graph/routers.py#L37-L53)，17 个出口常量分三类：
+看 [routers.py:38-53](../../local-agent-web/src/local_agent/graph/routers.py#L38-L53)，16 个出口常量分三类：
 
 | 类型 | 例子 | 含义 |
 |---|---|---|
@@ -277,7 +293,7 @@ def route_after_compression(state):  return ROUTE_TOOL if state.get("mode") == "
 
 ### 5.1 第一组：`decide_mode` 的三层兜底
 
-[mode_router_node](../../local-agent-web/src/local_agent/graph/routers.py#L127-L145) → [decide_mode](../../local-agent-web/src/local_agent/graph/routers.py#L148-L177)。
+[mode_router_node](../../local-agent-web/src/local_agent/graph/routers.py#L127-L152) → [decide_mode](../../local-agent-web/src/local_agent/graph/routers.py#L155-L184)。
 
 判定顺序（这是本项目"失败闭合"思想最清楚的一个例子）：
 
@@ -293,7 +309,7 @@ def route_after_compression(state):  return ROUTE_TOOL if state.get("mode") == "
 
 三个细节：
 
-**细节 1：`except Exception` 是刻意的**，注释明写（[164](../../local-agent-web/src/local_agent/graph/routers.py#L164)）：
+**细节 1：`except Exception` 是刻意的**，注释明写（[171](../../local-agent-web/src/local_agent/graph/routers.py#L171)）：
 
 ```python
 except Exception as exc:  # noqa: BLE001 — 任何分类失败都必须退化为规则判定
@@ -313,7 +329,7 @@ reason=f"规则兜底：命中关键词「{keyword}」（LLM 分类失败：{fai
 
 **细节 3：三层兜底的最后一层是 `chat`，不是 `tool`。**
 
-[170](../../local-agent-web/src/local_agent/graph/routers.py#L170)：*"未命中工具意图，按闲聊处理"*。
+[177](../../local-agent-web/src/local_agent/graph/routers.py#L177)：*"未命中工具意图，按闲聊处理"*。
 
 **为什么保守方向是 `chat`？** 因为 `tool` 分支能读写文件、执行命令。判错的代价不对称：
 
@@ -324,7 +340,7 @@ reason=f"规则兜底：命中关键词「{keyword}」（LLM 分类失败：{fai
 
 ### 5.2 分类提示词：把"什么不算工具任务"写清楚
 
-[build_classifier_prompt](../../local-agent-web/src/local_agent/graph/routers.py#L189-L209) 值得一读，因为它花了一半篇幅讲**否定条件**：
+[build_classifier_prompt](../../local-agent-web/src/local_agent/graph/routers.py#L196-L216) 值得一读，因为它花了一半篇幅讲**否定条件**：
 
 ```text
 - 询问"我之前说过的偏好/设定""我习惯用什么""我们上次的结论是什么"，
@@ -346,7 +362,7 @@ reason=f"规则兜底：命中关键词「{keyword}」（LLM 分类失败：{fai
 
 ### 5.3 第二组：5 个纯判定函数（实测行为表）
 
-这 5 个函数**不碰 State、不调模型、没有副作用**，只读 State 返回一个字符串。所以可以单独测（`tests/test_router.py` 有 2807 行）。
+这 5 个函数**不碰 State、不调模型、没有副作用**，只读 State 返回一个字符串。所以可以单独测（`tests/test_router.py` 有 2901 行）。
 
 #### `route_by_mode` / `route_after_compression`
 
@@ -357,7 +373,7 @@ mode == "tool"  → tool
 
 注意"含 mode 缺失"——`state.get("mode")` 返回 `None` 时走 `chat`。又是一次保守兜底。
 
-#### `route_after_decision`（[239-251](../../local-agent-web/src/local_agent/graph/routers.py#L239-L251)）
+#### `route_after_decision`（[248-272](../../local-agent-web/src/local_agent/graph/routers.py#L248-L272)）
 
 实测五种情况：
 
@@ -369,7 +385,7 @@ mode == "tool"  → tool
 | 无工具 + 单步计划 | `final` |
 | 无工具 + 无计划 | `final` |
 
-**第二行是这里唯一有故事的**，docstring 讲了原因（[242-245](../../local-agent-web/src/local_agent/graph/routers.py#L242-L245)）：
+**第二行是这里唯一有故事的**，docstring 讲了原因（[251-254](../../local-agent-web/src/local_agent/graph/routers.py#L251-L254)）：
 
 > 计划里还有未完成步骤时**不能直接收尾**：模型偶尔会在第二步就给出"任务完成了"的回答，直接进 `final_response_node` 会让整张图在第二步结束、第三步永远不执行——而且 `task_status` 还显示 `running`，用户看到一个半截任务（复审实证）。
 
@@ -377,13 +393,13 @@ mode == "tool"  → tool
 
 修法不是"不信任模型"，而是**加一条机械规则**：计划里有未完成步骤 → 先过反思，由 `_advance_plan`（L4 §4.3 提过）用机械规则决定继续还是收尾。
 
-**注意最后三行的对比**：单步计划直接 `final`。为什么？docstring 补了一句（[256-258](../../local-agent-web/src/local_agent/graph/routers.py#L256-L258)）：
+**注意最后三行的对比**：单步计划直接 `final`。为什么？docstring 补了一句（[278-279](../../local-agent-web/src/local_agent/graph/routers.py#L278-L279)）：
 
 > **单步计划不走这条路**：单步任务的正常收尾就是"模型直接给回答"，把它也拉去反思会改变既有行为（验收基线：单步任务不回归）。多步计划里最后一步直接回答时多绕一次反思，结论不变。
 
 **这是"修 bug 时顺手保住了兼容性"**：多绕一次反思对多步任务无副作用（结论不变），但对单步任务会改变行为。所以用 `len(plan) <= 1` 把单步摘出去。
 
-`_plan_has_unfinished_steps` 的实测边界（[254-263](../../local-agent-web/src/local_agent/graph/routers.py#L254-L263)）：
+`_plan_has_unfinished_steps` 的实测边界（[275-284](../../local-agent-web/src/local_agent/graph/routers.py#L275-L284)）：
 
 | 计划 | 结果 | 说明 |
 |---|---|---|
@@ -395,7 +411,7 @@ mode == "tool"  → tool
 
 **后两行值得留意**：`blocked`（等用户补充信息）的步骤不会被这里拦住。它会走到 `final_response_node`，由反思结果里的 `next_action` 决定追问——**职责在反思，不在这里**。
 
-#### `route_after_safety`（[266-270](../../local-agent-web/src/local_agent/graph/routers.py#L266-L270)）
+#### `route_after_safety`（[287-293](../../local-agent-web/src/local_agent/graph/routers.py#L287-L293)）
 
 实测：
 
@@ -409,7 +425,7 @@ mode == "tool"  → tool
 
 注意第三行：**全部被拒时不是去 `final_response`，而是去 `reflection`**。因为"工具被拒"也是一个需要反思的事件（为什么被拒？要不要换个做法？要不要问用户？）。这个判断交给反思层，而不是在路由里硬编码。
 
-#### `route_after_approval`（[273-281](../../local-agent-web/src/local_agent/graph/routers.py#L273-L281)）
+#### `route_after_approval`（[301-309](../../local-agent-web/src/local_agent/graph/routers.py#L301-L309)）
 
 ```python
 history = list(state.get("approval_history", []))
@@ -513,7 +529,7 @@ graph.add_conditional_edges(                                 # ② 条件边：�
 )
 ```
 
-两段各自的职责（[routers.py:293-325](../../local-agent-web/src/local_agent/graph/routers.py#L293-L325)）：
+两段各自的职责（[routers.py:321-353](../../local-agent-web/src/local_agent/graph/routers.py#L321-L353)）：
 
 **第一段 `completion_router_node`（节点，能改 State）**
 
@@ -540,7 +556,7 @@ def completion_route(state):
     return route
 ```
 
-**两段共享同一个判定**：`_loop_limit_blocks(state)`（[340-342](../../local-agent-web/src/local_agent/graph/routers.py#L340-L342)）就是
+**两段共享同一个判定**：`_loop_limit_blocks(state)`（[372-374](../../local-agent-web/src/local_agent/graph/routers.py#L372-L374)）就是
 
 ```python
 _next_action(state) in LOOPING_ACTIONS and loop_limit_reached(state)
@@ -572,12 +588,12 @@ _next_action(state) in LOOPING_ACTIONS and loop_limit_reached(state)
 | 无 `reflection_result` | — | `finish` |
 | `finish` + 有记忆候选 | — | **`memory_write`** |
 
-**中间那两行是本篇最值得琢磨的设计**，[routers.py:287-289](../../local-agent-web/src/local_agent/graph/routers.py#L287-L289) 的注释：
+**中间那两行是本篇最值得琢磨的设计**，[routers.py:315-317](../../local-agent-web/src/local_agent/graph/routers.py#L315-L317) 的注释：
 
 > 达到循环上限时仍然"想继续"的动作：只有它们会被上限拦住（架构 §11.5）。
 > `finish` / `ask_user` 本轮就能收尾，不受上限影响——拦它们只会把正常结论变成"失败"。
 
-**这是一个修过的 bug**，`completion_router_node` 的 docstring 里留了记录（[299-301](../../local-agent-web/src/local_agent/graph/routers.py#L299-L301)）：
+**这是一个修过的 bug**，`completion_router_node` 的 docstring 里留了记录（[327-329](../../local-agent-web/src/local_agent/graph/routers.py#L327-L329)）：
 
 > 上限**不覆盖**已经确定的 `finish` / `ask_user`：那一轮反思已经给出可收尾的结论（而且是基于机械证据的结论），把它改成"失败"会让正常终止在边界轮次丢失（**复审实证：`verified + finish` 与 `ask_user` 都被改成了 `loop_limit + failed`**）。
 
@@ -591,7 +607,7 @@ _next_action(state) in LOOPING_ACTIONS and loop_limit_reached(state)
 LOOPING_ACTIONS: tuple[str, ...] = ("continue", "retry")
 ```
 
-注释（[288-289](../../local-agent-web/src/local_agent/graph/routers.py#L288-L289)）说：
+注释（[315-318](../../local-agent-web/src/local_agent/graph/routers.py#L315-L318)）说：
 
 > 反思节点也用这个集合判"空转保护"（§5.3），所以是公开常量，避免两处各写一份。
 
@@ -696,7 +712,7 @@ def loop_limit_reached(state):
 
 ### 8.1 大小写
 
-`match_tool_keyword` 先 `text.lower()`（[182](../../local-agent-web/src/local_agent/graph/routers.py#L182)），但词表里的英文词**本来就是小写**（`"read "` / `"grep"` / `"pytest"`），所以 `"READ the file"` 也能命中。中文不受影响。
+`match_tool_keyword` 先 `text.lower()`（[189](../../local-agent-web/src/local_agent/graph/routers.py#L189)），但词表里的英文词**本来就是小写**（`"read "` / `"grep"` / `"pytest"`），所以 `"READ the file"` 也能命中。中文不受影响。
 
 ---
 
@@ -732,9 +748,9 @@ def loop_limit_reached(state):
 ### 10.1 可达性
 
 ```text
-节点总数 = 18（16 个业务节点 + __start__ + __end__）
-从 START 可达 = 17
-能到达 END    = 17
+节点总数 = 19（17 个业务节点 + __start__ + __end__）
+从 START 可达 = 18
+能到达 END    = 18
 从 START 到不了: []
 到不了 END    : []
 ```
@@ -752,37 +768,39 @@ mode_router              出边 2: ['compression_node', 'retrieve_code_node']
 retrieve_code_node       出边 1: ['planner_node']
 planner_node             出边 1: ['compression_node']
 compression_node         出边 2: ['agent_decision_node', 'chat_node']
-agent_decision_node      出边 3: ['final_response_node', 'reflection_node', 'safety_gate_node']
-safety_gate_node         出边 3: ['approval_interrupt_node', 'reflection_node', 'tool_execution_node']
+agent_decision_node      出边 4: ['chat_node', 'final_response_node', 'reflection_node', 'safety_gate_node']
+safety_gate_node         出边 4: ['approval_interrupt_node', 'compression_node', 'reflection_node', 'tool_execution_node']
 approval_interrupt_node  出边 3: ['final_response_node', 'planner_node', 'tool_execution_node']
-tool_execution_node      出边 1: ['reflection_node']
+tool_execution_node      出边 2: ['compression_node', 'reflection_node']
 reflection_node          出边 1: ['completion_router']
-completion_router        出边 4: ['compression_node', 'final_response_node', 'memory_write_node', 'planner_node']
+completion_router        出边 5: ['compression_node', 'final_response_node', 'memory_write_node', 'planner_node', 'task_memory_node']
 memory_write_node        出边 1: ['final_response_node']
-chat_node                出边 1: ['reflection_node']
+task_memory_node         出边 2: ['final_response_node', 'memory_write_node']
+chat_node                出边 2: ['final_response_node', 'reflection_node']
 final_response_node      出边 1: ['__end__']
 ```
 
-**4 个"多出口"节点**：`mode_router`(2) / `compression_node`(2) / `agent_decision_node`(3) / `safety_gate_node`(3) / `approval_interrupt_node`(3) / `completion_router`(4)。
+**9 个"多出口"节点**：`mode_router`(2) / `compression_node`(2) / `agent_decision_node`(4) / `safety_gate_node`(4) / `approval_interrupt_node`(3) / `tool_execution_node`(2) / `completion_router`(5) / `task_memory_node`(2) / `chat_node`(2)。
 
-**其余全是单出口**——流程的"形状"就由这 6 个节点决定。你要改流程，改的一定是这 6 个之一。
+**其余全是单出口**——流程的"形状"就由这 9 个节点决定。你要改流程，改的一定是这 9 个之一。
 
 ### 10.3 入边数（查汇合点）
 
 ```text
-final_response_node  <- ['agent_decision_node', 'approval_interrupt_node',
-                         'completion_router', 'memory_write_node']      ← 4 条
+final_response_node  <- ['agent_decision_node', 'approval_interrupt_node', 'chat_node',
+                         'completion_router', 'memory_write_node', 'task_memory_node']  ← 6 条
 reflection_node      <- ['agent_decision_node', 'chat_node',
                          'safety_gate_node', 'tool_execution_node']     ← 4 条
-compression_node     <- ['completion_router', 'mode_router', 'planner_node']  ← 3 条
+compression_node     <- ['completion_router', 'mode_router', 'planner_node',
+                         'safety_gate_node', 'tool_execution_node']      ← 5 条
 planner_node         <- ['approval_interrupt_node', 'completion_router', 'retrieve_code_node']  ← 3 条
 tool_execution_node  <- ['approval_interrupt_node', 'safety_gate_node']   ← 2 条
 其余 12 个节点         每条 1 条入边
 ```
 
-**两个 4 入口的汇合点是"收尾"和"反思"**：
+**两个汇合点（`final_response_node` 6 入口、`reflection_node` 4 入口）是"收尾"和"反思"**：
 
-- `final_response_node` 汇聚 4 条路 → 收尾逻辑只有一处（§3.3）
+- `final_response_node` 汇聚 6 条路 → 收尾逻辑只有一处（§3.3）
 - `reflection_node` 汇聚 4 条路 → **反思是所有路径的必经点**，不管是工具执行完、安全门全拒、审批被拒、还是闲聊
 
 **第二点是本项目"机械校验不可绕过"的实现方式**：只要 `reflection_node` 是唯一通向 `completion_router` 的节点，就没有任何路径能跳过反思直接收尾。
@@ -796,7 +814,7 @@ tool_execution_node  <- ['approval_interrupt_node', 'safety_gate_node']   ← 2 
 把前面所有东西串起来。假设用户说"把 `config.py` 里的 DEBUG 改成 False"：
 
 ```text
-① prepare_context        复位上一轮残留（写 17 个字段，L4 §7.1）
+① prepare_context        复位上一轮残留（写 23 个字段，L4 §7.1）
 ② load_agents            扫描合并 AGENTS.md → 写 RuntimeContext.agents_context
 ③ recall_memory          召回记忆 → memory_refs
 ④ mode_router            LLM 分类 → mode="tool"（含"修改"关键词，双保险）
@@ -812,7 +830,7 @@ tool_execution_node  <- ['approval_interrupt_node', 'safety_gate_node']   ← 2 
 ⑩ approval_interrupt_node   interrupt() 挂起 ★ 图在这里暂停，返回页面
         ↓
      【用户在页面上点"批准"】
-     web.py:366  graph.invoke(Command(resume=...), ...)
+     application/service.py:1356  payload=Command(resume=resume)
         ↓
 ⑩ approval_interrupt_node  恢复，把决策写进 approval_history
                          ── 条件边 route_after_approval → "approve"
@@ -850,7 +868,7 @@ tool_execution_node  <- ['approval_interrupt_node', 'safety_gate_node']   ← 2 
 
 ## 13. 自查清单
 
-1. `edges.py` 里有几次 `add_edge`、几次 `add_conditional_edges`？编译后总边数是多少？ → §4（11 / 6 / 28）
+1. `edges.py` 里有几次 `add_edge`、几次 `add_conditional_edges`？编译后总边数是多少？ → §4（9 / 9 / 35）
 2. 条件边判定函数返回的是什么——节点名还是出口名？ → §4.2（`path_map` 的键）
 3. 判定函数返回 `Command(goto=...)` 会怎样？ → §6.2（**静默失效**，无异常，目标节点不执行）
 4. `completion_router` 为什么要拆成"节点 + 条件边"？ → §6.3（节点改 State，条件边只能返回字符串）
@@ -867,12 +885,12 @@ tool_execution_node  <- ['approval_interrupt_node', 'safety_gate_node']   ← 2 
 
 ## 下一步
 
-流程的**形状**讲完了。接下来是流程里的**内容**——那 14 个节点各自在干什么。
+流程的**形状**讲完了。接下来是流程里的**内容**——那 15 个节点各自在干什么。
 
-- **L6 · 编排主干**：[nodes.py](../../local-agent-web/src/local_agent/graph/nodes.py) 的 3470 行。会按 L4 §7.1 那张"读什么/写什么"的表逐个过，重点讲：
-  - `prepare_context_node` 为什么要写 17 个字段（复位清单）
+- **L6 · 编排主干**：[nodes.py](../../local-agent-web/src/local_agent/graph/nodes.py) 的 4419 行。会按 L4 §7.1 那张"读什么/写什么"的表逐个过，重点讲：
+  - `prepare_context_node` 为什么要写 23 个字段（复位清单）
   - `load_agents_node` 为什么一个 State 字段都不写
-  - `reflection_node`（约 1300 行）里"机械校验"到底校了什么
+  - `reflection_node`（约 270 行）里"机械校验"到底校了什么
   - `approval_interrupt_node` 的 `interrupt()` 前后各跑一次，怎么保证不写重
 
 建议接着写 **L6**。

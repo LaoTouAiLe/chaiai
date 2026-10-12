@@ -51,7 +51,7 @@ def loop_limit_reached(state: AgentState) -> bool:   # 标注只是给人看和�
 ### 1.2 函数是对象，可以当值传来传去
 
 ```python
-# edges.py:80-84：把函数本身当参数传进去
+# edges.py:85-89：把函数本身当参数传进去
 graph.add_conditional_edges(MODE_ROUTER, route_by_mode, {...})
 ```
 
@@ -62,7 +62,7 @@ Java 里这需要 `Function<T,R>` 或方法引用；Python 里**函数就是普�
 | Java | Python | 本项目 |
 |---|---|---|
 | `private void helper()` | `def _helper()`（下划线开头） | 到处可见，如 `policy.py` 的 `_classify_edit` |
-| `interface AnswerSink` | `class AnswerSink(Protocol)` | [`ui/streaming.py:41`](../../local-agent-web/src/local_agent/ui/streaming.py#L41) |
+| `interface AnswerSink` | `class AnswerSink(Protocol)` | [`llm/stream_context.py:11`](../../local-agent-web/src/local_agent/llm/stream_context.py#L11) |
 | `final` | 没有（`Final` 只是给 mypy 看的） | — |
 
 下划线约定**没有任何强制力**：`_foo` 照样能被外部调用。它只是在说"别碰，这是内部实现"。
@@ -104,7 +104,7 @@ class AgentState(TypedDict, total=False):
 
 `total=False` 的含义：**所有键都可选**。所以节点可以只返回自己改的那几个键（见 L0 第 3.2 节）。
 
-对比一下 `result_types.py:109` 的 `ToolResultRecord(TypedDict)`——**没有** `total=False`，表示所有字段都必填。
+对比一下 `result_types.py:208` 的 `ToolResultRecord(TypedDict)`——**没有** `total=False`，表示所有字段都必填。
 
 ```python
 class ToolResultRecord(TypedDict):     # 全部必填
@@ -119,7 +119,7 @@ class ToolResultRecord(TypedDict):     # 全部必填
 ### 2.2 `@dataclass(frozen=True)`：不可变的 record
 
 ```python
-# security/policy.py:59-65
+# security/policy.py:90-96
 @dataclass(frozen=True)
 class SafetyDecision:
     allowed: bool
@@ -141,7 +141,7 @@ d.allowed = False        # ❌ 抛 FrozenInstanceError
 还有两个变体：
 
 ```python
-# llm/embedding.py:548、reflection/memory_candidates.py:77
+# llm/embedding.py:564、reflection/memory_candidates.py:78
 @dataclass(frozen=True, kw_only=True)     # 构造时必须写参数名
 ```
 
@@ -236,7 +236,7 @@ Java 对应 `enum`。**但这个项目里完全没有用 `Enum`**——全部用
 ### 3.4 `Protocol`：不用 implements 的接口
 
 ```python
-# ui/streaming.py:41
+# llm/stream_context.py:11
 class AnswerSink(Protocol):
     def push(self, text: str) -> None: ...     # 只有签名，没有实现
 ```
@@ -256,10 +256,10 @@ class AnswerSink(Protocol):
 ### 3.5 `TypeVar`：泛型
 
 ```python
-# graph/state.py:95
+# graph/state.py:105
 T = TypeVar("T")
 
-# llm/protocol.py:43 —— 带约束的泛型
+# llm/protocol.py:51 —— 带约束的泛型
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 ```
 
@@ -275,7 +275,7 @@ def merge_appended(existing: list[T], incoming: list[T], key: Callable[[T], str]
 **下标泛型**也是同样的写法：
 
 ```python
-# graph/builder.py:63
+# graph/builder.py:88
 ChatGraph = CompiledStateGraph[AgentState, RuntimeContext, AgentState, AgentState]
 ```
 
@@ -321,8 +321,8 @@ SafetyDecision = dataclass(frozen=True)(SafetyDecision)   # 把类传给函数�
 | 装饰器 | 作用 | 项目例子 |
 |---|---|---|
 | `@dataclass` | 自动生成 `__init__`/`__eq__` 等 | 30+ 处 |
-| `@property` | **把方法变成"属性"**，访问时不用写括号 | [`session_store.py:70`](../../local-agent-web/src/local_agent/persistence/session_store.py#L70) |
-| `@classmethod` | 第一个参数是**类**而不是实例，常用于替代构造器 | [`policy.py:90`](../../local-agent-web/src/local_agent/security/policy.py#L90) 的 `from_config` |
+| `@property` | **把方法变成"属性"**，访问时不用写括号 | [`session_store.py:73`](../../local-agent-web/src/local_agent/persistence/session_store.py#L73) |
+| `@classmethod` | 第一个参数是**类**而不是实例，常用于替代构造器 | [`policy.py:125`](../../local-agent-web/src/local_agent/security/policy.py#L125) 的 `from_config` |
 | `@pytest.fixture` | 声明测试夹具 | `tests/` 目录（见 L11） |
 | `@abstractmethod` 等 | 本项目未使用 | — |
 
@@ -342,7 +342,7 @@ def uses_shell_adapter(self) -> bool:
 ### `@classmethod` 替代构造器
 
 ```python
-# security/policy.py:89-96（简化）
+# security/policy.py:124-132（简化）
 @classmethod
 def from_config(cls, app_config, *, workspace_root, environ=None) -> SecurityPolicy:
     ...
@@ -438,12 +438,12 @@ env_keys: tuple[str, ...] = field(default_factory=tuple)
 本项目只用了 4 次，全是经典用法：
 
 ```python
-# security/policy.py:114-116 —— 在推导式里算一次、用一次
+# security/policy.py:156-158 —— 在推导式里算一次、用一次
 secret_values = tuple(
     value for name in secret_names if (value := env.get(name, "").strip())
 )
 
-# security/approval.py:288、tools/file_tools.py:648 —— 边读边判
+# security/approval.py:290、tools/file_tools.py:684 —— 边读边判
 while chunk := handle.read(1024 * 1024):
     ...    # 读到空就结束循环
 
@@ -468,7 +468,7 @@ tuple(v for name in names if (v := env.get(name)))  # 生成器 → 转元组
 
 **Java 对应**：`stream().filter().map().collect()`。Python 的推导式是这个的语法糖，但**没有惰性求值**（列表推导立刻算完；用圆括号才是惰性生成器）。
 
-项目里 `policy.py:116` 就是"过滤 + 映射"一步完成，等价于 Java：
+项目里 `policy.py:157` 就是"过滤 + 映射"一步完成，等价于 Java：
 
 ```java
 Arrays.stream(secretNames).map(n -> env.get(n)).filter(v -> v != null && !v.isBlank())...
@@ -616,7 +616,7 @@ raise SecurityError("...") from exc
 ### 7.2 `collections.abc`
 
 ```python
-from collections.abc import Mapping, Sequence    # security/policy.py:19
+from collections.abc import Mapping    # security/policy.py:20
 ```
 
 | 抽象类型 | 相当于 Java |
@@ -813,7 +813,7 @@ Raises:
 
 **阶段二 · 地图**
 
-- **L3 · 项目总览与技术选型**：11 个包、60 个文件的分工；为什么选 LangGraph / Streamlit / SQLite / Chroma；哪些是"刻意不用"的（如不用 LangChain 的 Chain、不用 `Enum`、不用 `logging`）
+- **L3 · 项目总览与技术选型**：13 个包、111 个文件的分工；为什么选 LangGraph / FastAPI+React / SQLite / Chroma；哪些是"刻意不用"的（如不用 LangChain 的 Chain、不用 `Enum`、不用 `logging`）
 - **L4 · 数据模型**：`graph/state.py` 逐个字段讲透
 
 建议接着写 **L3**——它能把前面三篇的孤立知识接到这个项目的具体位置上。

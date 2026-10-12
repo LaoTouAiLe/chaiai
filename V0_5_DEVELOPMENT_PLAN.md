@@ -118,7 +118,7 @@
 - **验收**：只读三件套在受控仓库可用；提交必须经人工审批；在 `main` / `master` 上的提交有额外确认；任何路径都不会出现 `git push`。
 - **明确不做**：分支管理、merge / rebase、远程操作、冲突自动解决。
 - **未知**：T40 的试用包不含 `git` 可执行文件。开工第一步先确认目标机器是否有 `git`，没有时按"明确失败并给出可照做提示"处理。
-- **状态（2026-10-09，契约已冻结，实现未开始）**：§6.9 能力闭集加 `git_read` / `git_write`，§16.4 由"未冻结"转为冻结——工具清单、档位归属（`coder` 两个都要、`researcher` 只读、`reviewer` 都不给）、作用域、安全与审批口径、配置段（默认关闭）与"明确不做"都写进去了。**前置排查结果**：① 本机 `git` 可用（`git version 2.39.1.windows.1`，在 PATH 中）；② 但工作区常常是仓库的**子目录**——本工作区 `local-agent-web` 的仓库根在上一级（`E:/pylianxi/chaiai`，分支 `master`），所以"作用域是工作区还是仓库"必须由契约定死（已定：**工作区 + 路径限定**，不得让用户把"我看到的 diff"当成仓库全部改动）；③ **打包形态仍未验**：T40 的包不含 `git`，"缺 git 就明确失败 + 给可照做提示"必须真的实现，不能只在开发机上成立。
+- **前置核验记录（2026-10-09 契约冻结时；实现已在下条完成）**：§6.9 能力闭集加 `git_read` / `git_write`，§16.4 由"未冻结"转为冻结——工具清单、档位归属（`coder` 两个都要、`researcher` 只读、`reviewer` 都不给）、作用域、安全与审批口径、配置段（默认关闭）与"明确不做"都写进去了。**前置排查结果**：① 本机 `git` 可用（`git version 2.39.1.windows.1`，在 PATH 中）；② 但工作区常常是仓库的**子目录**——本工作区 `local-agent-web` 的仓库根在上一级（`E:/pylianxi/chaiai`，分支 `master`），所以"作用域是工作区还是仓库"必须由契约定死（已定：**工作区 + 路径限定**，不得让用户把"我看到的 diff"当成仓库全部改动）；③ **打包形态仍未验**：T40 的包不含 `git`，"缺 git 就明确失败 + 给可照做提示"必须真的实现，不能只在开发机上成立。
 - **实现判据（按架构 / 健壮性 / 可维护性 / 可读性四条写死）**：工具模块与 `file_tools` / `web_tools` 同构，安全判定**一律**走 `security/policy.py`（不在工具里另开一套）；`shell=False` + 参数闭集，拒绝 `-c` / `--git-dir` / `--work-tree` / `--exec-path` 这类改环境的开关；截断与超时沿用 §6.7 与 `security.shell` 的既有口径（不发明第二套）；提交只 `add` 显式列出的工作区内路径、提交后回读 `git log -1` 自证、不加 `--no-verify`；测试用**可注入的假 runner**（不依赖机器上真实 git、可重复），真实 git 只做一次人工验收。
 - **实现进度（2026-10-09）**：① `tools/git_tools.py` 已完成——只读三件套 + 受控提交、参数闭集与兜底扫描（`_assert_safe` 同时挡 `--amend` 与 `--git-dir=/x` 这种带等号写法）、可注入 runner、缺 git 的可照做提示、作用域限定与"仓库在上一层"的说明；结果模型暂时定义在本模块（`result_types.py` 正被另一处改动编辑，待其落地再搬家，属已知的暂时偏离）。② `tests/test_git_tools.py` **22 条**全过（假 runner；含"停在默认分支确认时一个 git 写操作都没发生"与"越界路径在任何 git 调用之前就被拒"）。③ **真实 git 只读验收抓到一个缺陷**：`run_git` 原本按系统首选编码解码，中文提交信息被解成 `璁板繂搴撹矾寰勬寜 base_dir`（本机 GBK）——git 的路径与提交信息是 UTF-8，已改为固定 UTF-8 解码并加回归用例；复核后显示正常。④ **装配已落地（2026-10-09）**：`capabilities.py` 加 `git_read`（`git_status`/`git_diff`/`git_log`）与 `git_write`（`git_commit`）两个能力，档位为 `coder` 两个都要、`researcher` 只加读、`reviewer` 都不加；`effective_capabilities` 新增**必需参数** `git_enabled`（没有默认值——它把"配置开关"与"本机有没有 git"合起来，这是"两台机器配置一样却行为不同"的唯一入口）。`config.py` 加 `git` 段（`enabled` 默认 false、`timeout_seconds`、`max_output_chars`）；`tool_registry.py` 总是构造四个 Git 工具并在构造期探测 `git_available`（缺 git 时工具仍在，只是能力不进有效集合）；`security/policy.py` 把只读三件套登记进 `READ_ONLY_TOOLS`，`git_commit` 单列 `GIT_WRITE_TOOLS` 并**始终需要人工审批**（理由里带出路径与提交信息，审批卡片据此展示）；`graph/builder.py` 传 `git_enabled=配置开关 and registry.git_available`；`context/prompt_context.py` 加 Git 规范段落，并**修正"全能力基准"**：原先以 `set(CAPABILITY_TOOLS) - {"web"}` 判定，加了 git 之后 `coder` 会掉进"短版工具规范"——那是无声降级（措辞与前缀都变），现在改为"T53 之前的那套能力"作基准 + 新能力一律追加段落；`config.yaml.example` 加 `git` 段与档位说明。**验收**：Python 全量 **1217 passed / 7 skipped**、`ruff check src tests`、`mypy src`（108 文件）通过；能力指纹按有意变更更新（`test_capability_boundary` 的常量与注释同步）。
 
@@ -205,3 +205,14 @@
 4. 缓存回落无法用事件指纹解释；
 5. 任一 Profile 的基础任务成功率低于 v0.4 基线；
 6. 为了 Profile 而需要让页面复制 Graph 真源或触发副作用。
+
+
+## 2026-10-10 审查修复（回答语义质量验收排除）
+
+T54 的 Git 路径拒绝 pathspec magic，默认 runner 使用 literal pathspec；工作区子目录不能借 `:(top)` 读取仓库根下文件，提交路径同步拒绝此输入。增加 4 种输入拒绝、真实临时仓库字面路径和提交前拒绝写入的回归，没有创建真实提交。原“实现未开始”状态已明确标为历史前置核验。
+
+与 v0.6 修复同批完整离线回归 **1469 passed / 8 skipped / 0 failed**；ruff、mypy src、OpenAPI 与前端 API 漂移检查通过。工具 schema、Profile 与提示前缀未改。当前真实缓存率和回答语义质量本轮不做验收；详见 `docs/benchmarks/v05-v06-review-20261010.md`。
+
+## 2026-10-11 必须改修复（T53 DNS 建连边界）
+
+默认 Web transport 在每跳建连时校验全部解析候选，仅连接已校验的数字 IP；重试不重查域名，保留原域名的 Host、SNI 与证书校验。默认使用直接连接，不使用环境/系统代理。DNS 变化、空/非法/混合地址、候选重试及 TLS 验证均有正式回归；原失败探针已转为通过。与 v0.6 取消修复同批的定向回归 **50 passed**，最终完整回归 **1482 passed / 8 skipped / 0 failed**。没有新增付费调用，T43 真实压力与回答语义质量验收仍保留。详见 `docs/benchmarks/v07-readiness-fixes-20261011.md`。

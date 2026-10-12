@@ -1,0 +1,169 @@
+{
+  "date": "2026-10-11",
+  "scope": "Fix only the three confirmed P1 findings; no v0.7 implementation",
+  "resolved_findings": [
+    1,
+    2,
+    3
+  ],
+  "source_sha256": {
+    "src/local_agent/application/jobs.py": "5cfb4032b1536f0dc999adc783c2b24df0b9b71fcce1279ab428ea6715476a2f",
+    "src/local_agent/application/service.py": "bcf73624e06bf52504129ad1c4a16842b93a122028acaec66cd952b08c419935",
+    "src/local_agent/tools/web_tools.py": "56a715637bfe5e2dce1578b21c9dda213391a6cb0fd634a6783800a22eeabec2",
+    "tests/test_jobs.py": "547103923ab68347f6a874373c5e9e30a2723989df8bed07d8ef961eadee0f4b",
+    "tests/test_api.py": "5459e87fe50cb75801d784be0c531cd4bafb53842c58f89a3b5ce44caa137e7f",
+    "tests/test_web_tools.py": "c0c5b4cf715e1544f0a95e0116356daa54eec4f0f3d8676f9bbe1da0ceb7f1c1",
+    "../ARCHITECTURE.md": "95b7c6058fa3beb9d1058ee382af74a6707230392f7ad6aa80920469529841c6",
+    "../V0_5_DEVELOPMENT_PLAN.md": "ea794360256f288f0e4ea46037efa09a3cc732d9fc1eb496ac91780a034dfb56",
+    "../V0_6_DEVELOPMENT_PLAN.md": "3e686efde077ab3250a5438834f7aab6936dccdbe1909f5f2b840f3f82ef2eda",
+    "../docs/benchmarks/v07-readiness-review-20261010.md": "160ed49c251bde0614cea952633f1c09867129ca5d65396a2f8155c78daf324b"
+  },
+  "verification": {
+    "python": {
+      "passed": 1482,
+      "skipped": 8,
+      "failed": 0,
+      "warnings": 38,
+      "seconds": 555.49,
+      "exit_code": 0,
+      "log": "eval\\v07-readiness-fixes-20261011\\pytest-final.log"
+    },
+    "focused": {
+      "passed": 50,
+      "deselected": 126,
+      "seconds": 42.67,
+      "log": "eval\\v07-readiness-fixes-20261011\\focused-final.log"
+    },
+    "new_regression_instances": 13,
+    "ruff": "passed",
+    "mypy": "passed: 122 source files",
+    "openapi": "passed",
+    "frontend_api_drift": "passed",
+    "frontend_full_matrix": "Not rerun: frontend sources and public DTOs unchanged"
+  },
+  "before": {
+    "stale-timeout": {
+      "new_token_cancelled_before": false,
+      "expired": [
+        "d780fa4933274848ba4ca2136abfd9ac"
+      ],
+      "old_state": "completed",
+      "new_state": "queued",
+      "new_job_id": "b41f64a16b224a2ebf92b017f70cffa8",
+      "new_token_cancelled_after": true,
+      "new_refusal_reason": "本轮已被取消，不再启动新的工具调用（超过 max_task_seconds=5 秒）",
+      "old_job_reported_expired": true,
+      "model_calls": 0
+    },
+    "unbound-cancel": {
+      "paid_calls": 0,
+      "cancelled_job_state": "cancelled",
+      "cancelled_job_run_id": null,
+      "token_after_first_restart": true,
+      "token_after_second_restart": false,
+      "approval_http_status": 200,
+      "file_preserved": false,
+      "token_after_approval": false,
+      "job_states": [
+        "cancelled",
+        "waiting_user"
+      ]
+    },
+    "dns-rebind": {
+      "paid_calls": 0,
+      "external_http_requests": 0,
+      "blocked": false,
+      "returned_owned_loopback_body": true,
+      "dns_answers": [
+        {
+          "stage": "validation",
+          "address": "8.8.8.8"
+        },
+        {
+          "stage": "validation",
+          "address": "8.8.8.8"
+        },
+        {
+          "stage": "connection",
+          "address": "127.0.0.1"
+        },
+        {
+          "stage": "validation",
+          "address": "8.8.8.8"
+        }
+      ],
+      "owned_loopback_visits": [
+        "/owned"
+      ]
+    }
+  },
+  "after": {
+    "stale-timeout": {
+      "new_token_cancelled_before": false,
+      "expired": [],
+      "old_state": "completed",
+      "new_state": "queued",
+      "new_job_id": "e0792de449b742c5b26be622c9ba3ca5",
+      "new_token_cancelled_after": false,
+      "new_refusal_reason": "本轮已被取消，不再启动新的工具调用",
+      "old_job_reported_expired": false,
+      "model_calls": 0
+    },
+    "unbound-cancel": {
+      "paid_calls": 0,
+      "cancelled_job_state": "cancelled",
+      "cancelled_job_run_id": "d5eb75b139204f75afb929f35641b18b",
+      "token_after_first_restart": true,
+      "token_after_second_restart": false,
+      "approval_http_status": 200,
+      "file_preserved": true,
+      "token_after_approval": true,
+      "job_states": [
+        "cancelled",
+        "completed"
+      ]
+    },
+    "dns-rebind": {
+      "paid_calls": 0,
+      "external_http_requests": 0,
+      "blocked": true,
+      "error": "拒绝连接本机或内网地址：127.0.0.1（owned-rebind.example；防 SSRF）",
+      "returned_owned_loopback_body": false,
+      "dns_answers": [
+        {
+          "stage": "validation",
+          "address": "8.8.8.8"
+        },
+        {
+          "stage": "validation",
+          "address": "8.8.8.8"
+        },
+        {
+          "stage": "connection",
+          "address": "127.0.0.1"
+        }
+      ],
+      "owned_loopback_visits": []
+    }
+  },
+  "probe_exit_codes": {
+    "stale-timeout": 0,
+    "unbound-cancel": 0,
+    "dns-rebind": 0
+  },
+  "paid_calls": 0,
+  "semantic_quality_review": "excluded_by_user",
+  "zip_exists": false,
+  "git_committed": false,
+  "production_database_touched": false,
+  "behavior_changes": [
+    "Default Web transport bypasses environment/system proxies and connects directly to validated numeric addresses",
+    "Unbound legacy cancelled tasks without provable current-task identity refuse approval execution; new bound turns remain independent"
+  ],
+  "remaining_gates": [
+    "T43 real pressure closure",
+    "Paused answer semantic quality review",
+    "v0.7 fixed complex-task baseline and plan"
+  ],
+  "incomplete_run_not_used_as_evidence": "eval\\v07-readiness-fixes-20261011\\pytest.log"
+}

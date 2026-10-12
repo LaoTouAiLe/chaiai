@@ -25,7 +25,7 @@ L0 讲清了"谁在调度这条循环"（LangGraph）。**本篇讲"每一次循
 LangChain 定义了一套消息类，项目直接从 `langchain_core.messages` 导入：
 
 ```python
-# state.py:23、web.py:30、short_term.py:37 等
+# state.py:23、memory/short_term.py:39 等
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 ```
 
@@ -49,12 +49,12 @@ print(AIMessage(content="").type)               # ai
 print(ToolMessage(content="{}", tool_call_id="call_1").type)  # tool
 ```
 
-上面四个 `type` 的值是我实跑出来的。**`type` 字段很重要**：项目里 `memory/summarizer.py:92` 的 `_role_of()` 就是靠它把消息渲染成 `"human: ..."` 这样的文本。
+上面四个 `type` 的值是我实跑出来的。**`type` 字段很重要**：项目里 `memory/summarizer.py:97` 的 `_role_of()` 就是靠它把消息渲染成 `"human: ..."` 这样的文本。
 
 ### `AnyMessage` 是什么
 
 ```python
-# state.py:318
+# state.py:399
 messages: Annotated[list[AnyMessage], add_messages]
 ```
 
@@ -78,7 +78,7 @@ messages: Annotated[list[AnyMessage], add_messages]
 | `id` | 消息 ID（`add_messages` 靠它判断"替换还是追加"，见 L0 第 4.4 节） |
 | `usage_metadata` | token 用量（项目用它记账） |
 
-另外有个 `text` 属性（实测存在）：它是"把 `content` 里的文本部分取出来"的便捷写法，项目里出现过 `getattr(response, "text", response)` 这种写法（[`ui/streaming.py:183`](../../local-agent-web/src/local_agent/ui/streaming.py#L183)）。
+另外有个 `text` 属性（实测存在）：它是"把 `content` 里的文本部分取出来"的便捷写法，项目里出现过 `getattr(response, "text", response)` 这种写法（[`ui/streaming.py:195`](../../local-agent-web/src/local_agent/ui/streaming.py#L195)）。
 
 ---
 
@@ -151,7 +151,7 @@ model.bind_tools([probe_tool])
 2. **它返回一个新的模型对象**（绑定后的），不是原地修改。这跟 Java 里 `builder` 模式返回新对象是一个思路。
 3. **模型知道有哪些工具，完全来自这份清单**。所以"模型调了一个不存在的工具名"这种情况，根因通常是清单和实际注册表不一致。
 
-本项目的设计是：**图里不放工具清单**，工具注册表由 `RuntimeContext` 注入（`builder.py:133` 的 `ToolRegistry.build(policy)`），节点在决策时再把它交给模型。这样测试时可以换一份工具表。
+本项目的设计是：**图里不放工具清单**，工具注册表由 `RuntimeContext` 注入（`builder.py:342` 的 `ToolRegistry.build(policy)`），节点在决策时再把它交给模型。这样测试时可以换一份工具表。
 
 ---
 
@@ -174,11 +174,11 @@ print(t.type, t.tool_call_id)     # tool call_1
 
 **每一个 `tool_calls[i]` 都必须有一条对应的 `ToolMessage`。** 如果漏了，模型会看到一个"要调用工具但没有结果"的残缺序列，它的下一步行为是不可预测的（可能重复调用、可能直接编造结果）。
 
-这正是本项目在"一轮有多个待审批动作"时，**对未处理的调用也要回填一条说明性消息**的原因（见 [`nodes.py:783-806`](../../local-agent-web/src/local_agent/graph/nodes.py#L783) 附近）。
+这正是本项目在"一轮有多个待审批动作"时，**对未处理的调用也要回填一条说明性消息**的原因（见 [`nodes.py:1376-1384`](../../local-agent-web/src/local_agent/graph/nodes.py#L1376) 附近）。
 
 ### 项目里的"工具步"定义
 
-[`memory/short_term.py:20`](../../local-agent-web/src/local_agent/memory/short_term.py#L20) 的注释给出了一个很实用的概念：
+[`memory/short_term.py:19`](../../local-agent-web/src/local_agent/memory/short_term.py#L19) 的注释给出了一个很实用的概念：
 
 > "工具步"的定义：一条 `AIMessage(tool_calls)` 及其紧随其后的 `ToolMessage`。**只按轮次裁剪**……（不能从 `AIMessage(tool_calls)` 与对应 `ToolMessage` 中间切开）
 
@@ -193,7 +193,7 @@ print(t.type, t.tool_call_id)     # tool call_1
 除了"工具调用"，还有一种让模型输出结构化数据的方式：**结构化输出**。
 
 ```python
-# 本项目的真实用法：llm/protocol.py:78
+# 本项目的真实用法：llm/protocol.py:96-102
 result = model.with_structured_output(schema, method="json_schema").invoke(payload)
 ```
 
@@ -225,7 +225,7 @@ result = model.with_structured_output(schema, method="json_schema").invoke(paylo
 
 ### 6.2 token 预算必须算上 `tool_calls.args`
 
-[`context/token_budget.py:151-159`](../../local-agent-web/src/local_agent/context/token_budget.py#L151) 的注释：
+[`context/token_budget.py:151-156`](../../local-agent-web/src/local_agent/context/token_budget.py#L151) 的注释：
 
 > 用鸭子类型读取 `content` 与 `tool_calls`（不导入 langchain 的消息类）：`str` 直接估算……
 > `tool_calls[].args` 里，而它们同样是**出站** Prompt 的一部分——漏算会让大参数的工具调用……
@@ -240,14 +240,14 @@ result = model.with_structured_output(schema, method="json_schema").invoke(paylo
 
 | 想干的事 | 写法 | 项目位置 |
 |---|---|---|
-| 造用户消息 | `HumanMessage(content=text)` | `web.py:780` |
-| 造系统提示 | `SystemMessage(content=prompt)` | `memory/summarizer.py:70`、`llm/protocol.py:89` |
+| 造用户消息 | `HumanMessage(content=text)` | `nodes.py:249` |
+| 造系统提示 | `SystemMessage(content=prompt)` | `memory/summarizer.py:71`、`llm/protocol.py:119` |
 | 读模型的工具调用 | `message.tool_calls` → `[{name, args, id, type}]` | `nodes.py` 的 `agent_decision_node` |
-| 取消息类型 | `message.type` → `human`/`ai`/`system`/`tool` | `memory/summarizer.py:92` |
+| 取消息类型 | `message.type` → `human`/`ai`/`system`/`tool` | `memory/summarizer.py:97` |
 | 回填工具结果 | `ToolMessage(content=..., tool_call_id=calls[i]["id"])` | `nodes.py` 的 `tool_execution_node` |
 | 给模型工具清单 | `model.bind_tools([...])` | `llm/models.py:82` |
-| 结构化输出 | `model.with_structured_output(模型类).invoke(...)` | `llm/protocol.py:78` |
-| 消息列表类型 | `Annotated[list[AnyMessage], add_messages]` | `state.py:318` |
+| 结构化输出 | `model.with_structured_output(模型类).invoke(...)` | `llm/protocol.py:96-102` |
+| 消息列表类型 | `Annotated[list[AnyMessage], add_messages]` | `state.py:399` |
 | 取消息 ID | 见 `graph/projection.py` 的 `message_id()` | `projection.py:24` |
 
 ---

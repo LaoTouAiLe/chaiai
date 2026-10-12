@@ -4,14 +4,14 @@
 >
 > 读完你应该能回答：**"为什么 `~` 不算绝对路径？""工作区根目录为什么不是受保护目标？""为什么 `pytest --version` 在配置白名单里却还是被拒？""被拒绝过的动作换个 ID 还能不能执行？""为什么删除操作要问你两次？"**
 
-文件：[security/](../../local-agent-web/src/local_agent/security)，**6 个文件、2001 行**。
+文件：[security/](../../local-agent-web/src/local_agent/security)，**6 个文件、2162 行**。
 
 | 文件 | 行数 | 一句话职责 |
 |---|---|---|
-| [path_guard.py](../../local-agent-web/src/local_agent/security/path_guard.py) | 219 | 路径边界、"不可审批目标"、敏感文件名 |
-| [shell_guard.py](../../local-agent-web/src/local_agent/security/shell_guard.py) | 613 | 命令切词、语法检测、黑白名单、执行器选择 |
-| [policy.py](../../local-agent-web/src/local_agent/security/policy.py) | 399 | **唯一总入口**：`classify_tool` + 一次性授权 + 脱敏 |
-| [approval.py](../../local-agent-web/src/local_agent/security/approval.py) | 342 | 审批请求/决策、**动作指纹**、拒绝与批准的作用域 |
+| [path_guard.py](../../local-agent-web/src/local_agent/security/path_guard.py) | 300 | 路径边界、"不可审批目标"、敏感文件名 |
+| [shell_guard.py](../../local-agent-web/src/local_agent/security/shell_guard.py) | 614 | 命令切词、语法检测、黑白名单、执行器选择 |
+| [policy.py](../../local-agent-web/src/local_agent/security/policy.py) | 476 | **唯一总入口**：`classify_tool` + 一次性授权 + 脱敏 |
+| [approval.py](../../local-agent-web/src/local_agent/security/approval.py) | 344 | 审批请求/决策、**动作指纹**、拒绝与批准的作用域 |
 | [diff_guard.py](../../local-agent-web/src/local_agent/security/diff_guard.py) | 423 | 变更行数统计、patch 结构校验与应用 |
 | [\_\_init\_\_.py](../../local-agent-web/src/local_agent/security/__init__.py) | 5 | **只有 docstring，没有导出** |
 
@@ -47,11 +47,11 @@
 
 ```mermaid
 graph BT
-    PG["path_guard.py<br/>219 行"]
-    SG["shell_guard.py<br/>613 行"]
+    PG["path_guard.py<br/>300 行"]
+    SG["shell_guard.py<br/>614 行"]
     DG["diff_guard.py<br/>423 行"]
-    PO["policy.py<br/>399 行"]
-    AP["approval.py<br/>342 行"]
+    PO["policy.py<br/>476 行"]
+    AP["approval.py<br/>344 行"]
 
     PG --> SG
     PG --> PO
@@ -61,7 +61,7 @@ graph BT
     SG --> AP
 ```
 
-实测的 import 关系（[policy.py:32-40](../../local-agent-web/src/local_agent/security/policy.py#L32-L40)、[approval.py:22-23](../../local-agent-web/src/local_agent/security/approval.py#L22-L23)）：
+实测的 import 关系（[policy.py:32-42](../../local-agent-web/src/local_agent/security/policy.py#L32-L42)、[approval.py:22-23](../../local-agent-web/src/local_agent/security/approval.py#L22-L23)）：
 
 - `path_guard` 是**最底层**，谁也不依赖（只依赖 `exceptions.py`）。
 - `shell_guard` 依赖 `path_guard`（要判 cwd 边界、要查受保护目标）。
@@ -75,21 +75,21 @@ graph BT
 
 | 使用方 | 用了什么 | 场景 |
 |---|---|---|
-| [graph/nodes.py:120-136](../../local-agent-web/src/local_agent/graph/nodes.py#L120-L136) | `action_fingerprint`、`build_request`、`find_approval`、`find_rejection`、`SecurityPolicy`、`SafetyDecision` | 安全门与审批节点 |
-| [graph/state.py:31-32](../../local-agent-web/src/local_agent/graph/state.py#L31-L32) | `ApprovalRequest`、`ApprovalDecision`、`SecurityPolicy` | 类型声明（策略挂在 `RuntimeContext` 上） |
+| [graph/nodes.py:141-157](../../local-agent-web/src/local_agent/graph/nodes.py#L141-L157) | `action_fingerprint`、`build_request`、`find_approval`、`find_rejection`、`SecurityPolicy`、`SafetyDecision` | 安全门与审批节点 |
+| [graph/state.py:34-35](../../local-agent-web/src/local_agent/graph/state.py#L34-L35) | `ApprovalRequest`、`ApprovalDecision`、`SecurityPolicy` | 类型声明（策略挂在 `RuntimeContext` 上） |
 | [tools/file_tools.py:24-33](../../local-agent-web/src/local_agent/tools/file_tools.py#L24-L33) | `action_fingerprint`、`diff_guard.*`、`assert_not_protected_target` | **执行前复核** |
-| [tools/shell_tools.py:23-25](../../local-agent-web/src/local_agent/tools/shell_tools.py#L23-L25) | `prepare_shell`、`build_shell_invocation`、`action_fingerprint` | 真正 fork 子进程 |
+| [tools/shell_tools.py:23-28](../../local-agent-web/src/local_agent/tools/shell_tools.py#L23-L28) | `prepare_shell`、`build_shell_invocation`、`action_fingerprint` | 真正 fork 子进程 |
 | [rag/search.py:32-33](../../local-agent-web/src/local_agent/rag/search.py#L32-L33)、[rag/snippets.py:17](../../local-agent-web/src/local_agent/rag/snippets.py#L17) | `is_sensitive_path`、`is_within`、`build_environment`、`resolve_executable` | 检索时跳过敏感文件、复用同一套环境构造 |
 
-**这个方向不能反**：`security/` 不知道有 LangGraph、不知道有 State。它的输入是"工具名 + 参数字典"，输出是"能不能做"。这样它才可能被单元测试直接调用（[tests/test_security.py](../../local-agent-web/tests/test_security.py) **925 行**，全部是纯函数级测试，不需要跑图）。
+**这个方向不能反**：`security/` 不知道有 LangGraph、不知道有 State。它的输入是"工具名 + 参数字典"，输出是"能不能做"。这样它才可能被单元测试直接调用（[tests/test_security.py](../../local-agent-web/tests/test_security.py) **1196 行**，全部是纯函数级测试，不需要跑图）。
 
 ---
 
-## 2. `path_guard.py`（219 行）：三道关卡
+## 2. `path_guard.py`（300 行）：三道关卡
 
 ### 2.1 关卡一：边界判定 —— `resolve_target`
 
-[path_guard.py:122-166](../../local-agent-web/src/local_agent/security/path_guard.py#L122-L166) 是全项目路径判定的唯一实现：
+[path_guard.py:199-247](../../local-agent-web/src/local_agent/security/path_guard.py#L199-L247) 是全项目路径判定的唯一实现：
 
 ```python
 text = path.strip()
@@ -103,36 +103,39 @@ if not raw_absolute:
 resolved = _resolve(candidate)                   # ← resolve() 展开 .. 与软链接
 root = _resolve(workspace_root)
 if is_within(resolved, root):
-    return ResolvedTarget(path=resolved, external=False)
-if raw_absolute and allow_external:              # ← 两个条件都满足才放行
-    return ResolvedTarget(path=resolved, external=True)
-raise WorkspaceBoundaryError(...)
+    return ResolvedTarget(path=resolved, external=False, access="inside")
+if not raw_absolute:                             # ← 非绝对路径（~、相对逃逸、盘符相对）直接拒绝
+    raise WorkspaceBoundaryError(...)
+access = None if external_policy is None else external_policy.access_for(resolved)
+if access is None:                               # ← 绝对但未被档位授权的外部目标：拒绝
+    raise WorkspaceBoundaryError(...)
+return ResolvedTarget(path=resolved, external=True, access=access)
 ```
 
 三个细节值得单独记：
 
-**① 顺序**：`is_absolute()` 必须在 `expanduser()` 和 `base_dir / candidate` **之前**调用。反过来写的话，`~` 展开成 `C:\Users\asus` 之后就是绝对路径了，会被当成"用户显式指定的外部路径"放行。这就是 [look_absolute](../../local-agent-web/src/local_agent/security/path_guard.py#L112-L119) 存在的理由——它单独抽出来就是为了强调"**按原始输入判**"。
+**① 顺序**：`is_absolute()` 必须在 `expanduser()` 和 `base_dir / candidate` **之前**调用。反过来写的话，`~` 展开成 `C:\Users\asus` 之后就是绝对路径了，会被当成"用户显式指定的外部路径"放行。这就是 [look_absolute](../../local-agent-web/src/local_agent/security/path_guard.py#L189-L196) 存在的理由——它单独抽出来就是为了强调"**按原始输入判**"。
 
-**② `resolve()` 在边界校验之前**：所以"工作区内的软链接指向工作区外"也会被拦住（[path_guard.py:6-7](../../local-agent-web/src/local_agent/security/path_guard.py#L6-L7) 的规则 2）。`resolve()` 用的是 [\_resolve](../../local-agent-web/src/local_agent/security/path_guard.py#L215-L219)，`OSError` 时退回 `absolute()`——**目标不存在时也能判定**，所以"读一个不存在的外部路径"报的是边界错误，不是"文件不存在"。
+**② `resolve()` 在边界校验之前**：所以"工作区内的软链接指向工作区外"也会被拦住（[path_guard.py:6-7](../../local-agent-web/src/local_agent/security/path_guard.py#L6-L7) 的规则 2）。`resolve()` 用的是 [\_resolve](../../local-agent-web/src/local_agent/security/path_guard.py#L296-L300)，`OSError` 时退回 `absolute()`——**目标不存在时也能判定**，所以"读一个不存在的外部路径"报的是边界错误，不是"文件不存在"。
 
-**③ 放行需要"两个条件同时成立"**：`raw_absolute and allow_external`。
+**③ 放行需要"两个条件同时成立"**：**原始输入本身是绝对路径**（`raw_absolute`）**且该绝对目标被当前档位认可**（`external_policy.access_for(...)` 不为 `None`）。
 
-**实测**（`allow_external=True` 时）：
+**实测**（档位认可外部目标时）：
 
 | 输入 | `look_absolute` | `resolve_target` 结果 |
 |---|---|---|
 | `~` | `False` | ❌ `WorkspaceBoundaryError`（展开后是 `C:/Users/asus`，但原始输入不是绝对路径） |
 | `C:foo` | `False` | 被拒（Windows 盘符相对路径，原始输入 `is_absolute()` 为假） |
-| `C:\Windows` | `True` | 若 `allow_external` 为真则放行，否则拒绝 |
+| `C:\Windows` | `True` | 若该目标被档位认可则放行，否则拒绝 |
 | `src/a.py` | `False` | 拼基准目录，落在工作区内 |
-| `../outside` | `False` | ❌ 即使 `allow_external=True` 也拒绝（相对路径逃逸） |
-| `E:\pylianxi\chaiai`（工作区的父目录，**绝对路径**） | `True` | ✅ `ResolvedTarget(path=..., external=True)` |
+| `../outside` | `False` | ❌ 即使档位为 `allow` 也拒绝（相对路径逃逸） |
+| `E:\pylianxi\chaiai`（工作区的父目录，**绝对路径**） | `True` | 被档位认可时 ✅ `ResolvedTarget(path=..., external=True, access=...)`，否则拒绝 |
 
-注意最后一行的措辞：**`allow_external_paths=true` 打开的是"显式绝对路径的受控外部访问"，不是"关闭边界校验"**（[config.py:161-172](../../local-agent-web/src/local_agent/config.py#L161-L172) 把这个区别写得很清楚）。而且放行之后还有关卡二。
+注意最后一行的措辞：外部路径的放开由档位 `workspace.external_paths.mode`（`deny` / `whitelist` / `allow`）控制，打开的是"显式绝对路径的受控外部访问"，不是"关闭边界校验"（[config.py:192-226](../../local-agent-web/src/local_agent/config.py#L192-L226) 把这个区别写得很清楚）。而且放行之后还有关卡二。
 
 ### 2.2 关卡二：不可审批目标 —— `protected_target_reason`
 
-[path_guard.py:169-187](../../local-agent-web/src/local_agent/security/path_guard.py#L169-L187)。这一关的特殊性在于：**它不是"需要更高审批"，而是"根本不可审批"**——用户点"批准"也没用。
+[path_guard.py:250-268](../../local-agent-web/src/local_agent/security/path_guard.py#L250-L268)。这一关的特殊性在于：**它不是"需要更高审批"，而是"根本不可审批"**——用户点"批准"也没用。
 
 **实测**：
 
@@ -154,7 +157,7 @@ raise WorkspaceBoundaryError(...)
 
 ### 2.3 关卡三：敏感文件名 —— `is_sensitive_path`
 
-[path_guard.py:209-212](../../local-agent-web/src/local_agent/security/path_guard.py#L209-L212)：
+[path_guard.py:290-293](../../local-agent-web/src/local_agent/security/path_guard.py#L290-L293)：
 
 ```python
 def is_sensitive_path(path: Path, patterns: tuple[str, ...] = SENSITIVE_NAME_PATTERNS) -> bool:
@@ -163,7 +166,7 @@ def is_sensitive_path(path: Path, patterns: tuple[str, ...] = SENSITIVE_NAME_PAT
     return any(fnmatch.fnmatch(name, pattern) for pattern in patterns)
 ```
 
-模式表在 [path_guard.py:52-64](../../local-agent-web/src/local_agent/security/path_guard.py#L52-L64)：`.env`、`.env.*`、`*.pem`、`*.key`、`*.pfx`、`*.keystore`、`id_rsa*`、`id_ed25519*`、`id_ecdsa*`、`credentials`、`credentials.*`。
+模式表在 [path_guard.py:64-77](../../local-agent-web/src/local_agent/security/path_guard.py#L64-L77)：`.env`、`.env.*`、`*.pem`、`*.key`、`*.pfx`、`*.keystore`、`id_rsa*`、`id_ed25519*`、`id_ecdsa*`、`credentials`、`credentials.*`。
 
 **实测**：
 
@@ -184,13 +187,13 @@ resolve_readable_file('.env.example') -> !! SecurityError: 该文件按策略禁
 resolve_readable_file('pyproject.toml') -> OK（未拦）
 ```
 
-拦截动作在 [policy.py:379-381](../../local-agent-web/src/local_agent/security/policy.py#L379-L381)，受 `security.secrets.block_known_secret_files` 开关控制（[config.py:321-325](../../local-agent-web/src/local_agent/config.py#L321-L325)，默认 `true`）。
+拦截动作在 [policy.py:452-454](../../local-agent-web/src/local_agent/security/policy.py#L452-L454)，受 `security.secrets.block_known_secret_files` 开关控制（[config.py:436](../../local-agent-web/src/local_agent/config.py#L436)，默认 `true`）。
 
 ---
 
-## 3. `shell_guard.py`（613 行）：全项目唯一做"语法分析"的文件
+## 3. `shell_guard.py`（614 行）：全项目唯一做"语法分析"的文件
 
-其他安全判定都是"看参数值"，只有 Shell 判定要**真正解析一条命令字符串**。613 行里大部分复杂度来自这里。
+其他安全判定都是"看参数值"，只有 Shell 判定要**真正解析一条命令字符串**。614 行里大部分复杂度来自这里。
 
 ### 3.1 五步判定顺序
 
@@ -208,15 +211,15 @@ resolve_readable_file('pyproject.toml') -> OK（未拦）
 
 ### 3.2 `_tokenize`：切词与语法检测
 
-[shell_guard.py:550-586](../../local-agent-web/src/local_agent/security/shell_guard.py#L550-L586)。它一次遍历同时做三件事：切 argv、记录引号外的语法字符、收集"未被引号包住的内容"用于命令替换检测。
+[shell_guard.py:551-587](../../local-agent-web/src/local_agent/security/shell_guard.py#L551-L587)。它一次遍历同时做三件事：切 argv、记录引号外的语法字符、收集"未被引号包住的内容"用于命令替换检测。
 
-语法字符表 [shell_guard.py:47](../../local-agent-web/src/local_agent/security/shell_guard.py#L47)：
+语法字符表 [shell_guard.py:48](../../local-agent-web/src/local_agent/security/shell_guard.py#L48)：
 
 ```python
 SHELL_SYNTAX_TOKENS: tuple[str, ...] = ("|", ">", "<", "&", ";", "`", "^", "\n")
 ```
 
-命令替换正则 [shell_guard.py:50](../../local-agent-web/src/local_agent/security/shell_guard.py#L50)：
+命令替换正则 [shell_guard.py:51](../../local-agent-web/src/local_agent/security/shell_guard.py#L51)：
 
 ```python
 _COMMAND_SUBSTITUTION = re.compile(r"\$\(|%[A-Za-z_][A-Za-z0-9_]*%")
@@ -236,7 +239,7 @@ _COMMAND_SUBSTITUTION = re.compile(r"\$\(|%[A-Za-z_][A-Za-z0-9_]*%")
 | `echo \`whoami\`` | `['echo', 'whoami']` | `'\`'`（反引号被吃掉，内容留下了） |
 | `git status` | `['git', 'status']` | `None` |
 
-**第一、二行是"为什么指纹里必须有原始命令"的直接证据**：`echo hi > f`（写文件）和 `echo hi < f`（读文件）切出来的 argv **完全一样**，但语义完全相反。所以 [approval.py:166](../../local-agent-web/src/local_agent/security/approval.py#L166) 把 `raw_command` 原文放进了指纹，实测两者指纹不同：
+**第一、二行是"为什么指纹里必须有原始命令"的直接证据**：`echo hi > f`（写文件）和 `echo hi < f`（读文件）切出来的 argv **完全一样**，但语义完全相反。所以 [approval.py:165-175](../../local-agent-web/src/local_agent/security/approval.py#L165-L175) 把 `raw_command` 原文放进了指纹，实测两者指纹不同：
 
 ```
 shell 'echo hi > f'  ->  '6eaa71e256b5914b'
@@ -247,15 +250,15 @@ shell 'echo hi < f'  ->  '155eda694cadd813'
 
 ### 3.3 判定分支的顺序不是随意的
 
-[prepare_shell](../../local-agent-web/src/local_agent/security/shell_guard.py#L145-L356) 里的分支顺序有几处"看起来可以换、其实不能换"：
+[prepare_shell](../../local-agent-web/src/local_agent/security/shell_guard.py#L146-L357) 里的分支顺序有几处"看起来可以换、其实不能换"：
 
-**① 黑名单（L225）先于"带路径"（L306）与"可解析性"（L296）判断**
+**① 黑名单（L226）先于"带路径"（L307）与"可解析性"（L297）判断**
 
-[shell_guard.py:269-271](../../local-agent-web/src/local_agent/security/shell_guard.py#L269-L271) 的解释：
+[shell_guard.py:270-272](../../local-agent-web/src/local_agent/security/shell_guard.py#L270-L272) 的解释：
 
 > 破坏性信号比路径风险更该出现在审批说明里，而且 `rm` / `del` / `chmod` 这类命令在 Windows 上本来就没有可执行文件（属于 shell 内建）。
 
-**② 但"不可执行"的命令不能进审批**（L272-281）：
+**② 但"不可执行"的命令不能进审批**（L273-282）：
 
 > 否则用户批准后必然启动失败，判定对象也不等于执行对象。
 
@@ -268,13 +271,13 @@ shell 'echo hi < f'  ->  '155eda694cadd813'
 
 **这就是"失败"与"没命中"必须分开**的另一个实例：硬拒绝（`requires_approval=False`）表示"这条路根本走不通"，审批（`requires_approval=True`）表示"用户点头就能走"。把前者做成审批，用户点完批准只会得到"命令无法启动"。
 
-**③ 可执行文件解析失败一律硬拒绝**（L296-304）：
+**③ 可执行文件解析失败一律硬拒绝**（L297-305）：
 
 > 解析不到就当场拒绝，不再退回原名字让执行阶段重新搜索 PATH——那正是"判定对象 ≠ 执行对象"的缺口。
 
 ### 3.4 实测：13 条命令的完整判定
 
-配置来自项目真实的 [config.yaml:91-124](../../local-agent-web/config.yaml#L91-L124)（白名单 5 条、黑名单 7 条）。
+配置来自项目真实的 [config.yaml:135-163](../../local-agent-web/config.yaml#L135-L163)（白名单 5 条、黑名单 7 条）。
 
 | 命令 | `allowed` | 需审批 | 走了哪一步 |
 |---|---|---|---|
@@ -292,11 +295,11 @@ shell 'echo hi < f'  ->  '155eda694cadd813'
 | `chmod +x a.sh` | ❌ | 否 | 同上（`chmod` 是 shell 内建） |
 | `nonexistent-tool-xyz --version` | ❌ | 否 | 硬拒绝：解析不到可执行文件 |
 
-注意 `pytest -q` 那一行：它本该落到"第 5 步 → 需要审批"，但因为**可执行文件解析**（L296）在**白名单匹配**（L326）之前，它在更早的地方就被硬拒绝了。**判定顺序会改变"需不需要审批"这个结论**——这是读这个文件时最容易看漏的一点。
+注意 `pytest -q` 那一行：它本该落到"第 5 步 → 需要审批"，但因为**可执行文件解析**（L297）在**白名单匹配**（L327）之前，它在更早的地方就被硬拒绝了。**判定顺序会改变"需不需要审批"这个结论**——这是读这个文件时最容易看漏的一点。
 
 ### 3.5 白名单是"结构匹配"，不是"名字匹配"
 
-[match_whitelist](../../local-agent-web/src/local_agent/security/shell_guard.py#L440-L464) 要同时满足四个条件：
+[match_whitelist](../../local-agent-web/src/local_agent/security/shell_guard.py#L441-L466) 要同时满足四个条件：
 
 ```python
 if entry.platform and platform not in entry.platform:        # ① 平台
@@ -310,14 +313,14 @@ if not _cwd_allowed(entry, cwd=cwd, workspace_root=workspace_root):  # ④ 可�
 return entry
 ```
 
-**③ 是 `!=` 而不是"前缀匹配"**，所以 `match: exact`（[config.py:295](../../local-agent-web/src/local_agent/config.py#L295) 里 `Literal["exact"]`，**只允许这一个值**，实测传 `match="prefix"` 会抛 `ValidationError`）意味着：
+**③ 是 `!=` 而不是"前缀匹配"**，所以 `match: exact`（[config.py:406](../../local-agent-web/src/local_agent/config.py#L406) 里 `Literal["exact"]`，**只允许这一个值**，实测传 `match="prefix"` 会抛 `ValidationError`）意味着：
 
 ```
 git status          -> 免审
 git status --short  -> 需要审批
 ```
 
-**② 的归一化在 [same_executable](../../local-agent-web/src/local_agent/security/shell_guard.py#L495-L501)**：忽略大小写、目录前缀、Windows 可执行后缀。实测：
+**② 的归一化在 [same_executable](../../local-agent-web/src/local_agent/security/shell_guard.py#L496-L503)**：忽略大小写、目录前缀、Windows 可执行后缀。实测：
 
 | 比较 | 结果 |
 |---|---|
@@ -338,7 +341,7 @@ git status --short  -> 需要审批
 | `<工作区>`（根） | ❌ |
 | 条目 cwd 本身越界（`../outside`） | ❌（`_cwd_allowed` 里 `resolve_within_workspace` 抛异常 → 返回 `False`） |
 
-**⚠️ 一个必须知道的前提**：白名单要真正生效，**可执行文件必须能被 `shutil.which` 在当前进程的 PATH 上找到**（[resolve_executable:436-437](../../local-agent-web/src/local_agent/security/shell_guard.py#L436-L437)）。
+**⚠️ 一个必须知道的前提**：白名单要真正生效，**可执行文件必须能被 `shutil.which` 在当前进程的 PATH 上找到**（[resolve_executable:437](../../local-agent-web/src/local_agent/security/shell_guard.py#L437)）。
 
 **实测对照**（同一份配置、同一台机器）：
 
@@ -351,7 +354,7 @@ git status --short  -> 需要审批
 
 ### 3.6 黑名单的两个坑（实测）
 
-[match_blocked_patterns](../../local-agent-web/src/local_agent/security/shell_guard.py#L467-L492) 是**两级匹配**：
+[match_blocked_patterns](../../local-agent-web/src/local_agent/security/shell_guard.py#L468-L495) 是**两级匹配**：
 
 1. **结构匹配**：把 pattern 也切成 argv，比较归一化后的可执行名，并要求 pattern 的其余 token 是实际参数的**前缀**。这样 `format`、`FORMAT.COM`、`C:\Windows\System32\format.com` 会被同一条规则拦住。
 2. **子串匹配**：pattern 不是合法命令形态时的兜底，用 `raw_pattern.casefold() in command.casefold()`。
@@ -373,9 +376,9 @@ prepare_shell('reformat x')  -> 命中「format 」，且解析不到可执行�
 
 ### 3.7 环境变量透传：默认一个都不给
 
-[build_environment:513-518](../../local-agent-web/src/local_agent/security/shell_guard.py#L513-L518) 构造子进程环境时，**不继承 `os.environ`**，而是从 [BASE_ENV_KEYS:62-81](../../local-agent-web/src/local_agent/security/shell_guard.py#L62-L81) 这个白名单里挑（`PATH`、`PATHEXT`、`SystemRoot`、`TEMP`、`USERPROFILE` 等 19 个），再叠加调用方显式申请的键。
+[build_environment:514-519](../../local-agent-web/src/local_agent/security/shell_guard.py#L514-L519) 构造子进程环境时，**不继承 `os.environ`**，而是从 [BASE_ENV_KEYS:63-82](../../local-agent-web/src/local_agent/security/shell_guard.py#L63-L82) 这个白名单里挑（`PATH`、`PATHEXT`、`SystemRoot`、`TEMP`、`USERPROFILE` 等 18 个），再叠加调用方显式申请的键。
 
-显式申请要过 [_validate_env_keys:597-613](../../local-agent-web/src/local_agent/security/shell_guard.py#L597-L613)：
+显式申请要过 [_validate_env_keys:598-614](../../local-agent-web/src/local_agent/security/shell_guard.py#L598-L614)：
 
 ```python
 name = (key or "").strip()
@@ -394,7 +397,7 @@ if any(hint in upper for hint in _SECRET_ENV_HINTS):     # ("KEY","TOKEN","SECRE
 | `["MY_VAR"]` | ✅ 通过（随后走正常白名单判定） |
 | `["1BAD"]` | ❌ 硬拒绝："环境变量名不合法" |
 
-注意第 601 行有个 `del config`：
+注意第 602 行有个 `del config`：
 
 ```python
 del config  # 目前所有疑似密钥的名字一律拒绝，不提供按配置放开的入口
@@ -406,12 +409,12 @@ del config  # 目前所有疑似密钥的名字一律拒绝，不提供按配置
 
 ### 3.8 执行器：`argv` 直执行 vs 三种 Shell 适配器
 
-[ShellPlan.executor](../../local-agent-web/src/local_agent/security/shell_guard.py#L129-L142) 有两个取值家族：
+[ShellPlan.executor](../../local-agent-web/src/local_agent/security/shell_guard.py#L118-L143) 有两个取值家族：
 
 - `EXECUTOR_ARGV = "argv"`：**没有** Shell 语法 → 直接 `subprocess(argv, shell=False)`。
 - `cmd` / `pwsh` / `sh`：**有** Shell 语法 → 交给适配器，`shell=False` 依旧成立，但首元素是适配器。
 
-[build_shell_invocation:389-417](../../local-agent-web/src/local_agent/security/shell_guard.py#L389-L417) 拼出最终 argv：
+[build_shell_invocation:390-419](../../local-agent-web/src/local_agent/security/shell_guard.py#L390-L419) 拼出最终 argv：
 
 | 适配器 | 前缀 | 实测（`echo hi \| more`） |
 |---|---|---|
@@ -422,7 +425,7 @@ del config  # 目前所有疑似密钥的名字一律拒绝，不提供按配置
 
 **关键点：调用方始终 `shell=False`**（docstring 原文"调用方始终 `shell=False`"）。"交给 Shell"这件事是通过**显式启动一个 Shell 进程**实现的，不是通过 `shell=True`。这样超时、输出捕获、进程树管理都还能控制。
 
-**适配器与平台必须匹配**，[select_adapter:364-381](../../local-agent-web/src/local_agent/security/shell_guard.py#L364-L381) 实测：
+**适配器与平台必须匹配**，[select_adapter:365-384](../../local-agent-web/src/local_agent/security/shell_guard.py#L365-L384) 实测：
 
 | 配置 | 平台 | 结果 |
 |---|---|---|
@@ -433,7 +436,7 @@ del config  # 目前所有疑似密钥的名字一律拒绝，不提供按配置
 
 配置写错平台 → **失败闭合**，不是"自动换个能用的"。
 
-**另外**：适配器本身也会被 `resolve_executable` 解析（[L233-247](../../local-agent-web/src/local_agent/security/shell_guard.py#L233-L247)），解析不到就**当场失败闭合**——理由同样是"不能让用户先批准、执行时才报命令无法启动"。
+**另外**：适配器本身也会被 `resolve_executable` 解析（[L233-248](../../local-agent-web/src/local_agent/security/shell_guard.py#L233-L248)），解析不到就**当场失败闭合**——理由同样是"不能让用户先批准、执行时才报命令无法启动"。
 
 **⚠️ 一个潜在陷阱**（实测发现，但当前代码路径不会触发）：`build_shell_invocation(plan, adapter=...)` 的 `adapter` 覆盖参数只改**标志位**，不改 launcher：
 
@@ -447,15 +450,17 @@ build_shell_invocation(plan_cmd, adapter='pwsh')
 
 ---
 
-## 4. `policy.py`（399 行）：唯一总入口
+## 4. `policy.py`（476 行）：唯一总入口
 
 ### 4.1 `classify_tool`：一张分派表 + 一个兜底 deny
 
-[policy.py:196-227](../../local-agent-web/src/local_agent/security/policy.py#L196-L227) 是整层最常被调用的函数。结构极简：
+[policy.py:242-277](../../local-agent-web/src/local_agent/security/policy.py#L242-L277) 是整层最常被调用的函数。结构极简：
 
 ```python
 args = dict(arguments or {})
-if tool_name in READ_ONLY_TOOLS:          # ("list_dir", "read_file")
+if tool_name in CONTROL_TOOLS:            # ("update_plan",)
+    return SafetyDecision(allowed=True, requires_approval=False, reason="当前任务计划更新")
+if tool_name in READ_ONLY_TOOLS:          # 9 个只读工具（含 grep/glob/web_*/git_*）
     return SafetyDecision(allowed=True, requires_approval=False, reason="只读工具")
 if tool_name == "edit_file":
     return self._classify_edit(args)
@@ -463,6 +468,8 @@ if tool_name == "write_file":
     return self._classify_write(args)
 if tool_name in SHELL_TOOLS:              # ("run_shell",)
     return self._classify_shell(args)
+if tool_name in GIT_WRITE_TOOLS:          # ("git_commit",)
+    return self._classify_git_commit(args)
 if tool_name in ALWAYS_APPROVAL_TOOLS:    # ("delete_file",)
     ...
 return SafetyDecision(allowed=False, requires_approval=False,
@@ -475,31 +482,34 @@ return SafetyDecision(allowed=False, requires_approval=False,
 classify_tool('some_new_tool') -> allowed=False, appr=False, reason='工具 some_new_tool 尚未接入或不在放行清单内'
 ```
 
-四个工具分组常量在 [policy.py:43-57](../../local-agent-web/src/local_agent/security/policy.py#L43-L57)，实测值：
+工具分组常量在 [policy.py:51-87](../../local-agent-web/src/local_agent/security/policy.py#L51-L87)，实测值：
 
 ```python
-READ_ONLY_TOOLS       = ('list_dir', 'read_file')
+READ_ONLY_TOOLS       = ('list_dir', 'read_file', 'grep', 'glob',
+                         'web_search', 'web_fetch', 'git_status', 'git_diff', 'git_log')
+CONTROL_TOOLS         = ('update_plan',)
 WRITE_TOOLS           = ('edit_file', 'write_file')
 SHELL_TOOLS           = ('run_shell',)
 ALWAYS_APPROVAL_TOOLS = ('delete_file',)
-KNOWN_TOOLS           = READ_ONLY_TOOLS + WRITE_TOOLS + SHELL_TOOLS + ALWAYS_APPROVAL_TOOLS   # 共 6 个
+GIT_WRITE_TOOLS       = ('git_commit',)
+KNOWN_TOOLS           = READ_ONLY + CONTROL + WRITE + SHELL + ALWAYS_APPROVAL + GIT_WRITE   # 共 15 个
 ```
 
 > **注意 `WRITE_TOOLS` 在 `classify_tool` 里没有被用到**——它是给别处（提示词、工具注册）用的分组。**看到常量定义不要假设它一定在本文件被用**，用 grep 查引用。
 
-### 4.2 `_external_side_effect_decision`：三出口
+### 4.2 `_external_side_effect_decision`：副作用守卫
 
-[policy.py:229-262](../../local-agent-web/src/local_agent/security/policy.py#L229-L262)。所有**有副作用**的工具（edit / write / delete）都会先过它，返回三种结果之一：
+[policy.py:279-315](../../local-agent-web/src/local_agent/security/policy.py#L279-L315)。所有**有副作用**的工具（edit / write / delete）都会先过它，返回以下结果之一：
 
 | 情况 | 返回 | 含义 |
 |---|---|---|
 | 路径为空 | `None` | "别抢着判"——交给工具自己的解析去报错 |
-| 越界且不允许外部 | `SafetyDecision(False, False, ...)` | **硬拒绝** |
+| 越界且未被授权 | `SafetyDecision(False, False, ...)` | **硬拒绝**（提示去「设置 → 权限」） |
 | 受保护目标 | `SafetyDecision(False, False, ...)` | **硬拒绝**（不可审批） |
-| 工作区外普通目标 | `SafetyDecision(False, True, ...)` | **强制审批**，且不参与免审白名单 |
-| 工作区内目标 | `None` | 按各工具自己的风险规则继续判 |
+| 只有只读授权的外部目标 | `SafetyDecision(False, False, ...)` | **硬拒绝**（该授权只覆盖读取，不能写/改/删） |
+| 读写授权的外部目标 / 工作区内目标 | `None` | 视同工作区内，按各工具自己的风险规则继续判 |
 
-**第一行那个"路径为空返回 None"有个具体理由**（[policy.py:238-241](../../local-agent-web/src/local_agent/security/policy.py#L238-L241)）：
+**第一行那个"路径为空返回 None"有个具体理由**（[policy.py:291-294](../../local-agent-web/src/local_agent/security/policy.py#L291-L294)）：
 
 > 没给路径（或空串）：交给工具自身的解析去报错，这里不抢先判定，否则"只按文本判定"的调用（例如只传 `old_text`/`new_text`）会被误判为缺路径。
 
@@ -511,11 +521,11 @@ classify_tool('delete_file', {path: 'E:/'})       -> appr=False 「路径超出�
 classify_tool('write_file', {path: 'C:\\temp\\x.txt'})  -> appr=False 「路径超出工作区：C:/TEMP/x.txt ...」
 ```
 
-第三行值得注意：`C:\temp\x.txt` 是**绝对路径**，但因为 `allow_external_paths=false`（本机配置 [config.yaml:27](../../local-agent-web/config.yaml#L27)），它在 `resolve_path` 阶段就抛 `WorkspaceBoundaryError` → **硬拒绝**，而不是"外部路径需要审批"。**顺序是：先判越界，再判受保护，最后才判"外部路径需审批"。**
+第三行值得注意：`C:\temp\x.txt` 是**绝对路径**，但因为 `allow_external_paths=false`（本机配置 [config.yaml:30](../../local-agent-web/config.yaml#L30)），它在 `resolve_path` 阶段就抛 `WorkspaceBoundaryError` → **硬拒绝**，而不是"外部路径需要审批"。**顺序是：先判越界，再判受保护，最后才判"外部路径需审批"。**
 
 ### 4.3 免审上限：`large_edit`
 
-[_classify_edit:264-302](../../local-agent-web/src/local_agent/security/policy.py#L264-L302) 的骨架：
+[_classify_edit:337-375](../../local-agent-web/src/local_agent/security/policy.py#L337-L375) 的骨架：
 
 ```python
 mode = edit_input_mode(args.get("old_text"), args.get("new_text"), args.get("patch"))
@@ -537,13 +547,13 @@ return SafetyDecision(True, False, f"{what}，改动 {changed_lines} 行，在�
 
 **三个设计要点**：
 
-**① 输入模式判定与工具执行共用同一个函数**（[policy.py:265-266](../../local-agent-web/src/local_agent/security/policy.py#L265-L266) 的注释）：
+**① 输入模式判定与工具执行共用同一个函数**（[policy.py:338-339](../../local-agent-web/src/local_agent/security/policy.py#L338-L339) 的注释）：
 
 > 安全判定与工具执行**共用** `diff_guard.edit_input_mode`，不能两处各写一套互斥规则。
 
 这是"**同一个事实只能有一个真相来源**"的实例。如果安全判定自己写一套"有 patch 就用 patch"、工具执行写另一套，两者迟早分叉——然后就会出现"判定时算的是 A 模式，执行时按 B 模式执行"。
 
-**② 结构非法的 patch 硬拒绝，不进审批**（[policy.py:277-280](../../local-agent-web/src/local_agent/security/policy.py#L277-L280)）：
+**② 结构非法的 patch 硬拒绝，不进审批**（[policy.py:351-353](../../local-agent-web/src/local_agent/security/policy.py#L351-L353)）：
 
 > 结构非法的 patch 永远不可能被执行：硬拒绝，不推进审批——不能让用户为一个必然失败的补丁点"批准"。
 
@@ -584,7 +594,7 @@ policy.resolve_readable_file('C:\\Windows\\win.ini')
 
 ### 4.5 一次性授权：`grant` / `revoke` / `is_granted`
 
-[policy.py:355-369](../../local-agent-web/src/local_agent/security/policy.py#L355-L369) 就是一个 `set[str]`：
+[policy.py:428-442](../../local-agent-web/src/local_agent/security/policy.py#L428-L442) 就是一个 `set[str]`：
 
 ```python
 def grant(self, fingerprint: str) -> None:
@@ -608,7 +618,7 @@ revoke 后 is_granted('FP-1') -> False
 is_granted('') -> False            # 空指纹永远不通过
 ```
 
-**为什么需要这个机制？** 因为工具本身**也要**拦一道。看 [tools/file_tools.py:271-275](../../local-agent-web/src/local_agent/tools/file_tools.py#L271-L275)：
+**为什么需要这个机制？** 因为工具本身**也要**拦一道。看 [tools/file_tools.py:299-305](../../local-agent-web/src/local_agent/tools/file_tools.py#L299-L305)：
 
 ```python
 resolved = policy.resolve_writable_file(path)
@@ -619,7 +629,7 @@ if not decision.allowed and not policy.is_granted(
     raise SecurityError(...)      # 没有有效批准 → 工具自己拒绝
 ```
 
-**工具不信任"调用方说已经批准了"**，它自己去 `policy` 里查。而 `policy` 里的授权是 [nodes.py:1235-1245](../../local-agent-web/src/local_agent/graph/nodes.py#L1235-L1245) 在执行前临时放进去、执行完 `finally` 立刻撤销的：
+**工具不信任"调用方说已经批准了"**，它自己去 `policy` 里查。而 `policy` 里的授权是 [nodes.py:1707-1738](../../local-agent-web/src/local_agent/graph/nodes.py#L1707-L1738) 在执行前临时放进去、执行完 `finally` 立刻撤销的：
 
 ```python
 if granted:
@@ -636,11 +646,11 @@ finally:
 
 ---
 
-## 5. `approval.py`（342 行）：指纹与"批准的作用域"
+## 5. `approval.py`（344 行）：指纹与"批准的作用域"
 
 ### 5.1 指纹算法
 
-[action_fingerprint:103-179](../../local-agent-web/src/local_agent/security/approval.py#L103-L179) 的结构：
+[action_fingerprint:105-181](../../local-agent-web/src/local_agent/security/approval.py#L105-L181) 的结构：
 
 ```python
 parts: list[str] = [tool_name, policy.workspace_root.as_posix()]   # ← 所有工具都带前两项
@@ -665,7 +675,7 @@ return _hash_text("|".join(parts))
 
 **三个"为什么这些字段必须在里面"**：
 
-**① 工作区根（第 113 行）**：
+**① 工作区根（第 115 行）**：
 
 > 工作区根目录必须是指纹的一部分：同一个相对路径在不同工作区是两个不同的动作，否则"在 A 里批准过"的指纹会复用到 B。
 
@@ -676,7 +686,7 @@ return _hash_text("|".join(parts))
 同一 edit，工作区 = local-agent-web/src ->  'cc627b661728b5f4'
 ```
 
-**② 文件当前内容摘要（`_file_digest`）**：如果批准之后文件被别的东西改了，指纹会变 → 批准自动失效。`_file_digest` 对"不存在/读不了"返回 `"missing"` / `"unreadable"` 这样的**稳定标记**（[approval.py:279-293](../../local-agent-web/src/local_agent/security/approval.py#L279-L293)），而不是抛异常。
+**② 文件当前内容摘要（`_file_digest`）**：如果批准之后文件被别的东西改了，指纹会变 → 批准自动失效。`_file_digest` 对"不存在/读不了"返回 `"missing"` / `"unreadable"` 这样的**稳定标记**（[approval.py:281-296](../../local-agent-web/src/local_agent/security/approval.py#L281-L296)），而不是抛异常。
 
 **③ `run_shell` 的 `executable_path`**：
 
@@ -686,7 +696,7 @@ return _hash_text("|".join(parts))
 
 指纹最容易出问题的地方是"同一个动作算出两个指纹"，导致**批准莫名失效**。代码里有两处专门的归一化：
 
-[\_text:336-342](../../local-agent-web/src/local_agent/security/approval.py#L336-L342)：
+[\_text:338-341](../../local-agent-web/src/local_agent/security/approval.py#L338-L341)：
 
 ```python
 def _text(value: Any) -> str:
@@ -694,7 +704,7 @@ def _text(value: Any) -> str:
     return value if isinstance(value, str) else ""
 ```
 
-[as_int:384-398](../../local-agent-web/src/local_agent/security/policy.py#L384-L398)（放在 `policy.py` 里，被 `approval.py` 引用）：
+[as_int:457-472](../../local-agent-web/src/local_agent/security/policy.py#L457-L472)（放在 `policy.py` 里，被 `approval.py` 引用）：
 
 > 安全判定与动作指纹必须用同一套归一规则，否则同一个动作会在两处算出不同的计划（例如 `timeout_seconds` 传 `"60"` 与传 `60`）。
 
@@ -715,7 +725,7 @@ if isinstance(value, bool):
 | `run_shell` `cwd="."` vs `cwd="./"` | **相同** |
 | `run_shell` `echo hi > f` vs `echo hi < f` | 不同（见 §3.2） |
 
-`timeout_seconds` 省略时取的是**配置值**（`policy.security.shell.default_timeout_seconds`），不是出厂常量 60（[approval.py:146-151](../../local-agent-web/src/local_agent/security/approval.py#L146-L151) 专门解释了这点）：
+`timeout_seconds` 省略时取的是**配置值**（`policy.security.shell.default_timeout_seconds`），不是出厂常量 60（[approval.py:148-153](../../local-agent-web/src/local_agent/security/approval.py#L148-L153) 专门解释了这点）：
 
 > 归一规则与 `SecurityPolicy.classify_tool` 一致；省略时取配置值（与安全判定、工具执行同一语义），而不是配置的出厂常量 60。
 
@@ -727,8 +737,8 @@ if isinstance(value, bool):
 
 | 函数 | 匹配条件 | 作用域 |
 |---|---|---|
-| [find_rejection:225-238](../../local-agent-web/src/local_agent/security/approval.py#L225-L238) | `decision == "reject"` **且** `action_fingerprint` 相等 | **不按轮次隔离**（跨轮生效） |
-| [find_approval:241-263](../../local-agent-web/src/local_agent/security/approval.py#L241-L263) | `decision == "approve"` **且** `run_id` 相等 **且** `tool_call_id` 相等 **且** `action_fingerprint` 相等 | **三重限定**（只对同一次调用生效） |
+| [find_rejection:227-240](../../local-agent-web/src/local_agent/security/approval.py#L227-L240) | `decision == "reject"` **且** `action_fingerprint` 相等 | **不按轮次隔离**（跨轮生效） |
+| [find_approval:243-265](../../local-agent-web/src/local_agent/security/approval.py#L243-L265) | `decision == "approve"` **且** `run_id` 相等 **且** `tool_call_id` 相等 **且** `action_fingerprint` 相等 | **三重限定**（只对同一次调用生效） |
 
 **实测**：
 
@@ -751,7 +761,7 @@ find_approval(同轮 run-A 但换 call-9)         -> None     # 批准不跨调�
 
 翻译：**拒绝是"这个动作永远不许"，批准是"这一次可以"**。前者偏严（宁可挡住用户），后者偏紧（宁可重新审批）——两者都往"更安全"的方向偏。
 
-`find_approval` 里还有一个升级兼容处理（[L256-258](../../local-agent-web/src/local_agent/security/approval.py#L256-L258)）：
+`find_approval` 里还有一个升级兼容处理（[L258-260](../../local-agent-web/src/local_agent/security/approval.py#L258-L260)）：
 
 ```python
 # 缺 run_id 的历史记录（升级前的 Checkpoint）一律不认，宁可重新审批
@@ -763,7 +773,7 @@ if str(record.get("run_id") or "") != run_id:
 
 ### 5.4 二次确认与影响摘要
 
-**二次确认**（[requires_second_confirmation:220-222](../../local-agent-web/src/local_agent/security/approval.py#L220-L222)）：
+**二次确认**（[requires_second_confirmation:222-224](../../local-agent-web/src/local_agent/security/approval.py#L222-L224)）：
 
 ```python
 return tool_name == "delete_file" and bool(dict(arguments or {}).get("recursive"))
@@ -776,11 +786,11 @@ requires_second_confirmation('delete_file', {'recursive': True})  -> True
 requires_second_confirmation('delete_file', {})                   -> False
 ```
 
-这个布尔值被写进 `ApprovalRequest.requires_second_confirmation`（[build_request:78](../../local-agent-web/src/local_agent/security/approval.py#L78)），然后由 L6 §5 讲过的 [approval_interrupt_node:3025-3038](../../local-agent-web/src/local_agent/graph/nodes.py#L3025-L3038) **调两次 `interrupt()`** 来消费它。
+这个布尔值被写进 `ApprovalRequest.requires_second_confirmation`（[build_request:79](../../local-agent-web/src/local_agent/security/approval.py#L79)），然后由 L6 §5 讲过的 [approval_interrupt_node:3888](../../local-agent-web/src/local_agent/graph/nodes.py#L3888) **调两次 `interrupt()`** 来消费它。
 
 > **注意作用域**：`security/` 只负责**算出"需不需要二次确认"**；"怎么问用户、问几次"是 `graph/nodes.py` 的事。这是很好的分层——安全层不做 UI 决策。
 
-**影响摘要**（[describe_impact:182-210](../../local-agent-web/src/local_agent/security/approval.py#L182-L210)）实测：
+**影响摘要**（[describe_impact:184-212](../../local-agent-web/src/local_agent/security/approval.py#L184-L212)）实测：
 
 ```
 describe_impact('delete_file', {path: 'src/a.py'})
@@ -793,11 +803,11 @@ describe_impact('run_shell', {command: 'dir', cwd: 'C:\\Windows'})
 **注意两点**：
 
 1. 给用户看的是**规范化绝对路径**（`E:/pylianxi/chaiai/local-agent-web/src/a.py`），不是模型给的 `src/a.py`。用户能一眼看出到底动的是哪个文件。
-2. 工作区外目标带 **`【工作区外路径】`** 前缀（[policy.py:213-217](../../local-agent-web/src/local_agent/security/policy.py#L213-L217) 的 `_external_marker`）。
+2. 工作区外目标带 **`【工作区外路径】`** 前缀（[approval.py:215-219](../../local-agent-web/src/local_agent/security/approval.py#L215-L219) 的 `_external_marker`）。
 
-`（missing）` 来自 [_delete_target_summary:296-329](../../local-agent-web/src/local_agent/security/approval.py#L296-L329)，它给出的是 `dir:大小:修改时间:父目录状态:条目数` 这样的**状态快照**——这个快照**同时进指纹**，所以"批准后目录内容变了"会让批准失效。
+`（missing）` 来自 [_delete_target_summary:298-332](../../local-agent-web/src/local_agent/security/approval.py#L298-L332)，它给出的是 `dir:大小:修改时间:父目录状态:条目数` 这样的**状态快照**——这个快照**同时进指纹**，所以"批准后目录内容变了"会让批准失效。
 
-**摘要扫描是有上限的**（[L266-268](../../local-agent-web/src/local_agent/security/approval.py#L266-L268)）：
+**摘要扫描是有上限的**（[L270](../../local-agent-web/src/local_agent/security/approval.py#L270)）：
 
 ```python
 #: 删除目标摘要允许扫描的条目上限：超过就停止并标注 capped。
@@ -949,7 +959,7 @@ sequenceDiagram
 - **安全类**（路径、命令、副作用）→ fail-closed，宁可误伤。
 - **成本/体验类**（分类失败、召回失败、压缩失败）→ fail-open，退化为规则或跳过。
 
-`decide_mode`（[routers.py:148-177](../../local-agent-web/src/local_agent/graph/routers.py#L148-L177)）是后者的代表：LLM 分类失败 → 退化为关键词匹配 → 再不行按闲聊处理。**如果这里也 fail-closed，一次网络抖动就会让用户什么都干不了。**
+`decide_mode`（[routers.py:155-184](../../local-agent-web/src/local_agent/graph/routers.py#L155-L184)）是后者的代表：LLM 分类失败 → 退化为关键词匹配 → 再不行按闲聊处理。**如果这里也 fail-closed，一次网络抖动就会让用户什么都干不了。**
 
 **判断"该严还是该松"的标准**：问一句"**最坏情况是什么**"。最坏是"数据被删/密钥泄漏"→ 严；最坏是"这次多绕一步/答得不够好"→ 松。
 
@@ -971,7 +981,7 @@ sequenceDiagram
 7. 白名单命中要同时满足哪四个条件？为什么 `match` 只能是 `exact`？
 8. 黑名单命中的命令，什么时候是"需审批"、什么时候是"硬拒绝"？
 9. 配置白名单里写了 `pytest --version`，为什么还是被拒？先查什么？
-10. `del config` 那一行（shell_guard.py:601）想表达什么？
+10. `del config` 那一行（shell_guard.py:602）想表达什么？
 
 **策略与审批**
 11. `classify_tool` 对 `read_file` 返回 `allowed=True`，为什么外部路径的读取仍然会失败？
@@ -986,9 +996,9 @@ sequenceDiagram
 
 L7 讲完了"**谁能做、谁能做多大**"，但"**具体怎么做**"还没讲——`edit_file` 怎么把 `old_text` 换成 `new_text`、`apply_patch` 怎么逐行校验、`run_shell` 怎么起进程并截断输出、`delete_file` 的递归删除怎么实现。
 
-所以下一篇推荐 **L8 · 能力层**（[`tools/`](../../local-agent-web/src/local_agent/tools)，5 文件 1203 行）：
+所以下一篇推荐 **L8 · 能力层**（[`tools/`](../../local-agent-web/src/local_agent/tools)，10 文件 3195 行）：
 
-- 6 个工具的真实签名与 Pydantic 参数校验；
+- 17 个工具的真实签名与 Pydantic 参数校验；
 - `ToolRegistry` 怎么把工具暴露给模型（`bind_tools` 的那一步）；
 - `ToolResultRecord` 的结构（L6 里反复出现的 `output_digest`、`truncated` 从哪来）；
 - **`apply_patch` 的严格校验**——L7 只讲了"结构非法就拒绝"，没讲"内容不一致怎么拒绝"；

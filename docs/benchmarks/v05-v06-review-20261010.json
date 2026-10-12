@@ -1,0 +1,195 @@
+{
+  "review_date": "2026-10-10",
+  "root": "E:\\pylianxi\\chaiai\\local-agent-web",
+  "source_sha256": {
+    "src/local_agent/tools/git_tools.py": "a93bcc4708624625e68fafea93ce95413f6ee3b9f772483a4907355cb228120d",
+    "src/local_agent/application/service.py": "171086081ab8373afbd75d6d7c409d41ace5339e2e65439c975996e0fba38fe2",
+    "src/local_agent/application/jobs.py": "17fcb5a148d6960579467e48aaac9ea7e48645f1b07dbba669aba02c23378571",
+    "src/local_agent/tools/result_spill.py": "4bef2cbf0fa0fd76a9502381074d9fd8ced3d814e5417646e9f238a14f3e8a60",
+    "src/local_agent/application/errors.py": "eae438e402adb2b51f1f0fa069fe7801d493666196f97e485a6a3be914f149dc",
+    "../V0_5_DEVELOPMENT_PLAN.md": "344b9851a28a8a431fa2620fe03604fadfe0b6be3e8802dfba506df049c7e6a9",
+    "../V0_6_DEVELOPMENT_PLAN.md": "dfdd0f9e88d0d7dd467ee117a1a400ac653fba9208480fd2f8139d3a58a52fce",
+    "../ARCHITECTURE.md": "dd61216c5d6ef7f9fe2e0978ae9cde7e05324676f7eb48868e0a2559d0182d19"
+  },
+  "reproduction": {
+    "data": "E:\\pylianxi\\chaiai\\local-agent-web\\eval\\v05-v06-review-20261010\\cases-421gtou9",
+    "queue_cancel": {
+      "job_state": "cancelled",
+      "work_called": false,
+      "session_lock_still_held": true
+    },
+    "approval_cancel": {
+      "pending_status": "awaiting_approval",
+      "cancel_status": "cancelled",
+      "new_request_http_status": 409,
+      "new_request_body": {
+        "error": {
+          "code": "SESSION_BUSY",
+          "category": "system",
+          "severity": "warning",
+          "title": "该会话已有正在运行的一轮",
+          "message": "本次提交未被接受：同一会话同一时刻只允许一轮运行，请求不会排队。",
+          "hint": "等待当前一轮结束后再提交这条内容；v0.4 不公开取消接口，因此没有可以中止它的按钮。",
+          "retryable": true,
+          "retry_condition": "当前一轮结束后可原样重发；请求不会排队，也没有取消接口。",
+          "blocked_reason": null,
+          "diagnostic_id": "SESSION_BUSY:d9878eda2bca",
+          "occurred_at": "2026-10-10T13:02:22.448386Z",
+          "source": "session"
+        }
+      },
+      "approval_http_status": 200,
+      "approval_status": "completed",
+      "cancelled_delete_executed": true
+    },
+    "worker_cancel_race": {
+      "worker_errors": [
+        "JobStoreError: 非法任务状态迁移：cancelled → running"
+      ],
+      "workers_alive": [
+        false
+      ],
+      "later_job_stuck": true,
+      "later_job_state": "queued"
+    },
+    "spill_equal_mtime": {
+      "equal_mtime_old_exists": true,
+      "equal_mtime_new_exists": false
+    },
+    "git_pathspec": {
+      "workspace": "E:\\pylianxi\\chaiai\\local-agent-web\\eval\\v05-v06-review-20261010\\cases-421gtou9\\git-scope\\ws",
+      "supplied_path": ":(top)outside.txt",
+      "validated_path": ":(top)outside.txt",
+      "diff_file_markers": [
+        "diff --git a/outside.txt b/outside.txt"
+      ],
+      "outside_workspace_diff_returned": true
+    }
+  },
+  "junction": {
+    "workspace": "E:\\pylianxi\\chaiai\\local-agent-web\\eval\\v05-v06-review-20261010\\junction-case\\workspace",
+    "reported_locator": ".local-agent/results/grep-review.txt",
+    "actual_target": "E:\\pylianxi\\chaiai\\local-agent-web\\eval\\v05-v06-review-20261010\\junction-case\\outside\\results\\grep-review.txt",
+    "outside_workspace_write": true
+  },
+  "verification": {
+    "python": {
+      "passed": 1451,
+      "failed": 1,
+      "skipped": 8,
+      "failed_test": "tests/test_search_spill.py::test_spill_is_also_capped_by_total_bytes",
+      "isolated_retest": "1 passed"
+    },
+    "frontend_unit": "339 passed",
+    "prototype": "174 passed / 3 skipped",
+    "ruff": "passed",
+    "mypy": "122 source files passed",
+    "openapi": "passed",
+    "frontend_typecheck": "passed",
+    "frontend_lint": "passed",
+    "api_type_drift": "passed"
+  },
+  "zip_exists": false,
+  "paid_calls_this_review": 0,
+  "semantic_quality_review": "excluded",
+  "after_fix": {
+    "resolved_findings": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "source_sha256": {
+      "src/local_agent/application/jobs.py": "42a1fc8b99485a7ab58e0bbf1daea93171a5fea6e98403e82ba175368d93173e",
+      "src/local_agent/application/service.py": "aa57697cdc88be2fc6fd1270569f0e61e8e9832e600fb2bffad7107612227ee6",
+      "src/local_agent/application/errors.py": "ea68d5a968972825ae1705cbb1a4a12a7f2fc38d3e77f5e50d9c0e57ce89a959",
+      "src/local_agent/tools/git_tools.py": "13a6e7718b65377d1fbc5f881ec7777f449d5c3beafd21f610b0c9e41c35c949",
+      "src/local_agent/tools/result_spill.py": "87fcc980067ec9af2e6e89c59548c1acae7eea2f676a9659847487f7d39c8599",
+      "tests/test_jobs.py": "4c12483a10c47fa307aee4a712f894ca5e7ddf869a6d407e70c22814d8e6c8e2",
+      "tests/test_api.py": "936a1d2bcc3717eb0787cac6baa34cab8bca2249f368c41021667fd5813c02eb",
+      "tests/test_git_tools.py": "bfdd1bdd4038932e706262b4fc89324fbe069dbc72e0f339a95a4fe0c1ea5ece",
+      "tests/test_search_spill.py": "f9c123f31295f4cdd10df4a9ce30811d336107261db76408a86594e223a291e9",
+      "../ARCHITECTURE.md": "722c187244aec1818fd08cd54f12aed5361fd1922291d1894e7eb8a99474bae3",
+      "../V0_5_DEVELOPMENT_PLAN.md": "68ebc8c151d3e7f497c5e976ca622fa12c64c54016c029f9f9e77f5ea3018fc9",
+      "../V0_6_DEVELOPMENT_PLAN.md": "99aaccdb3d4ce3788e20cc8d50c6a01606532c4eef0e5c0f6855aed2c6ceed7d"
+    },
+    "python": {
+      "passed": 1469,
+      "failed": 0,
+      "skipped": 8,
+      "seconds": 539.26,
+      "new_regression_instances": 17,
+      "log": "eval/v05-v06-review-20261010/fix-pytest-final.log"
+    },
+    "static_checks": {
+      "ruff": "passed",
+      "mypy": "122 source files passed",
+      "openapi": "passed",
+      "frontend_api_drift": "passed"
+    },
+    "reproduction": {
+      "data": "E:\\pylianxi\\chaiai\\local-agent-web\\eval\\v05-v06-review-20261010\\cases-br3ek24p",
+      "queue_cancel": {
+        "job_state": "cancelled",
+        "work_called": false,
+        "session_lock_still_held": false
+      },
+      "approval_cancel": {
+        "pending_status": "awaiting_approval",
+        "cancel_status": "cancelled",
+        "new_request_http_status": 409,
+        "new_request_body": {
+          "error": {
+            "code": "SESSION_BUSY",
+            "category": "system",
+            "severity": "warning",
+            "title": "该会话已有正在运行的一轮",
+            "message": "本次提交未被接受：同一会话同一时刻只允许一轮运行，请求不会排队。",
+            "hint": "等待当前一轮结束；也可在会话中取消任务并处理待审批或核对事项。取消不撤销已经发生的副作用。",
+            "retryable": true,
+            "retry_condition": "当前一轮结束，或取消并处理待审批/核对事项后可原样重发；请求不会排队。",
+            "blocked_reason": null,
+            "diagnostic_id": "SESSION_BUSY:f1338abde774",
+            "occurred_at": "2026-10-10T13:56:54.308744Z",
+            "source": "session"
+          }
+        },
+        "approval_http_status": 200,
+        "approval_status": "completed",
+        "cancelled_delete_executed": false
+      },
+      "worker_cancel_race": {
+        "worker_errors": [],
+        "workers_alive": [
+          true
+        ],
+        "later_job_stuck": false,
+        "later_job_state": "completed"
+      },
+      "spill_equal_mtime": {
+        "equal_mtime_old_exists": false,
+        "equal_mtime_new_exists": true
+      },
+      "git_pathspec": {
+        "workspace": "E:\\pylianxi\\chaiai\\local-agent-web\\eval\\v05-v06-review-20261010\\cases-br3ek24p\\git-scope\\ws",
+        "pathspec_blocked": true,
+        "outside_workspace_diff_returned": false
+      }
+    },
+    "junction": {
+      "junction_blocked": true,
+      "outside_files_unchanged": true
+    },
+    "approval_restart_cases": {
+      "none": "passed",
+      "before_resume": "passed",
+      "after_registration": "passed"
+    },
+    "paid_calls": 0,
+    "semantic_quality_review": "excluded",
+    "zip_exists": false
+  }
+}

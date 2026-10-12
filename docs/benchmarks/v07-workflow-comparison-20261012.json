@@ -1,0 +1,2673 @@
+{
+  "schema_version": 1,
+  "task_set": "v07-complex-v1",
+  "model_kind": "scripted",
+  "repetitions": 3,
+  "execution_order": [
+    [
+      "code_change",
+      1,
+      "free_loop"
+    ],
+    [
+      "code_change",
+      1,
+      "subgraph"
+    ],
+    [
+      "code_change",
+      2,
+      "subgraph"
+    ],
+    [
+      "code_change",
+      2,
+      "free_loop"
+    ],
+    [
+      "code_change",
+      3,
+      "free_loop"
+    ],
+    [
+      "code_change",
+      3,
+      "subgraph"
+    ],
+    [
+      "readonly_research",
+      1,
+      "free_loop"
+    ],
+    [
+      "readonly_research",
+      1,
+      "subgraph"
+    ],
+    [
+      "readonly_research",
+      2,
+      "subgraph"
+    ],
+    [
+      "readonly_research",
+      2,
+      "free_loop"
+    ],
+    [
+      "readonly_research",
+      3,
+      "free_loop"
+    ],
+    [
+      "readonly_research",
+      3,
+      "subgraph"
+    ]
+  ],
+  "source_sha256": {
+    "src/local_agent/__init__.py": "3750347cdf0b07be16c14ade46fc5452154ae17e0e5bc2d91c175e2ed32175f4",
+    "src/local_agent/api/__init__.py": "c5971dcfc5633f7d9df4ba2aa5cf11c0e4949b1deba1aa42dfe1fc2f412a6ef5",
+    "src/local_agent/api/__main__.py": "fd71cde8280abf72c80f8d8b00e817957033f27cb48df6d876996b9fb6e36b94",
+    "src/local_agent/api/app.py": "28d0544ee2b4be41cf51054d2806669048b8d76e623dc81bd103def46b3e120e",
+    "src/local_agent/api/container.py": "bd57546a7179274d1718da5878b844c95ecda3f8afae17d4bd725902fc214156",
+    "src/local_agent/api/openapi.py": "a98d8c2929d2a9f499ee8dc5ea35661ffb3064e32327014f2523215f60b06606",
+    "src/local_agent/api/routes.py": "8639f1d7cdcdee62dd2844ac912d7e29f7d2869ec384f7c59430d0285aa7818e",
+    "src/local_agent/api/schema_extras.py": "9296bb28e18fcf25e82b85a932e6ccba21189b237b60280b1ea1843f0858d1f9",
+    "src/local_agent/api/schemas.py": "8c82f51cd79a663ce73d2ef82f51010cc64a99273aa19ec5f7de8356286cfd13",
+    "src/local_agent/api/security.py": "b2b705bba46d5754dfd06c00ba9fddb327c1830705bc3a2d9d4fd61536ebe0e3",
+    "src/local_agent/api/sse.py": "3ac5fe27f8978672301214f94e14460a07e03a184117d5037581773ddfb1bc9d",
+    "src/local_agent/api/static.py": "a084bf568c80a8876fe7b4fd89b4141dcb91ab8e156ac79cb10df021c095b6e9",
+    "src/local_agent/app_paths.py": "3762a5fafe0fd1a3ab3121a209085652fdeb643ffb13c7810a431bd70bbcca7b",
+    "src/local_agent/application/__init__.py": "735e415a99af4628f17a7de8b5de6403d7730697df8dcb8e50fb1e1924a6437d",
+    "src/local_agent/application/conversation.py": "51edbf560120ab456cf7b8ba57452e5727ba1ead8df3c826ab6300ceee8a4add",
+    "src/local_agent/application/data_center.py": "75cc2218a63189df5c375f44bbb52192ff6d3319b817cea0b4d480b76e817eef",
+    "src/local_agent/application/data_center_models.py": "af8bd7e63f28017a560afbbbe2278a0d0b8edef34b5bf6190b0ff5843a0933bd",
+    "src/local_agent/application/errors.py": "ea68d5a968972825ae1705cbb1a4a12a7f2fc38d3e77f5e50d9c0e57ce89a959",
+    "src/local_agent/application/events.py": "be310facdc0563471c8929b3f8e621cc068562a630e8c3a0e19de835ecf8b272",
+    "src/local_agent/application/jobs.py": "4c3d51e6b39810212df24b23374e8d35216efb9b159e257ff72d13996b78d601",
+    "src/local_agent/application/models.py": "a25906850ca3071901040aed8eeda9cc9993bf786a87d8264a46e115ebc0a750",
+    "src/local_agent/application/projection.py": "bce36bf4f45d0b317f37ef9755cc006d81add7e51db4208f4328cc45ab42a82e",
+    "src/local_agent/application/recovery.py": "6ac34a595dac0644de6c25ca5c93977140485b99feeb973e045210d0ee52da57",
+    "src/local_agent/application/service.py": "2e01e7ee3f051e630683afc08864946aa72eb1e35c107de149b5f6d118801238",
+    "src/local_agent/browser_open.py": "6de284c9bdcf0b76c3f84a2a1a1a62f0bef6d676e8a98b4b131b0bc1c2217594",
+    "src/local_agent/cancellation.py": "864d183213c1f02f9148d4e575ebf899ab71587001a3622798abbbea14bcde5a",
+    "src/local_agent/capabilities.py": "389e8226c4666368b71dc5f6d800fa6f329536465a5f0d06954042ba6084f56a",
+    "src/local_agent/cli.py": "a7f4d124dcaa01691b90f11c6a75b76776b872564c692407e9b5fcaf9f2c119b",
+    "src/local_agent/config.py": "e8ab41c3b899379e399771b3d3650d96a38d3314a224a0e58c4945e2784ecb0e",
+    "src/local_agent/context/__init__.py": "4918248cfd1a7cc5eaf8be0fb1302f743758e9fabfb0e81fd2cce05e3d1c8457",
+    "src/local_agent/context/agents_loader.py": "b50c55646ae26697d9c2b0be036cffc8336ca6e8efe88b71c05c3e708ad224b5",
+    "src/local_agent/context/citations.py": "922fedaf7f9ee474c7f10bc6f5736cf48c68b5bf561836cc50ada3c58c5c5c50",
+    "src/local_agent/context/prompt_context.py": "04c67c0d7913b035a3995602895a52836c4f7e7c10ca7d0826df2511c4504a62",
+    "src/local_agent/context/skills_loader.py": "4d8737f399892bfe6f56a42fb15b04db7d3f155b4229eb9a537530193815116d",
+    "src/local_agent/context/token_budget.py": "b444c0978facb974165d6d9044197b94da33b134fa491c5773519f37df5ed297",
+    "src/local_agent/directory_picker.py": "65f628e1f00f368fb4f422aea60fbd8655923b54711896ae8eb49eb1d4487ae3",
+    "src/local_agent/exceptions.py": "d351e65ea972a2148623a6d816933e3438ee28ca20fc554aa3f8198a50fd0833",
+    "src/local_agent/graph/__init__.py": "f1c9e4b93f10126c898d9d5e84cea9eeb3e088c7ec8b9f1aef8ceafa850fc728",
+    "src/local_agent/graph/builder.py": "46c34bd3706ed1ce65393867ebd8e21fec9c40468cf1fbbdf3e134b560e39517",
+    "src/local_agent/graph/code_workflow.py": "629a218cca1719ebbe5f039588941b82952d295d2ff10fb8c1322e929c04e55c",
+    "src/local_agent/graph/delegated_workflow.py": "e3d85d48662e868e55916f44319614cc9704535c868e98fb78554a0300680e6f",
+    "src/local_agent/graph/edges.py": "029e154b84c0e1c9643152ea9de9297aae30a8712a9e4074337d325a53bc0189",
+    "src/local_agent/graph/evidence.py": "b5be8f8871c83ba7d8ee11a9c4c972d29cba45a35e31e63b7b4bac5614612d77",
+    "src/local_agent/graph/main_loop.py": "06725356b94fd9bee26df37fa2209956eae785441a7b43b0b3f0ebbcd6d30609",
+    "src/local_agent/graph/nodes.py": "9f59b879450596bfc3961d98b64362fe4033e89dbbbbc03278a3d35669e5ae4b",
+    "src/local_agent/graph/plan_updates.py": "dedf68dd342ebb6dad4ce662e0cbfee994f5d882c7467f562be053267f31b0c7",
+    "src/local_agent/graph/projection.py": "87f1ef143f827ebc6ee5ffcb73294b119d27c44b9315b0e93d609aa0edd574ab",
+    "src/local_agent/graph/readonly_workflow.py": "d8634da281def092e0f9b8482ffee88caebfdd9b0a94942980c253556b013428",
+    "src/local_agent/graph/routers.py": "3c0f24f2894d1d125923793ed1b35bcf4ed508f923dd8a826a9f58ea1ae1871a",
+    "src/local_agent/graph/scope.py": "e3af853128adfed144c7cad96c637e950143da6d8c0d4b32879f3700a4252d04",
+    "src/local_agent/graph/state.py": "a0b24b5ef50e6ecc4ff8dd7e0fbd2c4e1583945fc14c511d6df25ea3d9ffca73",
+    "src/local_agent/job_state.py": "1138657986de418432fcad9654904a010d1c03e097ff81e26631a4fd67efbd9a",
+    "src/local_agent/llm/__init__.py": "8322c2ad577216e06fab395c1b4e21ac7fdea37d6a96c6b9d080990627802a1b",
+    "src/local_agent/llm/compat.py": "c942c862e9182c27019cb698222214d3c1b76695efa6e195c9c54c019153c1d8",
+    "src/local_agent/llm/embedding.py": "eaf170adc460d38e96c4b4fe7b4d784e3c85588d2713ab86bcf0bf787eb42180",
+    "src/local_agent/llm/factory.py": "2a5d4e634a7a12bcca922d3e2918889e8cae9145e62b071b3e4db14055320415",
+    "src/local_agent/llm/models.py": "e55ff618592b9fae7339eea57466c3db27b0a74f5592c85834d8a63beb494fb3",
+    "src/local_agent/llm/protocol.py": "ecfd12168fa5959cf5250a7f632ad58a5510c0ffe535d2f9e0ba9b9c361aad45",
+    "src/local_agent/llm/stream_context.py": "68a14339053ef2543bf079dfdee564731b0a7ed76a1a50e97ca1e7ab07276d8d",
+    "src/local_agent/llm/usage.py": "af3407d53444031fe1f522a0bf5b5b50b1d63310e98a9f98f60ec2c610368521",
+    "src/local_agent/llm/usage_recording.py": "643f7ebdc9575f90fdd4a6ed2b5ae5236afed95a248d3fa4bb7ff3ca9881c8ab",
+    "src/local_agent/llm/workflow_model.py": "ac4c05d353550079f4895effcb3efe7d116ef9c95e3792f6fa41f1e0e23314e3",
+    "src/local_agent/memory/__init__.py": "45455b53f487a14f1c46e96dd99748ec14c9eb7aede4355ad683053174fb1c22",
+    "src/local_agent/memory/forgetting.py": "275f7fdb15ce5d32e1fd4f8675a6e76b0dfe4f3c77fc9efde8ed37f35a304468",
+    "src/local_agent/memory/long_term.py": "3a73b3a764fcb357b34ba7b30a72619e989c5e3334b56f06cb7067467ccd1888",
+    "src/local_agent/memory/medium_term.py": "e0185119dd50e253d8f86a29d3f8150510148e77dae5ca94d384cbeaf4906dc3",
+    "src/local_agent/memory/recall.py": "cd3df6183f9f88555afb6b58ff7eb8593f6fa51e6e35d2f578a081078420fbbb",
+    "src/local_agent/memory/schemas.py": "7ee75a0cbde1ec5c3d3fc891f10f939f0c1d67856dacd17d7f109fe252016225",
+    "src/local_agent/memory/short_term.py": "da8ef5224e88bd5058191e48b31bad1fae4ef5027f7604cf37ac0f3098c05d56",
+    "src/local_agent/memory/summarizer.py": "6c1a56838b9819d7ab60e8258b445e3f62d9784b35302bf1902d3b40db1e8075",
+    "src/local_agent/memory/tool_output.py": "36b7fccda00ce846d80e02c371fc8e9337f045af74db2ef7ea7bfbb8bebcc5e9",
+    "src/local_agent/memory/writer.py": "4ab3ec4fe6a2bb047a544099f86430f27b3b7c6899adb1c60c7be417a5843aa2",
+    "src/local_agent/model_settings/__init__.py": "e58fb93544303ab6b2b3d18a6038f541f1419d9e92dd26c8436fef92e8051139",
+    "src/local_agent/model_settings/credentials.py": "0fed014e952890719cadaed11b28377341509fc42433a6cc89befaf13e218e10",
+    "src/local_agent/model_settings/legacy_import.py": "f86871c312324184fbf2d902ea97dbca8f782067e2633d1b483ba80b256ed922",
+    "src/local_agent/model_settings/memory_settings.py": "90e7618fd173f74dd26144aafd4b5c0c123e263f1e3f79e0caddc20cfef4916a",
+    "src/local_agent/model_settings/models.py": "88ebe61cd33ebb7fdb9c2229819fa71fdc1aacdd816a0cc6fc4e789a43333d93",
+    "src/local_agent/model_settings/preferences.py": "792edfff6c211d7bec103025133982cf7237e4563bcbbb32a61183d8be0240d1",
+    "src/local_agent/model_settings/probe.py": "dcc406abcdf8f35c552d24a20b4b68d2621fc0f3b753be6f658848535388f92e",
+    "src/local_agent/model_settings/store.py": "10fec150b8943627ba8f8c2f630afc18aeab035787d08b0c818f728f2257d662",
+    "src/local_agent/persistence/__init__.py": "a4aaaddfac7b5304f550a2569b7812c753f5303e59056311a65262948638f503",
+    "src/local_agent/persistence/checkpoint.py": "61ba030e601a44b35b53d82be0c62d068246daa58ca2c25db6c5277b301d8eec",
+    "src/local_agent/persistence/conversation_store.py": "eaa6a7c09b9af0ec82bb34ae6ade8f0000eae68e39230ae47bab770ec4d17030",
+    "src/local_agent/persistence/job_store.py": "d290ec05042a336157b2cc29e17e50bd4e8475ab55c350eb59902c73b6e873e0",
+    "src/local_agent/persistence/migrations.py": "dc511a8a3eafdaf8c091ad36976e86981b53bc7a7b4177fe310ee180bcc43277",
+    "src/local_agent/persistence/request_ledger.py": "3c24954249199ccacab0ef65b662a04cc98187dc8214cb664b5c609382748c96",
+    "src/local_agent/persistence/session_store.py": "48b466db0108811d589106ccdfea60bc88877aed458da3b67d26d9d4a2ca2db0",
+    "src/local_agent/profile_tasks.py": "ccfa74189f9d30289a48a62d61d1e3fc5bcf5f199e624ce0d9fb346939f14f29",
+    "src/local_agent/rag/__init__.py": "ccb82bd0229f76aee0ae0a2e78efd09c28b581703ca092c8bda440e2e8719b2c",
+    "src/local_agent/rag/ignore.py": "73f0192b3525282c714a3ff94942580b5163ebaf9385c170527d9d3eb5fc63b3",
+    "src/local_agent/rag/retriever.py": "36bac3939e9d30cf3a2905333b1b014e31ee646398559ca436b6b6c1ecc6e436",
+    "src/local_agent/rag/search.py": "52c0b395eb183ec9569bebf8bdd68ee258d03a0d40e34f9c20bebc861755741a",
+    "src/local_agent/rag/snippets.py": "6c1cc72938264f9602ae92ec39a415302453934d2f4cb761073402bea4aba281",
+    "src/local_agent/rag/walk.py": "8d154bdd585849a450b294e491a0cc90fe62e410d8a91b59258cdb18677ab36d",
+    "src/local_agent/reflection/__init__.py": "207dd6be1cf1a336229ad610c7bd28d6143cb97705319f517c4226e4e62fe0be",
+    "src/local_agent/reflection/memory_candidates.py": "dbd28a0fdb7b0d04dc3724e976400af37eae12c86e8c7973f6258998ae41c0a2",
+    "src/local_agent/reflection/reflector.py": "d2ab18e18190852267021eaf8bcd5d1c246233f5f48ac717712d4ad429deb43c",
+    "src/local_agent/reflection/validators.py": "ced4dd4dd153c1c756cd75c7cffb65b686e7465aa38767387de710162ecc7be4",
+    "src/local_agent/scope.py": "5014cfdec5b2e6d1324bf1013317ab23cf28de519d35ab39f5fe31e7e534ed97",
+    "src/local_agent/security/__init__.py": "c55889b59e297ebbbc8c5df992ba38425eb4c9e3246c3e4b80daf6e9576fa868",
+    "src/local_agent/security/approval.py": "3556b64f467d668ac816b575ad240f4e0f9d09ed5a746286375d484d508e88cd",
+    "src/local_agent/security/diff_guard.py": "2ebe804c5df294452cea1540fd71f846ad6864b1b5ac025cfeeabfb2761d578c",
+    "src/local_agent/security/path_guard.py": "57126443cc365db7bd951e510e599adde5d5943fedb75bc61840545d01adfef6",
+    "src/local_agent/security/policy.py": "5c5d22ef1e07b7c905e6ff2cbbd7a438eef612540115064bc9764c7acab77df2",
+    "src/local_agent/security/process_guard.py": "d3ed3b6a23fefae80861849179353dc7f1f59b48e7f3a4a0d043b37af20c66fb",
+    "src/local_agent/security/shell_guard.py": "c63460508538c2be87177d834166b64d62bc6c5710bc8ae1b82f1eff29337f84",
+    "src/local_agent/session_kind.py": "ad9c0d50b00678d98e883491b7f614e5740eca2fe98fef5d8e40e0b7ae5c4755",
+    "src/local_agent/startup.py": "508b2b6ea04836730580618945b605287e5a0f35b096b4f25c086484831f33e4",
+    "src/local_agent/tools/__init__.py": "f52b453fa8e3e472496f90f7dafbcf77d6b466f01e4f1938c6efffed995bead2",
+    "src/local_agent/tools/file_tools.py": "80493cb1e6766522803ec620792ea13013610e826f91f61d9a1cbd12607921a0",
+    "src/local_agent/tools/git_tools.py": "13a6e7718b65377d1fbc5f881ec7777f449d5c3beafd21f610b0c9e41c35c949",
+    "src/local_agent/tools/plan_tools.py": "2099edc0850aff5f865ccc363fb6646213cca6cc2977608305ff7ceaa53b80d2",
+    "src/local_agent/tools/result_spill.py": "87fcc980067ec9af2e6e89c59548c1acae7eea2f676a9659847487f7d39c8599",
+    "src/local_agent/tools/result_types.py": "49e6a2dd336909e86895fb26320dba0074e94b0152fedfb1a603cf271f789d36",
+    "src/local_agent/tools/search_tools.py": "f296f6fab87c2953cd21d1e66383c36b517dd3ba54a5c8d9a86efaef9c14a747",
+    "src/local_agent/tools/shell_tools.py": "6e99b9d7946ecafac8aa43e632885ff5a3641016ce5643c8d2a52ba60bb50eb0",
+    "src/local_agent/tools/skill_tools.py": "d26846e68786401d2c49850fef1896930b262d3c363c52a250e9321f6314e5db",
+    "src/local_agent/tools/tool_registry.py": "aae66f6927e4c3b70ef70e31f085b78539d533d31708316452cf221137486556",
+    "src/local_agent/tools/web_tools.py": "56a715637bfe5e2dce1578b21c9dda213391a6cb0fd634a6783800a22eeabec2",
+    "src/local_agent/ui/__init__.py": "c21820d9574d058ce007f1f2721abe2decd5c87b4362dcb43b89b8d93b6cfae9",
+    "src/local_agent/ui/approval_ui.py": "4e8770dc09d97724a783fddf6faa10f3d18b204a1206ec7ffd14b5a669922139",
+    "src/local_agent/ui/decision_streaming.py": "cbcf4bffbea8eb490e87d043e57cad40916ea37ca3cb535c49f9e636b9b160e6",
+    "src/local_agent/ui/renderer.py": "71f8a9a21bf338dc47c66256b8cdda95d8490e5293c608e9730d504c969f203e",
+    "src/local_agent/ui/streaming.py": "55821beff12673bc5bebdbf52c1d878ff879f3b09d4e5a551615f4e9d0bb433f",
+    "src/local_agent/web.py": "55a4b5fe36305612e6a8dd8192acebb1ab220289a0e4d961b794aa285457a1c3",
+    "src/local_agent/workflow_comparison.py": "51d763d4fc1e70afaac6bb80ba1ff588d834fc6d9d81c707e362a9bdeee0cab2",
+    "src/local_agent/workflow_contracts.py": "89ffd5e6bd04a57a23697cb1a76fbebcb88ec4e0df7d694c59777a87d5b3eef3",
+    "src/local_agent/workflow_eval.py": "78a4685093a60eb5641c61aeeb6356b9f28d3de88279afad848e8a365beca9a9",
+    "src/local_agent/workspaces.py": "0119be3dccbebde85505f9741581cd844f46e45fc525e8c1eb9db0b5c660d4cf",
+    "scripts/run_workflow_baseline.py": "5340b733dcb19cfa2421a94ae8ca7d72a2f6093aee1ac43fad917defe283564f",
+    "scripts/run_workflow_comparison.py": "6799d201162cb7f80e7b1a4ea5370cfcb43e5f492b88d0e77ca7dc8f18eb6313",
+    "tests/test_workflow_eval.py": "d901c2745eabc6be80d81c144a4d1e859f9cd42a458a3e53371349f15e9673f6",
+    "tests/test_workflow_comparison.py": "70b6a67285acff70c277bd108858140e42f24df49b3d39e0f0da61618489ad1e"
+  },
+  "paid_model_calls": 0,
+  "semantic_quality_reviewed": false,
+  "real_model_advantage_proven": false,
+  "limitations": [
+    "固定脚本已知正确修复；仅证明离线编排调用改善",
+    "只读工作流整理原文，不进行模型语义归纳",
+    "两臂配置相同；自由循环与工作流预算执行门仍各用原实现",
+    "耗时仅记录；未知实际 Token/缓存为 null，预留不是实际用量"
+  ],
+  "runs": [
+    {
+      "case_id": "code_change",
+      "attempt": 1,
+      "mode": "free_loop",
+      "task_fingerprint": "1ad43f952bf399c389a23d7d0762d453ea4f08702735ae082489aae925ea7e70",
+      "profile": "coder",
+      "model": "scripted-offline",
+      "model_fingerprint": "72403f299dd9bc6b4339194ebd64e4dfbb5ae64f8ee8787c1d5655b2d081fe54",
+      "evaluation_config_fingerprint": "aab85f4b2a4239c73c13b6d4f025cb6b306f486987429cb645c087690358f46b",
+      "seed_sha256": {
+        "bounds.py": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "final_file_sha256": {
+        "bounds.py": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "workflow_request": null,
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 6,
+      "model_requests": [
+        {
+          "protocol": "free_loop",
+          "input_sha256": "556eaea6c865bd4e4da09eca69bf99504bd7815b88e9c6f2af7e4022e1888e8b",
+          "output_sha256": "60d59dfc97f1fe3abce096250a49e027586b62d4b5dfa13158610bd978955611"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "636d4e26b083a2cb1ccaa5efe7f4a0cd8fae38f273fc3d587dee284f9888a3ad",
+          "output_sha256": "3f6e36f40d9dd934f3caea191001f02b81c3552c8448adb368bda58b790efee2"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "247273e5ae34fd5e2e7b6af9a7fac8b672ab544330e78c60a286b46ae9487569",
+          "output_sha256": "a2bff82257fb21a14be1838b4bb08adb77d7bc4581071c856e1cfe731df9ef43"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "5f1717832e3995fe12dbd505e25ffdf1386bbc2b238bccbaee0233e49d49bc6d",
+          "output_sha256": "def0008317ef20bcefc44a75343e4b232fc30d6b9faf1830b0b854dba9e76fd5"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "9305906ba967b648735f390624b1092473a8be8011421fa9aad45d61c1ab2d26",
+          "output_sha256": "e42904050f627dc4f2cff48d9ccc334f00a8dc98f53da44c3dd245d0915defe1"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "87d002b2e278ef5da2e12207fa49352ebaf77fac73e490dea67716acd1bace8f",
+          "output_sha256": "503a173c48cbbc0f1963b7d48e27c4f837ee7067dca12b35640feda60d8e51c3"
+        }
+      ],
+      "tool_calls": 5,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "code-before",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "tests",
+          "status": "ok",
+          "arguments": {
+            "path": "test_bounds.py"
+          }
+        },
+        {
+          "tool_name": "edit_file",
+          "tool_call_id": "fix",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "old_text": "    return value\n",
+            "new_text": "    return min(upper, max(lower, value))\n",
+            "expected_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556"
+          }
+        },
+        {
+          "tool_name": "run_shell",
+          "tool_call_id": "test",
+          "status": "ok",
+          "arguments": {
+            "command": "python -B -m unittest -v"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "code-after",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "code-before",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return value\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "tests",
+          "name": "read_file",
+          "output": {
+            "path": "test_bounds.py",
+            "encoding": "utf-8",
+            "sha256": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106",
+            "line_count": 13,
+            "truncated": false,
+            "is_binary": false,
+            "content": "import unittest\nfrom bounds import clamp\n\n\nclass ClampTests(unittest.TestCase):\n    def test_below(self):\n        self.assertEqual(clamp(-1, 0, 10), 0)\n\n    def test_inside(self):\n        self.assertEqual(clamp(5, 0, 10), 5)\n\n    def test_above(self):\n        self.assertEqual(clamp(11, 0, 10), 10)\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 13,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "fix",
+          "name": "edit_file",
+          "output": {
+            "path": "bounds.py",
+            "reason": "",
+            "replaced_count": 1,
+            "changed_lines": 2,
+            "old_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "new_sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "diff": "--- a/bounds.py\n+++ b/bounds.py\n@@ -1,2 +1,2 @@\n def clamp(value, lower, upper):\n-    return value\n+    return min(upper, max(lower, value))\n",
+            "line_count": 2,
+            "note": null
+          }
+        },
+        {
+          "tool_call_id": "test",
+          "name": "run_shell",
+          "output": {
+            "command": "python -B -m unittest -v",
+            "argv": [
+              "E:\\miniconda3 py\\python.exe",
+              "-B",
+              "-m",
+              "unittest",
+              "-v"
+            ],
+            "cwd": "<workspace>",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "test_above (test_bounds.ClampTests.test_above) ... ok\r\ntest_below (test_bounds.ClampTests.test_below) ... ok\r\ntest_inside (test_bounds.ClampTests.test_inside) ... ok\r\n\r\n----------------------------------------------------------------------\r\nRan 3 tests in 0.000s\r\n\r\nOK\r\n",
+            "timed_out": false,
+            "duration_ms": 119,
+            "truncated": false,
+            "note": null,
+            "executor": "argv"
+          }
+        },
+        {
+          "tool_call_id": "code-after",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return min(upper, max(lower, value))\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "已修复 clamp，运行三个 unittest 并复读文件。",
+      "loop_count": 6,
+      "workflow_steps": null,
+      "workflow_model_tokens_reserved": null,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 586,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    },
+    {
+      "case_id": "code_change",
+      "attempt": 1,
+      "mode": "subgraph",
+      "task_fingerprint": "1ad43f952bf399c389a23d7d0762d453ea4f08702735ae082489aae925ea7e70",
+      "profile": "coder",
+      "model": "scripted-offline",
+      "model_fingerprint": "72403f299dd9bc6b4339194ebd64e4dfbb5ae64f8ee8787c1d5655b2d081fe54",
+      "evaluation_config_fingerprint": "aab85f4b2a4239c73c13b6d4f025cb6b306f486987429cb645c087690358f46b",
+      "seed_sha256": {
+        "bounds.py": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "final_file_sha256": {
+        "bounds.py": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "workflow_request": {
+        "source_path": "bounds.py",
+        "test_paths": [
+          "test_bounds.py"
+        ],
+        "expected_test_count": 3
+      },
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 1,
+      "model_requests": [
+        {
+          "protocol": "proposal",
+          "input_sha256": "54eca9afb886b2549c796c27f4c12760b5fbfb242283ea88643189ee9d01c145",
+          "output_sha256": "d37060ecae0c45e50eee52d3c3f4d6bae9a8cb212e05f4dfa43cb227359018f1"
+        }
+      ],
+      "tool_calls": 6,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:1",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:2",
+          "status": "ok",
+          "arguments": {
+            "path": "test_bounds.py",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "edit_file",
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:3",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "old_text": "    return value\n",
+            "new_text": "    return min(upper, max(lower, value))\n",
+            "expected_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556"
+          }
+        },
+        {
+          "tool_name": "run_shell",
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:4",
+          "status": "ok",
+          "arguments": {
+            "command": "python -B -m unittest -v",
+            "cwd": "."
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:5",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:6",
+          "status": "ok",
+          "arguments": {
+            "path": "test_bounds.py",
+            "max_chars": "16000"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:1",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return value\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:2",
+          "name": "read_file",
+          "output": {
+            "path": "test_bounds.py",
+            "encoding": "utf-8",
+            "sha256": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106",
+            "line_count": 13,
+            "truncated": false,
+            "is_binary": false,
+            "content": "import unittest\nfrom bounds import clamp\n\n\nclass ClampTests(unittest.TestCase):\n    def test_below(self):\n        self.assertEqual(clamp(-1, 0, 10), 0)\n\n    def test_inside(self):\n        self.assertEqual(clamp(5, 0, 10), 5)\n\n    def test_above(self):\n        self.assertEqual(clamp(11, 0, 10), 10)\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 13,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:3",
+          "name": "edit_file",
+          "output": {
+            "path": "bounds.py",
+            "reason": "",
+            "replaced_count": 1,
+            "changed_lines": 2,
+            "old_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "new_sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "diff": "--- a/bounds.py\n+++ b/bounds.py\n@@ -1,2 +1,2 @@\n def clamp(value, lower, upper):\n-    return value\n+    return min(upper, max(lower, value))\n",
+            "line_count": 2,
+            "note": null
+          }
+        },
+        {
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:4",
+          "name": "run_shell",
+          "output": {
+            "command": "python -B -m unittest -v",
+            "argv": [
+              "E:\\miniconda3 py\\python.exe",
+              "-B",
+              "-m",
+              "unittest",
+              "-v"
+            ],
+            "cwd": "<workspace>",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "test_above (test_bounds.ClampTests.test_above) ... ok\r\ntest_below (test_bounds.ClampTests.test_below) ... ok\r\ntest_inside (test_bounds.ClampTests.test_inside) ... ok\r\n\r\n----------------------------------------------------------------------\r\nRan 3 tests in 0.000s\r\n\r\nOK\r\n",
+            "timed_out": false,
+            "duration_ms": 113,
+            "truncated": false,
+            "note": null,
+            "executor": "argv"
+          }
+        },
+        {
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:5",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return min(upper, max(lower, value))\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "80259d8303954a789d423f24578fff2e:code:6",
+          "name": "read_file",
+          "output": {
+            "path": "test_bounds.py",
+            "encoding": "utf-8",
+            "sha256": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106",
+            "line_count": 13,
+            "truncated": false,
+            "is_binary": false,
+            "content": "import unittest\nfrom bounds import clamp\n\n\nclass ClampTests(unittest.TestCase):\n    def test_below(self):\n        self.assertEqual(clamp(-1, 0, 10), 0)\n\n    def test_inside(self):\n        self.assertEqual(clamp(5, 0, 10), 5)\n\n    def test_above(self):\n        self.assertEqual(clamp(11, 0, 10), 10)\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 13,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "已修改 bounds.py，真实运行 3 个 unittest 通过；复读源码与测试，产物符合预期，测试文件保持原样。",
+      "loop_count": 0,
+      "workflow_steps": 16,
+      "workflow_model_tokens_reserved": 4407,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 307,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    },
+    {
+      "case_id": "code_change",
+      "attempt": 2,
+      "mode": "subgraph",
+      "task_fingerprint": "1ad43f952bf399c389a23d7d0762d453ea4f08702735ae082489aae925ea7e70",
+      "profile": "coder",
+      "model": "scripted-offline",
+      "model_fingerprint": "72403f299dd9bc6b4339194ebd64e4dfbb5ae64f8ee8787c1d5655b2d081fe54",
+      "evaluation_config_fingerprint": "aab85f4b2a4239c73c13b6d4f025cb6b306f486987429cb645c087690358f46b",
+      "seed_sha256": {
+        "bounds.py": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "final_file_sha256": {
+        "bounds.py": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "workflow_request": {
+        "source_path": "bounds.py",
+        "test_paths": [
+          "test_bounds.py"
+        ],
+        "expected_test_count": 3
+      },
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 1,
+      "model_requests": [
+        {
+          "protocol": "proposal",
+          "input_sha256": "cc30538d23a99302065c3f3bf31e7274526aa106bd5bb4588e326a3867eec106",
+          "output_sha256": "d37060ecae0c45e50eee52d3c3f4d6bae9a8cb212e05f4dfa43cb227359018f1"
+        }
+      ],
+      "tool_calls": 6,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:1",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:2",
+          "status": "ok",
+          "arguments": {
+            "path": "test_bounds.py",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "edit_file",
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:3",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "old_text": "    return value\n",
+            "new_text": "    return min(upper, max(lower, value))\n",
+            "expected_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556"
+          }
+        },
+        {
+          "tool_name": "run_shell",
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:4",
+          "status": "ok",
+          "arguments": {
+            "command": "python -B -m unittest -v",
+            "cwd": "."
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:5",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:6",
+          "status": "ok",
+          "arguments": {
+            "path": "test_bounds.py",
+            "max_chars": "16000"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:1",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return value\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:2",
+          "name": "read_file",
+          "output": {
+            "path": "test_bounds.py",
+            "encoding": "utf-8",
+            "sha256": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106",
+            "line_count": 13,
+            "truncated": false,
+            "is_binary": false,
+            "content": "import unittest\nfrom bounds import clamp\n\n\nclass ClampTests(unittest.TestCase):\n    def test_below(self):\n        self.assertEqual(clamp(-1, 0, 10), 0)\n\n    def test_inside(self):\n        self.assertEqual(clamp(5, 0, 10), 5)\n\n    def test_above(self):\n        self.assertEqual(clamp(11, 0, 10), 10)\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 13,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:3",
+          "name": "edit_file",
+          "output": {
+            "path": "bounds.py",
+            "reason": "",
+            "replaced_count": 1,
+            "changed_lines": 2,
+            "old_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "new_sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "diff": "--- a/bounds.py\n+++ b/bounds.py\n@@ -1,2 +1,2 @@\n def clamp(value, lower, upper):\n-    return value\n+    return min(upper, max(lower, value))\n",
+            "line_count": 2,
+            "note": null
+          }
+        },
+        {
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:4",
+          "name": "run_shell",
+          "output": {
+            "command": "python -B -m unittest -v",
+            "argv": [
+              "E:\\miniconda3 py\\python.exe",
+              "-B",
+              "-m",
+              "unittest",
+              "-v"
+            ],
+            "cwd": "<workspace>",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "test_above (test_bounds.ClampTests.test_above) ... ok\r\ntest_below (test_bounds.ClampTests.test_below) ... ok\r\ntest_inside (test_bounds.ClampTests.test_inside) ... ok\r\n\r\n----------------------------------------------------------------------\r\nRan 3 tests in 0.000s\r\n\r\nOK\r\n",
+            "timed_out": false,
+            "duration_ms": 114,
+            "truncated": false,
+            "note": null,
+            "executor": "argv"
+          }
+        },
+        {
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:5",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return min(upper, max(lower, value))\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "d2f878b008c34de1a5f89c6173e2cd13:code:6",
+          "name": "read_file",
+          "output": {
+            "path": "test_bounds.py",
+            "encoding": "utf-8",
+            "sha256": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106",
+            "line_count": 13,
+            "truncated": false,
+            "is_binary": false,
+            "content": "import unittest\nfrom bounds import clamp\n\n\nclass ClampTests(unittest.TestCase):\n    def test_below(self):\n        self.assertEqual(clamp(-1, 0, 10), 0)\n\n    def test_inside(self):\n        self.assertEqual(clamp(5, 0, 10), 5)\n\n    def test_above(self):\n        self.assertEqual(clamp(11, 0, 10), 10)\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 13,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "已修改 bounds.py，真实运行 3 个 unittest 通过；复读源码与测试，产物符合预期，测试文件保持原样。",
+      "loop_count": 0,
+      "workflow_steps": 16,
+      "workflow_model_tokens_reserved": 4407,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 315,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    },
+    {
+      "case_id": "code_change",
+      "attempt": 2,
+      "mode": "free_loop",
+      "task_fingerprint": "1ad43f952bf399c389a23d7d0762d453ea4f08702735ae082489aae925ea7e70",
+      "profile": "coder",
+      "model": "scripted-offline",
+      "model_fingerprint": "72403f299dd9bc6b4339194ebd64e4dfbb5ae64f8ee8787c1d5655b2d081fe54",
+      "evaluation_config_fingerprint": "aab85f4b2a4239c73c13b6d4f025cb6b306f486987429cb645c087690358f46b",
+      "seed_sha256": {
+        "bounds.py": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "final_file_sha256": {
+        "bounds.py": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "workflow_request": null,
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 6,
+      "model_requests": [
+        {
+          "protocol": "free_loop",
+          "input_sha256": "287962a3aae757b59ff3991900ff6d33aaac7e13aa034162e54fa160d84aed63",
+          "output_sha256": "60d59dfc97f1fe3abce096250a49e027586b62d4b5dfa13158610bd978955611"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "532fd0e6e8c056a1cb0679af423880c50ad7c3adeb003cfe914ffc3770adc44e",
+          "output_sha256": "3f6e36f40d9dd934f3caea191001f02b81c3552c8448adb368bda58b790efee2"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "fb120f275cadf3e40b634a11ab03b0b556e838e527f17f2bf829d1172ffbe94b",
+          "output_sha256": "a2bff82257fb21a14be1838b4bb08adb77d7bc4581071c856e1cfe731df9ef43"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "41b5f0326f49256dae7d7230175c598b6fc9bbc1bcec9bda51d87f7787b6f570",
+          "output_sha256": "def0008317ef20bcefc44a75343e4b232fc30d6b9faf1830b0b854dba9e76fd5"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "6262f11e0bb209b58c2dfc6624f7b2b53bf4ac34ea9cae586969a0b2e78a9304",
+          "output_sha256": "e42904050f627dc4f2cff48d9ccc334f00a8dc98f53da44c3dd245d0915defe1"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "a6d89c8075f60c17d24936fa61f1560c057342e898cb07206313e7e479efea21",
+          "output_sha256": "503a173c48cbbc0f1963b7d48e27c4f837ee7067dca12b35640feda60d8e51c3"
+        }
+      ],
+      "tool_calls": 5,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "code-before",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "tests",
+          "status": "ok",
+          "arguments": {
+            "path": "test_bounds.py"
+          }
+        },
+        {
+          "tool_name": "edit_file",
+          "tool_call_id": "fix",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "old_text": "    return value\n",
+            "new_text": "    return min(upper, max(lower, value))\n",
+            "expected_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556"
+          }
+        },
+        {
+          "tool_name": "run_shell",
+          "tool_call_id": "test",
+          "status": "ok",
+          "arguments": {
+            "command": "python -B -m unittest -v"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "code-after",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "code-before",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return value\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "tests",
+          "name": "read_file",
+          "output": {
+            "path": "test_bounds.py",
+            "encoding": "utf-8",
+            "sha256": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106",
+            "line_count": 13,
+            "truncated": false,
+            "is_binary": false,
+            "content": "import unittest\nfrom bounds import clamp\n\n\nclass ClampTests(unittest.TestCase):\n    def test_below(self):\n        self.assertEqual(clamp(-1, 0, 10), 0)\n\n    def test_inside(self):\n        self.assertEqual(clamp(5, 0, 10), 5)\n\n    def test_above(self):\n        self.assertEqual(clamp(11, 0, 10), 10)\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 13,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "fix",
+          "name": "edit_file",
+          "output": {
+            "path": "bounds.py",
+            "reason": "",
+            "replaced_count": 1,
+            "changed_lines": 2,
+            "old_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "new_sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "diff": "--- a/bounds.py\n+++ b/bounds.py\n@@ -1,2 +1,2 @@\n def clamp(value, lower, upper):\n-    return value\n+    return min(upper, max(lower, value))\n",
+            "line_count": 2,
+            "note": null
+          }
+        },
+        {
+          "tool_call_id": "test",
+          "name": "run_shell",
+          "output": {
+            "command": "python -B -m unittest -v",
+            "argv": [
+              "E:\\miniconda3 py\\python.exe",
+              "-B",
+              "-m",
+              "unittest",
+              "-v"
+            ],
+            "cwd": "<workspace>",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "test_above (test_bounds.ClampTests.test_above) ... ok\r\ntest_below (test_bounds.ClampTests.test_below) ... ok\r\ntest_inside (test_bounds.ClampTests.test_inside) ... ok\r\n\r\n----------------------------------------------------------------------\r\nRan 3 tests in 0.000s\r\n\r\nOK\r\n",
+            "timed_out": false,
+            "duration_ms": 112,
+            "truncated": false,
+            "note": null,
+            "executor": "argv"
+          }
+        },
+        {
+          "tool_call_id": "code-after",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return min(upper, max(lower, value))\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "已修复 clamp，运行三个 unittest 并复读文件。",
+      "loop_count": 6,
+      "workflow_steps": null,
+      "workflow_model_tokens_reserved": null,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 573,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    },
+    {
+      "case_id": "code_change",
+      "attempt": 3,
+      "mode": "free_loop",
+      "task_fingerprint": "1ad43f952bf399c389a23d7d0762d453ea4f08702735ae082489aae925ea7e70",
+      "profile": "coder",
+      "model": "scripted-offline",
+      "model_fingerprint": "72403f299dd9bc6b4339194ebd64e4dfbb5ae64f8ee8787c1d5655b2d081fe54",
+      "evaluation_config_fingerprint": "aab85f4b2a4239c73c13b6d4f025cb6b306f486987429cb645c087690358f46b",
+      "seed_sha256": {
+        "bounds.py": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "final_file_sha256": {
+        "bounds.py": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "workflow_request": null,
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 6,
+      "model_requests": [
+        {
+          "protocol": "free_loop",
+          "input_sha256": "882d24d087e8da3840e158df1c263d733099f47a71c125417ba0b606961412f2",
+          "output_sha256": "60d59dfc97f1fe3abce096250a49e027586b62d4b5dfa13158610bd978955611"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "2ccc2290ede900f84ed976a102c2771b1290ff233a4701fc658a6f6dd0cdab76",
+          "output_sha256": "3f6e36f40d9dd934f3caea191001f02b81c3552c8448adb368bda58b790efee2"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "0096f93607e6f0fd00b0dcc3d268bf00f0fe08415e6f9780174fad144c6749f5",
+          "output_sha256": "a2bff82257fb21a14be1838b4bb08adb77d7bc4581071c856e1cfe731df9ef43"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "03e9e5864bac2434e0e53f6f276b4b29678da8f9f60ff21c4d1e9a404f25a376",
+          "output_sha256": "def0008317ef20bcefc44a75343e4b232fc30d6b9faf1830b0b854dba9e76fd5"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "64154ac3a132a4117182dc135e31aee16da5e3a9dea10466360b46589b673d69",
+          "output_sha256": "e42904050f627dc4f2cff48d9ccc334f00a8dc98f53da44c3dd245d0915defe1"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "75631c1f952aad4d1c0ddbffe0e12d6b2ed0ba77e2fab46c77690d0bd1436e89",
+          "output_sha256": "503a173c48cbbc0f1963b7d48e27c4f837ee7067dca12b35640feda60d8e51c3"
+        }
+      ],
+      "tool_calls": 5,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "code-before",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "tests",
+          "status": "ok",
+          "arguments": {
+            "path": "test_bounds.py"
+          }
+        },
+        {
+          "tool_name": "edit_file",
+          "tool_call_id": "fix",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "old_text": "    return value\n",
+            "new_text": "    return min(upper, max(lower, value))\n",
+            "expected_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556"
+          }
+        },
+        {
+          "tool_name": "run_shell",
+          "tool_call_id": "test",
+          "status": "ok",
+          "arguments": {
+            "command": "python -B -m unittest -v"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "code-after",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "code-before",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return value\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "tests",
+          "name": "read_file",
+          "output": {
+            "path": "test_bounds.py",
+            "encoding": "utf-8",
+            "sha256": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106",
+            "line_count": 13,
+            "truncated": false,
+            "is_binary": false,
+            "content": "import unittest\nfrom bounds import clamp\n\n\nclass ClampTests(unittest.TestCase):\n    def test_below(self):\n        self.assertEqual(clamp(-1, 0, 10), 0)\n\n    def test_inside(self):\n        self.assertEqual(clamp(5, 0, 10), 5)\n\n    def test_above(self):\n        self.assertEqual(clamp(11, 0, 10), 10)\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 13,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "fix",
+          "name": "edit_file",
+          "output": {
+            "path": "bounds.py",
+            "reason": "",
+            "replaced_count": 1,
+            "changed_lines": 2,
+            "old_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "new_sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "diff": "--- a/bounds.py\n+++ b/bounds.py\n@@ -1,2 +1,2 @@\n def clamp(value, lower, upper):\n-    return value\n+    return min(upper, max(lower, value))\n",
+            "line_count": 2,
+            "note": null
+          }
+        },
+        {
+          "tool_call_id": "test",
+          "name": "run_shell",
+          "output": {
+            "command": "python -B -m unittest -v",
+            "argv": [
+              "E:\\miniconda3 py\\python.exe",
+              "-B",
+              "-m",
+              "unittest",
+              "-v"
+            ],
+            "cwd": "<workspace>",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "test_above (test_bounds.ClampTests.test_above) ... ok\r\ntest_below (test_bounds.ClampTests.test_below) ... ok\r\ntest_inside (test_bounds.ClampTests.test_inside) ... ok\r\n\r\n----------------------------------------------------------------------\r\nRan 3 tests in 0.000s\r\n\r\nOK\r\n",
+            "timed_out": false,
+            "duration_ms": 120,
+            "truncated": false,
+            "note": null,
+            "executor": "argv"
+          }
+        },
+        {
+          "tool_call_id": "code-after",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return min(upper, max(lower, value))\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "已修复 clamp，运行三个 unittest 并复读文件。",
+      "loop_count": 6,
+      "workflow_steps": null,
+      "workflow_model_tokens_reserved": null,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 579,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    },
+    {
+      "case_id": "code_change",
+      "attempt": 3,
+      "mode": "subgraph",
+      "task_fingerprint": "1ad43f952bf399c389a23d7d0762d453ea4f08702735ae082489aae925ea7e70",
+      "profile": "coder",
+      "model": "scripted-offline",
+      "model_fingerprint": "72403f299dd9bc6b4339194ebd64e4dfbb5ae64f8ee8787c1d5655b2d081fe54",
+      "evaluation_config_fingerprint": "aab85f4b2a4239c73c13b6d4f025cb6b306f486987429cb645c087690358f46b",
+      "seed_sha256": {
+        "bounds.py": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "final_file_sha256": {
+        "bounds.py": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+        "test_bounds.py": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106"
+      },
+      "workflow_request": {
+        "source_path": "bounds.py",
+        "test_paths": [
+          "test_bounds.py"
+        ],
+        "expected_test_count": 3
+      },
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 1,
+      "model_requests": [
+        {
+          "protocol": "proposal",
+          "input_sha256": "f3c09553dc7d4d8b116b712a52e0986a789ae00579a4de0ce45d4ddfb7798310",
+          "output_sha256": "d37060ecae0c45e50eee52d3c3f4d6bae9a8cb212e05f4dfa43cb227359018f1"
+        }
+      ],
+      "tool_calls": 6,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:1",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:2",
+          "status": "ok",
+          "arguments": {
+            "path": "test_bounds.py",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "edit_file",
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:3",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "old_text": "    return value\n",
+            "new_text": "    return min(upper, max(lower, value))\n",
+            "expected_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556"
+          }
+        },
+        {
+          "tool_name": "run_shell",
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:4",
+          "status": "ok",
+          "arguments": {
+            "command": "python -B -m unittest -v",
+            "cwd": "."
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:5",
+          "status": "ok",
+          "arguments": {
+            "path": "bounds.py",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:6",
+          "status": "ok",
+          "arguments": {
+            "path": "test_bounds.py",
+            "max_chars": "16000"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:1",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return value\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:2",
+          "name": "read_file",
+          "output": {
+            "path": "test_bounds.py",
+            "encoding": "utf-8",
+            "sha256": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106",
+            "line_count": 13,
+            "truncated": false,
+            "is_binary": false,
+            "content": "import unittest\nfrom bounds import clamp\n\n\nclass ClampTests(unittest.TestCase):\n    def test_below(self):\n        self.assertEqual(clamp(-1, 0, 10), 0)\n\n    def test_inside(self):\n        self.assertEqual(clamp(5, 0, 10), 5)\n\n    def test_above(self):\n        self.assertEqual(clamp(11, 0, 10), 10)\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 13,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:3",
+          "name": "edit_file",
+          "output": {
+            "path": "bounds.py",
+            "reason": "",
+            "replaced_count": 1,
+            "changed_lines": 2,
+            "old_sha256": "431f7ff295b4b180e99157c8bd2d5191459f8b8511799b90808ce71bc5ccc556",
+            "new_sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "diff": "--- a/bounds.py\n+++ b/bounds.py\n@@ -1,2 +1,2 @@\n def clamp(value, lower, upper):\n-    return value\n+    return min(upper, max(lower, value))\n",
+            "line_count": 2,
+            "note": null
+          }
+        },
+        {
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:4",
+          "name": "run_shell",
+          "output": {
+            "command": "python -B -m unittest -v",
+            "argv": [
+              "E:\\miniconda3 py\\python.exe",
+              "-B",
+              "-m",
+              "unittest",
+              "-v"
+            ],
+            "cwd": "<workspace>",
+            "exit_code": 0,
+            "stdout": "",
+            "stderr": "test_above (test_bounds.ClampTests.test_above) ... ok\r\ntest_below (test_bounds.ClampTests.test_below) ... ok\r\ntest_inside (test_bounds.ClampTests.test_inside) ... ok\r\n\r\n----------------------------------------------------------------------\r\nRan 3 tests in 0.000s\r\n\r\nOK\r\n",
+            "timed_out": false,
+            "duration_ms": 113,
+            "truncated": false,
+            "note": null,
+            "executor": "argv"
+          }
+        },
+        {
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:5",
+          "name": "read_file",
+          "output": {
+            "path": "bounds.py",
+            "encoding": "utf-8",
+            "sha256": "20377a09a5bc2b888f0f28ce80cab127e459fc2fe826f1315f3d91715c8b1ff8",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "def clamp(value, lower, upper):\n    return min(upper, max(lower, value))\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "50fe8998440043689dbe3b4c0984f233:code:6",
+          "name": "read_file",
+          "output": {
+            "path": "test_bounds.py",
+            "encoding": "utf-8",
+            "sha256": "114bb23f783101f9f4f895ba36d18fd340073b69ad347ec9f87b5a65b3fc2106",
+            "line_count": 13,
+            "truncated": false,
+            "is_binary": false,
+            "content": "import unittest\nfrom bounds import clamp\n\n\nclass ClampTests(unittest.TestCase):\n    def test_below(self):\n        self.assertEqual(clamp(-1, 0, 10), 0)\n\n    def test_inside(self):\n        self.assertEqual(clamp(5, 0, 10), 5)\n\n    def test_above(self):\n        self.assertEqual(clamp(11, 0, 10), 10)\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 13,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "已修改 bounds.py，真实运行 3 个 unittest 通过；复读源码与测试，产物符合预期，测试文件保持原样。",
+      "loop_count": 0,
+      "workflow_steps": 16,
+      "workflow_model_tokens_reserved": 4407,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 315,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    },
+    {
+      "case_id": "readonly_research",
+      "attempt": 1,
+      "mode": "free_loop",
+      "task_fingerprint": "385c7fb42fd6f5428b9c6d513a5554e2216193f4d8c86adf7f4ff218aa23f2bc",
+      "profile": "reviewer",
+      "model": "scripted-offline",
+      "model_fingerprint": "05cb7195a69ea761fbf7bae6b5d6fed5584bda905ff9fd62110eababdcabcb66",
+      "evaluation_config_fingerprint": "fd2af53ae1ebcc39489a81f7b8196d4aa17b12b513e034b9ec5a32b0ce8af316",
+      "seed_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "final_file_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "workflow_request": null,
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 4,
+      "model_requests": [
+        {
+          "protocol": "free_loop",
+          "input_sha256": "aa98aa0f24f7a2fd177b5f158b965959135b3b950823875bdd6574c7ca78f91d",
+          "output_sha256": "1d29594526b3aec0d841776c2a6cc174132dbfb3fa4bc6429e61119daa6829fb"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "056e7f1350014de08ead796bcc94f7266ccf8f080443ba1cae1484500f4b41e0",
+          "output_sha256": "f8aa544515658797886659a0b10ea6a14a65b96f6ac6fedfed066d17a2755020"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "9ffe1f65dde1503356b99abbef5c4e2359431c70adb947dc47688002b3e436ec",
+          "output_sha256": "a5831a66ee7dd1d0695832fce705c102b64ca6308b0edfbf18a88e61c8aa1198"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "b11fadd16c4dc2007ee7d2e04e886f8361ca24b8a699ac99ce56d1480c1544f3",
+          "output_sha256": "29419603825b4b804f01d49034bdf047d89d6aff2299402958a579256328ae15"
+        }
+      ],
+      "tool_calls": 3,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "read-0",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/cancel.md"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "read-1",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/recovery.md"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "read-2",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/permissions.md"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "read-0",
+          "name": "read_file",
+          "output": {
+            "path": "docs/cancel.md",
+            "encoding": "utf-8",
+            "sha256": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 取消\n取消不撤销已发生的副作用。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "read-1",
+          "name": "read_file",
+          "output": {
+            "path": "docs/recovery.md",
+            "encoding": "utf-8",
+            "sha256": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 恢复\n无法证明执行结果时需要人工核对。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "read-2",
+          "name": "read_file",
+          "output": {
+            "path": "docs/permissions.md",
+            "encoding": "utf-8",
+            "sha256": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 权限\n子任务能力必须是父任务能力的子集。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "取消不撤销已发生的副作用。（docs/cancel.md:2）\n无法证明执行结果时需要人工核对。（docs/recovery.md:2）\n子任务能力必须是父任务能力的子集。（docs/permissions.md:2）",
+      "loop_count": 4,
+      "workflow_steps": null,
+      "workflow_model_tokens_reserved": null,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 243,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    },
+    {
+      "case_id": "readonly_research",
+      "attempt": 1,
+      "mode": "subgraph",
+      "task_fingerprint": "385c7fb42fd6f5428b9c6d513a5554e2216193f4d8c86adf7f4ff218aa23f2bc",
+      "profile": "reviewer",
+      "model": "scripted-offline",
+      "model_fingerprint": "05cb7195a69ea761fbf7bae6b5d6fed5584bda905ff9fd62110eababdcabcb66",
+      "evaluation_config_fingerprint": "fd2af53ae1ebcc39489a81f7b8196d4aa17b12b513e034b9ec5a32b0ce8af316",
+      "seed_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "final_file_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "workflow_request": {
+        "pattern": "docs/*.md",
+        "keywords": [
+          "取消",
+          "执行结果",
+          "能力"
+        ]
+      },
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 0,
+      "model_requests": [],
+      "tool_calls": 4,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "glob",
+          "tool_call_id": "55d5651f293a499c826166d75f8aede4:readonly:1",
+          "status": "ok",
+          "arguments": {
+            "pattern": "docs/*.md",
+            "max_files": "9"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "55d5651f293a499c826166d75f8aede4:readonly:2",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/cancel.md",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "55d5651f293a499c826166d75f8aede4:readonly:3",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/permissions.md",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "55d5651f293a499c826166d75f8aede4:readonly:4",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/recovery.md",
+            "max_chars": "16000"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "55d5651f293a499c826166d75f8aede4:readonly:1",
+          "name": "glob",
+          "output": {
+            "pattern": "docs/*.md",
+            "path": ".",
+            "files": [
+              "docs/cancel.md",
+              "docs/permissions.md",
+              "docs/recovery.md"
+            ],
+            "total_files": 3,
+            "truncated": false,
+            "note": null
+          }
+        },
+        {
+          "tool_call_id": "55d5651f293a499c826166d75f8aede4:readonly:2",
+          "name": "read_file",
+          "output": {
+            "path": "docs/cancel.md",
+            "encoding": "utf-8",
+            "sha256": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 取消\n取消不撤销已发生的副作用。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "55d5651f293a499c826166d75f8aede4:readonly:3",
+          "name": "read_file",
+          "output": {
+            "path": "docs/permissions.md",
+            "encoding": "utf-8",
+            "sha256": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 权限\n子任务能力必须是父任务能力的子集。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "55d5651f293a499c826166d75f8aede4:readonly:4",
+          "name": "read_file",
+          "output": {
+            "path": "docs/recovery.md",
+            "encoding": "utf-8",
+            "sha256": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 恢复\n无法证明执行结果时需要人工核对。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "原文调查结果：\n# 取消（docs/cancel.md:1）\n取消不撤销已发生的副作用。（docs/cancel.md:2）\n子任务能力必须是父任务能力的子集。（docs/permissions.md:2）\n无法证明执行结果时需要人工核对。（docs/recovery.md:2）",
+      "loop_count": 0,
+      "workflow_steps": 11,
+      "workflow_model_tokens_reserved": null,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 145,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    },
+    {
+      "case_id": "readonly_research",
+      "attempt": 2,
+      "mode": "subgraph",
+      "task_fingerprint": "385c7fb42fd6f5428b9c6d513a5554e2216193f4d8c86adf7f4ff218aa23f2bc",
+      "profile": "reviewer",
+      "model": "scripted-offline",
+      "model_fingerprint": "05cb7195a69ea761fbf7bae6b5d6fed5584bda905ff9fd62110eababdcabcb66",
+      "evaluation_config_fingerprint": "fd2af53ae1ebcc39489a81f7b8196d4aa17b12b513e034b9ec5a32b0ce8af316",
+      "seed_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "final_file_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "workflow_request": {
+        "pattern": "docs/*.md",
+        "keywords": [
+          "取消",
+          "执行结果",
+          "能力"
+        ]
+      },
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 0,
+      "model_requests": [],
+      "tool_calls": 4,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "glob",
+          "tool_call_id": "bd1bffc66c624b72b21aec9b596711c4:readonly:1",
+          "status": "ok",
+          "arguments": {
+            "pattern": "docs/*.md",
+            "max_files": "9"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "bd1bffc66c624b72b21aec9b596711c4:readonly:2",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/cancel.md",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "bd1bffc66c624b72b21aec9b596711c4:readonly:3",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/permissions.md",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "bd1bffc66c624b72b21aec9b596711c4:readonly:4",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/recovery.md",
+            "max_chars": "16000"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "bd1bffc66c624b72b21aec9b596711c4:readonly:1",
+          "name": "glob",
+          "output": {
+            "pattern": "docs/*.md",
+            "path": ".",
+            "files": [
+              "docs/cancel.md",
+              "docs/permissions.md",
+              "docs/recovery.md"
+            ],
+            "total_files": 3,
+            "truncated": false,
+            "note": null
+          }
+        },
+        {
+          "tool_call_id": "bd1bffc66c624b72b21aec9b596711c4:readonly:2",
+          "name": "read_file",
+          "output": {
+            "path": "docs/cancel.md",
+            "encoding": "utf-8",
+            "sha256": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 取消\n取消不撤销已发生的副作用。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "bd1bffc66c624b72b21aec9b596711c4:readonly:3",
+          "name": "read_file",
+          "output": {
+            "path": "docs/permissions.md",
+            "encoding": "utf-8",
+            "sha256": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 权限\n子任务能力必须是父任务能力的子集。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "bd1bffc66c624b72b21aec9b596711c4:readonly:4",
+          "name": "read_file",
+          "output": {
+            "path": "docs/recovery.md",
+            "encoding": "utf-8",
+            "sha256": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 恢复\n无法证明执行结果时需要人工核对。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "原文调查结果：\n# 取消（docs/cancel.md:1）\n取消不撤销已发生的副作用。（docs/cancel.md:2）\n子任务能力必须是父任务能力的子集。（docs/permissions.md:2）\n无法证明执行结果时需要人工核对。（docs/recovery.md:2）",
+      "loop_count": 0,
+      "workflow_steps": 11,
+      "workflow_model_tokens_reserved": null,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 143,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    },
+    {
+      "case_id": "readonly_research",
+      "attempt": 2,
+      "mode": "free_loop",
+      "task_fingerprint": "385c7fb42fd6f5428b9c6d513a5554e2216193f4d8c86adf7f4ff218aa23f2bc",
+      "profile": "reviewer",
+      "model": "scripted-offline",
+      "model_fingerprint": "05cb7195a69ea761fbf7bae6b5d6fed5584bda905ff9fd62110eababdcabcb66",
+      "evaluation_config_fingerprint": "fd2af53ae1ebcc39489a81f7b8196d4aa17b12b513e034b9ec5a32b0ce8af316",
+      "seed_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "final_file_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "workflow_request": null,
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 4,
+      "model_requests": [
+        {
+          "protocol": "free_loop",
+          "input_sha256": "cb2ff24bfe6ee05d3e757fd64f92523b791dfc86f06e5589012854dbec6fec63",
+          "output_sha256": "1d29594526b3aec0d841776c2a6cc174132dbfb3fa4bc6429e61119daa6829fb"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "1b68b9989fa72ca1dff9a15e08408211a76c0bde285e537fd38f35a38cf08827",
+          "output_sha256": "f8aa544515658797886659a0b10ea6a14a65b96f6ac6fedfed066d17a2755020"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "e278dfa0f1969f1fd6f48031db22e3a91bbdd412380f454e66ce9846f9b7dc8a",
+          "output_sha256": "a5831a66ee7dd1d0695832fce705c102b64ca6308b0edfbf18a88e61c8aa1198"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "be220a9de7435b0d7ed530921a8c1c90795a0044f9a64379ee27e66f8408f8d0",
+          "output_sha256": "29419603825b4b804f01d49034bdf047d89d6aff2299402958a579256328ae15"
+        }
+      ],
+      "tool_calls": 3,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "read-0",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/cancel.md"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "read-1",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/recovery.md"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "read-2",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/permissions.md"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "read-0",
+          "name": "read_file",
+          "output": {
+            "path": "docs/cancel.md",
+            "encoding": "utf-8",
+            "sha256": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 取消\n取消不撤销已发生的副作用。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "read-1",
+          "name": "read_file",
+          "output": {
+            "path": "docs/recovery.md",
+            "encoding": "utf-8",
+            "sha256": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 恢复\n无法证明执行结果时需要人工核对。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "read-2",
+          "name": "read_file",
+          "output": {
+            "path": "docs/permissions.md",
+            "encoding": "utf-8",
+            "sha256": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 权限\n子任务能力必须是父任务能力的子集。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "取消不撤销已发生的副作用。（docs/cancel.md:2）\n无法证明执行结果时需要人工核对。（docs/recovery.md:2）\n子任务能力必须是父任务能力的子集。（docs/permissions.md:2）",
+      "loop_count": 4,
+      "workflow_steps": null,
+      "workflow_model_tokens_reserved": null,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 242,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    },
+    {
+      "case_id": "readonly_research",
+      "attempt": 3,
+      "mode": "free_loop",
+      "task_fingerprint": "385c7fb42fd6f5428b9c6d513a5554e2216193f4d8c86adf7f4ff218aa23f2bc",
+      "profile": "reviewer",
+      "model": "scripted-offline",
+      "model_fingerprint": "05cb7195a69ea761fbf7bae6b5d6fed5584bda905ff9fd62110eababdcabcb66",
+      "evaluation_config_fingerprint": "fd2af53ae1ebcc39489a81f7b8196d4aa17b12b513e034b9ec5a32b0ce8af316",
+      "seed_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "final_file_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "workflow_request": null,
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 4,
+      "model_requests": [
+        {
+          "protocol": "free_loop",
+          "input_sha256": "64ebe13474ea136929fb5fac88e9da589336450ddb8597339e4cab44f50bca41",
+          "output_sha256": "1d29594526b3aec0d841776c2a6cc174132dbfb3fa4bc6429e61119daa6829fb"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "7984e8409132313d3df7051c626519366dbfe01f82629dcfdf2baac66a5eb7dc",
+          "output_sha256": "f8aa544515658797886659a0b10ea6a14a65b96f6ac6fedfed066d17a2755020"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "7eb432d688db1a7a6c1b6291cb99794b1749483c7d8d01be8a66d4e2c2cbf5cd",
+          "output_sha256": "a5831a66ee7dd1d0695832fce705c102b64ca6308b0edfbf18a88e61c8aa1198"
+        },
+        {
+          "protocol": "free_loop",
+          "input_sha256": "4eb77bc03b76b14e6c1515e3bcf185ef04f0c72d21f961b9a35dbada71734ea4",
+          "output_sha256": "29419603825b4b804f01d49034bdf047d89d6aff2299402958a579256328ae15"
+        }
+      ],
+      "tool_calls": 3,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "read-0",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/cancel.md"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "read-1",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/recovery.md"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "read-2",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/permissions.md"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "read-0",
+          "name": "read_file",
+          "output": {
+            "path": "docs/cancel.md",
+            "encoding": "utf-8",
+            "sha256": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 取消\n取消不撤销已发生的副作用。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "read-1",
+          "name": "read_file",
+          "output": {
+            "path": "docs/recovery.md",
+            "encoding": "utf-8",
+            "sha256": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 恢复\n无法证明执行结果时需要人工核对。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "read-2",
+          "name": "read_file",
+          "output": {
+            "path": "docs/permissions.md",
+            "encoding": "utf-8",
+            "sha256": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 权限\n子任务能力必须是父任务能力的子集。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "取消不撤销已发生的副作用。（docs/cancel.md:2）\n无法证明执行结果时需要人工核对。（docs/recovery.md:2）\n子任务能力必须是父任务能力的子集。（docs/permissions.md:2）",
+      "loop_count": 4,
+      "workflow_steps": null,
+      "workflow_model_tokens_reserved": null,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 244,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    },
+    {
+      "case_id": "readonly_research",
+      "attempt": 3,
+      "mode": "subgraph",
+      "task_fingerprint": "385c7fb42fd6f5428b9c6d513a5554e2216193f4d8c86adf7f4ff218aa23f2bc",
+      "profile": "reviewer",
+      "model": "scripted-offline",
+      "model_fingerprint": "05cb7195a69ea761fbf7bae6b5d6fed5584bda905ff9fd62110eababdcabcb66",
+      "evaluation_config_fingerprint": "fd2af53ae1ebcc39489a81f7b8196d4aa17b12b513e034b9ec5a32b0ce8af316",
+      "seed_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "final_file_sha256": {
+        "docs/cancel.md": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+        "docs/permissions.md": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+        "docs/recovery.md": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2"
+      },
+      "workflow_request": {
+        "pattern": "docs/*.md",
+        "keywords": [
+          "取消",
+          "执行结果",
+          "能力"
+        ]
+      },
+      "status": "completed",
+      "passed": true,
+      "failures": [],
+      "runtime_error": null,
+      "model_calls": 0,
+      "model_requests": [],
+      "tool_calls": 4,
+      "tool_audit_complete": true,
+      "tool_events": [
+        {
+          "tool_name": "glob",
+          "tool_call_id": "e503ad7e08904e76aa098b4668a97bf4:readonly:1",
+          "status": "ok",
+          "arguments": {
+            "pattern": "docs/*.md",
+            "max_files": "9"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "e503ad7e08904e76aa098b4668a97bf4:readonly:2",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/cancel.md",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "e503ad7e08904e76aa098b4668a97bf4:readonly:3",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/permissions.md",
+            "max_chars": "16000"
+          }
+        },
+        {
+          "tool_name": "read_file",
+          "tool_call_id": "e503ad7e08904e76aa098b4668a97bf4:readonly:4",
+          "status": "ok",
+          "arguments": {
+            "path": "docs/recovery.md",
+            "max_chars": "16000"
+          }
+        }
+      ],
+      "tool_outputs": [
+        {
+          "tool_call_id": "e503ad7e08904e76aa098b4668a97bf4:readonly:1",
+          "name": "glob",
+          "output": {
+            "pattern": "docs/*.md",
+            "path": ".",
+            "files": [
+              "docs/cancel.md",
+              "docs/permissions.md",
+              "docs/recovery.md"
+            ],
+            "total_files": 3,
+            "truncated": false,
+            "note": null
+          }
+        },
+        {
+          "tool_call_id": "e503ad7e08904e76aa098b4668a97bf4:readonly:2",
+          "name": "read_file",
+          "output": {
+            "path": "docs/cancel.md",
+            "encoding": "utf-8",
+            "sha256": "afd8587953580b97b7d74b0b0285380dcba5d35955e8f9a5efec1517ace6c561",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 取消\n取消不撤销已发生的副作用。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "e503ad7e08904e76aa098b4668a97bf4:readonly:3",
+          "name": "read_file",
+          "output": {
+            "path": "docs/permissions.md",
+            "encoding": "utf-8",
+            "sha256": "17ee91d24e35929c0c9a432ecc85d580d078582ade3b0fefaf0519e94c045317",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 权限\n子任务能力必须是父任务能力的子集。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        },
+        {
+          "tool_call_id": "e503ad7e08904e76aa098b4668a97bf4:readonly:4",
+          "name": "read_file",
+          "output": {
+            "path": "docs/recovery.md",
+            "encoding": "utf-8",
+            "sha256": "073529ac7458862173f62283ab2cd2d4b2fe895b324a6716f916235dfcc41cc2",
+            "line_count": 2,
+            "truncated": false,
+            "is_binary": false,
+            "content": "# 恢复\n无法证明执行结果时需要人工核对。\n",
+            "note": null,
+            "first_line": 1,
+            "last_line": 2,
+            "has_more": false,
+            "next_start_line": null,
+            "partial_lines": []
+          }
+        }
+      ],
+      "final_response": "原文调查结果：\n# 取消（docs/cancel.md:1）\n取消不撤销已发生的副作用。（docs/cancel.md:2）\n子任务能力必须是父任务能力的子集。（docs/permissions.md:2）\n无法证明执行结果时需要人工核对。（docs/recovery.md:2）",
+      "loop_count": 0,
+      "workflow_steps": 11,
+      "workflow_model_tokens_reserved": null,
+      "configured_limits": {
+        "free_loop": {
+          "max_tool_loops": 12
+        },
+        "workflows": {
+          "enabled": true,
+          "max_tool_calls": 16,
+          "max_steps": 32,
+          "max_source_files": 8,
+          "max_evidence_chars": 16000,
+          "max_report_chars": 20000,
+          "max_model_tokens": 16000,
+          "max_model_output_tokens": 2048,
+          "max_children": 3,
+          "max_concurrency": 2,
+          "child_timeout_seconds": 30
+        }
+      },
+      "elapsed_ms": 153,
+      "actual_input_tokens": null,
+      "actual_output_tokens": null,
+      "actual_cache_read_tokens": null
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "code_change",
+      "attempts_per_arm": {
+        "free_loop": 3,
+        "subgraph": 3
+      },
+      "completion_counts": {
+        "free_loop": 3,
+        "subgraph": 3
+      },
+      "means": {
+        "free_loop": {
+          "model_calls": 6.0,
+          "tool_calls": 5.0,
+          "elapsed_ms": 579.3333333333334
+        },
+        "subgraph": {
+          "model_calls": 1.0,
+          "tool_calls": 6.0,
+          "elapsed_ms": 312.3333333333333
+        }
+      },
+      "failures": [],
+      "model_calls_improved_in_every_pair": true
+    },
+    {
+      "case_id": "readonly_research",
+      "attempts_per_arm": {
+        "free_loop": 3,
+        "subgraph": 3
+      },
+      "completion_counts": {
+        "free_loop": 3,
+        "subgraph": 3
+      },
+      "means": {
+        "free_loop": {
+          "model_calls": 4.0,
+          "tool_calls": 3.0,
+          "elapsed_ms": 243.0
+        },
+        "subgraph": {
+          "model_calls": 0.0,
+          "tool_calls": 4.0,
+          "elapsed_ms": 147.0
+        }
+      },
+      "failures": [],
+      "model_calls_improved_in_every_pair": true
+    }
+  ],
+  "hard_gates_passed": true,
+  "failures": [],
+  "offline_subgraph_advantage_proven": true,
+  "passed": true
+}
