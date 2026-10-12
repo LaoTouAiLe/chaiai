@@ -83,7 +83,7 @@ from local_agent.application.recovery import (
     classify_interrupted_job,
 )
 from local_agent.cancellation import DEFAULT_CANCEL_REASON, CancellationToken
-from local_agent.capabilities import capability_status
+from local_agent.capabilities import capability_status, selectable_profiles
 from local_agent.config import LlmConfig, RunConfig, WorkflowsConfig
 from local_agent.exceptions import (
     ConnectionValidationError,
@@ -106,6 +106,7 @@ from local_agent.model_settings import (
     ModelBinding,
     ModelConnection,
     PermissionStore,
+    ProfileStore,
     Selection,
     SelectionRef,
     memory_settings,
@@ -526,6 +527,7 @@ class ApplicationService:
         connections: ConnectionStore | None = None,
         permissions: PermissionStore | None = None,
         preferences: PreferenceStore | None = None,
+        profiles: ProfileStore | None = None,
         model_factory: Callable[[LlmConfig, str], Any] | None = None,
         jobs: JobRuntime | None = None,
     ) -> None:
@@ -539,6 +541,9 @@ class ApplicationService:
         #: ``config.yaml`` 的出厂默认（``external_policy()`` 返回 ``None`` 由下层兜底）。
         self._permissions = permissions
         self._preferences = preferences
+        #: 当前 Agent 档位（§16.6 档位切换）。与上面三项同库同生命周期：没有设置库时退回
+        #: ``config.yaml`` 的 ``profiles.active``，页面据此不提供切换（写下去是 503）。
+        self._profiles = profiles
         #: 按连接构造客户端的可调用对象；测试注入确定性假模型走同一条路径。
         self._build_model = model_factory or llm_factory.build_chat_model
         self._workspace_root = Path(workspace_root)
@@ -1404,15 +1409,25 @@ class ApplicationService:
     def capabilities_view(self) -> CapabilitiesView:
         """当前档位与每个能力的可用性（**每次现算**，不缓存；架构 §16.6）。
 
-        为什么不缓存：答案取决于配置开关与**这台机器上装没装 git**，两者都可能在运行期变化
-        （用户改配置、装完 Git 重启）。缓存一个旧答案比不显示更糟——那会让人以为"改了没用"。
+        为什么不缓存：答案取决于**当前档位**（用户刚在面板里切过）、配置开关与**这台机器上装没装 git**，
+        三者都可能在运行期变化。缓存一个旧答案比不显示更糟——那会让人以为"改了没用"。
 
-        对外只有**能力名与解释**，没有工具名（§15.8 的字段门槛）。
+        对外只有**能力名与解释**，没有工具名（§15.8 的字段门槛）。`profiles` 是**服务端枚举**的可选集
+        （内置三档 + 自定义），页面照它渲染，不自己拼一份（§16.6 档位切换）。
         """
         config = self._app_config
         probe = git_availability()
+        store = self._profiles
+        # 档位取**当前生效**那一个（设置库优先、config 只是出厂默认），与运行期 `_context` 同源：
+        # 面板显示的能力集合必须和"下一次提交真正绑给模型的那份"是同一个。
+        profile = self.active_profile()
         return CapabilitiesView(
-            profile=config.profiles.active,
+            profile=profile,
+            default_profile=config.profiles.active,
+            profiles=list(store.selectable) if store is not None else list(
+                selectable_profiles(config.profiles.custom)
+            ),
+            store_unavailable=store is None,
             capabilities=[
                 CapabilityStatusView(
                     capability=status.capability,
@@ -1423,7 +1438,7 @@ class ApplicationService:
                     hint=status.hint,
                 )
                 for status in capability_status(
-                    config.profiles.capabilities(),
+                    config.profiles.model_copy(update={"active": profile}).capabilities(),
                     web_access_enabled=config.web_access.enabled,
                     git_access_enabled=config.git.enabled,
                     git_available=probe.available,
@@ -1432,6 +1447,34 @@ class ApplicationService:
                 )
             ],
         )
+
+    def active_profile(self) -> str:
+        """当前生效档位（§16.6 档位切换）：**设置库优先、``config.yaml`` 只是出厂默认**。
+
+        与外部路径档位（T38）同一口径：**每一轮现取、不缓存**——用户刚在面板里切完，下一次运行
+        就该按新档位绑定工具；没有设置库时退回 ``profiles.active``。
+        """
+        store = self._profiles
+        if store is None:
+            return self._app_config.profiles.active
+        return self._sqlite_access(store.profile)
+
+    def set_active_profile(self, profile: str) -> CapabilitiesView:
+        """保存当前档位（"保存即生效、作用于下一轮"），返回保存后的完整视图。
+
+        Raises:
+            ApplicationError: 档位名不在可选集里（``MODEL_SETTINGS_INVALID``），或没有可用设置库
+                （``SETTINGS_STORE_UNAVAILABLE``）。
+        """
+        store = self._require_profiles()
+        if profile not in store.selectable:
+            # 取值与领域层同源：可选集由服务端枚举，页面打错名字得到 422，而不是静默保存成别的档位。
+            raise app_errors.model_settings_invalid(
+                detail=f"未知档位：{profile}。可选值：{'、'.join(store.selectable)}。",
+                occurred_at=_now(),
+            )
+        self._sqlite_access(partial(store.set_profile, profile))
+        return self.capabilities_view()
 
     # ---- 权限（T38；§1.5）---------------------------------------------------
 
@@ -1507,6 +1550,13 @@ class ApplicationService:
                 detail="设置库没有打开", occurred_at=_now()
             )
         return self._permissions
+
+    def _require_profiles(self) -> ProfileStore:
+        if self._profiles is None:
+            raise app_errors.settings_store_unavailable(
+                detail="设置库没有打开", occurred_at=_now()
+            )
+        return self._profiles
 
     def _require_store(self) -> ConnectionStore:
         if self._connections is None:
@@ -2307,6 +2357,12 @@ class ApplicationService:
             limits = WorkflowsConfig.model_validate(workflow_limits)
             limits.enabled = limits.enabled and config.workflows.enabled
             config = config.model_copy(update={"workflows": limits})
+        # 档位**每一轮现取**（§16.6 档位切换）：用户刚在能力面板里切完，下一次运行就该按新档位绑定
+        # 工具与能力。少了这一步，"页面里能调档位"就只是改显示——真正决定绑哪些工具的是下面
+        # `build_runtime_context` 里的 `profiles.active` / `profiles.capabilities()`（§16.1）。
+        config = config.model_copy(
+            update={"profiles": config.profiles.model_copy(update={"active": self.active_profile()})}
+        )
         choices: dict[str, dict[str, Any]] = (
             {} if selected is None else {selected.name: selected.request.model_dump(mode="json")})
         return builder.build_runtime_context(

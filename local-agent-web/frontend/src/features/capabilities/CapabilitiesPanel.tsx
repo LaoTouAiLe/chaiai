@@ -17,6 +17,12 @@ interface CapabilitiesPanelProps {
   view: CapabilitiesView | null
   /** 最近一次读取失败的用户可读文本；没有就不显示。 */
   errorText?: string | null
+  /** 闭合动作（档位切换）：不传就是纯展示（测试与原型用）——档位那一行因此退回纯文本。 */
+  actions?: {
+    onSelectProfile: (profile: string) => void
+    /** 正在提交：选择器据此禁用，防双击。 */
+    busy?: boolean
+  }
   /** 关闭面板；不传就是纯展示（测试与原型用）。 */
   onClose?: () => void
 }
@@ -29,7 +35,16 @@ const REASON_LABEL: Record<CapabilityReason, string> = {
   missing_dependency: '本机缺少依赖',
 }
 
-export function CapabilitiesPanel({ view, errorText = null, onClose }: CapabilitiesPanelProps) {
+export function CapabilitiesPanel({
+  view,
+  errorText = null,
+  actions,
+  onClose,
+}: CapabilitiesPanelProps) {
+  // 能切换的条件：① 有人接线（真宿主）；② 设置库可用（否则改动存不下来，§16.6 的降级口径）；
+  // ③ 服务端给了可选集（页面不自己拼档位名）。三条缺一条就退回纯文本，不给点不动的控件。
+  const switchable =
+    actions !== undefined && view !== null && !view.storeUnavailable && view.profiles.length > 0
   return (
     <div className={styles.overlay} role="presentation">
       <section className={styles.dialog} role="dialog" aria-modal="true" aria-label="能力与档位">
@@ -38,8 +53,16 @@ export function CapabilitiesPanel({ view, errorText = null, onClose }: Capabilit
             <h2 className={styles.title}>能力与档位</h2>
             <p className={styles.note}>
               这里只讲能力，不讲内部工具。每一项都会说明"能不能用、为什么、怎么才能用"。
-              装好依赖（例如 git）后重开这个面板就是最新结论；<strong>改档位与开关要重启服务才生效</strong>
-              （配置只在启动时读一次）。
+              {switchable ? (
+                <>
+                  <strong>档位可以在下面直接切换</strong>（下一次提交生效，不用重启）；config.yaml 里的
+                  开关与自定义档位仍要改完重启服务才生效。
+                </>
+              ) : (
+                // 没有可写的设置库（或原型宿主没接线）时**不承诺**一个不存在的控件：
+                // 这时档位只来自 config.yaml，改完必须重启服务（配置只在启动时读一次）。
+                <>装好依赖（例如 git）后重开这个面板就是最新结论；config.yaml 里的档位与开关要改完重启服务才生效。</>
+              )}
             </p>
           </div>
           {onClose === undefined ? null : (
@@ -60,7 +83,28 @@ export function CapabilitiesPanel({ view, errorText = null, onClose }: Capabilit
         ) : (
           <>
             <p className={styles.profile}>
-              当前档位：<span className={styles.profileValue}>{view.profile}</span>
+              当前档位：
+              {switchable ? (
+                <select
+                  className={styles.profileSelect}
+                  aria-label="切换当前档位"
+                  value={view.profile}
+                  disabled={actions.busy === true}
+                  onChange={(event) => actions.onSelectProfile(event.target.value)}
+                >
+                  {view.profiles.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <span className={styles.profileValue}>{view.profile}</span>
+              )}
+              {/* 档位来自配置文件（设置库不可用）时如实说明：控件已经退回纯文本，别让用户以为面板坏了。 */}
+              {view.storeUnavailable ? (
+                <span className={styles.profileNote}>设置库不可用，档位来自配置文件</span>
+              ) : null}
             </p>
             <ul className={styles.list}>
               {view.capabilities.map((row) => (

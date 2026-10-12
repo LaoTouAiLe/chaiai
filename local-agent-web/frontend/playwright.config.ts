@@ -26,6 +26,8 @@ export default defineConfig({
     '**/conversation-variants.spec.ts',
     '**/approval-live.spec.ts',
     '**/workflow-live.spec.ts',
+    // §16.6 档位切换的真服务用例（与上面几条同因：它要真后端，默认套件只依赖 node）。
+    '**/capabilities-live.spec.ts',
   ],
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),

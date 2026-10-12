@@ -455,7 +455,7 @@
         "type": "object"
       },
       "CapabilitiesView": {
-        "description": "当前 Agent 档位与每个能力的状态（T56；§16.6）。",
+        "description": "当前 Agent 档位与每个能力的状态（T56；§16.6）。\n\n`profiles` 是**页面可选**的档位（服务端枚举：内置三档 + `profiles.custom`），`default_profile`\n是 `config.yaml` 的出厂默认（`profile` 是**当前生效**那一个）——三者一起让页面既能画选择器，\n也能说清\"现在这一档是从哪儿来的\"（§16.6 档位切换）。",
         "properties": {
           "capabilities": {
             "items": {
@@ -464,10 +464,27 @@
             "title": "Capabilities",
             "type": "array"
           },
+          "default_profile": {
+            "default": "",
+            "title": "Default Profile",
+            "type": "string"
+          },
           "profile": {
             "minLength": 1,
             "title": "Profile",
             "type": "string"
+          },
+          "profiles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Profiles",
+            "type": "array"
+          },
+          "store_unavailable": {
+            "default": false,
+            "title": "Store Unavailable",
+            "type": "boolean"
           }
         },
         "required": [
@@ -4235,6 +4252,23 @@
         "title": "PreferencesView",
         "type": "object"
       },
+      "ProfileRequest": {
+        "additionalProperties": false,
+        "description": "切换当前 Agent 档位（§16.6 档位切换）。\n\n可选值由**服务端枚举**（内置三档 + `profiles.custom`）：这里只做形状校验（非空、长度），\n**取值是否合法由领域层裁定**（未知档位给 422，理由里带上可选值）——传输层不另立一套档位名，\n与 `PermissionsModeRequest` 同一条口径。",
+        "properties": {
+          "profile": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Profile",
+            "type": "string"
+          }
+        },
+        "required": [
+          "profile"
+        ],
+        "title": "ProfileRequest",
+        "type": "object"
+      },
       "ReadonlyResearchRequest": {
         "additionalProperties": false,
         "description": "只接受工作区内的相对 glob 与字面关键词，不接受控制流。",
@@ -6925,7 +6959,7 @@
   "paths": {
     "/api/capabilities": {
       "get": {
-        "description": "当前 Profile 与每个能力的可用性、原因与下一步。\n\n**只讲能力不讲工具**（§16.6）：用户要判断的是\"现在能不能联网、能不能提交\"。答案每次现算，\n因此改完配置或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。",
+        "description": "当前 Profile 与每个能力的可用性、原因与下一步。\n\n**只讲能力不讲工具**（§16.6）：用户要判断的是\"现在能不能联网、能不能提交\"。答案每次现算，\n因此改完配置、切完档位或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。",
         "operationId": "capabilities_api_capabilities_get",
         "responses": {
           "200": {
@@ -6940,6 +6974,55 @@
           }
         },
         "summary": "当前档位与能力状态"
+      }
+    },
+    "/api/capabilities/profile": {
+      "put": {
+        "description": "保存当前档位：**保存即生效、作用于下一轮**（§16.6 档位切换）。\n\n改完**不用重启**——运行上下文每次装配时现取档位。响应是保存后的完整视图（页面直接换上它，\n不必再发一次读请求）。",
+        "operationId": "set_profile_api_capabilities_profile_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CapabilitiesView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "档位名不在可选集里"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "没有可用的设置库，改动存不下来"
+          }
+        },
+        "summary": "切换 Agent 档位"
       }
     },
     "/api/data-center/memories": {

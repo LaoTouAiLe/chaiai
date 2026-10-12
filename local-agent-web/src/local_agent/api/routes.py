@@ -36,6 +36,7 @@ from local_agent.api.schemas import (
     ModelConnectionRequest,
     PermissionsModeRequest,
     PickDirectoryView,
+    ProfileRequest,
     RecoveryRequest,
     RenameRequest,
     SelectDefaultConnectionRequest,
@@ -116,6 +117,11 @@ _PICK_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
 #: 权限写接口：路径/档位没通过业务校验（422），或没有可用的设置库（503，改动存不下来）。
 _PERMISSION_WRITE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
     422: {"model": ErrorResponse, "description": "目录路径或档位没有通过校验"},
+    503: {"model": ErrorResponse, "description": "没有可用的设置库，改动存不下来"},
+}
+#: 档位写接口（§16.6 档位切换）：与权限写同一口径——未知档位 422，没有设置库 503。
+_PROFILE_WRITE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
+    422: {"model": ErrorResponse, "description": "档位名不在可选集里"},
     503: {"model": ErrorResponse, "description": "没有可用的设置库，改动存不下来"},
 }
 
@@ -525,9 +531,23 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         """当前 Profile 与每个能力的可用性、原因与下一步。
 
         **只讲能力不讲工具**（§16.6）：用户要判断的是"现在能不能联网、能不能提交"。答案每次现算，
-        因此改完配置或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。
+        因此改完配置、切完档位或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。
         """
         return service.capabilities_view()
+
+    @router.put(
+        "/capabilities/profile",
+        response_model=CapabilitiesView,
+        responses=_PROFILE_WRITE_RESPONSES,
+        summary="切换 Agent 档位",
+    )
+    def set_profile(payload: ProfileRequest) -> CapabilitiesView:
+        """保存当前档位：**保存即生效、作用于下一轮**（§16.6 档位切换）。
+
+        改完**不用重启**——运行上下文每次装配时现取档位。响应是保存后的完整视图（页面直接换上它，
+        不必再发一次读请求）。
+        """
+        return service.set_active_profile(payload.profile)
 
     # ---- 权限（T38；§1.5）------------------------------------------------------
     # 这组接口只读写"工作区外路径"的档位与授权条目：档位存设置库（`config.yaml` 只是出厂默认），

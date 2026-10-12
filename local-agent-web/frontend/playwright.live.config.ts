@@ -18,7 +18,7 @@ const PORT = 8123
 
 export default defineConfig({
   testDir: './e2e',
-  testMatch: 'conversation-live.spec.ts',
+  testMatch: ['conversation-live.spec.ts', 'capabilities-live.spec.ts'],
   timeout: 90_000,
   expect: { timeout: 20_000 },
   reporter: [['line']],

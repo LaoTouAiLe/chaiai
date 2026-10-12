@@ -65,6 +65,9 @@ META_LEGACY_IMPORT_AT = "legacy_import.imported_at"
 #: 外部路径**档位**在 ``settings_meta`` 里的键（T38）。授权条目另有专表。
 META_EXTERNAL_PATHS_MODE = "permissions.external_paths.mode"
 
+#: 当前 **Agent 档位**（Profile）在 ``settings_meta`` 里的键（§16.6 档位切换，2026-10-12）。
+META_AGENT_PROFILE = "agent.profile"
+
 
 def now_iso() -> str:
     """当前时间（UTC、秒级、ISO 文本）：本库所有时间戳的统一写法。"""
@@ -218,6 +221,58 @@ class PermissionStore:
         return cast(ExternalPathsMode, value) if value in ("deny", "whitelist", "allow") else None
 
 
+@dataclass
+class ProfileStore:
+    """当前 **Agent 档位**（Profile）的读写（§16.6 档位切换，2026-10-12）。
+
+    与外部路径档位（T38）**同一口径**：档位是 ``settings_meta`` 里的一行，**唯一真源在设置库**，
+    ``config.yaml`` 只是出厂默认——用户改过之后，重启读到的仍是用户的选择（不会被配置文件覆盖）。
+    "保存即生效、作用于下一轮"，不写回配置文件。
+
+    ``selectable`` 由**服务端**枚举（内置三档 + ``profiles.custom``），页面照它渲染：档位名与能力集合的
+    定义只在 ``capabilities.py`` 与配置里（§16.1），不在这里另立一套。
+    """
+
+    _connection: sqlite3.Connection
+    _default_profile: str
+    _selectable: tuple[str, ...]
+
+    @property
+    def default_profile(self) -> str:
+        """``config.yaml`` 给的出厂默认档位；库里没有用户选择时用它。"""
+        return self._default_profile
+
+    @property
+    def selectable(self) -> tuple[str, ...]:
+        """页面可选的全部档位（固定顺序）。"""
+        return self._selectable
+
+    def profile(self) -> str:
+        """当前生效档位：库里的用户选择优先，没有（或已不在可选集里）则回落到出厂默认。"""
+        stored = self._value()
+        return self._default_profile if stored is None else stored
+
+    def set_profile(self, profile: str) -> None:
+        """保存档位（调用方负责先校验取值合法）。"""
+        self._connection.execute(
+            "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (META_AGENT_PROFILE, profile, now_iso()),
+        )
+        self._connection.commit()
+
+    def _value(self) -> str | None:
+        row = self._connection.execute(
+            "SELECT value FROM settings_meta WHERE key = ?", (META_AGENT_PROFILE,)
+        ).fetchone()
+        if row is None:
+            return None
+        value = str(row[0])
+        # 自定义档位被从配置里删掉之后，库里那个名字就不该继续生效（与 `_mode_value` 同一条失败闭合）：
+        # 回落到出厂默认，而不是让运行期去解析一个不存在的档位。
+        return value if value in self._selectable else None
+
+
 def _grant_access(value: Any) -> GrantAccess:
     """把库里的文本收敛成访问级别；未知值按**只读**处理（失败闭合）。"""
     return "read_write" if str(value) == "read_write" else "read"
@@ -231,6 +286,7 @@ class SettingsDatabase:
     connections: ConnectionStore
     permissions: PermissionStore
     preferences: PreferenceStore
+    profiles: ProfileStore
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -246,6 +302,8 @@ def open_settings_database(
     *,
     credentials: CredentialStore | None = None,
     default_external_paths_mode: ExternalPathsMode = "whitelist",
+    default_profile: str = "",
+    profile_names: Sequence[str] = (),
 ) -> SettingsDatabase:
     """打开（必要时创建）设置库并升到当前结构版本。
 
@@ -254,6 +312,8 @@ def open_settings_database(
         credentials: 密钥存储；给 ``None`` 时读写密钥的操作会被拒绝（只读设置仍可用）。
         default_external_paths_mode: ``config.yaml`` 里的外部路径档位，作为**出厂默认**：
             库里没有用户选择时用它，用户改过档位后以库里的为准（T38）。
+        default_profile: ``config.yaml`` 里的 ``profiles.active``，同类出厂默认（§16.6）。
+        profile_names: 页面可选的档位名（内置 + 自定义），由调用方从配置枚举后传进来。
 
     Raises:
         sqlite3.Error: 库无法打开或结构变更失败。
@@ -265,6 +325,9 @@ def open_settings_database(
         connections=ConnectionStore(connection, credentials=credentials),
         permissions=PermissionStore(connection, default_mode=default_external_paths_mode),
         preferences=PreferenceStore(connection),
+        profiles=ProfileStore(
+            connection, _default_profile=default_profile, _selectable=tuple(profile_names)
+        ),
     )
 
 

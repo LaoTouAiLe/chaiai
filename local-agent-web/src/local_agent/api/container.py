@@ -20,6 +20,7 @@ from langchain_core.language_models import BaseChatModel
 from local_agent import config as config_module
 from local_agent.application.jobs import JobRuntime
 from local_agent.application.service import ApplicationService
+from local_agent.capabilities import selectable_profiles
 from local_agent.config import AppConfig, ConfigError, LlmConfig
 from local_agent.graph import builder
 from local_agent.llm import factory
@@ -189,6 +190,8 @@ def open_runtime(
             connections=None if settings is None else settings.connections,
             permissions=None if settings is None else settings.permissions,
             preferences=None if settings is None else settings.preferences,
+            # Agent 档位（§16.6）：与上面三个同源，都是设置库里的可调项；没有库时整组为 None。
+            profiles=None if settings is None else settings.profiles,
             # 任务索引与**会话索引、Checkpoint 同库同连接**（§17.1）；worker 只在
             # `jobs.background=true` 时才起，默认路径与 v0.5 一致。
             jobs=JobRuntime(
@@ -242,6 +245,9 @@ def _open_settings(app_config: AppConfig, *, base_dir: Path) -> SettingsDatabase
             credentials=credentials,
             # config.yaml 里的档位只是**出厂默认**：库里没有用户选择时用它（T38）。
             default_external_paths_mode=app_config.workspace.external_paths.mode,
+            # Agent 档位同一条口径（§16.6）：出厂默认 + **服务端枚举**的可选集（内置三档 + 自定义）。
+            default_profile=app_config.profiles.active,
+            profile_names=selectable_profiles(app_config.profiles.custom),
         )
     except (sqlite3.Error, OSError):
         return None

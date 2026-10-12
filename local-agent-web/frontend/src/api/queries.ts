@@ -24,6 +24,7 @@ import {
   pickWorkspaceDirectory,
   resolveApproval,
   selectSessionModel,
+  setActiveProfile,
   selectWorkspace,
   submitMessage,
 } from './client'
@@ -75,6 +76,22 @@ export function useTasks(workspaceId: string | null) {
  */
 export function useCapabilities() {
   return useQuery({ queryKey: queryKeys.capabilities, queryFn: getCapabilities })
+}
+
+/**
+ * 切换当前档位（§16.6）：保存即生效、作用于下一轮。
+ *
+ * 成功就用服务端返回的**完整视图**替换缓存——档位一变，每个能力的可用性与"下一步"都跟着变，
+ * 自己在前端推算那份列表就是第二套真相（与 `usePermissions.setMode` 同一条做法）。
+ */
+export function useSetActiveProfile() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (profile: string) => setActiveProfile(profile),
+    onSuccess: (view) => {
+      queryClient.setQueryData(queryKeys.capabilities, view)
+    },
+  })
 }
 
 export function useHealth() {

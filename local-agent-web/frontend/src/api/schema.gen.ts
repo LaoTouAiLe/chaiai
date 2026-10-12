@@ -16,10 +16,33 @@ export interface paths {
          * @description 当前 Profile 与每个能力的可用性、原因与下一步。
          *
          *     **只讲能力不讲工具**（§16.6）：用户要判断的是"现在能不能联网、能不能提交"。答案每次现算，
-         *     因此改完配置或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。
+         *     因此改完配置、切完档位或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。
          */
         get: operations["capabilities_api_capabilities_get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/capabilities/profile": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 切换 Agent 档位
+         * @description 保存当前档位：**保存即生效、作用于下一轮**（§16.6 档位切换）。
+         *
+         *     改完**不用重启**——运行上下文每次装配时现取档位。响应是保存后的完整视图（页面直接换上它，
+         *     不必再发一次读请求）。
+         */
+        put: operations["set_profile_api_capabilities_profile_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -905,12 +928,28 @@ export interface components {
         /**
          * CapabilitiesView
          * @description 当前 Agent 档位与每个能力的状态（T56；§16.6）。
+         *
+         *     `profiles` 是**页面可选**的档位（服务端枚举：内置三档 + `profiles.custom`），`default_profile`
+         *     是 `config.yaml` 的出厂默认（`profile` 是**当前生效**那一个）——三者一起让页面既能画选择器，
+         *     也能说清"现在这一档是从哪儿来的"（§16.6 档位切换）。
          */
         CapabilitiesView: {
             /** Capabilities */
             capabilities?: components["schemas"]["CapabilityStatusView"][];
+            /**
+             * Default Profile
+             * @default
+             */
+            default_profile: string;
             /** Profile */
             profile: string;
+            /** Profiles */
+            profiles?: string[];
+            /**
+             * Store Unavailable
+             * @default false
+             */
+            store_unavailable: boolean;
         };
         /**
          * CapabilityCheckView
@@ -2534,6 +2573,18 @@ export interface components {
             writable: boolean;
         };
         /**
+         * ProfileRequest
+         * @description 切换当前 Agent 档位（§16.6 档位切换）。
+         *
+         *     可选值由**服务端枚举**（内置三档 + `profiles.custom`）：这里只做形状校验（非空、长度），
+         *     **取值是否合法由领域层裁定**（未知档位给 422，理由里带上可选值）——传输层不另立一套档位名，
+         *     与 `PermissionsModeRequest` 同一条口径。
+         */
+        ProfileRequest: {
+            /** Profile */
+            profile: string;
+        };
+        /**
          * ReadonlyResearchRequest
          * @description 只接受工作区内的相对 glob 与字面关键词，不接受控制流。
          */
@@ -3635,6 +3686,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CapabilitiesView"];
+                };
+            };
+        };
+    };
+    set_profile_api_capabilities_profile_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfileRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CapabilitiesView"];
+                };
+            };
+            /** @description 档位名不在可选集里 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

@@ -5,14 +5,17 @@
 //   2. 不可用**必须**给出下一步——只灰掉不解释会让人以为功能坏了；
 //   3. 还没读到时不编造任何一项。
 
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 
 import type { CapabilitiesView } from '../../fixtures/types'
 import { CapabilitiesPanel } from './CapabilitiesPanel'
 
 const VIEW: CapabilitiesView = {
   profile: 'coder',
+  defaultProfile: 'coder',
+  profiles: ['coder', 'researcher', 'reviewer'],
+  storeUnavailable: false,
   capabilities: [
     {
       capability: 'plan',
@@ -71,5 +74,45 @@ describe('CapabilitiesPanel', () => {
     render(<CapabilitiesPanel view={null} errorText="请求失败（HTTP 500）" />)
 
     expect(screen.getByRole('alert')).toHaveTextContent('请求失败（HTTP 500）')
+  })
+
+  it('lets the user switch the profile when the host wired it up', () => {
+    const onSelectProfile = vi.fn()
+    render(<CapabilitiesPanel view={VIEW} actions={{ onSelectProfile }} />)
+
+    const select = screen.getByLabelText('切换当前档位')
+    expect(select).toHaveValue('coder')
+    // 选项来自**服务端给的可选集**（视图模型里那三个），页面不自己拼一份。
+    expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'coder', 'researcher', 'reviewer',
+    ])
+
+    fireEvent.change(select, { target: { value: 'reviewer' } })
+
+    expect(onSelectProfile).toHaveBeenCalledWith('reviewer')
+  })
+
+  it('keeps the profile as plain text when there is nothing to write to', () => {
+    // ① 没接线（原型宿主）：纯文本——不给一个点了没反应的控件。
+    const plain = render(<CapabilitiesPanel view={VIEW} />)
+    expect(screen.queryByLabelText('切换当前档位')).not.toBeInTheDocument()
+    expect(screen.getByText('coder')).toBeInTheDocument()
+    plain.unmount()
+
+    // ② 设置库不可用：同样纯文本，并如实说明档位来自配置文件（§16.6 的降级口径）。
+    render(
+      <CapabilitiesPanel
+        view={{ ...VIEW, storeUnavailable: true }}
+        actions={{ onSelectProfile: vi.fn() }}
+      />,
+    )
+    expect(screen.queryByLabelText('切换当前档位')).not.toBeInTheDocument()
+    expect(screen.getByText(/设置库不可用，档位来自配置文件/)).toBeInTheDocument()
+  })
+
+  it('disables the selector while a switch is in flight', () => {
+    render(<CapabilitiesPanel view={VIEW} actions={{ onSelectProfile: vi.fn(), busy: true }} />)
+
+    expect(screen.getByLabelText('切换当前档位')).toBeDisabled()
   })
 })

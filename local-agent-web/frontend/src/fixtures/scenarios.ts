@@ -1347,6 +1347,11 @@ export const capabilitiesScenario: ConversationScenario = {
   modelMenu: null,
   capabilities: {
     profile: 'researcher',
+    // 可选集由服务端枚举（§16.6）：原型也照真形状给一份，截图因此能画出档位选择器；
+    // 原型宿主的那个动作是惰性的（`App.tsx`），真宿主由 `CapabilitiesSection` 接线。
+    defaultProfile: 'coder',
+    profiles: ['coder', 'researcher', 'reviewer'],
+    storeUnavailable: false,
     capabilities: [
       { capability: 'plan', label: '任务计划', available: true, reason: 'available', detail: '当前可用。', hint: null },
       { capability: 'files_read', label: '读取工作区文件', available: true, reason: 'available', detail: '当前可用。', hint: null },

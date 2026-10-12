@@ -24,6 +24,7 @@ from local_agent.application.service import (
     binding_from_state,
     binding_of,
 )
+from local_agent.capabilities import selectable_profiles
 from local_agent.config import AppConfig, LlmConfig
 from local_agent.exceptions import (
     ConnectionValidationError,
@@ -34,6 +35,7 @@ from local_agent.exceptions import (
 )
 from local_agent.graph import builder
 from local_agent.model_settings import (
+    META_AGENT_PROFILE,
     META_EXTERNAL_PATHS_MODE,
     CapabilityReport,
     ConnectionDraft,
@@ -42,6 +44,7 @@ from local_agent.model_settings import (
     KeyringCredentialStore,
     ModelConnection,
     PermissionStore,
+    ProfileStore,
     SelectionRef,
     credential_ref_for,
     current_settings_version,
@@ -1119,6 +1122,64 @@ def test_permission_store_falls_back_to_the_factory_default_on_unknown_mode(
     )
 
     assert permissions.mode() == "whitelist"
+
+
+def _profiles(
+    tmp_path: Path, **kwargs: Any
+) -> tuple[sqlite3.Connection, ProfileStore]:
+    database = open_settings_database(
+        tmp_path / "settings.sqlite", credentials=InMemoryCredentialStore(), **kwargs
+    )
+    return database.connection, database.profiles
+
+
+def test_profile_store_prefers_the_user_choice_over_the_factory_default(
+    tmp_path: Path,
+) -> None:
+    """档位（§16.6）的唯一真源是设置库；``config.yaml`` 只在库里还没有用户选择时兜底。
+
+    与外部路径档位（T38）同一条口径：页面改过之后，重启读到的仍是用户的选择——改档位不写回配置文件。
+    """
+    _connection, profiles = _profiles(
+        tmp_path, default_profile="reviewer", profile_names=("coder", "researcher", "reviewer")
+    )
+    assert profiles.profile() == "reviewer" and profiles.default_profile == "reviewer"
+    assert profiles.selectable == ("coder", "researcher", "reviewer")
+
+    profiles.set_profile("coder")
+
+    reopened = open_settings_database(
+        tmp_path / "settings.sqlite",
+        default_profile="reviewer",
+        profile_names=("coder", "researcher", "reviewer"),
+    )
+    assert reopened.profiles.default_profile == "reviewer"
+    assert reopened.profiles.profile() == "coder"
+    reopened.connection.close()
+
+
+def test_profile_store_falls_back_when_the_stored_name_is_gone(tmp_path: Path) -> None:
+    """库里那个名字已经不在可选集里（自定义档位被从配置删掉）：回落到出厂默认。
+
+    不能让运行期去解析一个不存在的档位——那会在装配上下文时才炸，报错离原因很远。
+    """
+    connection, profiles = _profiles(
+        tmp_path, default_profile="coder", profile_names=("coder", "reviewer")
+    )
+    connection.execute(
+        "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)",
+        (META_AGENT_PROFILE, "my-custom", "2026-01-01T00:00:00+00:00"),
+    )
+
+    assert profiles.profile() == "coder"
+
+
+def test_selectable_profiles_are_built_ins_first_then_custom_names() -> None:
+    """可选档位由服务端枚举：内置三档（固定顺序）在前，自定义按名排序在后（输出稳定）。"""
+    assert selectable_profiles() == ("coder", "researcher", "reviewer")
+    assert selectable_profiles(["zeta", "alpha", "coder"]) == (
+        "coder", "researcher", "reviewer", "alpha", "zeta",
+    )
 
 
 def test_grant_normalizes_rewrites_and_revokes(tmp_path: Path) -> None:

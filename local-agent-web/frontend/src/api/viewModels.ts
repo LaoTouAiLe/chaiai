@@ -142,6 +142,9 @@ export function toPermissionsView(dto: PermissionsDto): PermissionsView {
 export function toCapabilitiesView(dto: CapabilitiesDto): CapabilitiesView {
   return {
     profile: dto.profile,
+    defaultProfile: dto.default_profile ?? '',
+    profiles: dto.profiles ?? [],
+    storeUnavailable: dto.store_unavailable ?? false,
     capabilities: (dto.capabilities ?? []).map(
       (row): CapabilityStatusView => ({
         capability: row.capability,

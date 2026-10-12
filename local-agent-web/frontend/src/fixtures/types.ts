@@ -471,6 +471,12 @@ export interface CapabilityStatusView {
 export interface CapabilitiesView {
   /** 当前 Agent 档位名（`coder` / `researcher` / `reviewer`，或自定义名）。 */
   profile: string
+  /** `config.yaml` 的出厂默认档位；用户切换过后与 `profile` 不同。 */
+  defaultProfile: string
+  /** **可选**档位（服务端枚举，固定顺序）。页面照它渲染，不自己拼一份（§16.6）。 */
+  profiles: readonly string[]
+  /** 没有可用设置库：档位只能来自 `config.yaml`，此时**不提供**切换。 */
+  storeUnavailable: boolean
   capabilities: readonly CapabilityStatusView[]
 }
 

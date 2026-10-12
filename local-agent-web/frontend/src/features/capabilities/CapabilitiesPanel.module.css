@@ -77,6 +77,35 @@
   color: var(--law-text-primary);
 }
 
+/* 档位选择器（§16.6 档位切换）：与 `.close` 同一套外观，等宽字体——档位名是标识符，不是文案。 */
+.profileSelect {
+  padding: var(--law-space-xxs) var(--law-space-sm);
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-text-primary);
+  background: var(--law-button-ghost-fill);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-sm);
+  cursor: pointer;
+}
+
+.profileSelect:hover {
+  background: var(--law-button-ghost-hover);
+}
+
+.profileSelect:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 设置库不可用时的一句补充说明（控件已退回纯文本，别让用户以为面板坏了）。 */
+.profileNote {
+  margin-left: var(--law-space-sm);
+  font-size: var(--law-text-xs);
+  color: var(--law-text-caption);
+}
+
 .list {
   display: flex;
   flex-direction: column;

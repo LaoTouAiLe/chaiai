@@ -396,6 +396,19 @@ export function getCapabilities(): Promise<CapabilitiesDto> {
   return request<CapabilitiesDto>('/api/capabilities')
 }
 
+/**
+ * 切换当前 Agent 档位（§16.6）：**保存即生效、作用于下一轮**（改完不用重启）。
+ *
+ * 可选值由服务端枚举（`CapabilitiesView.profiles`），页面不自己拼档位名——打错名字会拿到 422，
+ * 理由里带着可选值；没有设置库时是 503（改动存不下来）。
+ */
+export function setActiveProfile(profile: string): Promise<CapabilitiesDto> {
+  return request<CapabilitiesDto>('/api/capabilities/profile', {
+    method: 'PUT',
+    body: JSON.stringify({ profile }),
+  })
+}
+
 // ---- 任务中心（T62；§17.6）---------------------------------------------------
 
 export type TasksDto = components['schemas']['TaskCenterView']

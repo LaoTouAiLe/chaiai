@@ -27,10 +27,12 @@ from local_agent.model_settings.models import (
     validate_draft,
 )
 from local_agent.model_settings.store import (
+    META_AGENT_PROFILE,
     META_EXTERNAL_PATHS_MODE,
     ConnectionStore,
     PathGrant,
     PermissionStore,
+    ProfileStore,
     Selection,
     SelectionRef,
     SettingsDatabase,
@@ -40,6 +42,7 @@ from local_agent.model_settings.store import (
 )
 
 __all__ = [
+    "META_AGENT_PROFILE",
     "META_EXTERNAL_PATHS_MODE",
     "PLACEHOLDER_API_KEY",
     "PROVIDER",
@@ -54,6 +57,7 @@ __all__ = [
     "ModelConnection",
     "PathGrant",
     "PermissionStore",
+    "ProfileStore",
     "Selection",
     "SelectionRef",
     "SettingsDatabase",

@@ -566,6 +566,68 @@ def test_capabilities_endpoint_explains_what_is_unavailable(
         assert name not in response.text, f"能力状态里泄露了工具名 {name}"
 
 
+def test_profile_switching_is_a_settings_backed_choice(
+    api: tuple[TestClient, ApiRuntime]
+) -> None:
+    """档位可以在页面里切（§16.6 档位切换）：可选集由服务端给、存设置库、读回一致、非法值 422。"""
+    client, _runtime = api
+
+    view = client.get("/api/capabilities").json()
+    assert view["profiles"] == ["coder", "researcher", "reviewer"]  # 内置三档，顺序稳定
+    assert view["profile"] == view["default_profile"] == "coder"  # 还没切过：等于出厂默认
+    assert view["store_unavailable"] is False
+
+    switched = client.put("/api/capabilities/profile", json={"profile": "researcher"})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["profile"] == "researcher"
+    assert switched.json()["default_profile"] == "coder"  # 出厂默认不变：切档不写回 config.yaml
+    rows = {row["capability"]: row for row in switched.json()["capabilities"]}
+    # 只读档：写文件能力立刻变成"当前档位没有"，并按档位措辞给下一步。
+    assert rows["files_write"]["available"] is False
+    assert rows["files_write"]["reason"] == "profile"
+    # 读回一致（页面刷新后看到的仍是用户的选择）。
+    assert client.get("/api/capabilities").json()["profile"] == "researcher"
+
+    bad = client.put("/api/capabilities/profile", json={"profile": "nope"})
+    assert bad.status_code == 422, bad.text
+    assert bad.json()["error"]["code"] == MODEL_SETTINGS_INVALID
+    # 理由里带上可选值：页面据此提示，不用自己拼一份档位名。
+    assert "coder" in bad.json()["error"]["message"]
+    # 空名在**形状**这一层就被拒，不会流到领域层（与权限档位同一条口径）。
+    assert client.put("/api/capabilities/profile", json={"profile": ""}).status_code == 422
+
+
+def test_switching_the_profile_changes_the_bound_tools(open_api: OpenApi) -> None:
+    """§16.6 档位切换的**功能证明**：页面切的档位必须改变真正绑给模型的能力集。
+
+    只读档（`reviewer`）下，模型请求写文件必须被拒且**没有副作用**；切到全能力档（`coder`）后
+    同一次调用必须真的落盘。这就是"能调"与"只改显示"的分界——只改显示的实现也能让第一条通过，
+    但第二条必然失败。
+    """
+    client, runtime = open_api(
+        decision="tool",
+        reply="好的",
+        tool_calls=[
+            {"name": "write_file", "args": {"path": "切换档位.txt", "content": "内容"}, "id": "call-1"}
+        ],
+        # 两次提交都要发出同一个工具调用：否则第二次决策调用不会带工具（假模型的既定行为）。
+        repeated_tool_calls=True,
+    )
+
+    assert client.put("/api/capabilities/profile", json={"profile": "reviewer"}).status_code == 200
+    session_id = _create_session(client)
+    workspace_root = Path(runtime.database.sessions.get(session_id).workspace_root)
+
+    assert _submit(client, session_id, "写一个文件", "req-readonly").status_code == 200
+    # 能力之外：既不调用也不执行（§6.9 的执行边界），所以工作区里不该多出文件。
+    assert not (workspace_root / "切换档位.txt").exists()
+
+    assert client.put("/api/capabilities/profile", json={"profile": "coder"}).status_code == 200
+    assert _submit(client, session_id, "再写一次", "req-full").status_code == 200
+    # 同一个调用，这次真的执行了——档位真的改变了绑给模型的能力集。
+    assert (workspace_root / "切换档位.txt").read_text(encoding="utf-8") == "内容"
+
+
 def test_session_lifecycle_over_http(api: tuple[TestClient, ApiRuntime]) -> None:
     client, _runtime = api
     session_id = _create_session(client, title="给 README 补一段")
@@ -1931,6 +1993,8 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/permissions",
         # v0.5 T56：当前档位与能力状态（只讲能力、不讲工具，§16.6）
         "/api/capabilities",
+        # §16.6 档位切换（2026-10-12）：切当前档位，下一轮生效
+        "/api/capabilities/profile",
         "/api/preferences",
         "/api/preferences/memory/test",
         "/api/data-center/memories",

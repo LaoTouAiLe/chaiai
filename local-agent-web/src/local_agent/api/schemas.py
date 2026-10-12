@@ -262,6 +262,20 @@ class PickDirectoryView(BaseModel):
     path: str | None = None
 
 
+# ---- 能力与档位（§16.6）----------------------------------------------------
+
+
+class ProfileRequest(_Request):
+    """切换当前 Agent 档位（§16.6 档位切换）。
+
+    可选值由**服务端枚举**（内置三档 + `profiles.custom`）：这里只做形状校验（非空、长度），
+    **取值是否合法由领域层裁定**（未知档位给 422，理由里带上可选值）——传输层不另立一套档位名，
+    与 `PermissionsModeRequest` 同一条口径。
+    """
+
+    profile: str = Field(min_length=1, max_length=REQUEST_ID_MAX_CHARS)
+
+
 # ---- 权限（T38；§1.5）------------------------------------------------------
 
 

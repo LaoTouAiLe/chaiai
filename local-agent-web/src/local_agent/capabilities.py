@@ -17,7 +17,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -85,6 +85,17 @@ KNOWN_MODES: tuple[str, ...] = tuple(MODE_CAPABILITIES)
 def profile_names() -> tuple[str, ...]:
     """内置 Profile 名（固定顺序，配置错误提示按这个顺序列出）。"""
     return tuple(PROFILES)
+
+
+def selectable_profiles(custom_names: Iterable[str] = ()) -> tuple[str, ...]:
+    """**页面可选**的全部档位：内置三档（固定顺序）+ 自定义名字（按名排序，输出稳定）。
+
+    为什么要服务端枚举：档位名是 `capabilities.py` 与 `config.yaml` 的事（§16.1），页面照着它渲染即可——
+    让前端自己拼一份，加一个内置档位或改一个自定义名就会两边不一致。与内置重名的自定义项**已被
+    `ProfilesConfig` 拒绝**（配置加载期），这里再滤一次只是为了不让脏输入扩散。
+    """
+    extra = sorted({str(name) for name in custom_names} - set(PROFILES))
+    return (*PROFILES, *extra)
 
 
 def capability_names() -> tuple[str, ...]:

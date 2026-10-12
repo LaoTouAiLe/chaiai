@@ -226,9 +226,20 @@ class CapabilityStatusView(_Dto):
 
 
 class CapabilitiesView(_Dto):
-    """当前 Agent 档位与每个能力的状态（T56；§16.6）。"""
+    """当前 Agent 档位与每个能力的状态（T56；§16.6）。
+
+    `profiles` 是**页面可选**的档位（服务端枚举：内置三档 + `profiles.custom`），`default_profile`
+    是 `config.yaml` 的出厂默认（`profile` 是**当前生效**那一个）——三者一起让页面既能画选择器，
+    也能说清"现在这一档是从哪儿来的"（§16.6 档位切换）。
+    """
 
     profile: str = Field(min_length=1)
+    #: `config.yaml` 的出厂默认档位；用户切换过后 `profile` 与它不同。
+    default_profile: str = ""
+    #: 可选档位（固定顺序）。没有设置库时仍然给出，但 `store_unavailable` 为真、页面不提供切换。
+    profiles: list[str] = Field(default_factory=list)
+    #: 没有可用设置库：档位只能来自 `config.yaml`，写下去会被拒（503）。
+    store_unavailable: bool = False
     capabilities: list[CapabilityStatusView] = Field(default_factory=list)
 
 
