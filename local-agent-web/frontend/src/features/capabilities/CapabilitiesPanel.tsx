@@ -37,8 +37,9 @@ export function CapabilitiesPanel({ view, errorText = null, onClose }: Capabilit
           <div>
             <h2 className={styles.title}>能力与档位</h2>
             <p className={styles.note}>
-              这里只讲能力，不讲内部工具。每一项都会说明"能不能用、为什么、怎么才能用"——改完配置或装好依赖后，
-              重新打开这个面板就是最新结论。
+              这里只讲能力，不讲内部工具。每一项都会说明"能不能用、为什么、怎么才能用"。
+              装好依赖（例如 git）后重开这个面板就是最新结论；<strong>改档位与开关要重启服务才生效</strong>
+              （配置只在启动时读一次）。
             </p>
           </div>
           {onClose === undefined ? null : (
