@@ -27,6 +27,22 @@ beforeEach(() => {
 })
 
 describe('useSubmitMessage session boundary', () => {
+  it('binds workflow parameters to the retry key and assigns a new key after editing the scope', async () => {
+    mock.submit.mockRejectedValue(new Error('network interrupted'))
+    const { result, rerender } = renderHook(({ pattern }) => useSubmitMessage('s1', {
+      workflow: { name: 'readonly_research', request: { pattern } },
+    }), { initialProps: { pattern: 'docs/*.md' }, wrapper })
+    act(() => result.current.mutate('核对原文'))
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    act(() => result.current.mutate('核对原文'))
+    await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.isError).toBe(true))
+    rerender({ pattern: 'src/*.py' })
+    act(() => result.current.mutate('核对原文'))
+    await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(3))
+    expect(mock.submit.mock.calls.map((call) => call[2])).toEqual(['req-1', 'req-1', 'req-2'])
+    expect(mock.submit.mock.calls[2]?.[3].workflow.request.pattern).toBe('src/*.py')
+  })
   it('does not carry the previous session pending state or idempotency key into a new session', async () => {
     let completeFirst: (value: unknown) => void = () => undefined
     mock.submit.mockImplementationOnce(() => new Promise((resolve) => { completeFirst = resolve }))

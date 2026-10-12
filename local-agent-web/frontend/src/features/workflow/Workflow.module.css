@@ -1,0 +1,23 @@
+.controls, .status {
+  min-width: 0;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--law-border-l2);
+  background: var(--law-bg-layer-1);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.controls label { display: flex; flex-direction: column; gap: 4px; margin: 4px 0; }
+.controls { max-height: 32vh; overflow-y: auto; }
+.controls input, .controls textarea, .controls select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  font: inherit;
+  color: var(--law-text-primary);
+  background: var(--law-bg-layer-1);
+  border: 1px solid var(--law-border-l2);
+}
+.controls p, .status p { margin: 4px 0; overflow-wrap: anywhere; }
+.task { padding-top: 6px; }
+.status { margin: 8px 16px; overflow-wrap: anywhere; }

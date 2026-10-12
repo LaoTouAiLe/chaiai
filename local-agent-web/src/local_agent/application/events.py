@@ -20,7 +20,7 @@ import hashlib
 import threading
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Annotated, Any, Final, Literal
+from typing import Annotated, Any, Final, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
@@ -59,6 +59,11 @@ EventType = Literal[
     "model_call_completed",
     "task_completed",
     "task_failed",
+    "job_queued",
+    "job_progress",
+    "job_waiting",
+    "job_completed",
+    "task_cancelled",
 ]
 
 #: 契约里的事件类型全集；测试用它对照 ARCHITECTURE §15.4，防止悄悄增删。
@@ -82,6 +87,11 @@ EVENT_TYPES: Final[tuple[EventType, ...]] = (
     "model_call_completed",
     "task_completed",
     "task_failed",
+    "job_queued",
+    "job_progress",
+    "job_waiting",
+    "job_completed",
+    "task_cancelled",
 )
 
 #: 每个事件都有的字段（§15.4）。
@@ -97,14 +107,10 @@ COMMON_EVENT_FIELDS: Final[tuple[str, ...]] = (
     "payload",
 )
 
-#: v0.6 才可能出现的类型：v0.4 不得实现，测试据此守卫。
-RESERVED_FOR_V06: Final[tuple[str, ...]] = (
-    "job_queued",
-    "job_progress",
-    "job_waiting",
-    "job_completed",
-    "task_cancelled",
-)
+#: v0.6 才可能出现的类型。**T59 起已全部转正**（`job_*` 与 `task_cancelled` 进了 :data:`EVENT_TYPES`），
+#: 这个常量保留为空元组：测试仍然用它守住"不得再往这里塞未实现的东西"，而临时"预留"事件类型
+#: 本身就是被禁止的做法（§15.4 原话：v0.4 不得预留它们的实现）。
+RESERVED_FOR_V06: Final[tuple[str, ...]] = ()
 
 
 def event_id_for(event_type: EventType, identity: str) -> str:
@@ -191,6 +197,21 @@ class _TaskEnvelope(_Envelope):
 
     task_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
+
+
+class _JobEnvelope(_Envelope):
+    """任务**生命周期**事件的信封（v0.6 §17.3）。
+
+    与 :class:`_TaskEnvelope` 的差别只有一处：`run_id` 允许为空。任务在**排队 / 刚登记**时还没有
+    任何轮次，`job_queued` 必然发生在 `run_id` 存在之前；强行要求非空只能靠伪造一个值，而伪造
+    标识正是 §15.4 明令禁止的。`task_id` 仍然非空——它等于 `job_id`（一次任务就是一个 task）。
+    """
+
+    task_id: str = Field(min_length=1)
+    run_id: str | None = None
+    #: 任务标识（§17.1）。与 `task_id` 同值，但**语义不同**：`task_id` 是事件协议里的任务引用，
+    #: `job_id` 是索引（`jobs` 表）里的主键——两者分离后，将来任务与轮次的关系变化也不影响协议。
+    job_id: str = Field(min_length=1)
 
 
 # ---- 载荷 ------------------------------------------------------------------
@@ -326,6 +347,30 @@ class TaskFailedPayload(BaseModel):
     error: ErrorView
 
 
+class JobStatePayload(BaseModel):
+    """任务状态事件（`job_queued` / `job_progress` / `job_waiting` / `job_completed`）的载荷（§17.3）。
+
+    `state` 是**任务索引里的状态**（闭集定义在叶子模块 `local_agent/job_state.py`，`persistence.job_store`
+    再导出），与事件类型
+    **一一对应**：`completed` / `failed` / `needs_review` 共用 `job_completed`——页面据此区分
+    "任务正常结束""任务失败"与"需要人工核对"（`detail` 带原因），而"取消"有独立类型
+    （`task_cancelled`），因为它是用户发起的。
+    """
+
+    model_config = ConfigDict(extra="ignore")
+    state: Literal[
+        "queued", "running", "waiting_user", "completed", "failed", "needs_review"
+    ]
+    detail: str | None = None
+
+
+class TaskCancelledPayload(BaseModel):
+    """任务被取消（§17.3）。`detail` 说明是谁、因为什么取消的。"""
+
+    model_config = ConfigDict(extra="ignore")
+    detail: str | None = None
+
+
 # ---- 具体事件 --------------------------------------------------------------
 
 
@@ -428,6 +473,98 @@ class TaskFailedEvent(_TaskEnvelope):
     payload: TaskFailedPayload
 
 
+# ---- 任务生命周期事件（v0.6 §17.3）------------------------------------------
+
+
+class JobQueuedEvent(_JobEnvelope):
+    """任务已登记、尚未取出执行（架构 §17.1 的 `queued`）。"""
+
+    event_type: Literal["job_queued"] = "job_queued"
+    payload: JobStatePayload
+
+
+class JobProgressEvent(_JobEnvelope):
+    """任务开始实际执行（`running`，此时 `run_id` 应当已存在）。"""
+
+    event_type: Literal["job_progress"] = "job_progress"
+    payload: JobStatePayload
+
+
+class JobWaitingEvent(_JobEnvelope):
+    """任务进入 `waiting_user`：等用户在页面上做决定（例如审批）。"""
+
+    event_type: Literal["job_waiting"] = "job_waiting"
+    payload: JobStatePayload
+
+
+class JobCompletedEvent(_JobEnvelope):
+    """任务进入终态 `completed` 或 `failed`；`payload.state` 区分两者，`detail` 带原因。"""
+
+    event_type: Literal["job_completed"] = "job_completed"
+    payload: JobStatePayload
+
+
+class TaskCancelledEvent(_JobEnvelope):
+    """任务被取消（`cancelled`）。触发与进程终止见架构 §17.4（v0.6 T60）。"""
+
+    event_type: Literal["task_cancelled"] = "task_cancelled"
+    payload: TaskCancelledPayload
+
+
+#: 任务生命周期事件类型 → 具体模型（与 :data:`EVENT_TYPES` 的这五项一致，由测试守住）。
+_JOB_EVENT_CLASSES: Final[Mapping[str, type]] = {
+    "job_queued": JobQueuedEvent,
+    "job_progress": JobProgressEvent,
+    "job_waiting": JobWaitingEvent,
+    "job_completed": JobCompletedEvent,
+    "task_cancelled": TaskCancelledEvent,
+}
+
+
+def is_job_event_type(event_type: str) -> bool:
+    """是不是任务生命周期事件（§17.3）。"""
+    return event_type in _JOB_EVENT_CLASSES
+
+
+def build_job_event(
+    *,
+    event_type: str,
+    event_id: str,
+    session_id: str,
+    job_id: str,
+    run_id: str | None,
+    occurred_at: datetime,
+    stream_sequence: int,
+    state: str,
+    detail: str | None = None,
+) -> Any:
+    """构造一条任务生命周期事件（§17.3）。
+
+    **纯函数**：不读库、不写 State、不调模型、不执行工具——它只把调用方从**任务索引**读到的事实
+    装成事件。任务状态到事件类型的映射由 :mod:`local_agent.application.jobs` 提供（它拥有那份闭集），
+    因此这里只按类型选模型，不做判定。
+    """
+    if event_type not in _JOB_EVENT_CLASSES:
+        msg = f"不是任务生命周期事件：{event_type}"
+        raise ValueError(msg)
+    payload: BaseModel = (
+        TaskCancelledPayload(detail=detail)
+        if event_type == "task_cancelled"
+        else JobStatePayload(state=cast(Any, state), detail=detail)
+    )
+    event_class = cast(Any, _JOB_EVENT_CLASSES[event_type])
+    return event_class(
+        event_id=event_id,
+        session_id=session_id,
+        task_id=job_id,
+        job_id=job_id,
+        run_id=run_id,
+        occurred_at=occurred_at,
+        stream_sequence=stream_sequence,
+        payload=payload,
+    )
+
+
 EventEnvelope = Annotated[
     SessionSnapshotEvent
     | MessageStartedEvent
@@ -447,7 +584,12 @@ EventEnvelope = Annotated[
     | ModelUsageReportedEvent
     | ModelCallCompletedEvent
     | TaskCompletedEvent
-    | TaskFailedEvent,
+    | TaskFailedEvent
+    | JobQueuedEvent
+    | JobProgressEvent
+    | JobWaitingEvent
+    | JobCompletedEvent
+    | TaskCancelledEvent,
     Field(discriminator="event_type"),
 ]
 

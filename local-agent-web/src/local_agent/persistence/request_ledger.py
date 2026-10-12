@@ -78,6 +78,20 @@ class RequestLedger:
         ).fetchall()
         return [entry for row in ids if (entry := self.get(str(row[0]))) is not None]
 
+    def latest(self, session_id: str) -> LedgerEntry | None:
+        """该会话**最后**一条台账记录；没有则 `None`（重启收口用，架构 §17.5）。
+
+        为什么需要它：任务索引在"结算"之前崩掉时**没有绑定 `run_id`**（`run_id` 与终态是同一次
+        写入，见 §17.1），而台账在流式期间就绑定了。取"最后一条"是与 Checkpoint 当前 run 比对的
+        前提——更早的请求绑的是更早的轮次，不可能等于当前 run，因此不会误判。
+        """
+        row = self._connection.execute(
+            "SELECT request_id FROM request_ledger WHERE session_id=? "
+            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return self.get(str(row[0])) if row is not None else None
+
     def has_executing(self, session_id: str) -> bool:
         return self._connection.execute(
             "SELECT 1 FROM request_ledger WHERE session_id=? AND status=? LIMIT 1",

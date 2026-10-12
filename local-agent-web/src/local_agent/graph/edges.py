@@ -23,6 +23,7 @@ completion_router --新循环 finish--> task_memory_node → [memory_write_node]
 from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
 
 from local_agent.graph.nodes import (
     AGENT_DECISION_NODE,
@@ -70,6 +71,7 @@ from local_agent.graph.routers import (
     route_by_mode,
 )
 from local_agent.graph.state import AgentState, RuntimeContext
+from local_agent.workflow_contracts import CODE_CHANGE, DELEGATED_RESEARCH, READONLY_RESEARCH
 
 #: 图在编译前的类型（State = AgentState，Context = RuntimeContext）。
 ChatStateGraph = StateGraph[AgentState, RuntimeContext, AgentState, AgentState]
@@ -84,8 +86,9 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
 
     graph.add_conditional_edges(
         MODE_ROUTER,
-        route_by_mode,
-        {ROUTE_CHAT: COMPRESSION_NODE, ROUTE_TOOL: RETRIEVE_CODE_NODE},
+        _selected_route,
+        {ROUTE_CHAT: COMPRESSION_NODE, ROUTE_TOOL: RETRIEVE_CODE_NODE,
+         READONLY_RESEARCH: READONLY_RESEARCH, CODE_CHANGE: CODE_CHANGE, DELEGATED_RESEARCH: DELEGATED_RESEARCH},
     )
     # 工具分支先按需检索（T21），再进入规划；闲聊分支不经过检索节点（架构 §5.2、§5.3）。
     graph.add_edge(RETRIEVE_CODE_NODE, PLANNER_NODE)
@@ -119,11 +122,12 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
     )
     graph.add_conditional_edges(
         APPROVAL_INTERRUPT_NODE,
-        route_after_approval,
+        _approval_route,
         {
             ROUTE_APPROVE: TOOL_EXECUTION_NODE,
             ROUTE_EDIT: PLANNER_NODE,
             ROUTE_REJECT: FINAL_RESPONSE_NODE,
+            CODE_CHANGE: CODE_CHANGE,
         },
     )
     graph.add_conditional_edges(
@@ -159,3 +163,25 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
         {ROUTE_WITHOUT_TOOLS: FINAL_RESPONSE_NODE, ROUTE_REFLECT: REFLECTION_NODE},
     )
     graph.add_edge(FINAL_RESPONSE_NODE, END)
+    graph.add_edge(READONLY_RESEARCH, FINAL_RESPONSE_NODE)
+    graph.add_edge(DELEGATED_RESEARCH, FINAL_RESPONSE_NODE)
+    graph.add_conditional_edges(CODE_CHANGE,
+        lambda state: ROUTE_TO_APPROVAL if state.get("pending_approval") else ROUTE_WITHOUT_TOOLS,
+        {ROUTE_TO_APPROVAL: APPROVAL_INTERRUPT_NODE, ROUTE_WITHOUT_TOOLS: FINAL_RESPONSE_NODE})
+
+
+def _selected_route(state: AgentState, runtime: Runtime[RuntimeContext]) -> str:
+    if runtime.context.delegated_research is not None:
+        return DELEGATED_RESEARCH
+    if runtime.context.code_change is not None:
+        return CODE_CHANGE
+    if runtime.context.readonly_research is not None:
+        return READONLY_RESEARCH
+    return route_by_mode(state)
+
+
+def _approval_route(state: AgentState) -> str:
+    data = state.get("workflow")
+    if data and data["name"] == CODE_CHANGE and data["phase"] == "waiting":
+        return CODE_CHANGE
+    return route_after_approval(state)

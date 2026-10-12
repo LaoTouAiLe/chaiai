@@ -1,0 +1,206 @@
+/* 「任务中心」面板样式。只用 `--law-*` 设计令牌，深浅色随主题自动切换（与能力面板同一套写法）。 */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--law-space-xl);
+  background: var(--law-bg-mask);
+}
+
+.dialog {
+  width: min(680px, 100%);
+  max-height: 80vh;
+  overflow: auto;
+  padding: var(--law-space-2xl);
+  background: var(--law-bg-layer-1);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+  box-shadow: var(--law-shadow-lv3);
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--law-space-lg);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--law-text-lg);
+  line-height: var(--law-leading-lg);
+  font-weight: var(--law-weight-semibold);
+  color: var(--law-text-primary);
+}
+
+.note {
+  margin: var(--law-space-sm) 0 0;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-text-secondary);
+}
+
+.close {
+  flex: none;
+  padding: var(--law-space-xs) var(--law-space-md);
+  font-size: var(--law-text-sm);
+  color: var(--law-text-secondary);
+  background: var(--law-button-ghost-fill);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-sm);
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--law-button-ghost-hover);
+}
+
+.error {
+  margin: var(--law-space-lg) 0 0;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-state-error);
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm);
+  margin: var(--law-space-lg) 0 0;
+}
+
+.filter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--law-space-xs);
+  padding: var(--law-space-xs) var(--law-space-md);
+  font-size: var(--law-text-sm);
+  color: var(--law-text-secondary);
+  background: var(--law-button-ghost-fill);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-pill);
+  cursor: pointer;
+}
+
+.filter:hover {
+  background: var(--law-button-ghost-hover);
+}
+
+.filterOn {
+  color: var(--law-text-primary);
+  border-color: var(--law-border-l3);
+}
+
+.filterCount {
+  font-family: var(--law-font-mono);
+  color: var(--law-text-tertiary);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-md);
+  margin: var(--law-space-lg) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  padding: var(--law-space-lg);
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-md);
+}
+
+.rowHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--law-space-md);
+}
+
+.state {
+  font-size: var(--law-text-md);
+  color: var(--law-text-primary);
+}
+
+/* 状态色取自设计令牌：需要人工核对与失败同样显眼，排队中保持中性。 */
+.row[data-state='running'] .state {
+  color: var(--law-state-info);
+}
+
+.row[data-state='waiting_user'] .state,
+.row[data-state='needs_review'] .state {
+  color: var(--law-state-warn-label);
+}
+
+.row[data-state='completed'] .state {
+  color: var(--law-state-success);
+}
+
+.row[data-state='failed'] .state {
+  color: var(--law-state-error);
+}
+
+.row[data-state='running'] .state::before,
+.row[data-state='waiting_user'] .state::before,
+.row[data-state='needs_review'] .state::before {
+  content: '●';
+  margin-right: var(--law-space-xs);
+}
+
+.session {
+  flex: none;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--law-text-sm);
+  color: var(--law-text-secondary);
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--law-space-xs);
+  margin: var(--law-space-sm) 0 0;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-text-secondary);
+}
+
+.waiting {
+  color: var(--law-text-tertiary);
+}
+
+.detail {
+  margin: var(--law-space-sm) 0 0;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-text-secondary);
+}
+
+.rowNote {
+  margin: var(--law-space-xs) 0 0;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  color: var(--law-state-info);
+}
+
+.open {
+  margin-top: var(--law-space-md);
+  padding: var(--law-space-xs) var(--law-space-md);
+  font-size: var(--law-text-sm);
+  color: var(--law-text-primary);
+  background: var(--law-button-ghost-fill);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-sm);
+  cursor: pointer;
+}
+
+.open:hover {
+  background: var(--law-button-ghost-hover);
+}

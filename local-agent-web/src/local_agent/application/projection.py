@@ -66,6 +66,8 @@ from local_agent.application.models import (
     TurnRecordView,
     TurnUsageView,
     UserMessageView,
+    WorkflowChildView,
+    WorkflowView,
     WorkspaceRef,
     cache_hit_ratio,
     context_usage_ratio,
@@ -1673,6 +1675,32 @@ def _final_result_state(value: TurnFinalState) -> FinalResultState:
 # ---- 会话快照 --------------------------------------------------------------
 
 
+def project_workflow(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) -> WorkflowView | None:
+    """白名单投影；旧轮次与私有工作流字段不进公开快照。"""
+    data = _as_mapping(state.get("workflow"))
+    if not data or data.get("run_id") != current_run_id(state):
+        return None
+    if data.get("name") not in {"readonly_research", "code_change", "delegated_research"}:
+        return None
+    children = [WorkflowChildView(
+        child_id=str(item.get("child_id") or ""),
+        scope=sanitize_text(str(item.get("scope") or ""), secrets),
+        status=str(item.get("status") or ""),
+        evidence_count=len(item.get("references") or []),
+        error=sanitize_text(str(item["error"]), secrets) if item.get("error") else None,
+    ) for item in _mappings(data.get("children"))]
+    return WorkflowView(
+        name=data["name"], run_id=data["run_id"], phase=str(data.get("phase") or ""),
+        steps=int(data.get("steps") or 0), tool_calls=int(data.get("tool_calls") or 0),
+        model_calls=int(data.get("model_calls") or 0),
+        model_tokens_reserved=int(data.get("model_tokens_reserved") or 0),
+        evidence_count=len(data.get("references") or []) + sum(child.evidence_count for child in children)
+            if data["name"] != "code_change" else len(state.get("final_evidence") or []),
+        error=sanitize_text(str(data["error"]), secrets) if data.get("error") else None,
+        children=children,
+    )
+
+
 def project_snapshot(
     state: Mapping[str, Any],
     *,
@@ -1720,5 +1748,6 @@ def project_snapshot(
         context=project_context(state),
         runtime_context=project_runtime_context(state),
         final_result=project_final_result(state, secrets=secrets),
+        workflow=project_workflow(state, secrets=secrets),
         created_at=created_at,
     )

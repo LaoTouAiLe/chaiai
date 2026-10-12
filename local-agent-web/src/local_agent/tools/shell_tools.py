@@ -6,7 +6,8 @@
 - 含 Shell 语法的命令由平台适配器执行（Windows ``cmd.exe /d /s /c`` 或
   ``pwsh -NoProfile -NonInteractive -Command``、POSIX ``/bin/sh -c``），适配器本身
   仍以 argv 数组启动，不交给 Python 的 ``shell=True``；
-- 输出按 ``security.shell.max_output_chars`` 截断，超时会被杀掉并标记；
+- 输出按 ``security.shell.max_output_chars`` 截断；超时**与取消**都按**进程树**终止并如实记录
+  （架构 §17.4：``taskkill /F /T`` / ``killpg``，手段与系统返回进 ``note``，退出码只写真实值）；
 - 子进程环境只含基础变量与显式放行的变量名，**不含任何密钥**；
 - 退出码、标准输出、错误输出、超时状态、执行方式与耗时都会返回，供反思节点机械校验。
 """
@@ -14,7 +15,6 @@
 from __future__ import annotations
 
 import locale
-import subprocess
 import time
 
 from langchain_core.tools import BaseTool, tool
@@ -22,6 +22,7 @@ from langchain_core.tools import BaseTool, tool
 from local_agent.exceptions import SecurityError
 from local_agent.security.approval import action_fingerprint
 from local_agent.security.policy import SecurityPolicy
+from local_agent.security.process_guard import ProcessCancelledError
 from local_agent.security.shell_guard import (
     build_environment,
     build_shell_invocation,
@@ -98,39 +99,35 @@ def run_shell_command(
 
     encoding = locale.getpreferredencoding(False) or "utf-8"
     started = time.perf_counter()
-    timed_out = False
     try:
-        completed = subprocess.run(
+        # 走**子进程登记表**（§17.4）：它有进程句柄，因此超时与取消都能按**进程树**终止，
+        # 而 `subprocess.run` 只能杀直接子进程、且中途无法干预。
+        outcome = policy.processes.run(
             build_shell_invocation(plan),
-            cwd=str(plan.cwd),
+            cwd=plan.cwd,
             env=build_environment(plan.env_keys),
-            shell=False,
-            capture_output=True,
-            timeout=plan.timeout_seconds,
-            check=False,
+            timeout_seconds=float(plan.timeout_seconds),
         )
-        stdout_bytes, stderr_bytes, exit_code = (
-            completed.stdout,
-            completed.stderr,
-            completed.returncode,
-        )
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        stdout_bytes = exc.stdout or b""
-        stderr_bytes = exc.stderr or b""
-        exit_code = None
+    except ProcessCancelledError as exc:
+        # 取消与命令启动撞在一起：**如实**说"命令未执行"，不伪装成"执行失败"。
+        raise SecurityError(str(exc)) from exc
     except OSError as exc:
         raise SecurityError(f"命令无法启动（{type(exc).__name__}）：{exc}") from exc
 
     duration_ms = int((time.perf_counter() - started) * 1000)
     max_chars = policy.security.shell.max_output_chars
-    stdout, stdout_cut = _decode_and_truncate(stdout_bytes, encoding, max_chars)
-    stderr, stderr_cut = _decode_and_truncate(stderr_bytes, encoding, max_chars)
+    stdout, stdout_cut = _decode_and_truncate(outcome.stdout, encoding, max_chars)
+    stderr, stderr_cut = _decode_and_truncate(outcome.stderr, encoding, max_chars)
     truncated = stdout_cut or stderr_cut
 
     notes: list[str] = []
-    if timed_out:
+    if outcome.timed_out:
         notes.append(f"命令在 {plan.timeout_seconds} 秒内未结束，已终止")
+    if outcome.cancelled:
+        notes.append("本轮已被取消，命令已被终止")
+    if outcome.termination:
+        # 终止手段与系统返回如实照录（§17.4）：不写"已停止"这种没有证据的话。
+        notes.append(outcome.termination)
     if truncated:
         notes.append(f"输出超过 {max_chars} 字符，已截断")
 
@@ -138,10 +135,10 @@ def run_shell_command(
         command=command,
         argv=build_shell_invocation(plan),
         cwd=str(plan.cwd),
-        exit_code=exit_code,
+        exit_code=outcome.exit_code,
         stdout=stdout,
         stderr=stderr,
-        timed_out=timed_out,
+        timed_out=outcome.timed_out,
         duration_ms=duration_ms,
         truncated=truncated,
         note="；".join(notes) if notes else None,

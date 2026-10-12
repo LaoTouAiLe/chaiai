@@ -254,6 +254,19 @@ skills:
   max_skill_chars: 20000
   max_list_chars: 8000
 
+# ---- 后台任务与长时间运行（v0.6，架构 §17.2）--------------------------------
+# 这里**不是能力开关**：它不是"关掉就不可用"，而是"这一轮在哪里跑"。
+#   background: false（默认）＝ 本次执行在提交请求内跑到终态，与 v0.5 逐字节一致；
+#               true          ＝ 先登记任务并立即返回（status="running" + job_id），
+#                               由本机 worker 在后台跑到终态或"等待用户"。
+# 两种取值下图节点调用序列与事件序列逐项一致，唯一差异是"POST 返回时任务是否已终态"。
+# 结局由任务索引（与会话索引、Checkpoint 同库）+ Checkpoint 快照给出，不靠 SSE。
+# max_concurrent_jobs：后台 worker 并发上限；本机单用户、单进程默认 1。
+# 每会话单飞不变：同一会话的第二个提交仍然返回 SESSION_BUSY（不排队）。
+jobs:
+  background: false
+  max_concurrent_jobs: 1
+
 # v0.4 独立 Web 前端与 HTTP API（T29，契约 §15.3）。
 # 默认只绑定回环地址：v0.4 没有鉴权，改 host 必须同时打开 allow_non_loopback，
 # 否则启动校验直接拒绝（不允许"改了就暴露到公网"这种静默升级）。
@@ -276,6 +289,20 @@ web:
   sse_idle_timeout_seconds: 300    # SSE 空闲上限：超过则关闭该连接（不取消任务）
   sse_max_pending_events: 200      # 单次排空超过它就判定客户端落后：结束订阅并要求重连
   keepalive_seconds: 15            # HTTP keep-alive 超时（uvicorn timeout_keep_alive）
+
+# 确定性只读调查工作流（v0.7 T65，架构 §18.2）。
+workflows:
+  enabled: false                  # T65–T67 显式图入口；网页接入在 T69
+  max_tool_calls: 16
+  max_steps: 32
+  max_source_files: 8
+  max_evidence_chars: 16000
+  max_report_chars: 20000
+  max_model_tokens: 16000          # T66 模型调用前的保守总预留，不是供应商实际量
+  max_model_output_tokens: 2048
+  max_children: 3                 # T67 共用上述总额度，预先均分；不能再次委派
+  max_concurrency: 2              # 输入默认串行，仅显式允许只读并发
+  child_timeout_seconds: 30
 
 # 可视化模型连接设置（T29A，契约 §6.8）。
 # 非秘密设置（连接、默认与会话选择、能力检测结果）存在这个**独立**库里；

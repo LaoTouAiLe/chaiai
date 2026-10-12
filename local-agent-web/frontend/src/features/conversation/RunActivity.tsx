@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { RunActivityView } from '../../fixtures/types'
+import { elapsedLabel } from './adapters'
 import styles from './RunActivity.module.css'
 
 /** A display clock; neither polling nor model requests are needed to animate it. */
@@ -12,8 +13,7 @@ export function RunActivity({ activity }: { activity: RunActivityView }) {
   }, [activity.active, activity.startedAt])
 
   const start = activity.startedAt === null ? NaN : Date.parse(activity.startedAt)
-  const seconds = Math.max(0, Math.floor((now - start) / 1_000))
-  const elapsed = seconds < 60 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+  const elapsed = elapsedLabel(now - start)
   return (
     <section className={styles.activity} data-active={activity.active} aria-label="当前运行状态">
       <span className={styles.indicator} aria-hidden="true" />

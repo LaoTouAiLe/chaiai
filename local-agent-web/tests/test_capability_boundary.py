@@ -97,6 +97,28 @@ def test_full_capability_profile_prompt_sections_are_frozen() -> None:
     assert READ_ONLY_LIMIT_PHRASE not in text
 
 
+@pytest.mark.parametrize("git_enabled", [False, True])
+def test_optional_skill_does_not_replace_coder_base_tool_instructions(
+    git_enabled: bool,
+) -> None:
+    """技能开关不改变基础工具用法；新增能力不能成为基础档判定条件。"""
+    enabled = effective_capabilities(
+        PROFILES["coder"], web_access_enabled=False,
+        git_enabled=git_enabled, skills_enabled=True,
+    )
+    disabled = effective_capabilities(
+        PROFILES["coder"], web_access_enabled=False,
+        git_enabled=git_enabled, skills_enabled=False,
+    )
+
+    assert prompt_context.render_tool_usage_rules(disabled) == (
+        prompt_context.render_tool_usage_rules(enabled)
+    )
+    assert "同一个调用连续失败两次就停下来说明情况" in (
+        prompt_context.render_tool_usage_rules(disabled)
+    )
+
+
 @pytest.mark.parametrize("profile", sorted(PROFILES))
 def test_prompt_never_names_a_tool_the_profile_cannot_see(
     profile: str, tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig

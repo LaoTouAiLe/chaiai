@@ -222,7 +222,9 @@ def test_no_terms_means_no_filesystem_access(
     def boom(*args: object, **kwargs: object) -> object:
         raise AssertionError("没有词项时不应遍历文件系统")
 
-    monkeypatch.setattr(search.os, "walk", boom)
+    # 遍历的入口是 `rag.walk.iter_candidate_files`（v0.6 T63 第三片：`grep` / `glob` / 本模块
+    # 共用同一份实现），钉住它就等于钉住"没有词项时不去枚举文件系统"。
+    monkeypatch.setattr(search, "iter_candidate_files", boom)
 
     result = _find("！？", workspace=workspace, app_config=app_config)
 
@@ -238,7 +240,7 @@ def test_walk_failure_is_reported_as_failed(
     def boom(*args: object, **kwargs: object) -> object:
         raise OSError("模拟遍历失败")
 
-    monkeypatch.setattr(search.os, "walk", boom)
+    monkeypatch.setattr(search, "iter_candidate_files", boom)
 
     result = _find("symbol_one", workspace=workspace, app_config=app_config)
 

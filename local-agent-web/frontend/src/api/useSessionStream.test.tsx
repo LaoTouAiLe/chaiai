@@ -87,6 +87,28 @@ describe('useSessionStream approval boundary', () => {
     unmount()
   })
 
+  it.each(['job_queued', 'job_progress', 'job_waiting', 'job_completed', 'task_cancelled'] as const)(
+    'invalidates the task centre on %s instead of deriving task state locally',
+    async (eventType) => {
+      mock.read.mockImplementation(async (_sessionId, handlers: { onEvent: (event: unknown) => void }) => {
+        handlers.onEvent({ event_type: eventType, payload: {} })
+      })
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+      const invalidate = vi.spyOn(client, 'invalidateQueries')
+      const wrapper = ({ children }: { children: ReactNode }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      )
+
+      const { unmount } = renderHook(() => useSessionStream('s1'), { wrapper })
+
+      // 任务状态的唯一出口是索引：页面只失效查询、自己**不推导**状态
+      await waitFor(() => {
+        expect(invalidate).toHaveBeenCalledWith({ queryKey: ['tasks'] })
+      })
+      unmount()
+    },
+  )
+
   it('reconnects after a normal stream close, fetching a snapshot before each subscription', async () => {
     mock.read.mockResolvedValue(undefined)
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })

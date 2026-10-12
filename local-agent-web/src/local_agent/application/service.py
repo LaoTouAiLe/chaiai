@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 from collections import Counter, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -37,7 +38,9 @@ from pathlib import Path
 from typing import Any, Final, Literal, TypeVar, cast
 
 from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.types import Command
+from pydantic import TypeAdapter
 
 from local_agent import config as config_module
 from local_agent.application import conversation, data_center
@@ -51,6 +54,7 @@ from local_agent.application.events import (
     StreamSequencer,
     event_id_for,
 )
+from local_agent.application.jobs import JOB_EVENT_FOR_STATE, Job, JobRuntime
 from local_agent.application.models import (
     AssistantMessageView,
     CapabilitiesView,
@@ -67,13 +71,24 @@ from local_agent.application.models import (
     PermissionsView,
     SessionSnapshot,
     SessionSummaryView,
+    TaskCenterView,
+    TaskView,
     WorkspaceRef,
 )
+from local_agent.application.recovery import (
+    TASK_TERMINAL_STATUSES,
+    JobVerdict,
+    TurnEvidence,
+    child_completion_proven,
+    classify_interrupted_job,
+)
+from local_agent.cancellation import DEFAULT_CANCEL_REASON, CancellationToken
 from local_agent.capabilities import capability_status
-from local_agent.config import LlmConfig, RunConfig
+from local_agent.config import LlmConfig, RunConfig, WorkflowsConfig
 from local_agent.exceptions import (
     ConnectionValidationError,
     ConnectionVersionConflict,
+    JobStoreError,
     ModelSettingsError,
     SelectionConflict,
 )
@@ -111,6 +126,14 @@ from local_agent.model_settings.preferences import (
     initial_preferences,
 )
 from local_agent.persistence.conversation_store import ConversationTurn
+from local_agent.persistence.job_store import (
+    JOB_STATE_CANCELLED,
+    JOB_STATE_NEEDS_REVIEW,
+    JOB_STATE_QUEUED,
+    JOB_STATE_WAITING_USER,
+    JOB_STATES,
+    TERMINAL_JOB_STATES,
+)
 from local_agent.persistence.request_ledger import (
     OPERATION_RESOLVE_APPROVAL,
     OPERATION_SUBMIT,
@@ -125,12 +148,23 @@ from local_agent.persistence.session_store import Session, SessionStore
 from local_agent.scope import SCOPE_WORKSPACE, scope_key_for
 from local_agent.security.path_guard import ExternalPathPolicy, protected_target_reason
 from local_agent.tools.git_tools import git_availability
+from local_agent.workflow_contracts import WorkflowRequest
 
-#: 任务的终态，用于"能否证明终态"的判断（§15.2 的恢复口径）。
-TASK_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({"completed", "failed"})
+#: 任务的终态（`TASK_TERMINAL_STATUSES`）、重启后的任务判定与它的纯函数都在
+#: :mod:`local_agent.application.recovery`（§17.5）——这里只做 I/O 与写索引，不重复判定逻辑。
 
 #: 一次命令的结局（与 `CommandResultView.status` 同值）。
-CommandStatus = Literal["completed", "awaiting_approval", "failed"]
+#: ``running`` 只在 ``jobs.background=true`` 时出现（§17.2）：命令已被接受、任务已进入运行。
+#: ``cancelled`` 只在取消命令上出现（§17.4）：任务已被中止。
+CommandStatus = Literal["completed", "awaiting_approval", "failed", "running", "cancelled"]
+
+#: 取消命令的操作名（§15.2）。它**不进幂等台账**：取消天然幂等，重复调用是空操作。
+OPERATION_CANCEL = "cancel_task"
+
+#: 超时看守的检查间隔（秒）。只影响"发现超时"的延迟，不影响判定口径。
+_WATCHDOG_INTERVAL_SECONDS = 1.0
+
+_LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
 #: 允许的审批决定（与 `ui/approval_ui.py` 的载荷一致；这里不导入那个模块——它依赖 Streamlit）。
@@ -493,6 +527,7 @@ class ApplicationService:
         permissions: PermissionStore | None = None,
         preferences: PreferenceStore | None = None,
         model_factory: Callable[[LlmConfig, str], Any] | None = None,
+        jobs: JobRuntime | None = None,
     ) -> None:
         self._graph = graph
         self._app_config = app_config
@@ -521,6 +556,255 @@ class ApplicationService:
         self._locks_guard = threading.Lock()
         self._streams: dict[str, _StreamingAnswerSink] = {}
         self._catalog_lock = threading.RLock()
+        #: 后台任务运行时与任务索引（§17.2）。``None`` 表示**未装配任务索引**（只有不经过
+        #: `api.container.open_runtime` 的单元测试会这样）：此时提交路径与 v0.5 完全一致，
+        #: 既不记账也不改调度时机——它是"索引不可用"的回退，不是第二种生产模式。
+        self._jobs = jobs
+        if jobs is not None:
+            # 任务生命周期事件由**运行时**在状态真的迁移时通知（§17.3）：只有索引知道"任务到哪一步了"。
+            jobs.set_transition_listener(self._on_job_transition)
+        #: 每会话一个取消令牌（§17.4）：令牌的生命周期 = "用户当前的这次意图"，因此**每次新提交都换一个**
+        #: （旧的取消不会粘住这个会话），而**审批恢复复用同一个**——已取消的任务不会因为点了批准又跑起来。
+        self._cancellations: dict[str, CancellationToken] = {}
+        self._cancellations_guard = threading.Lock()
+        #: 任务总时长上限（`jobs.max_task_seconds`）；`None` = 不限，此时不起看守线程。
+        self._max_task_seconds: float | None = getattr(
+            getattr(app_config, "jobs", None), "max_task_seconds", None
+        )
+        self._watchdog_stop = threading.Event()
+        self._watchdog: threading.Thread | None = None
+        if self._max_task_seconds is not None:
+            self._watchdog = threading.Thread(
+                target=self._watchdog_loop, name="job-timeout-watchdog", daemon=True
+            )
+            self._watchdog.start()
+
+    # ---- 取消（§17.4）--------------------------------------------------------
+
+    def _token_for(self, session_id: str) -> CancellationToken:
+        """取（必要时创建）该会话当前的取消令牌。"""
+        with self._cancellations_guard:
+            token = self._cancellations.get(session_id)
+            if token is None:
+                token = CancellationToken()
+                # 重启后的审批恢复也必须保留已经落库的取消意图。
+                jobs = [] if self._jobs is None else self._jobs.list_for_session(session_id)
+                if jobs and jobs[-1].state == JOB_STATE_CANCELLED:
+                    token.cancel(jobs[-1].detail or DEFAULT_CANCEL_REASON)
+                self._cancellations[session_id] = token
+            return token
+
+    def _reset_cancellation(self, session_id: str) -> None:
+        """新提交换一个令牌：取消只对**它被下达时那一轮**有效，不粘住这个会话。"""
+        with self._cancellations_guard:
+            self._cancellations[session_id] = CancellationToken()
+
+    def _cancel_job(self, job: Job, reason: str) -> bool:
+        """取消一条任务的**唯一路径**（用户取消与超时看守共用，§17.4）。"""
+        jobs = self._jobs
+        if jobs is None:
+            return False
+
+        def signal(current: Job) -> str | None:
+            # 运行时持有迁移锁且已重新核对目标：结算不能越过这里后换成下一轮令牌。
+            run_id = current.run_id
+            if run_id is None and current.state != JOB_STATE_QUEUED:
+                evidence = self._turn_evidence(current)
+                if (
+                    evidence is not None
+                    and evidence.reported_run is not None
+                    and evidence.reported_run == evidence.current_run_id
+                ):
+                    run_id = evidence.reported_run
+            # 先置信号，后落终态；运行编号同次写入，终态不再依赖结算补写。
+            self._token_for(current.session_id).cancel(reason)
+            return run_id
+
+        return jobs.cancel(job.job_id, detail=reason, before_cancel=signal) is not None
+
+    def cancel_task(self, session_id: str, reason: str = "") -> CommandResultView:
+        """取消当前会话在跑的任务（架构 §15.2、§17.4）。
+
+        **幂等**：没有非终态任务时什么都不做，返回当时的结局。**不进幂等台账**——重复调用本来就是
+        空操作，给它记一条"执行中"反而会污染"同一请求 id 的重试"语义。
+        """
+        session = self._session_or_raise(session_id)
+        job = self._jobs.active_for_session(session_id) if self._jobs is not None else None
+        cancelled = job is not None and self._cancel_job(job, reason.strip() or DEFAULT_CANCEL_REASON)
+        view = self._read(session)
+        snapshot = self._snapshot(session, view)
+        status: CommandStatus = "cancelled" if cancelled else _status_from_snapshot(snapshot)
+        return self._result(
+            request_id=_digest(OPERATION_CANCEL, session_id, reason),
+            operation=OPERATION_CANCEL,
+            session=session,
+            snapshot=snapshot,
+            status=status,
+            replayed=False,
+        )
+
+    # ---- 超时看守（§17.4）----------------------------------------------------
+
+    def _watchdog_loop(self) -> None:
+        """`jobs.max_task_seconds` 的看守：超限就走**同一条取消路径**，不另写一套中止逻辑。"""
+        while not self._watchdog_stop.wait(_WATCHDOG_INTERVAL_SECONDS):
+            try:
+                self.expire_overdue_tasks()
+            except Exception:
+                # 看守线程不能因为一次异常就退出：超时是尽力而为的兜底，不是执行的必要条件。
+                _LOGGER.exception("任务超时看守失败（下一轮继续）")
+
+    def expire_overdue_tasks(self) -> list[str]:
+        """把超过 `jobs.max_task_seconds` 的在跑任务取消掉，返回被取消的任务 id。
+
+        计时从**登记时刻**（`created_at`）算起：排队等待也算在任务的总墙钟里——否则一个被无限
+        排队的任务永远不会超时。
+        """
+        jobs = self._jobs
+        limit = self._max_task_seconds
+        if jobs is None or limit is None:
+            return []
+        now = datetime.now(timezone.utc)
+        expired: list[str] = []
+        for job in jobs.jobs_in_flight():
+            if _seconds_since(job.created_at, now) <= limit:
+                continue
+            if self._cancel_job(job, f"超过 max_task_seconds={limit:g} 秒"):
+                expired.append(job.job_id)
+        return expired
+
+    def recover_interrupted_jobs(self) -> list[JobVerdict]:
+        """重启后把索引里遗留的非终态任务**分类收口**（架构 §17.5，v0.6 T61）。
+
+        **只读核对 + 只写索引**：读 Checkpoint 判"能不能证明终态"，判定本身是
+        :func:`local_agent.application.recovery.classify_interrupted_job` 这个纯函数。
+        **不重提图输入、不执行工具、不调模型、不恢复 Graph**——"可能已部分执行"的任务一律标
+        `needs_review` 交给人工核对（§15.2：绝不自动假定恰好执行一次）。
+
+        调用时机：**装配期**（`api.container.open_runtime`，且本进程持有单实例锁时）。之后索引里
+        不会再有重启遗留的行，因此这个方法在正常运行期是空操作——它不是第二个执行入口。
+
+        Returns:
+            每个被检查任务的判定（含"不需要写库"的那些），供调用方记日志与测试断言。
+        """
+        jobs = self._jobs
+        if jobs is None:
+            return []
+        verdicts: list[JobVerdict] = []
+        for job in jobs.jobs_in_flight():
+            verdict = classify_interrupted_job(job, evidence=self._turn_evidence(job))
+            verdicts.append(verdict)
+            if not verdict.writes:
+                continue
+            try:
+                jobs.recover(job.job_id, target=cast("str", verdict.target), detail=verdict.detail)
+            except JobStoreError:
+                # 这一行在扫描之后、写入之前被别人推进了（正常装配期不会发生）：如实记日志，
+                # **不覆盖**已经写下的状态。
+                _LOGGER.exception("重启收口任务 %s 失败（状态未被改写）", job.job_id)
+                continue
+            _LOGGER.info(
+                "重启收口任务 %s：%s → %s（%s）",
+                job.job_id,
+                job.state,
+                verdict.target,
+                verdict.verdict,
+            )
+        return verdicts
+
+    def _adopt_interrupted_job(self, session: Session, *, reported_run: str | None) -> None:
+        """把该会话遗留的非终态任务按**同一条判定**收口（§17.5）。
+
+        触发点是"台账已经证明这一次请求的终态"（:meth:`_recover` 的成功分支与 :meth:`_replay`）：
+        证据由调用方给出（台账里那条记录的 `run_id`），判定仍走同一个纯函数
+        （`classify_interrupted_job`），不是第二条规则。没有非终态任务时它是空操作。
+        """
+        jobs = self._jobs
+        if jobs is None:
+            return
+        job = jobs.active_for_session(session.session_id)
+        if job is None:
+            return
+        verdict = classify_interrupted_job(
+            job, evidence=self._turn_evidence(job, reported_run=reported_run)
+        )
+        if not verdict.writes:
+            return
+        try:
+            jobs.recover(job.job_id, target=cast("str", verdict.target), detail=verdict.detail)
+        except JobStoreError:
+            _LOGGER.exception("按台账终态收口任务 %s 失败（状态未被改写）", job.job_id)
+
+    def _turn_evidence(self, job: Job, *, reported_run: str | None = None) -> TurnEvidence | None:
+        """读一个任务所属会话的 Checkpoint / 台账事实；读不到时返回 `None`（= 证明不了）。
+
+        ``reported_run`` 由调用方给（台账里那条记录）时优先用它；没给（重启收口）就按 §17.5 的两个
+        来源推导：索引自己绑定的 `run_id`（任务已结算过）优先，否则用**该会话台账最后一条**的
+        `run_id`（崩溃发生在结算之前时索引还没绑定，而台账在流式期间就绑了）。
+        """
+        session = self._sqlite_access(partial(self._sessions.get, job.session_id))
+        if session is None or session.archived:
+            return None
+        try:
+            view = self._read(session)
+        except Exception:
+            _LOGGER.exception("收口：读不到会话 %s 的 Checkpoint", job.session_id)
+            return None
+        run = reported_run if reported_run is not None else job.run_id
+        if run is None:
+            entry = self._sqlite_access(lambda: self._ledger.latest(job.session_id))
+            run = None if entry is None else entry["run_id"]
+        children: list[str] = []
+        saver = self._graph.checkpointer
+        if self._jobs is not None and isinstance(saver, BaseCheckpointSaver) and run is not None:
+            for parent_run, child_id in self._jobs.child_links(job.job_id):
+                if parent_run != run:
+                    continue
+                try:
+                    saved = saver.get_tuple({"configurable": {"thread_id": child_id}})
+                    if saved is not None and child_completion_proven(child_id, saved.checkpoint["channel_values"]):
+                        children.append(child_id)
+                except Exception:
+                    _LOGGER.exception("收口：读不到子任务 %s 的 Checkpoint", child_id)
+        return TurnEvidence(
+            turn_state=str(view.values.get("task_status") or "") or None,
+            current_run_id=proj.current_run_id(view.values) or None,
+            has_live_interrupt=view.has_live_interrupt,
+            reported_run=run,
+            completed_children=tuple(children),
+        )
+
+    def _on_job_transition(self, before: Job | None, after: Job) -> None:
+        """把任务状态迁移投影成事件并广播（架构 §17.3）。
+
+        `before` 为 `None` 表示任务**诞生**（登记即入队），也要发一条 `job_queued`。
+        **单向投影**：只读已经落库的那一行，不写 State、不调模型、不执行工具、不恢复 Graph（§15.4）。
+        没有订阅者时 `EventBus.publish` 自然丢弃——事件不落库，"任务到哪一步"由索引给出、
+        "这一轮发生了什么"由 Checkpoint 给出。
+        """
+        if before is not None and before.state == after.state:
+            return
+        event_type = JOB_EVENT_FOR_STATE[after.state]
+        self._bus.publish(
+            after.session_id,
+            [
+                app_events.build_job_event(
+                    event_type=event_type,
+                    # 稳定标识：同一行（同一 job + 同一次写入）重放得到同一个 event_id
+                    event_id=app_events.event_id_for(
+                        cast("app_events.EventType", event_type),
+                        f"{after.job_id}:{after.updated_at}",
+                    ),
+                    session_id=after.session_id,
+                    job_id=after.job_id,
+                    run_id=after.run_id,
+                    occurred_at=_as_dt(after.updated_at),
+                    stream_sequence=self._sequencer.next(after.session_id),
+                    state=after.state,
+                    detail=after.detail,
+                )
+            ],
+        )
 
     # ---- 会话 ---------------------------------------------------------------
 
@@ -616,6 +900,55 @@ class ApplicationService:
             partial(self._sessions.list_sessions, workspace_root=root, archived=archived)
         )
         return [self._summary(session) for session in sessions]
+
+    def list_tasks(
+        self,
+        *,
+        workspace_id: str | None = None,
+        include_finished: bool = True,
+        limit: int = 50,
+    ) -> TaskCenterView:
+        """任务中心的一页（架构 §17.6，v0.6 T62）：**只读**索引，不读任何会话的 Checkpoint。
+
+        数据来源只有两处：会话索引（工作区 ↔ 会话、标题）与任务索引（状态与时间戳）。
+        "任务在等什么"由页面按状态推导（§17.6 的闭集），服务端不猜、也不引入第二个真源。
+
+        两条口径写在这里，避免被当成 bug：
+
+        - **已归档会话的任务不进列表**——归档就是"离开视线"（归档时若还有待审批会被 §15.2 拒绝）。
+        - `counts` / `pending_count` 在**全量结果**上算，只有 `tasks` 受 `limit` 截断。
+        """
+        jobs = self._jobs
+        empty = dict.fromkeys(JOB_STATES, 0)
+        if jobs is None:
+            return TaskCenterView(tasks=[], counts=empty, pending_count=0)
+        root = self._root_of(None, workspace_id)
+        sessions = self._sqlite_access(
+            partial(self._sessions.list_sessions, workspace_root=root, archived=False)
+        )
+        by_id = {session.session_id: session for session in sessions}
+        # **不要**包在 `_sqlite_access` 里：任务索引与 Checkpoint 共用同一把**不可重入**的
+        # `threading.Lock`，JobStore 的每个公开方法已经在锁内执行——再套一层会直接死锁（T58 的实证）。
+        rows = jobs.list_for_sessions(list(by_id))
+        counts = dict(empty)
+        refs: dict[str, WorkspaceRef] = {}
+        visible: list[TaskView] = []
+        for job in rows:  # 已按登记时间倒序
+            counts[job.state] = counts.get(job.state, 0) + 1
+            session = by_id.get(job.session_id)
+            if session is None:  # 归档 / 删除竞态：跳过，不伪造标题
+                continue
+            if not include_finished and job.state in TERMINAL_JOB_STATES:
+                continue
+            ref = refs.get(session.workspace_root)
+            if ref is None:
+                ref = refs[session.workspace_root] = self._workspace_ref(session)
+            visible.append(self._task_view(job, session, ref))
+        return TaskCenterView(
+            tasks=visible[:limit],
+            counts=counts,
+            pending_count=counts[JOB_STATE_WAITING_USER] + counts[JOB_STATE_NEEDS_REVIEW],
+        )
 
     def model_configured(self) -> bool:
         """有没有可用的模型配置（健康检查用；不泄露连接名、端点或密钥）。
@@ -1245,11 +1578,16 @@ class ApplicationService:
     # ---- 执行状态修改（共用同一互斥边界）------------------------------------
 
     def submit_message(self, session_id: str, text: str, client_request_id: str, *,
+                       workflow: WorkflowRequest | Mapping[str, Any] | None = None,
                        parent_turn_id: str | None = None,
                        expected_branch_id: str | None = None,
                        expected_snapshot_id: str | None = None) -> CommandResultView:
         """提交一条用户消息。"""
         digest = _digest(OPERATION_SUBMIT, session_id, text)
+        selected = (None if workflow is None else
+                    TypeAdapter(WorkflowRequest).validate_python(workflow).model_dump(mode="json"))
+        if selected is not None:
+            digest = _digest(digest, json.dumps(selected, sort_keys=True, ensure_ascii=False))
         if any(value is not None for value in (parent_turn_id, expected_branch_id, expected_snapshot_id)):
             digest = _digest(digest, parent_turn_id or "", expected_branch_id or "", expected_snapshot_id or "")
         session = self._session_or_raise(session_id)
@@ -1266,6 +1604,19 @@ class ApplicationService:
             """
             nonlocal session
             session = self._session_or_raise(session_id)
+            if (
+                self._jobs is not None
+                and self._jobs.background
+                and self._jobs.active_for_session(session_id) is not None
+            ):
+                # 后台模式下"这个会话是不是在忙"由**任务索引**回答：任务可能还在 queued、没有任何
+                # 线程持有执行锁，锁挡不住（§17.2）。这条只在 background=true 时生效，默认路径
+                # 因此与 v0.5 逐字节一致（既不多一次查询，也不改错误码）。
+                raise app_errors.session_busy(
+                    session_id=session_id,
+                    request_id=client_request_id,
+                    occurred_at=_now(),
+                )
             self._require_idle(session, client_request_id)
             if expected_snapshot_id is not None:
                 current = self._read(session).checkpoint_id or f"{session.session_id}:no-checkpoint"
@@ -1274,6 +1625,8 @@ class ApplicationService:
             parents.append(conversation.submission_parent(
                 self, session, parent_turn_id, expected_branch_id))
             prepared.append(self._run_env(session, self._resolve_binding(session)))
+            # 预检失败不得清掉上一轮的取消意图。
+            self._reset_cancellation(session_id)
 
         def run() -> CommandResultView:
             env = prepared[0]
@@ -1283,7 +1636,10 @@ class ApplicationService:
                 "thread_id": session.thread_id,
                 "session_id": session.session_id,
                 "session_mode": session.mode,
+                "session_kind": session.kind,
                 "runtime_preferences": env.preference_binding.model_dump(mode="json"),
+                "workflow_request": selected,
+                "workflow_limits": env.app_config.workflows.model_dump(mode="json") if selected else None,
             }
             if env.binding is not None:
                 # 这次运行从此固定在这条连接的**这个版本**上：之后改设置都不会换掉它（§6.8）。
@@ -1368,6 +1724,8 @@ class ApplicationService:
             precheck=prepare,
             # 审批恢复不新建 run：绑定的就是**正在恢复的那一轮**（挂起的 interrupt 属于它）。
             bind_run=lambda: self._current_run_id(session),
+            # 审批恢复接上"等待用户"的那个任务，而不是新登记一个（§17.2）。
+            resume_job=True,
         )
 
     # ---- 内部：执行前的校验 --------------------------------------------------
@@ -1409,6 +1767,7 @@ class ApplicationService:
         run: Callable[[], CommandResultView],
         precheck: Callable[[], None] | None = None,
         bind_run: Callable[[], str | None] | None = None,
+        resume_job: bool = False,
     ) -> CommandResultView:
         """顺序固定：台账（冲突/重放）→ 抢锁（单飞）→ 陈旧台账恢复 → **执行前校验** → 落台账 → 跑图。
 
@@ -1418,6 +1777,11 @@ class ApplicationService:
 
         `bind_run` 给出"这次请求绑定哪一轮 run"（能在执行前确定时用；提交消息的 run 由 Graph
         生成，登记时还不知道，由 `_execute` 在图交出 run 时补绑定）。
+
+        `jobs.background=true` 时（§17.2）落台账后**不在这里跑图**：先登记任务索引，再把同一次
+        执行交给 worker，并立刻返回"已接受"。执行锁**不在这里释放**——它跟着这次执行走，由
+        worker 在跑完后释放，因此"同一会话第二个提交"仍然是 `SESSION_BUSY`。
+        `resume_job` 区分"新任务"与"接上等待审批的那个任务"。
         """
         existing = self._sqlite_access(partial(self._ledger.get, request_id))
         if existing is not None and existing["arguments_digest"] != arguments_digest:
@@ -1430,6 +1794,7 @@ class ApplicationService:
 
         lock = self._lock_for(session.session_id)
         acquired = lock.acquire(blocking=False)
+        handed_off = False
         try:
             if not acquired:
                 raise app_errors.session_busy(
@@ -1452,10 +1817,43 @@ class ApplicationService:
                     run_id=bind_run() if bind_run is not None else None,
                 )
             )
-            return run()
+            if self._jobs is None:
+                return run()
+            jobs = self._jobs
+            job = (
+                jobs.resume(session_id=session.session_id)
+                if resume_job
+                else jobs.begin(session_id=session.session_id)
+            )
+            if not jobs.background:
+                # 请求内执行：记账与状态迁移都在这条线程上完成，与 v0.5 的可见行为一致。
+                return jobs.run_now(job, run)
+            jobs.dispatch(job, run, on_done=lock.release)
+            handed_off = True
+            return self._accepted(session, request_id=request_id, operation=operation, job=job)
         finally:
-            if acquired:
+            if acquired and not handed_off:
                 lock.release()
+
+    def _accepted(
+        self, session: Session, *, request_id: str, operation: str, job: Job
+    ) -> CommandResultView:
+        """后台模式下的提交返回（§17.2）：命令已被接受、任务已进入运行。
+
+        快照取自**当前** Checkpoint——它可能还是上一轮的终态（本轮刚排队），所以 `status`
+        明确写 `running`，不拿旧快照冒充本轮结局；调用方凭 `job_id` 或重新拉快照收敛。
+        """
+        view = self._read(session)
+        snapshot = self._snapshot(session, view)
+        return self._result(
+            request_id=request_id,
+            operation=operation,
+            session=session,
+            snapshot=snapshot,
+            status="running",
+            replayed=False,
+            job_id=job.job_id,
+        )
 
     def _execute(
         self,
@@ -1606,12 +2004,25 @@ class ApplicationService:
                 env.usage_recorder.bind_run(resumed_run)
             bound = True
         with self._live_stream(session.session_id, sink):
+            source = payload if isinstance(payload, Mapping) else self._read(session).values
+            selection = source.get("workflow_request")
+            limits = source.get("workflow_limits")
+            stream_options: dict[str, Any] = {"subgraphs": True, "durability": "sync"} if selection else {}
+            context = (self._context(session, env, workflow_request=selection, workflow_limits=limits)
+                       if selection else self._context(session, env))
             for chunk in self._graph.stream(
                 payload,
                 config=self._conversation_config(session),
-                context=self._context(session, env),
+                context=context,
                 stream_mode="updates",
+                **stream_options,
             ):
+                if selection:
+                    namespace, chunk = chunk
+                    if namespace:
+                        if on_update is not None:
+                            on_update()
+                        continue
                 if not bound:
                     run_id = _run_id_of(chunk)
                     if run_id:
@@ -1701,6 +2112,9 @@ class ApplicationService:
                 result_ref=snapshot.snapshot_id,
             )
         )
+        # 同一条证明也把**任务索引**收口（§17.5）：否则崩溃后哪怕用户重试成功，索引里那条任务
+        # 仍是非终态，这个会话的下一次新提交会被"已有非终态任务"挡住，只能等下一次重启。
+        self._adopt_interrupted_job(session, reported_run=entry["run_id"])
         return self._result(
             request_id=entry["request_id"],
             operation=operation,
@@ -1739,6 +2153,13 @@ class ApplicationService:
         if entry["status"] == STATUS_FAILED and status == "completed":
             # 记过失败的请求不能重放成成功。
             status = "failed"
+        job_id = None
+        if self._jobs is not None and entry["run_id"]:
+            # 台账不存 job_id，按"会话 + 轮次"反查索引，让重放给出与原请求一致的任务标识。
+            job_id = self._jobs.job_id_for_run(session.session_id, entry["run_id"])
+        # 这条请求**已有终态**（否则走不到重放），按这同一份证据把该会话遗留的非终态任务收口（§17.5）：
+        # 崩溃后用户拿同一 id 重试就能自愈，不必等下一次重启。
+        self._adopt_interrupted_job(session, reported_run=entry["run_id"])
         return self._result(
             request_id=request_id,
             operation=operation,
@@ -1746,6 +2167,7 @@ class ApplicationService:
             snapshot=snapshot,
             status=status,
             replayed=True,
+            job_id=job_id,
         )
 
     # ---- 内部：读取与投影 ----------------------------------------------------
@@ -1754,7 +2176,7 @@ class ApplicationService:
         with self._locks_guard:
             sink = self._streams.get(session.session_id)
         if sink is not None and sink._run_id is not None:
-            latest = self._view_of(self._graph.get_state({"configurable": {"thread_id": session.thread_id}}))
+            latest = self._checkpoint_view({"configurable": {"thread_id": session.thread_id}})
             if proj.current_run_id(latest.values) == sink._run_id:
                 return latest
         branch = self._sqlite_access(lambda: self._conversations.active(session.session_id))
@@ -1763,7 +2185,13 @@ class ApplicationService:
             if view is None:
                 raise conversation.conflict(session.session_id, "当前分支检查点无法恢复。")
             return view
-        return self._view_of(self._graph.get_state({"configurable": {"thread_id": session.thread_id}}))
+        return self._checkpoint_view({"configurable": {"thread_id": session.thread_id}})
+
+    def _checkpoint_view(self, config: RunnableConfig) -> _ThreadView:
+        snapshot = self._graph.get_state(config)
+        if (getattr(snapshot, "values", None) or {}).get("workflow_request"):
+            snapshot = self._graph.get_state(config, subgraphs=True)
+        return self._view_of(snapshot)
 
     def _conversation_config(self, session: Session) -> RunnableConfig:
         branch = self._sqlite_access(lambda: self._conversations.active(session.session_id))
@@ -1826,10 +2254,9 @@ class ApplicationService:
             "configurable": {"thread_id": session.thread_id, "checkpoint_id": checkpoint_id}
         }
         try:
-            snapshot = self._graph.get_state(config)
+            view = self._checkpoint_view(config)
         except Exception:  # noqa: BLE001 — 读不到就按"拿不回这份结果"处理（fail-closed，宁可拒绝）
             return None
-        view = self._view_of(snapshot)
         if not view.values:
             return None
         if view.checkpoint_id is not None and view.checkpoint_id != checkpoint_id:
@@ -1841,6 +2268,18 @@ class ApplicationService:
         """把 LangGraph 的 StateSnapshot 收敛成只读视图（实时与历史走同一条路径）。"""
         values = getattr(snapshot, "values", None) or {}
         tasks = getattr(snapshot, "tasks", ()) or ()
+        selection = values.get("workflow_request")
+        if isinstance(selection, Mapping):
+            # Only the registered same-run workflow can contribute display facts.
+            # Keep parent terminal status, messages and result references authoritative.
+            for task in tasks:
+                child_values = getattr(getattr(task, "state", None), "values", None) or {}
+                if not isinstance(child_values, Mapping):
+                    continue
+                workflow = child_values.get("workflow")
+                if (isinstance(workflow, Mapping) and workflow.get("run_id") == values.get("run_id")
+                        and workflow.get("name") == selection.get("name")):
+                    values = {**values, "workflow": workflow}
         has_interrupt = any(getattr(task, "interrupts", ()) for task in tasks)
         confirmation_stage = 1
         for task in tasks:
@@ -1858,10 +2297,20 @@ class ApplicationService:
             next_nodes=tuple(getattr(snapshot, "next", ()) or ()),
         )
 
-    def _context(self, session: Session, env: _RunEnv) -> Any:
+    def _context(self, session: Session, env: _RunEnv, *,
+                 workflow_request: Any = None, workflow_limits: Any = None) -> Any:
         """构造这次调用的运行上下文（客户端与运行参数都在预检时定好，这里只装配）。"""
+        selected = (None if workflow_request is None else
+                    TypeAdapter(WorkflowRequest).validate_python(workflow_request))
+        config = env.app_config
+        if selected is not None and workflow_limits is not None:
+            limits = WorkflowsConfig.model_validate(workflow_limits)
+            limits.enabled = limits.enabled and config.workflows.enabled
+            config = config.model_copy(update={"workflows": limits})
+        choices: dict[str, dict[str, Any]] = (
+            {} if selected is None else {selected.name: selected.request.model_dump(mode="json")})
         return builder.build_runtime_context(
-            app_config=env.app_config,
+            app_config=config,
             model_adapter=env.model,
             workspace_root=Path(session.workspace_root),
             provider_name=env.provider_name,
@@ -1871,6 +2320,14 @@ class ApplicationService:
             external_policy=self.external_paths_policy(),
             # 录音机挂在上下文上：节点的用量装饰器从 `RuntimeContext` 取它（§15.6）。
             usage_recorder=env.usage_recorder,
+            # 取消令牌进两道门（§17.4）：安全 / 审批门与能力可见性门都读它。
+            # **审批恢复复用同一个令牌**——已取消的任务不会因为后来点了批准又跑起来。
+            cancellation=self._token_for(session.session_id),
+            child_index=(None if self._jobs is None else
+                         partial(self._jobs.index_children, session.session_id)),
+            readonly_research=choices.get("readonly_research"),
+            code_change=choices.get("code_change"),
+            delegated_research=choices.get("delegated_research"),
         )
 
     def external_paths_policy(self) -> ExternalPathPolicy | None:
@@ -1891,6 +2348,23 @@ class ApplicationService:
           页面会看到"设置不可用"的说明。
         """
         if for_resume:
+            # 在 resume 补建任务索引之前恢复令牌，否则新行会遮住旧取消记录。
+            token = self._token_for(session.session_id)
+            run_id = self._current_run_id(session)
+            if self._jobs is not None and run_id is not None:
+                history = self._jobs.list_for_session(session.session_id)
+                for job in reversed(history):
+                    if job.state == JOB_STATE_CANCELLED and job.run_id == run_id:
+                        # 上一次恢复已补建索引后崩溃，最新行也可能不再是 cancelled。
+                        token.cancel(job.detail or DEFAULT_CANCEL_REASON)
+                        break
+                if (
+                    not any(job.run_id == run_id for job in history)
+                    and any(job.state == JOB_STATE_CANCELLED and job.run_id is None for job in history)
+                ):
+                    # 升级前的空绑定取消记录无法证明所属轮次；恢复登记不得使它失效。
+                    # 正常新轮次已有自己的任务绑定，不会被旧记录粘住。
+                    token.cancel("旧取消记录无法关联当前轮次，已阻止审批执行；核对后请重新提交")
             saved = self._read(session).values.get("runtime_preferences")
             preference_binding = (
                 RuntimePreferenceBinding.model_validate(saved) if saved is not None else
@@ -2030,6 +2504,24 @@ class ApplicationService:
     def _workspace_ref(self, session: Session) -> WorkspaceRef:
         return self._ref_for(Path(session.workspace_root))
 
+    def _task_view(self, job: Job, session: Session, workspace: WorkspaceRef) -> TaskView:
+        """把索引里的一行任务 + 它的会话投影成任务中心的一行（§17.6）。
+
+        时间戳解析失败（旧行 / 手改过的库）时**如实留空**，不拿当前时间顶替——那会让页面显示一个
+        假的"已运行时长"。**不读 Checkpoint**：这里没有任何一条读取会话状态的分支。
+        """
+        return TaskView(
+            task_id=job.job_id,
+            session_id=session.session_id,
+            session_title=session.title,
+            workspace=workspace,
+            state=job.state,
+            detail=job.detail,
+            created_at=_as_dt(job.created_at),
+            started_at=_as_dt(job.started_at) if job.started_at else None,
+            finished_at=_as_dt(job.finished_at) if job.finished_at else None,
+        )
+
     def _snapshot(self, session: Session, view: _ThreadView) -> SessionSnapshot:
         # 运行期间可修改显示名称；长期 SSE 订阅捕获的旧 Session 不应覆盖新名称。
         session = self._sqlite_access(partial(self._sessions.get, session.session_id)) or session
@@ -2105,8 +2597,11 @@ class ApplicationService:
     def _snapshot_event(self, session: Session, view: _ThreadView) -> EventEnvelope:
         snapshot = self._snapshot(session, view)
         task = snapshot.current_task
+        identity = snapshot.snapshot_id
+        if snapshot.workflow is not None:
+            identity = _digest(identity, snapshot.workflow.model_dump_json())
         return SessionSnapshotEvent(
-            event_id=event_id_for("session_snapshot", snapshot.snapshot_id),
+            event_id=event_id_for("session_snapshot", identity),
             session_id=session.session_id,
             task_id=None if task is None else task.task_id,
             run_id=None if task is None else task.run_id,
@@ -2124,6 +2619,7 @@ class ApplicationService:
         snapshot: SessionSnapshot,
         status: CommandStatus,
         replayed: bool,
+        job_id: str | None = None,
     ) -> CommandResultView:
         return CommandResultView(
             request_id=request_id,
@@ -2134,6 +2630,7 @@ class ApplicationService:
             status=status,
             session_state=snapshot.session_state,
             replayed=replayed,
+            job_id=job_id,
             error=snapshot.errors[0] if snapshot.errors else None,
         )
 
@@ -2213,6 +2710,13 @@ class ApplicationService:
             # 所以这一份快照是完整可用的。
             announced.boundary_snapshot = True
             events.append(self._snapshot_event(session, view))
+
+        if snapshot.workflow is not None:
+            signature = snapshot.workflow.model_dump_json()
+            if signature != announced.workflow:
+                announced.workflow = signature
+                if not events:
+                    events.append(self._snapshot_event(session, view))
 
         def envelope(event_type: str, identity: str, payload: Any, payload_model: type) -> Any:
             return payload_model(
@@ -2445,6 +2949,7 @@ class _AnnouncedFacts:
     #: 边界快照是否已经播过。提交受理后的第一份快照只播一次：它是"提交成功"与"第一个业务事件"
     #: 之间唯一的权威数据来源（见 `_turn_events`）。
     boundary_snapshot: bool = False
+    workflow: str | None = None
     #: 工具作用域 → 已广播到的状态（`pending`/`running`/`ok`…）。
     tools: dict[str, str] = field(default_factory=dict)
     #: 已广播过的模型调用 id（§15.6 的三条事件一次发完，按 id 去重；重试是新 id，不会互相吞掉）。
@@ -2557,6 +3062,17 @@ def _connection_status_dto(status: str) -> Any:
 
 def _capability_result_dto(outcome: str) -> Any:
     return cast(Any, _CAPABILITY_RESULT_DTO.get(outcome, "unknown"))
+
+
+def _seconds_since(instant: str, now: datetime) -> float:
+    """从索引里的时间戳算到 ``now`` 的秒数（时间戳读不懂时返回 0，即"不判超时"）。"""
+    try:
+        moment = datetime.fromisoformat(instant)
+    except ValueError:
+        return 0.0
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - moment).total_seconds())
 
 
 def _status_from_snapshot(snapshot: SessionSnapshot) -> CommandStatus:

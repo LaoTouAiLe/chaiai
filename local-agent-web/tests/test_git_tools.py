@@ -8,6 +8,8 @@
 from __future__ import annotations
 
 import locale
+import shutil
+import subprocess
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -17,6 +19,39 @@ from local_agent.config import AppConfig
 from local_agent.exceptions import SecurityError
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools import git_tools
+
+
+@pytest.mark.parametrize("path", [":(top)outside.txt", ":/outside.txt", ":(exclude)ws", "./:(top)outside.txt"])
+def test_git_pathspec_magic_is_rejected_before_any_read(
+    tmp_path: Path, app_config: AppConfig, path: str
+) -> None:
+    fake = FakeGit()
+    with pytest.raises(SecurityError, match="pathspec"):
+        git_tools.diff(_policy(tmp_path, app_config), path=path, runner=fake)
+    assert fake.calls == []
+
+
+def test_real_git_runner_uses_literal_pathspecs(tmp_path: Path) -> None:
+    if shutil.which("git") is None:
+        pytest.skip("本机未安装 Git")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "inside.txt").write_text("inside", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("outside", encoding="utf-8")
+    for arguments in [["init", "--quiet"], ["add", "--", "ws/inside.txt", "outside.txt"]]:
+        subprocess.run(["git", "-C", str(tmp_path), *arguments], check=True, capture_output=True)
+    escaped = git_tools.run_git(["diff", "--cached", "--", ":(top)outside.txt"], workspace, 10)
+    assert escaped.exit_code == 0 and escaped.stdout == ""
+    ordinary = git_tools.run_git(["diff", "--cached", "--", "inside.txt"], workspace, 10)
+    assert ordinary.exit_code == 0 and "inside.txt" in ordinary.stdout
+
+
+def test_git_commit_magic_is_rejected_before_any_write(tmp_path: Path, app_config: AppConfig) -> None:
+    fake = FakeGit()
+    with pytest.raises(SecurityError, match="pathspec"):
+        git_tools.commit(_policy(tmp_path, app_config), paths=[":(top)outside.txt"],
+                         message="不得越界提交", confirm_on_default_branch=True, runner=fake)
+    assert not fake.saw("add") and not fake.saw("commit")
 
 
 def _policy(tmp_path: Path, app_config: AppConfig) -> SecurityPolicy:

@@ -2568,6 +2568,37 @@ def test_prompt_window_keeps_at_least_recent_turns() -> None:
     assert len(window.messages) == 4
 
 
+def test_retain_tokens_shrinks_recent_turns_to_fit_the_window() -> None:
+    """``retain_tokens`` 把保留下限与窗口联动：token 装不下的更早轮次不留在窗口。
+
+    每轮约 14 token（两条小消息）。条数上限先砍到第 7 条，轮次保底本来会把窗口**拉回**开头
+    （"至少保留 8 轮"≈ 整段历史，压缩触发也压不动）；预算 30 token 只装得下最近 2 轮，
+    保底因此落在第 6 条，窗口不再被拉回整段历史。
+    """
+    messages = _turns(5)
+
+    unbounded = short_term.select_prompt_window(
+        messages, enabled=True, max_messages=3, preserve_recent_turns=8,
+    )
+    window = short_term.select_prompt_window(
+        messages, enabled=True, max_messages=3, preserve_recent_turns=8, retain_tokens=30,
+    )
+
+    assert unbounded.messages == messages  # 无预算时保底把整段历史都留住
+    assert [message.content for message in window.messages] == ["问题3", "回答3", "问题4", "回答4"]
+
+
+def test_retain_tokens_never_drops_the_newest_turn() -> None:
+    """预算再紧也至少保留最近 1 轮：否则窗口会把当前问题也裁掉。"""
+    messages = _turns(3)
+
+    window = short_term.select_prompt_window(
+        messages, enabled=True, max_messages=1, preserve_recent_turns=8, retain_tokens=1,
+    )
+
+    assert [message.content for message in window.messages] == ["问题2", "回答2"]
+
+
 def test_prompt_window_omits_older_tool_steps_in_a_long_loop() -> None:
     """一个用户请求内的长工具链也能收缩：只保留最近 K 个完整工具步。
 
@@ -2650,37 +2681,25 @@ def _big_tool_loop(steps: int, body_chars: int) -> list[AnyMessage]:
     return messages
 
 
-def test_prompt_window_squeezes_big_tool_results_unconditionally() -> None:
-    """超**单条**阈值的工具结果**无条件**压中段——不看窗口预算（2026-09-30，对标 dsh）。
-
-    为什么从"超预算才压"改成无条件：实测一次真实对话，未命中输入的大头正是"大工具结果**第一次**
-    进历史"那几次（单个 2 万字符的读取约 1.2 万 token 全价未命中，那一跳命中率只有 **22.6%**），
-    而窗口当时才约 45k token——**远没到 12 万的预算线**，按预算触发的裁剪**一次都没跑**，机制存在
-    等于不存在。dsh 的 ``compaction-tool-result-pruner`` 就是按单条结果阈值（8192）无条件跑的。
-
-    **不破坏前缀**：这一步每次都执行、对同一输入是确定性的，所以一条结果**第一次被发出去时就已经
-    是压过的形态**，之后每次都是同一份字节（不存在"先发全量、后来再改写"）。
-    """
+def test_prompt_window_squeezes_big_tool_results_only_in_pressure_pass() -> None:
+    """压力已达标时按条裁剪，保持头尾、工具边界与审计原文。"""
     body_chars = 12_000
     body = "正文" * (body_chars // 2)
     messages = _big_tool_loop(3, body_chars)
-    raw_sizes = [
-        len(str(message.content)) for message in messages if isinstance(message, ToolMessage)
-    ]
 
     # 对照：阈值 0 = 不压，三条结果原样保留（旧口径）。
     untouched = _window(messages, preserve_recent_turns=1, preserve_recent_tool_steps=3)
-    assert [
-        len(str(message.content))
-        for message in untouched.messages
-        if isinstance(message, ToolMessage)
-    ] == raw_sizes
+    full = [json.loads(str(message.content)) for message in untouched.messages
+            if isinstance(message, ToolMessage)]
+    assert [item["content"] for item in full] == [body] * 3
+    assert all(item["source_coordinates"] == "unknown" for item in full)
 
-    window = _window(
+    window = short_term.select_prompt_window(
         messages,
         preserve_recent_turns=1,
         preserve_recent_tool_steps=3,
-        tool_result_keep_chars=8_192,
+        tool_result_keep_chars=8_192, enabled=True, max_messages=100,
+        prune_tool_results=True,
     )
 
     assert window.omitted_tool_steps == 0  # 一步都没省
@@ -2698,8 +2717,9 @@ def test_prompt_window_squeezes_big_tool_results_unconditionally() -> None:
     assert len(compressed) < len(body)
     assert compressed.startswith(body[:64])
     assert compressed.endswith(body[-64:])
-    assert "字符已裁剪" in compressed
-    assert "start_line/end_line" in compressed
+    assert "中间内容已裁剪" in compressed
+    assert all(item["truncated"] and item["has_more"] for item in squeezed)
+    assert all(item["next_start_line"] is None for item in squeezed)
 
 
 def test_prompt_window_omits_tool_steps_across_turns_but_keeps_human_messages() -> None:

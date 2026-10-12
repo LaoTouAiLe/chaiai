@@ -4,6 +4,7 @@ import { Composer } from '../components/Composer'
 import { Sidebar } from '../components/Sidebar'
 import { TopBar } from '../components/TopBar'
 import { CapabilitiesPanel } from '../features/capabilities/CapabilitiesPanel'
+import { TasksPanel } from '../features/tasks/TasksPanel'
 import { Conversation } from '../features/conversation/Conversation'
 import { ModelSettingsDialog } from '../features/settings/ModelSettingsDialog'
 import { SettingsDialog } from '../features/settings/SettingsDialog'
@@ -101,6 +102,10 @@ function PrototypeHost({ scenarioId }: { scenarioId: string | null }) {
         {scenario.capabilities == null || !capabilitiesOpen
           ? null
           : <CapabilitiesPanel view={scenario.capabilities} onClose={() => setCapabilitiesOpen(false)} />}
+        {/* 同上（T62 的 `tasks`）：只有挂了视图模型的场景才渲染，"打开会话"在原型里是惰性的。 */}
+        {scenario.tasks == null
+          ? null
+          : <TasksPanel view={scenario.tasks} onOpenSession={() => undefined} />}
       </main>
     </div>
   )

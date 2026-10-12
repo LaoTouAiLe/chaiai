@@ -33,6 +33,7 @@ from local_agent.persistence.conversation_store import ConversationStore
 #: ``project_id`` / ``normalize_path`` 等稳定标识在 :mod:`local_agent.scope` 统一实现：
 #: 记忆层要用同一份规则，放在这里会造成两侧各算一次而漂移。
 from local_agent.scope import normalize_path, project_id_for
+from local_agent.session_kind import DEFAULT_SESSION_KIND, SESSION_KINDS
 
 #: 新会话的默认标题；第一次提交消息后会自动命名（之后仍可手动重命名）。
 DEFAULT_TITLE = "新会话"
@@ -49,9 +50,9 @@ STATUS_IDLE = "idle"
 #: 查询列顺序与 :class:`Session` 字段顺序严格一致。
 _COLUMNS = (
     "session_id, thread_id, title, workspace_root, project_id, "
-    "created_at, updated_at, last_checkpoint_id, status, mode, archived"
+    "created_at, updated_at, last_checkpoint_id, status, mode, archived, kind"
 )
-_PLACEHOLDERS = ", ".join("?" * 11)
+_PLACEHOLDERS = ", ".join("?" * 12)
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,9 @@ class Session:
     status: str
     mode: str
     archived: bool = False
+    #: 会话来源（架构 §10.6、§17.1）：``interactive`` / ``scheduled`` / ``heartbeat``。
+    #: 它只影响记忆候选的**来源级别**，不参与 ``mode`` 决定的工具集与提示段落。
+    kind: str = DEFAULT_SESSION_KIND
 
     @property
     def is_active(self) -> bool:
@@ -114,6 +118,7 @@ def _row_to_session(row: tuple[object, ...]) -> Session:
         status=str(row[8]),
         mode=str(row[9]),
         archived=bool(row[10]),
+        kind=str(row[11]),
     )
 
 
@@ -280,6 +285,7 @@ class SessionStore:
         thread_id: str | None = None,
         workspace_root: Path | None = None,
         mode: str = "agent",
+        kind: str = DEFAULT_SESSION_KIND,
     ) -> Session:
         """新建会话并切换过去（原来的当前会话变为 ``idle``）。
 
@@ -294,6 +300,8 @@ class SessionStore:
         """
         if mode not in ("chat", "agent"):
             raise SessionStoreError(f"未知会话模式：{mode}")
+        if kind not in SESSION_KINDS:
+            raise SessionStoreError(f"未知会话来源：{kind}")
         root = self.workspace_root if workspace_root is None else Path(workspace_root).resolve()
         session_id = uuid4().hex[:12]
         now = _now()
@@ -308,6 +316,7 @@ class SessionStore:
             last_checkpoint_id=None,
             status=STATUS_ACTIVE,
             mode=mode,
+            kind=kind,
         )
         with self._connection:
             self._register_workspace(root)
@@ -326,6 +335,7 @@ class SessionStore:
                     record.status,
                     record.mode,
                     int(record.archived),
+                    record.kind,
                 ),
             )
         return record

@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from local_agent.capabilities import CAPABILITY_TOOLS, tool_names_for
+from local_agent.capabilities import tool_names_for
 from local_agent.context.token_budget import MESSAGE_OVERHEAD_TOKENS, estimate_tokens
 from local_agent.exceptions import LocalAgentError
 from local_agent.graph.state import AgentMode, PlanStep, RAGReference, RuntimeContext
@@ -588,7 +588,7 @@ _GIT_TOOL_USE_RULES = (
 #:
 #: 为什么不是 ``set(CAPABILITY_TOOLS)``：每加一个新能力，`coder` 就会从"能力齐备"掉进"有缺口"，
 #: 于是拿到一份短版工具规范——那是**无声的降级**（措辞变了、前缀也变了），而不是"新能力带来的新路径"。
-_BASELINE_CAPABILITIES = frozenset(CAPABILITY_TOOLS) - {"web", "git_read", "git_write"}
+_BASELINE_CAPABILITIES = frozenset({"plan", "files_read", "code_search", "files_write", "shell"})
 
 
 def render_tool_usage_rules(capabilities: Sequence[str]) -> str:
@@ -712,18 +712,14 @@ _OUTPUT_TEMPLATE_RULES = (
 
 #: 调查与收尾由同一主模型完成；静态规则不点名本档不可见的工具。
 _CODE_INVESTIGATION_RULES = (
-    "## 项目与源码调查\n\n"
-    "- 问项目用途时，从文档导航到程序入口和代表性功能核实，再按用户角度说明用途、能力与使用方式；"
-    "不能只读 README 和顶层目录，不输出节点清单。明确只要一句话时可简答，不凑文件数。\n"
-    "- 跨模块的能力或方法问题，先核对能力/工具注册、构建和路由来列全调查范围；"
-    "本档有计划工具时先记录调查范围与待核实路径，再沿各路径读取关键实现。"
-    "不要用自己的工具清单或最先搜到的模块代替项目全部能力，默认关闭但已实现的相关路径也要说明。\n"
-    "- 描述流程必须核实路由函数及被调实现的实际条件；分别说明版本、兼容和不同类型分支，"
-    "不按名称、接线图或注释推断。区分源码实现、配置默认值和当前运行值，文档冲突以核实的实现说明。\n"
-    "- 本地代码检索模式最多 200 字符，多符号分组搜索；先定位再定点读。收尾前检查范围和证据，"
-    "能在授权内只读补齐的缺口本轮完成，证据足够即回答，不重复补读或以“需要可以继续”收尾。\n"
-    "- 源码问答报告证据支持的事实和条件，不列笼统的未测试声明；只有缺口影响结论时才说明。"
-    "本轮调用检索/读取工具就是已执行调查，未做专项运行测试不等于没执行检索；只读不等于禁止只读工具。\n\n"
+    "## 项目与源码调查\n"
+    "\n"
+    "- 用途题沿文档→程序入口→代表性功能取证，按用户视角说明用途、能力与用法；不只读 README，不调查或枚举全部节点。\n"
+    "- 方法题有计划工具时，先登记调查范围；每次计划更新必须单独调用，不与检索/读取同批，收到成功结果再继续。收尾单独提交全部完成状态再回答，不用口头计划代替。核对能力表、构建与路由，覆盖默认关闭的已实现能力。\n"
+    "- 核实路由条件、版本与类型分支，不凭名称、接线或注释推断。过滤/排序读完整函数及计算函数，按类型给出阈值、有效值与例外。公式代入实际系数，用括号保留乘加优先级；区分源码默认与运行值，文档冲突以实现为准。\n"
+    "- 本地检索模式≤200字符，多符号拆组；path须真实存在，通配放过滤参数。路径按当前工作区定位。收尾核对范围、证据与引用，授权内缺口本轮补齐；证据足够即答，不重复读或以“需要可以继续”收尾。每处引用完整工作区相对路径与1基行号，后文不缩写；行区间须支持结论，总括不抹掉例外。\n"
+    "- 只读允许检索/读取，调用它们就是已调查。只列影响结论的缺口，不作笼统未测试声明。方法题聚焦对象、算法、关键过滤与例外，不抄全部配置。\n"
+    "\n"
 )
 
 

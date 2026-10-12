@@ -25,6 +25,18 @@ describe('ContextMeter', () => {
     )
   })
 
+  it('reports over-budget usage as more than 100% while the ring fill stays capped', () => {
+    // 分子超过分母（发送前估算超出窗口）时，圆环填充封顶整圈，但**数字不能谎称 100%**：
+    // 过去两者一起被 Math.min 钳掉，于是标题写"100%"、读数却是 2000k / 1000k，自相矛盾。
+    const { container } = render(
+      <ContextMeter meter={{ usedTokens: 2_000_000, windowTokens: 1_000_000, scope: 'current' }} />,
+    )
+
+    expect(screen.getByRole('img')).toHaveAccessibleName(/上下文已用 200%（2000k \/ 1000k，当前请求）/)
+    expect(container.firstElementChild).toHaveAttribute('title', expect.stringContaining('上下文已用 200%'))
+    expect(container.querySelector('[role="img"]')?.getAttribute('style')).toContain('--law-meter-ratio: 1')
+  })
+
   it('keeps counts under one thousand unrounded', () => {
     render(<ContextMeter meter={{ usedTokens: 842, windowTokens: 1_000_000, scope: 'current' }} />)
     expect(screen.getByText('842 / 1000k')).toBeInTheDocument()

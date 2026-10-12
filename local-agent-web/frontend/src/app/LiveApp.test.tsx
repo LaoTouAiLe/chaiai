@@ -9,6 +9,7 @@ import { LiveApp } from './LiveApp'
 const mock = vi.hoisted(() => ({
   sessionState: 'awaiting_approval' as 'awaiting_approval' | 'idle' | 'failed' | 'running',
   selection: null as null | { connection_id: string; config_version: string },
+  creating: false,
   approval: null as null | Record<string, unknown>,
   messages: [] as Record<string, unknown>[],
   mutate: vi.fn(),
@@ -84,8 +85,11 @@ vi.mock('../api/queries', () => ({
     snapshot: (id: string) => ['snapshot', id],
     modelConnections: ['model-connections'],
     health: ['health'],
+    tasks: (id: string | null) => ['tasks', id],
   },
   useHealth: () => ({ data: { model_configured: true } }),
+  // 任务中心的数据源：这个夹具里没有任务，角标因此不显示（T62；§17.6）。
+  useTasks: () => ({ data: { tasks: [], counts: {}, pending_count: 0 } }),
   useArchivedSessions: () => ({ data: [], isLoading: false, isError: false }),
   useWorkspaces: () => ({ data: [{ workspace_id: 'w1', display_name: '工作区' }] }),
   useSessions: () => ({
@@ -126,7 +130,7 @@ vi.mock('../api/queries', () => ({
       },
     ]
   }),
-  useCreateSession: () => ({ mutate: vi.fn() }),
+  useCreateSession: () => ({ mutate: vi.fn(), isPending: mock.creating }),
   useSetSessionMode: () => ({ mutate: mock.modeMutate, isPending: false }),
   useEndInterruptedRequest: () => ({ mutate: mock.recoveryMutate, isPending: false }),
   useSelectWorkspace: () => ({ mutate: mock.workspaceMutate }),
@@ -168,6 +172,7 @@ beforeEach(() => {
   mock.pickMutate.mockReset()
   mock.workspaceMutate.mockReset()
   mock.selection = null
+  mock.creating = false
   useUiStore.setState({ workspaceId: 'w1', activeSessionId: 's1', drafts: { s1: '保留这段草稿' } })
 })
 
@@ -175,6 +180,24 @@ describe('LiveApp pending approval', () => {
   const renderApp = () => render(
     <QueryClientProvider client={new QueryClient()}><LiveApp /></QueryClientProvider>,
   )
+
+  it('locks workflow configuration while a new session is being created', () => {
+    mock.sessionState = 'idle'
+    mock.creating = true
+    renderApp()
+    expect(screen.getByLabelText('执行方式')).toBeDisabled()
+  })
+
+  it('keeps workflow drafts separate when switching sessions', () => {
+    mock.sessionState = 'idle'
+    renderApp()
+    fireEvent.change(screen.getByLabelText('执行方式'), { target: { value: 'readonly_research' } })
+    fireEvent.change(screen.getByLabelText('相对文件匹配（如 docs/*.md）'), { target: { value: 'docs/*.md' } })
+    act(() => useUiStore.getState().openSession('s2'))
+    expect(screen.getByLabelText('执行方式')).toHaveValue('free')
+    act(() => useUiStore.getState().openSession('s1'))
+    expect(screen.getByLabelText('相对文件匹配（如 docs/*.md）')).toHaveValue('docs/*.md')
+  })
 
   it('switches mode in the current session and keeps the draft', () => {
     mock.sessionState = 'idle'

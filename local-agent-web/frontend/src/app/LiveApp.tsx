@@ -16,6 +16,11 @@ import { Composer } from '../components/Composer'
 import { Sidebar } from '../components/Sidebar'
 import { TopBar } from '../components/TopBar'
 import { Conversation } from '../features/conversation/Conversation'
+import { WorkflowControls } from '../features/workflow/WorkflowControls'
+import { emptyWorkflowDraft, workflowDraftValid, workflowSelection } from '../features/workflow/draft'
+import type { WorkflowDraft } from '../features/workflow/draft'
+import { WorkflowStatus } from '../features/workflow/WorkflowStatus'
+import { mapWorkflow } from '../features/workflow/adapters'
 import { toolLabel } from '../features/tool/display'
 import {
   mapApproval,
@@ -38,9 +43,10 @@ import { TraceView } from '../features/trace/TraceView'
 import { ConversationMapPanel } from '../features/conversation-map/ConversationMapPanel'
 import { DataCenter } from '../features/data-center/DataCenter'
 import { CapabilitiesSection } from '../features/capabilities/CapabilitiesSection'
+import { TasksSection } from '../features/tasks/TasksSection'
 import type { components } from '../api/schema.gen'
 import { ApiError, archiveSession, listSessions, removeWorkspace, renameSession, renameWorkspace, restoreSession, selectSession } from '../api/client'
-import { queryKeys, useHealth, useModelConnections, useSessions, useSnapshot, useSubmitMessage, useWorkspaces, useCreateSession, useSelectWorkspace, useSelectSessionModel, useResolveApproval, usePickWorkspaceDirectory, useSetSessionMode, useEndInterruptedRequest } from '../api/queries'
+import { queryKeys, useHealth, useModelConnections, useSessions, useSnapshot, useSubmitMessage, useTasks, useWorkspaces, useCreateSession, useSelectWorkspace, useSelectSessionModel, useResolveApproval, usePickWorkspaceDirectory, useSetSessionMode, useEndInterruptedRequest } from '../api/queries'
 import { useSessionStream } from '../api/useSessionStream'
 import { useStreamTail } from '../stores/stream'
 import { useUiStore } from '../stores/ui'
@@ -69,6 +75,8 @@ export function LiveApp() {
   const setWorkspace = useUiStore((state) => state.setWorkspace)
   const openSession = useUiStore((state) => state.openSession)
   const setDraft = useUiStore((state) => state.setDraft)
+  const [workflowDrafts, setWorkflowDrafts] = useState<Record<string, WorkflowDraft>>({})
+  const workflowDraft = activeSessionId === null ? emptyWorkflowDraft : (workflowDrafts[activeSessionId] ?? emptyWorkflowDraft)
 
   // 侧栏折叠：`null` = 跟随窗口宽度，非 null = 用户手动选择过（手动优先）。
   const [collapsedPref, setCollapsedPref] = useState<boolean | null>(null)
@@ -88,6 +96,9 @@ export function LiveApp() {
   const [dataCenterOpen, setDataCenterOpen] = useState(false)
   // 「能力与档位」面板：纯界面状态，每次打开都重新取一次（服务端现算，页面不留旧结论）。
   const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
+  // 「任务中心」面板（v0.6 T62；§17.6）：同样是纯界面状态。数据由 `useTasks` 提供——
+  // 它与面板内的查询**同一个 key**，因此角标与列表不会各自缓存出一份不同的结论。
+  const [tasksOpen, setTasksOpen] = useState(false)
   const [archivedOpen, setArchivedOpen] = useState(false)
   // 上下文详情面板的展开态：**界面状态**，不入服务端契约（刷新后回到收起）。
   const [meterOpen, setMeterOpen] = useState(false)
@@ -107,6 +118,9 @@ export function LiveApp() {
   const queryClient = useQueryClient()
 
   const health = useHealth()
+  // 任务中心的数据源（v0.6 T62；§17.6）：入口角标与面板**共用同一个 query key**，
+  // 因此不会各缓存一份不同的结论。角标直接用服务端给的"等你处理"计数，页面不自己加总。
+  const tasks = useTasks(workspaceId)
   const workspaces = useWorkspaces()
   const sessions = useSessions(null)
   const archivedSessions = useArchivedSessions(archivedOpen)
@@ -129,12 +143,13 @@ export function LiveApp() {
   const sessionList = useMemo(() => sessions.data ?? [], [sessions.data])
   const snapshot = snapshotQuery.data ?? null
   const selectedFollowup = followup?.sessionId === activeSessionId ? followup : null
+  const currentMode = snapshot?.mode ?? sessionList.find((item) => item.session_id === activeSessionId)?.mode ?? 'agent'
   const submit = useSubmitMessage(activeSessionId, {
     parent_turn_id: selectedFollowup?.turnId,
     expected_branch_id: selectedFollowup?.branchId ?? snapshot?.branch_id,
     expected_snapshot_id: selectedFollowup?.baseSnapshotId ?? snapshot?.snapshot_id,
+    workflow: currentMode === 'agent' ? workflowSelection(workflowDraft) : null,
   })
-  const currentMode = snapshot?.mode ?? sessionList.find((item) => item.session_id === activeSessionId)?.mode ?? 'agent'
 
   // 刷新恢复：本地没有选中项时，按服务端的 `is_active` 回填（全库唯一 active）。
   useEffect(() => {
@@ -352,6 +367,7 @@ export function LiveApp() {
   }
 
   const send = () => {
+    if (currentMode === 'agent' && !workflowDraftValid(workflowDraft)) return
     if (activeSessionId === null || draft.trim() === '' || running || awaitingApproval || interrupted || submit.isPending || createSession.isPending || setSessionMode.isPending) return
     const text = draft
     // 先清草稿：提交的幂等键重试由用户发起（见 queries.ts），草稿不该在失败后被吞掉，
@@ -512,6 +528,11 @@ export function LiveApp() {
           onOpenDataCenter: () => { setSettingsOpen(false); setDataCenterOpen(true) },
           // 三个入口互斥：同时叠两个面板会让用户以为"设置里也能改能力"。
           onOpenCapabilities: () => { setSettingsOpen(false); setDataCenterOpen(false); setCapabilitiesOpen(true) },
+          // 四个入口互斥：同时叠两个面板会让用户以为"设置里也能看任务"。
+          onOpenTasks: () => {
+            setSettingsOpen(false); setDataCenterOpen(false); setCapabilitiesOpen(false); setTasksOpen(true)
+          },
+          pendingTasks: tasks.data?.pending_count ?? 0,
           onToggleCollapse: () => setCollapsedPref(!sidebarCollapsed),
         }}
       />
@@ -624,8 +645,12 @@ export function LiveApp() {
           } : scenario} autoFollow onToggleTool={toggleTool}
             focusTurnId={focusTurn?.sessionId === activeSessionId ? focusTurn.turnId : null} />
         )}
+        {tab === 'conversation' && snapshot?.workflow ? <WorkflowStatus view={mapWorkflow(snapshot.workflow)} /> : null}
         {/* 地图留出详情空间；历史追问回到同一个输入框，审批时保留接管按钮。 */}
         {tab !== 'map' || awaitingApproval ? <Composer
+          workflowControls={<WorkflowControls draft={workflowDraft}
+            disabled={activeSessionId === null || currentMode !== 'agent' || running || awaitingApproval || interrupted || submit.isPending || createSession.isPending || setSessionMode.isPending}
+            onChange={(value) => { if (activeSessionId !== null) setWorkflowDrafts((items) => ({ ...items, [activeSessionId]: value })) }} />}
           mode={currentMode}
           session={session ?? { title: '新会话', workspace: null, status: 'idle', modelLabel: '' }}
           plan={scenario.plan}
@@ -671,11 +696,23 @@ export function LiveApp() {
             },
             modeDisabled: activeSessionId === null || running || awaitingApproval || interrupted || submit.isPending || setSessionMode.isPending,
             // 任务进行中**允许继续写**，但不让发（T30 裁定）：草稿留在输入框里等这一轮结束。
-            canSend: activeSessionId !== null && draft.trim() !== '' && !running && !awaitingApproval && !interrupted && !submit.isPending && !createSession.isPending && !setSessionMode.isPending,
+            canSend: activeSessionId !== null && draft.trim() !== '' && (currentMode === 'chat' || workflowDraftValid(workflowDraft)) && !running && !awaitingApproval && !interrupted && !submit.isPending && !createSession.isPending && !setSessionMode.isPending,
           }}
         /> : null}
         </>}
         {capabilitiesOpen ? <CapabilitiesSection onClose={() => setCapabilitiesOpen(false)} /> : null}
+        {tasksOpen ? (
+          <TasksSection
+            workspaceId={workspaceId}
+            onOpenSession={(sessionId) => {
+              // 恢复入口：三类判定都指向"去会话里处理"（§17.6），这里只负责打开它。
+              openSession(sessionId)
+              setTasksOpen(false)
+              setTab('conversation')
+            }}
+            onClose={() => setTasksOpen(false)}
+          />
+        ) : null}
         {settingsOpen ? <ModelSettingsDialog onClose={() => {
           setSettingsOpen(false)
           void queryClient.invalidateQueries({ queryKey: queryKeys.modelConnections })

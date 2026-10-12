@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 
 import type {
   ComposerStateView,
@@ -43,6 +44,7 @@ export interface ComposerActions {
 }
 
 interface ComposerProps {
+  workflowControls?: ReactNode
   mode?: 'chat' | 'agent'
   session: SessionSummaryView
   plan: PlanView | null
@@ -74,7 +76,7 @@ const SEND_BLOCKED_TEXT = '任务进行中：可以先继续写草稿，但要�
  * card stays above it as a visible outcome, because a card that asks the user to
  * re-issue a request must not be the reason they cannot type one.
  */
-export function Composer({ mode = 'agent', session, plan, meter, takeover, modelMenu, state, actions, modelMenuActions, approvalActions }: ComposerProps) {
+export function Composer({ mode = 'agent', session, plan, meter, takeover, modelMenu, state, actions, modelMenuActions, approvalActions, workflowControls }: ComposerProps) {
   const { send_shortcut: sendShortcut } = useGeneralPreferences()
   const [modeMenuOpen, setModeMenuOpen] = useState(false)
   const modeMenuRef = useRef<HTMLDivElement>(null)
@@ -106,6 +108,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
   return (
     <div className={styles.dock}>
       <div className={styles.stack}>
+        {awaitingDecision ? null : workflowControls}
         {plan === null ? null : <PlanStrip plan={plan} />}
 
         {approval !== null && !awaitingDecision ? (

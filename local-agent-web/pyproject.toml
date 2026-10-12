@@ -20,6 +20,10 @@ dependencies = [
   "pyyaml",
   "python-dotenv",
   "filelock",
+  # v0.6 T63：`.gitignore` 语义不自己实现——`pathspec` 是 Python 侧的参考实现（black / pre-commit 用它），
+  # 检索遍历据此跳过"被 git 忽略的产物目录"（与 ripgrep 的默认一致）。它本来就在依赖图里（传递依赖），
+  # 这里只是**显式声明**我们在直接用它。
+  "pathspec>=1.0,<2",
   "fastapi>=0.141.1",
   "uvicorn>=0.52.4",
   "keyring>=25.7.0",

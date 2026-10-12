@@ -694,6 +694,42 @@ class ProfilesConfig(_StrictModel):
         return resolve_capabilities(self.active, self.custom)
 
 
+class JobsConfig(_StrictModel):
+    """后台任务运行时（v0.6 T58；契约 §17.2）。
+
+    **这不是能力开关**：``background`` 只决定**调度时机**，不决定走哪条代码路径——
+    ``false`` 时这次执行在提交请求内跑到终态（与 v0.5 逐字节一致），``true`` 时先登记任务并立即返回，
+    由本机 worker 在后台跑到终态或"等待用户"。命名刻意不用能力开关惯用的 ``enabled``，因为那个名字在
+    ``web_access`` / ``git`` / ``skills`` 上表示"关掉就不可用"，用在这里会被读成同一个意思。
+
+    只放"调度时机"与"资源上限"：取消的语义见 §17.4，恢复与"需人工核对"属 T61。
+    """
+
+    #: 是否把执行交给本机 worker（默认否：保持 v0.5 的请求内执行）。
+    background: bool = False
+    #: 后台 worker 的并发上限。本机单用户、单进程，默认 1——不引入队列公平性之类的第二套语义。
+    max_concurrent_jobs: int = Field(default=1, ge=1, le=8)
+    #: 单任务总墙钟上限（秒）；``None`` = 不限（默认）。超限走**与取消完全相同的那一条路径**
+    #: （置取消信号 + 任务进 `cancelled`，`detail` 写明原因，见 §17.4），不另写一套中止逻辑。
+    max_task_seconds: float | None = Field(default=None, gt=0)
+
+
+class WorkflowsConfig(_StrictModel):
+    """确定性工作流的实际资源上限（v0.7 T65/T66，架构 §18.2）。"""
+
+    enabled: bool = False
+    max_tool_calls: int = Field(default=16, ge=1, le=64)
+    max_steps: int = Field(default=32, ge=1, le=128)
+    max_source_files: int = Field(default=8, ge=1, le=32)
+    max_evidence_chars: int = Field(default=16000, ge=1, le=64000)
+    max_report_chars: int = Field(default=20000, ge=1, le=64000)
+    max_model_tokens: int = Field(default=16000, ge=1, le=128000)
+    max_model_output_tokens: int = Field(default=2048, ge=1, le=16000)
+    max_children: int = Field(default=3, ge=1, le=3)
+    max_concurrency: int = Field(default=2, ge=1, le=2)
+    child_timeout_seconds: int = Field(default=30, ge=1, le=120)
+
+
 class AppConfig(_StrictModel):
     """全部配置的根对象。"""
 
@@ -714,6 +750,8 @@ class AppConfig(_StrictModel):
     web_access: WebAccessConfig = Field(default_factory=WebAccessConfig)
     git: GitConfig = Field(default_factory=GitConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    jobs: JobsConfig = Field(default_factory=JobsConfig)
+    workflows: WorkflowsConfig = Field(default_factory=WorkflowsConfig)
 
     def as_run_config(self) -> RunConfig:
         """收窄成运行期配置；``llm`` 缺省时抛可执行的 `ConfigError`。

@@ -2011,15 +2011,11 @@ def test_recent_tool_records_keep_the_latest_results() -> None:
     assert "结果1" not in text and "结果2" not in text
 
 
-def test_long_tool_loop_window_omits_older_tool_steps(
-    tmp_path: Path, model_factory: ModelFactory
+@pytest.mark.parametrize("capacity,can_summarize", [(4096, False), (20000, True)])
+def test_long_tool_loop_window_records_summary_for_complete_older_tool_steps(
+    tmp_path: Path, model_factory: ModelFactory, capacity: int, can_summarize: bool,
 ) -> None:
-    """一个用户请求内的长工具链也能收缩：窗口只保留最近 K 个完整工具步。
-
-    这条链只有 1 个人类轮次，``preserve_recent_turns`` 取到的起点就是链首，救不了它
-    （复审探针：21 条消息仍发 21 条）；收缩靠"工具步"这一层规则，且不切开
-    ``AIMessage(tool_calls)`` 与它的 ``ToolMessage``。
-    """
+    """长任务压力下摘要完整早期工具步，边界落盘而不临时整步省略。"""
     graph = _graph(_database(tmp_path))
     model = model_factory(
         decision="tool",
@@ -2037,6 +2033,8 @@ def test_long_tool_loop_window_omits_older_tool_steps(
             # 条数只是下限。本用例验证的就是"还能收缩"，所以把预算压到必然超出的程度。
             tool_step_budget_chars=1,
             max_tool_loops=4,
+            context_window_tokens=capacity,
+            trigger_ratio=0.1,  # 两种预算都触发；只有装得下证据的窗口可推进覆盖。
         ),
     )
 
@@ -2059,8 +2057,17 @@ def test_long_tool_loop_window_omits_older_tool_steps(
     assert sorted(calls) == sorted(results)
     assert len(result["tool_events"]) == len(calls)
     assert len(result["tool_results"]) == len(calls)
-    # 循环中途的窗口已经按"工具步"收缩（更早的调用与结果整步省略）
-    assert any("省略了" in prompt for prompt in model.seen_prompts)
+    # 真实图仅在有证据余量时推进覆盖；4k 小于固定前缀/Schema 时必须保留旧消息。
+    if can_summarize:
+        assert result["compression_count"] >= 1
+        assert result["context_budget"].summary_covered_messages > 0
+        assert any("会话摘要" in prompt for prompt in model.seen_prompts)
+    else:
+        assert result.get("compression_count", 0) == 0
+        assert result["context_budget"].summary_covered_messages == 0
+        assert not result.get("conversation_summary")
+        assert any("无法再压缩" in event["message"] for event in result["error_events"])
+    assert not any("省略了" in prompt for prompt in model.seen_prompts)
 
 
 def test_ask_user_text_never_leaks_internal_self_audit() -> None:
@@ -2264,11 +2271,14 @@ def test_compression_writes_summary_without_dropping_messages(
     result = results[-1]
 
     assert result["conversation_summary"] == "用户连聊三句"
-    # 第一轮还没有"更早的旧消息"可摘要：静默跳过（不算故障），从第二轮起才真正压缩
-    assert not any(
-        event["stage"] == nodes.COMPRESSION_NODE
-        for event in results[0].get("error_events", [])
-    )
+    # 第一轮还没有"更早的旧消息"可摘要，而窗口（4096）已被系统提示撑满（比值 ≥ 1）：
+    # 这正是"触发也压不动"，必须留下**可见告警**而不是静默；从第二轮起才真正压缩。
+    first_round_events = [
+        event for event in results[0].get("error_events", [])
+        if event["stage"] == nodes.COMPRESSION_NODE
+    ]
+    assert len(first_round_events) == 1
+    assert "无法再压缩" in first_round_events[0]["message"]
     assert result["compression_count"] >= 2
     assert result["context_version"] >= 2
     assert result["context_budget"].triggered is True

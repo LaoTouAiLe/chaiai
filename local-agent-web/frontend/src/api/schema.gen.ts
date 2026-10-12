@@ -385,6 +385,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Cancel Task
+         * @description 取消在跑的任务（§17.4）：**幂等**，没有可取消的任务时返回当时的结局。
+         */
+        post: operations["cancel_task_api_sessions__session_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/conversation-map": {
         parameters: {
             query?: never;
@@ -539,6 +559,30 @@ export interface paths {
         };
         /** 单轮问答与执行详情 */
         get: operations["turn_detail_api_sessions__session_id__turns__turn_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/tasks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 任务中心（只读索引，不读会话 Checkpoint）
+         * @description 当前工作区的任务列表：状态、已运行时长与"在等什么"。
+         *
+         *     **只读**，且字段全部由任务索引 + 会话索引推出（§17.6）：不读任何会话的 Checkpoint，
+         *     因此"任务在等什么"不可能与真源不一致。页面**不展示** `task_id`（它是稳定引用，只作列表键
+         *     与动作参数，与 `session_id` 同一口径）。
+         */
+        get: operations["list_tasks_api_tasks_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -845,6 +889,20 @@ export interface components {
             text: string;
         };
         /**
+         * CancelTaskRequest
+         * @description 取消当前会话在跑的任务（架构 §15.2、§17.4）。**幂等**：没有可取消的任务时是空操作。
+         *
+         *     刻意**不带** `client_request_id`：取消不进幂等台账（重复调用本来就是空操作），
+         *     要求一个用不上的幂等键只会让调用方以为"取消也会被去重"。
+         */
+        CancelTaskRequest: {
+            /**
+             * Reason
+             * @default
+             */
+            reason: string;
+        };
+        /**
          * CapabilitiesView
          * @description 当前 Agent 档位与每个能力的状态（T56；§16.6）。
          */
@@ -896,19 +954,62 @@ export interface components {
             reason: "available" | "profile" | "disabled" | "missing_dependency";
         };
         /**
+         * ChildResearchTask
+         * @description 父任务明确授予的问题与目录，不接受模型生成授权。
+         */
+        ChildResearchTask: {
+            /** Question */
+            question: string;
+            /** Scope */
+            scope: string;
+        };
+        /**
+         * CodeChangeRequest
+         * @description 首版单文件精确修改与显式 unittest 验证范围。
+         */
+        CodeChangeRequest: {
+            /** Expected Test Count */
+            expected_test_count: number;
+            /** Source Path */
+            source_path: string;
+            /**
+             * Test Command
+             * @default python -B -m unittest -v
+             * @constant
+             */
+            test_command: "python -B -m unittest -v";
+            /** Test Paths */
+            test_paths: string[];
+        };
+        /** CodeWorkflowRequest */
+        CodeWorkflowRequest: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            name: "code_change";
+            request: components["schemas"]["CodeChangeRequest"];
+        };
+        /**
          * CommandResultView
-         * @description 一次**执行状态修改**的命令结果引用（§6.2）。
+         * @description 一次**执行状态修改**的命令结果引用（§6.2，v0.6 起含后台任务）。
          *
          *     POST 完成时必须能凭它确认结局，不需要 SSE 才能知道命令成没成。`replayed=True` 表示
          *     这条结果是幂等台账给的（本次没有真的跑图）。
+         *
+         *     `status="running"` 只在 `jobs.background=true` 时出现（§17.2）：含义是"**命令已被接受、
+         *     任务已进入运行**"（`queued` 与执行中都映射到它），结局由任务索引 + Checkpoint 快照收敛，
+         *     凭 `job_id` 或重新拉快照都能拿到。默认路径（`background=false`）不会产生这个取值。
          */
         CommandResultView: {
             error?: components["schemas"]["ErrorView"] | null;
+            /** Job Id */
+            job_id?: string | null;
             /**
              * Operation
              * @enum {string}
              */
-            operation: "submit_message" | "resolve_approval";
+            operation: "submit_message" | "resolve_approval" | "cancel_task";
             /**
              * Replayed
              * @default false
@@ -931,7 +1032,7 @@ export interface components {
              * Status
              * @enum {string}
              */
-            status: "completed" | "awaiting_approval" | "failed";
+            status: "completed" | "awaiting_approval" | "failed" | "running" | "cancelled";
         };
         /**
          * ContextMeterView
@@ -1020,6 +1121,25 @@ export interface components {
             title?: string | null;
             /** Workspace Id */
             workspace_id?: string | null;
+        };
+        /** DelegatedResearchRequest */
+        DelegatedResearchRequest: {
+            /**
+             * Concurrency
+             * @default 1
+             */
+            concurrency: number;
+            /** Tasks */
+            tasks: components["schemas"]["ChildResearchTask"][];
+        };
+        /** DelegatedWorkflowRequest */
+        DelegatedWorkflowRequest: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            name: "delegated_research";
+            request: components["schemas"]["DelegatedResearchRequest"];
         };
         /** EmbeddingPreferences */
         EmbeddingPreferences: {
@@ -1129,7 +1249,7 @@ export interface components {
             /** Title */
             title: string;
         };
-        EventEnvelope: components["schemas"]["SessionSnapshotEvent"] | components["schemas"]["MessageStartedEvent"] | components["schemas"]["MessageDeltaEvent"] | components["schemas"]["MessageCompletedEvent"] | components["schemas"]["PlanUpdatedEvent"] | components["schemas"]["StepStartedEvent"] | components["schemas"]["StepCompletedEvent"] | components["schemas"]["ToolStartedEvent"] | components["schemas"]["ToolOutputEvent"] | components["schemas"]["ToolCompletedEvent"] | components["schemas"]["ApprovalRequiredEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["MemoryRecalledEvent"] | components["schemas"]["MemoryWrittenEvent"] | components["schemas"]["ModelCallStartedEvent"] | components["schemas"]["ModelUsageReportedEvent"] | components["schemas"]["ModelCallCompletedEvent"] | components["schemas"]["TaskCompletedEvent"] | components["schemas"]["TaskFailedEvent"];
+        EventEnvelope: components["schemas"]["SessionSnapshotEvent"] | components["schemas"]["MessageStartedEvent"] | components["schemas"]["MessageDeltaEvent"] | components["schemas"]["MessageCompletedEvent"] | components["schemas"]["PlanUpdatedEvent"] | components["schemas"]["StepStartedEvent"] | components["schemas"]["StepCompletedEvent"] | components["schemas"]["ToolStartedEvent"] | components["schemas"]["ToolOutputEvent"] | components["schemas"]["ToolCompletedEvent"] | components["schemas"]["ApprovalRequiredEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["MemoryRecalledEvent"] | components["schemas"]["MemoryWrittenEvent"] | components["schemas"]["ModelCallStartedEvent"] | components["schemas"]["ModelUsageReportedEvent"] | components["schemas"]["ModelCallCompletedEvent"] | components["schemas"]["TaskCompletedEvent"] | components["schemas"]["TaskFailedEvent"] | components["schemas"]["JobQueuedEvent"] | components["schemas"]["JobProgressEvent"] | components["schemas"]["JobWaitingEvent"] | components["schemas"]["JobCompletedEvent"] | components["schemas"]["TaskCancelledEvent"];
         /** ExecutionPreferences */
         ExecutionPreferences: {
             /** Max Retries Per Step */
@@ -1319,6 +1439,176 @@ export interface components {
              * @constant
              */
             storage: "sqlite";
+        };
+        /**
+         * JobCompletedEvent
+         * @description 任务进入终态 `completed` 或 `failed`；`payload.state` 区分两者，`detail` 带原因。
+         */
+        JobCompletedEvent: {
+            /** Event Id */
+            event_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            event_type: "job_completed";
+            /** Job Id */
+            job_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            payload: components["schemas"]["JobStatePayload"];
+            /**
+             * Run Id
+             * @default null
+             */
+            run_id: string | null;
+            /**
+             * Schema Version
+             * @default 1
+             */
+            schema_version: number;
+            /** Session Id */
+            session_id: string;
+            /** Stream Sequence */
+            stream_sequence: number;
+            /** Task Id */
+            task_id: string;
+        };
+        /**
+         * JobProgressEvent
+         * @description 任务开始实际执行（`running`，此时 `run_id` 应当已存在）。
+         */
+        JobProgressEvent: {
+            /** Event Id */
+            event_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            event_type: "job_progress";
+            /** Job Id */
+            job_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            payload: components["schemas"]["JobStatePayload"];
+            /**
+             * Run Id
+             * @default null
+             */
+            run_id: string | null;
+            /**
+             * Schema Version
+             * @default 1
+             */
+            schema_version: number;
+            /** Session Id */
+            session_id: string;
+            /** Stream Sequence */
+            stream_sequence: number;
+            /** Task Id */
+            task_id: string;
+        };
+        /**
+         * JobQueuedEvent
+         * @description 任务已登记、尚未取出执行（架构 §17.1 的 `queued`）。
+         */
+        JobQueuedEvent: {
+            /** Event Id */
+            event_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            event_type: "job_queued";
+            /** Job Id */
+            job_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            payload: components["schemas"]["JobStatePayload"];
+            /**
+             * Run Id
+             * @default null
+             */
+            run_id: string | null;
+            /**
+             * Schema Version
+             * @default 1
+             */
+            schema_version: number;
+            /** Session Id */
+            session_id: string;
+            /** Stream Sequence */
+            stream_sequence: number;
+            /** Task Id */
+            task_id: string;
+        };
+        /**
+         * JobStatePayload
+         * @description 任务状态事件（`job_queued` / `job_progress` / `job_waiting` / `job_completed`）的载荷（§17.3）。
+         *
+         *     `state` 是**任务索引里的状态**（闭集定义在叶子模块 `local_agent/job_state.py`，`persistence.job_store`
+         *     再导出），与事件类型
+         *     **一一对应**：`completed` / `failed` / `needs_review` 共用 `job_completed`——页面据此区分
+         *     "任务正常结束""任务失败"与"需要人工核对"（`detail` 带原因），而"取消"有独立类型
+         *     （`task_cancelled`），因为它是用户发起的。
+         */
+        JobStatePayload: {
+            /**
+             * Detail
+             * @default null
+             */
+            detail: string | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "queued" | "running" | "waiting_user" | "completed" | "failed" | "needs_review";
+        };
+        /**
+         * JobWaitingEvent
+         * @description 任务进入 `waiting_user`：等用户在页面上做决定（例如审批）。
+         */
+        JobWaitingEvent: {
+            /** Event Id */
+            event_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            event_type: "job_waiting";
+            /** Job Id */
+            job_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            payload: components["schemas"]["JobStatePayload"];
+            /**
+             * Run Id
+             * @default null
+             */
+            run_id: string | null;
+            /**
+             * Schema Version
+             * @default 1
+             */
+            schema_version: number;
+            /** Session Id */
+            session_id: string;
+            /** Stream Sequence */
+            stream_sequence: number;
+            /** Task Id */
+            task_id: string;
         };
         /** LongTermPreferences */
         LongTermPreferences: {
@@ -2243,6 +2533,25 @@ export interface components {
             /** Writable */
             writable: boolean;
         };
+        /**
+         * ReadonlyResearchRequest
+         * @description 只接受工作区内的相对 glob 与字面关键词，不接受控制流。
+         */
+        ReadonlyResearchRequest: {
+            /** Keywords */
+            keywords?: string[];
+            /** Pattern */
+            pattern: string;
+        };
+        /** ReadonlyWorkflowRequest */
+        ReadonlyWorkflowRequest: {
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            name: "readonly_research";
+            request: components["schemas"]["ReadonlyResearchRequest"];
+        };
         /** RecoveryRequest */
         RecoveryRequest: {
             /**
@@ -2470,6 +2779,7 @@ export interface components {
             /** Turn Usages */
             turn_usages?: components["schemas"]["TurnUsageView"][];
             usage?: components["schemas"]["TurnRecordView"] | null;
+            workflow?: components["schemas"]["WorkflowView"] | null;
             workspace: components["schemas"]["WorkspaceRef"];
         };
         /**
@@ -2640,6 +2950,76 @@ export interface components {
             parent_turn_id?: string | null;
             /** Text */
             text: string;
+            /** Workflow */
+            workflow?: (components["schemas"]["ReadonlyWorkflowRequest"] | components["schemas"]["CodeWorkflowRequest"] | components["schemas"]["DelegatedWorkflowRequest"]) | null;
+        };
+        /**
+         * TaskCancelledEvent
+         * @description 任务被取消（`cancelled`）。触发与进程终止见架构 §17.4（v0.6 T60）。
+         */
+        TaskCancelledEvent: {
+            /** Event Id */
+            event_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            event_type: "task_cancelled";
+            /** Job Id */
+            job_id: string;
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            payload: components["schemas"]["TaskCancelledPayload"];
+            /**
+             * Run Id
+             * @default null
+             */
+            run_id: string | null;
+            /**
+             * Schema Version
+             * @default 1
+             */
+            schema_version: number;
+            /** Session Id */
+            session_id: string;
+            /** Stream Sequence */
+            stream_sequence: number;
+            /** Task Id */
+            task_id: string;
+        };
+        /**
+         * TaskCancelledPayload
+         * @description 任务被取消（§17.3）。`detail` 说明是谁、因为什么取消的。
+         */
+        TaskCancelledPayload: {
+            /**
+             * Detail
+             * @default null
+             */
+            detail: string | null;
+        };
+        /**
+         * TaskCenterView
+         * @description 任务中心的一页（架构 §17.6）。
+         *
+         *     `counts` **覆盖全部任务**（不只 `tasks` 里被 `limit` 截断的那些），因此页面上的筛选计数是准的；
+         *     键**恰好**是任务状态闭集（`local_agent/job_state.py` 的 `JOB_STATES`），没有的状态是 0 而不是
+         *     缺键——这条由服务端填充 + 测试守住（`dict[str, int]` 而不是 `Literal` 键：闭集只有一处来源，
+         *     这里再写一份字面量就是第二套）。
+         *     `pending_count` = `waiting_user` + `needs_review`：入口角标用它（为 0 时页面不显示角标）。
+         */
+        TaskCenterView: {
+            /** Counts */
+            counts: {
+                [key: string]: number;
+            };
+            /** Pending Count */
+            pending_count: number;
+            /** Tasks */
+            tasks: components["schemas"]["TaskView"][];
         };
         /** TaskCompletedEvent */
         TaskCompletedEvent: {
@@ -2714,6 +3094,42 @@ export interface components {
         TaskRef: {
             /** Run Id */
             run_id: string;
+        };
+        /**
+         * TaskView
+         * @description 任务中心里的一行（架构 §17.6，v0.6 T62）。
+         *
+         *     **字段门槛**（§15.8）：不含 `run_id` / `thread_id` / `request_id` / 动作指纹 / 工具名 / 诊断号 /
+         *     内部路径。`task_id` 是**稳定引用**（列表键与动作参数），页面**不展示**它——与 `session_id` /
+         *     `approval_id` 同一口径。
+         *
+         *     **没有"在等什么"字段**：它是 `state` 的函数（§17.6 的闭集表），由页面按状态推导。服务端不猜，
+         *     也不需要因此去读会话的 Checkpoint。
+         */
+        TaskView: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Detail */
+            detail?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Session Id */
+            session_id: string;
+            /** Session Title */
+            session_title: string;
+            /** Started At */
+            started_at?: string | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "queued" | "running" | "waiting_user" | "completed" | "failed" | "cancelled" | "needs_review";
+            /** Task Id */
+            task_id: string;
+            workspace: components["schemas"]["WorkspaceRef"];
         };
         /** ToolCompletedEvent */
         ToolCompletedEvent: {
@@ -3130,6 +3546,48 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /** WorkflowChildView */
+        WorkflowChildView: {
+            /** Child Id */
+            child_id: string;
+            /** Error */
+            error?: string | null;
+            /** Evidence Count */
+            evidence_count: number;
+            /** Scope */
+            scope: string;
+            /** Status */
+            status: string;
+        };
+        /**
+         * WorkflowView
+         * @description 同轮检查点的只读事实，不暴露模型输入或可执行规格。
+         */
+        WorkflowView: {
+            /** Children */
+            children?: components["schemas"]["WorkflowChildView"][];
+            /** Error */
+            error?: string | null;
+            /** Evidence Count */
+            evidence_count: number;
+            /** Model Calls */
+            model_calls: number;
+            /** Model Tokens Reserved */
+            model_tokens_reserved: number;
+            /**
+             * Name
+             * @enum {string}
+             */
+            name: "readonly_research" | "code_change" | "delegated_research";
+            /** Phase */
+            phase: string;
+            /** Run Id */
+            run_id: string;
+            /** Steps */
+            steps: number;
+            /** Tool Calls */
+            tool_calls: number;
         };
         /**
          * WorkspaceRef
@@ -4163,6 +4621,50 @@ export interface operations {
             };
         };
     };
+    cancel_task_api_sessions__session_id__cancel_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CancelTaskRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandResultView"];
+                };
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     conversation_map_api_sessions__session_id__conversation_map_get: {
         parameters: {
             query?: {
@@ -4576,6 +5078,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_tasks_api_tasks_get: {
+        parameters: {
+            query?: {
+                workspace_id?: string | null;
+                include_finished?: boolean;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TaskCenterView"];
                 };
             };
             /** @description Validation Error */

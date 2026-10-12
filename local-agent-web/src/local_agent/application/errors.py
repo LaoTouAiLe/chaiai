@@ -148,7 +148,7 @@ _RETRYABLE: Final[frozenset[str]] = frozenset(
 
 #: 条件说明。重试条件不是"现在就能重试"，页面按此决定是否显示按钮与如何措辞。
 _RETRY_CONDITION: Final[dict[str, str]] = {
-    SESSION_BUSY: "当前一轮结束后可原样重发；请求不会排队，也没有取消接口。",
+    SESSION_BUSY: "当前一轮结束，或取消并处理待审批/核对事项后可原样重发；请求不会排队。",
     IDEMPOTENCY_CONFLICT: "需要生成新的请求 id，或修正请求内容后重发。",
     RECOVERY_REQUIRED: "需要先人工核对上一次运行的记录，不能自动重试。",
     CONVERSATION_CONFLICT: "刷新会话地图并重新选择路径后，以新的请求提交；不能自动原样重试。",
@@ -348,7 +348,7 @@ def session_busy(*, session_id: str, request_id: str, occurred_at: datetime) -> 
             SESSION_BUSY,
             title="该会话已有正在运行的一轮",
             message="本次提交未被接受：同一会话同一时刻只允许一轮运行，请求不会排队。",
-            hint="等待当前一轮结束后再提交这条内容；v0.4 不公开取消接口，因此没有可以中止它的按钮。",
+            hint="等待当前一轮结束；也可在会话中取消任务并处理待审批或核对事项。取消不撤销已经发生的副作用。",
             diagnostic_id=diagnostic_id_for(SESSION_BUSY, session_id, request_id),
             occurred_at=occurred_at,
             source="session",

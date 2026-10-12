@@ -299,6 +299,22 @@
 .footerButton svg { flex-shrink: 0; }
 .sidebarCollapsed .footerButton { justify-content: center; padding: 0; }
 
+/* 「等你处理」角标（T62；§17.6）：需要人工核对的任务必须能被发现，用 warn 令牌保持与状态色一致。 */
+.footerBadge {
+  flex: 0 0 auto;
+  margin-left: auto;
+  min-width: 18px;
+  padding: 0 var(--law-space-xs);
+  text-align: center;
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  color: var(--law-state-warn-label);
+  border: 1px solid var(--law-state-warn-subtle);
+  border-radius: var(--law-radius-pill);
+}
+
+.sidebarCollapsed .footerBadge { margin-left: 0; }
+
 .managedRow { display: flex; align-items: center; min-width: 0; position: relative; }
 .managedRow > .session, .managedRow > .workspaceTitle { flex: 1; min-width: 0; }
 span.workspaceTitle { cursor: default; }

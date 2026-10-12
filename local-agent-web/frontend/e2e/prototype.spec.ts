@@ -570,3 +570,60 @@ test('the capability panel tail is fully readable after scrolling', async ({ pag
   await settle(page)
   await expect(page).toHaveScreenshot('capabilities-bottom.png')
 })
+
+/**
+ * v0.6 T62：任务中心（§17.6）。
+ *
+ * **必须钉住时钟**：面板要显示"已运行 X 分 Y 秒"与"多久以前结束"，两者都随当前时刻变化——
+ * 不钉时钟的基线每跑一次都不一样，而这里是逐像素比对（`maxDiffPixelRatio: 0`）。
+ * `page.clock.setFixedTime` 只冻结 `Date`、不动计时器，所以 `settle()` 的两个 rAF 照常执行。
+ *
+ * 这条用例**不进 `ALL_SCENARIOS`**：那个循环不钉时钟，只适合"内容不随时间变"的场景。
+ */
+test('prototype tasks', async ({ page }) => {
+  await page.clock.setFixedTime(new Date('2026-10-10T12:00:00Z'))
+  await page.goto('/?state=tasks')
+  await settle(page, 'tasks')
+
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  )
+  expect(overflow).toBeLessThanOrEqual(0)
+
+  await expect(page).toHaveScreenshot('tasks.png')
+})
+
+test('the task centre states where each task is, what it waits for and the next step', async ({
+  page,
+}) => {
+  await page.clock.setFixedTime(new Date('2026-10-10T12:00:00Z'))
+  await page.goto('/?state=tasks')
+  const dialog = page.getByRole('dialog', { name: '任务中心' })
+
+  // 七个状态各一行（§17.6 的闭集），状态名与"在等什么"都要看得见。
+  // `exact`：文本匹配默认是**子串**——"正在执行"也出现在"需要人工核对"那行的原因里。
+  for (const label of ['排队中', '正在执行', '在等你的决定', '已完成', '失败', '已取消', '需要人工核对']) {
+    await expect(dialog.getByText(label, { exact: true }).first()).toBeVisible()
+  }
+  for (const waiting of ['在等空闲执行位', '没有在等外部输入', '在等你的决定（审批）', '已结束，等你核对']) {
+    await expect(dialog.getByText(waiting, { exact: true }).first()).toBeVisible()
+  }
+
+  // 时长：运行中按当前时刻算（2 分 30 秒），已结束的是总时长（1 分 30 秒）
+  await expect(dialog.getByText(/已运行 2 分 30 秒/).first()).toBeVisible()
+  await expect(dialog.getByText(/已运行 1 分 30 秒/).first()).toBeVisible()
+  // 没有起始时间的那一行**不编一个假的时长**（这一行整段文本含"在等什么"，所以按子串匹配）
+  await expect(dialog.getByText('未记录起始时间').first()).toBeVisible()
+
+  // 恢复入口的文案与 §17.5 的三类判定一致：不自动重跑、取消不撤销
+  await expect(dialog.getByText(/不自动重跑：核对后重新提交就是新任务/).first()).toBeVisible()
+  // §17.6 要求**在跑的那一行也要写明"取消不撤销"**（那里正是用户要考虑取消的地方），
+  // 因此这条提示在"正在执行"与"已取消"两行各出现一次。
+  await expect(dialog.getByText(/取消不撤销已经发生的副作用/)).toHaveCount(2)
+  await expect(dialog.getByRole('button', { name: '打开会话核对' })).toBeVisible()
+
+  // 字段门槛（§15.8）：页面不出现内部标识
+  const text = await dialog.innerText()
+  expect(text).not.toContain('job-')
+  expect(text).not.toMatch(/[A-Za-z]:\\/)
+})

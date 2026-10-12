@@ -51,6 +51,20 @@ export interface SidebarActions {
    * 截图一字不变——新增的产品面不该悄悄改动已有基线。
    */
   onOpenCapabilities?: () => void
+  /**
+   * 打开「任务中心」面板（v0.6 T62；§17.6）。
+   *
+   * 与 `onOpenCapabilities` 同样**可选**：原型宿主不传，入口就不渲染，因此原型与视觉基线的
+   * DOM 与截图一字不变。
+   */
+  onOpenTasks?: () => void
+  /**
+   * "等你处理"的任务数（在等审批 + 需要人工核对）；为 0 或未传时不显示角标。
+   *
+   * 角标的作用是"**需要人工核对的任务必须能被发现**"（§17.6）——重启收口后没人知道任务停在
+   * 哪一步，那正是这一片要消灭的状态。
+   */
+  pendingTasks?: number
   /** 展开态与窄轨态共用的同一个动作：收起 / 展开是同一枚开关。 */
   onToggleCollapse: () => void
 }
@@ -261,6 +275,18 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
             <rect x="4" y="5" width="16" height="14" rx="2" /><path d="M8 10h8M8 14h5" />
           </svg>{collapsed ? null : <span>能力与档位</span>}
+        </button> : null}
+        {actions?.onOpenTasks ? <button type="button" className={styles.footerButton}
+          onClick={actions.onOpenTasks}
+          aria-label={(actions.pendingTasks ?? 0) > 0 ? `任务中心（${actions.pendingTasks} 个等你处理）` : '任务中心'}
+          title={collapsed ? '任务中心' : undefined}>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+            <path d="M4 7h16M4 12h16M4 17h9" /><circle cx="18" cy="17" r="2" />
+          </svg>
+          {collapsed ? null : <span>任务中心</span>}
+          {(actions.pendingTasks ?? 0) > 0 ? (
+            <span className={styles.footerBadge} aria-hidden="true">{actions.pendingTasks}</span>
+          ) : null}
         </button> : null}
         {actions?.onOpenDataCenter ? <button type="button" className={styles.footerButton} onClick={actions.onOpenDataCenter} aria-label="数据中台" title={collapsed ? '数据中台' : undefined}>
           <Doc size={18} />{collapsed ? null : <span>数据中台</span>}

@@ -103,6 +103,15 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
           reconcileFromServer()
           void queryClient.invalidateQueries({ queryKey: ['sessions'] })
           return
+        case 'job_queued':
+        case 'job_progress':
+        case 'job_waiting':
+        case 'job_completed':
+        case 'task_cancelled':
+          // v0.6 T62（§17.6）：任务状态变了 → 让任务中心**重读索引**，页面不在这里推导状态。
+          // 索引是任务状态的唯一出口，"任务到哪一步了"永远以它为准。
+          void queryClient.invalidateQueries({ queryKey: ['tasks'] })
+          return
         case 'plan_updated':
         case 'step_started':
         case 'step_completed':
@@ -123,6 +132,8 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
     const connect = async (): Promise<void> => {
       try {
         // 每次（重）连都先重建权威状态，再订阅：这是"断线先取快照"的落地位置。
+        // （任务列表不在这里重取：它有自己的兜底间隔，见 `queries.ts` 的 `useTasks`。
+        //  这里只做一件事，重连路径才不会有第二条"顺手刷新"的逻辑。）
         await refreshSnapshot()
         if (stopped) return
         setConnected(true)

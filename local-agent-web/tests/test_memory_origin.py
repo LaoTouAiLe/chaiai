@@ -18,12 +18,14 @@ import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from local_agent.config import LongTermMemoryConfig
 from local_agent.context import prompt_context
 from local_agent.exceptions import MemoryStoreError
+from local_agent.graph.nodes import _candidate_origin
 from local_agent.graph.state import MemoryCandidate
 from local_agent.memory import long_term, recall, writer
 from local_agent.memory.schemas import (
@@ -36,6 +38,11 @@ from local_agent.memory.schemas import (
 )
 from local_agent.reflection.memory_candidates import RejectedCandidate, plan_writes
 from local_agent.scope import SCOPE_PROJECT, project_id_for
+from local_agent.session_kind import (
+    SESSION_KIND_HEARTBEAT,
+    SESSION_KIND_INTERACTIVE,
+    SESSION_KIND_SCHEDULED,
+)
 
 NOW = datetime(2026, 10, 8, 12, 0, tzinfo=timezone.utc)
 
@@ -235,3 +242,70 @@ def test_render_memory_section_skips_non_injectable_sources() -> None:
     assert "本机事实甲" in text
     assert "网页内容乙" not in text
     assert "脚手架说明丙" not in text
+
+
+# ------------------------------------------------- 候选来源的三步优先级链（T57，B-03）
+
+
+def _origin_state(**overrides: Any) -> dict[str, Any]:
+    """``_candidate_origin`` 认得出的最小 State（只用到 ``session_kind`` 与 ``tool_results``）。"""
+    state: dict[str, Any] = {
+        "session_kind": SESSION_KIND_INTERACTIVE,
+        "run_id": "run-1",
+        "tool_results": [],
+    }
+    state.update(overrides)
+    return state
+
+
+def test_candidate_origin_is_owner_for_interactive_sessions() -> None:
+    """对照组：本机用户在页面上发起的会话，来源仍是 ``owner``（既有行为不变）。"""
+    assert _candidate_origin(_origin_state()) == ORIGIN_OWNER
+
+
+@pytest.mark.parametrize("kind", [SESSION_KIND_SCHEDULED, SESSION_KIND_HEARTBEAT])
+def test_candidate_origin_downgrades_non_interactive_sessions(kind: str) -> None:
+    """B-03：定时 / 心跳会话不产生**可自动注入**的持久记忆——落库为 ``system``。"""
+    assert _candidate_origin(_origin_state(session_kind=kind)) == ORIGIN_SYSTEM
+
+
+def test_candidate_origin_prefers_untrusted_over_session_kind() -> None:
+    """两个条件同时成立时取最保守的一侧：``untrusted`` 优先于 ``system``。"""
+    state = _origin_state(
+        session_kind=SESSION_KIND_SCHEDULED,
+        tool_results=[
+            {
+                "tool_name": "web_fetch",
+                "status": "ok",
+                "run_id": "run-1",
+                "tool_call_id": "call-1",
+            }
+        ],
+    )
+
+    assert _candidate_origin(state) == ORIGIN_UNTRUSTED
+
+
+def test_candidate_origin_treats_missing_kind_as_interactive() -> None:
+    """旧 Checkpoint 没有 ``session_kind``：按 ``interactive`` 处理，与聊天库 v7 的列默认值一致。"""
+    state = _origin_state()
+    state.pop("session_kind")
+
+    assert _candidate_origin(state) == ORIGIN_OWNER
+
+
+def test_candidate_origin_is_system_even_with_failed_web_call() -> None:
+    """被拒 / 失败的外部调用没有带进内容 → 不该升级成 ``untrusted``，但会话来源门仍成立。"""
+    state = _origin_state(
+        session_kind=SESSION_KIND_HEARTBEAT,
+        tool_results=[
+            {
+                "tool_name": "web_fetch",
+                "status": "error",
+                "run_id": "run-1",
+                "tool_call_id": "call-1",
+            }
+        ],
+    )
+
+    assert _candidate_origin(state) == ORIGIN_SYSTEM

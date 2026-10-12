@@ -69,7 +69,8 @@ def test_tool_character_budget_does_not_slide_when_model_window_has_room(
     assert [m.model_dump() for m in roomy.messages] == [m.model_dump() for m in messages]
     app_config.llm.context_window_tokens = 8_000
     pressured = nodes._prompt_window(state, context)
-    assert pressured.omitted_tool_steps > 0  # The existing pressure fallback is retained.
+    assert pressured.omitted_tool_steps == 0  # New loop uses recorded compaction, not transient omission.
+    assert pressured.tool_result_overrides
     legacy = nodes._prompt_window({**state, "agent_loop_version": 0}, context)
     assert legacy.omitted_tool_steps > 0
 
@@ -96,3 +97,38 @@ def test_memory_json_retries_tool_request_without_executing_it_or_changing_capab
     assert len(seen) == 2
     assert all(call[:len(prefix)] == prefix for call in seen)
     assert capabilities.structured_json_schema  # The role preference does not degrade the provider.
+
+
+def test_snapshot_stays_before_kept_tool_history_after_user_is_covered(tmp_path, app_config, model_factory):
+    from local_agent.context.token_budget import ContextBudget
+
+    app_config.memory.compression.enabled = True
+    context = _context(tmp_path, app_config, model_factory)
+    user = HumanMessage(content="调查", id="r:user")
+    state = {"agent_loop_version": 1, "run_id": "r", "run_user_message_id": "r:user",
+             "mode": "tool", "messages": [user], "conversation_summary": "已核对部分证据"}
+    frozen = nodes._runtime_snapshot(state, context)
+    state["runtime_context_snapshots"] = [frozen]
+    state["messages"] = [user, AIMessage(content="", tool_calls=[{
+        "name": "read_file", "id": "read", "args": {"path": "note.txt"}}]),
+        ToolMessage(content="old evidence", tool_call_id="read", name="read_file")]
+    state["context_budget"] = ContextBudget(context_window_tokens=1048576,
+        completion_reserve_tokens=512, prompt_budget_tokens=1048064,
+        estimated_prompt_tokens=1000, usage_ratio=0.01, trigger_ratio=0.8, triggered=True,
+        window_messages=2, total_messages=3, summary_chars=8, summary_covered_messages=1)
+    sent = nodes._main_conversation_prefix(state, context, frozen)
+    following = nodes._main_conversation_prefix({**state, "messages": [
+        *state["messages"], AIMessage(content="已核对")
+    ]}, context, frozen)
+    assert [m.model_dump() for m in following[:len(sent)]] == [m.model_dump() for m in sent]
+    assert sent[2].text == frozen.canonical_text
+    assert isinstance(sent[3], AIMessage)
+    assert isinstance(sent[4], ToolMessage)
+
+    next_turn = {**state, "run_id": "next", "run_user_message_id": "next:user",
+                 "messages": [*state["messages"], AIMessage(content="已核对"),
+                              HumanMessage(content="继续", id="next:user")]}
+    new_snapshot = nodes._runtime_snapshot(next_turn, context)
+    next_sent = nodes._main_conversation_prefix(next_turn, context, new_snapshot)
+    assert [m.model_dump() for m in next_sent[:len(sent)]] == [m.model_dump() for m in sent]
+    assert next_sent[-2].text == new_snapshot.canonical_text

@@ -3,7 +3,7 @@
 三条边界，改这个文件前先读：
 
 1. **SSRF 硬边界**：只允许 ``http`` / ``https``，目标不得指向本机或内网（环回、私有、链路本地、
-   保留、多播、未指定地址），并且**跟随重定向之后再校验一次**。本机 Agent 能访问 ``127.0.0.1`` 上的
+   保留、多播、未指定地址），并且**每次跟随重定向之前校验目标**，响应返回后再次校验。本机 Agent 能访问 ``127.0.0.1`` 上的
    一切服务，把任意 URL 交给它等于把内网交出去。
 2. **如实报告**：超时、DNS 失败、非文本类型、解析不出结果都如实说明；不编造结果，也不把失败伪装成
    "没有找到"。
@@ -20,13 +20,23 @@ import gzip
 import ipaddress
 import re
 import socket
+import ssl
 import zlib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from html import unescape
+from http.client import HTTPConnection, HTTPSConnection
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import (
+    HTTPHandler,
+    HTTPRedirectHandler,
+    HTTPSHandler,
+    ProxyHandler,
+    Request,
+    build_opener,
+)
 
 from langchain_core.tools import BaseTool, tool
 
@@ -186,6 +196,8 @@ def _reject_blocked_host(host: str, *, resolve: bool, resolver: Resolver | None)
             except ValueError:  # pragma: no cover - 解析器返回了非地址
                 continue
     blocked = sorted({str(address) for address in addresses if _is_blocked_address(address)})
+    if not addresses:
+        raise WebAccessError(f"域名没有可校验的地址：{host}")
     if blocked:
         raise WebAccessError(
             f"拒绝访问本机或内网地址：{'、'.join(blocked)}（{host}；防 SSRF）"
@@ -250,14 +262,86 @@ def parse_search_results(
     return hits
 
 
+class _CheckedRedirectHandler(HTTPRedirectHandler):
+    """在 urllib 发出下一跳请求之前检查目标，阻止公网到内网的跳转。"""
+
+    def redirect_request(
+        self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str,
+    ) -> Request | None:
+        return super().redirect_request(req, fp, code, msg, headers, check_url(newurl))
+
+
+def _connect_public(
+    address: tuple[str, int],
+    timeout: Any = None,
+    source_address: tuple[str, int] | None = None,
+) -> socket.socket:
+    """仅连接本次解析且已校验的数字 IP，不在 socket 建连时再次解析域名。"""
+    host, port = address
+    try:
+        candidates = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise WebAccessError(f"域名解析失败：{host}（{exc.strerror or exc}）") from exc
+    if not candidates:
+        raise WebAccessError(f"域名没有可校验的地址：{host}")
+    for _, _, _, _, sockaddr in candidates:
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError as exc:
+            raise WebAccessError(f"域名返回非法地址：{host}") from exc
+        if _is_blocked_address(ip):
+            raise WebAccessError(f"拒绝连接本机或内网地址：{ip}（{host}；防 SSRF）")
+    error: OSError | None = None
+    for family, kind, protocol, _, sockaddr in candidates:
+        handle = socket.socket(family, kind, protocol)
+        try:
+            if timeout is None or isinstance(timeout, (int, float)):
+                handle.settimeout(timeout)
+            if source_address is not None:
+                handle.bind(source_address)
+            handle.connect(sockaddr)
+            return handle
+        except OSError as exc:
+            handle.close()
+            error = exc
+    assert error is not None
+    raise error
+
+
+class _PinnedHTTPConnection(HTTPConnection):
+    source_address: tuple[str, int] | None
+
+    def connect(self) -> None:
+        self.sock = _connect_public((self.host, self.port), self.timeout, self.source_address)
+
+
+class _PinnedHTTPSConnection(HTTPSConnection, _PinnedHTTPConnection):
+    # HTTPSConnection.connect 先调用上面的 connect，再按原域名执行标准 TLS 包装。
+    pass
+
+
+class _PinnedHTTPHandler(HTTPHandler):
+    def http_open(self, request: Request) -> Any:
+        return self.do_open(_PinnedHTTPConnection, request)
+
+
+class _PinnedHTTPSHandler(HTTPSHandler):
+    def __init__(self) -> None:
+        self._ssl_context = ssl.create_default_context()
+        self._ssl_context.set_alpn_protocols(["http/1.1"])
+        super().__init__(context=self._ssl_context)
+
+    def https_open(self, request: Request) -> Any:
+        return self.do_open(_PinnedHTTPSConnection, request, context=self._ssl_context)
+
+
 def _default_transport(url: str, timeout: float, user_agent: str) -> WebResponse:
     """真实网络访问（stdlib，不引第三方依赖）。
 
-    重定向由 ``urlopen`` 自动跟随，因此**拿到响应后必须再校验一次最终地址**：否则一个公网 URL 可以
-    把我们重定向到 ``http://127.0.0.1:8000/``。
+    每一跳在发送请求前检查目标；响应返回后仍校验最终地址。公网 URL 不能借重定向访问内网。
     """
     request = Request(
-        url,
+        check_url(url),
         headers={
             "User-Agent": user_agent,
             "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
@@ -266,7 +350,10 @@ def _default_transport(url: str, timeout: float, user_agent: str) -> WebResponse
         },
     )
     try:
-        with urlopen(request, timeout=timeout) as response:
+        opener = build_opener(
+            ProxyHandler({}), _PinnedHTTPHandler(), _PinnedHTTPSHandler(), _CheckedRedirectHandler(),
+        )
+        with opener.open(request, timeout=timeout) as response:
             final_url = str(response.geturl())
             check_url(final_url)
             content_type = str(response.headers.get("Content-Type", ""))

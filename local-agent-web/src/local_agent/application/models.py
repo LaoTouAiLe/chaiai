@@ -27,6 +27,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from local_agent.application.errors import ErrorView
 from local_agent.capabilities import CapabilityReason
 
+# 只借**任务状态的类型别名**（叶子模块，与索引闭集同源）：契约模块不得依赖持久化层，见该模块
+# docstring 与 `tests/test_events.py::test_pure_contract_modules_do_not_import_runtime_layers`。
+from local_agent.job_state import JobState
+
 #: 契约版本。任何破坏性改名都要提升它，并在 API 层显式声明。
 SCHEMA_VERSION: Final[int] = 1
 
@@ -708,6 +712,29 @@ class FinalResultView(_Dto):
     evidence_references: list[str] = Field(default_factory=list)
 
 
+class WorkflowChildView(_Dto):
+    child_id: str
+    scope: str
+    status: str
+    evidence_count: int = Field(ge=0)
+    error: str | None = None
+
+
+class WorkflowView(_Dto):
+    """同轮检查点的只读事实，不暴露模型输入或可执行规格。"""
+
+    name: Literal["readonly_research", "code_change", "delegated_research"]
+    run_id: str
+    phase: str
+    steps: int = Field(ge=0)
+    tool_calls: int = Field(ge=0)
+    model_calls: int = Field(ge=0)
+    model_tokens_reserved: int = Field(ge=0)
+    evidence_count: int = Field(ge=0)
+    error: str | None = None
+    children: list[WorkflowChildView] = Field(default_factory=list)
+
+
 class ModelSelectionView(_Dto):
     """某个作用域**当前选中的连接**（默认或某个会话的下一轮模型）。
 
@@ -758,6 +785,7 @@ class SessionSnapshot(_Dto):
     context: ContextMeterView = Field(default_factory=ContextMeterView)
     runtime_context: RuntimeContextSnapshotView | None = Field(default=None, exclude=True)
     final_result: FinalResultView | None = None
+    workflow: WorkflowView | None = None
     created_at: datetime
 
     @field_validator("created_at")
@@ -821,14 +849,18 @@ class SessionSummaryView(_Dto):
         return _require_timezone(value)
 
 
-Operation = Literal["submit_message", "resolve_approval"]
+Operation = Literal["submit_message", "resolve_approval", "cancel_task"]
 
 
 class CommandResultView(_Dto):
-    """一次**执行状态修改**的命令结果引用（§6.2）。
+    """一次**执行状态修改**的命令结果引用（§6.2，v0.6 起含后台任务）。
 
     POST 完成时必须能凭它确认结局，不需要 SSE 才能知道命令成没成。`replayed=True` 表示
     这条结果是幂等台账给的（本次没有真的跑图）。
+
+    `status="running"` 只在 `jobs.background=true` 时出现（§17.2）：含义是"**命令已被接受、
+    任务已进入运行**"（`queued` 与执行中都映射到它），结局由任务索引 + Checkpoint 快照收敛，
+    凭 `job_id` 或重新拉快照都能拿到。默认路径（`background=false`）不会产生这个取值。
     """
 
     request_id: str = Field(min_length=1)
@@ -837,10 +869,56 @@ class CommandResultView(_Dto):
     run_id: str | None = None
     #: 稳定结果引用：本次命令对应的 Checkpoint 快照标识。
     snapshot_id: str = Field(min_length=1)
-    status: Literal["completed", "awaiting_approval", "failed"]
+    status: Literal["completed", "awaiting_approval", "failed", "running", "cancelled"]
     session_state: SessionState
     replayed: bool = False
+    #: 后台任务标识（§17.2）：只有 `jobs.background=true` 的提交带上它；其余为 `None`。
+    job_id: str | None = None
     error: ErrorView | None = None
+
+
+class TaskView(_Dto):
+    """任务中心里的一行（架构 §17.6，v0.6 T62）。
+
+    **字段门槛**（§15.8）：不含 `run_id` / `thread_id` / `request_id` / 动作指纹 / 工具名 / 诊断号 /
+    内部路径。`task_id` 是**稳定引用**（列表键与动作参数），页面**不展示**它——与 `session_id` /
+    `approval_id` 同一口径。
+
+    **没有"在等什么"字段**：它是 `state` 的函数（§17.6 的闭集表），由页面按状态推导。服务端不猜，
+    也不需要因此去读会话的 Checkpoint。
+    """
+
+    task_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    #: 会话标题：任务中心靠它让用户认出"这是哪个会话在跑"，而不是显示内部标识。
+    session_title: str
+    workspace: WorkspaceRef
+    state: JobState
+    #: 服务端写好的用户可读说明（失败 / 取消 / 需核对的原因）；没有就是 `None`。
+    detail: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    @field_validator("created_at", "started_at", "finished_at")
+    @classmethod
+    def _tz(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _require_timezone(value)
+
+
+class TaskCenterView(_Dto):
+    """任务中心的一页（架构 §17.6）。
+
+    `counts` **覆盖全部任务**（不只 `tasks` 里被 `limit` 截断的那些），因此页面上的筛选计数是准的；
+    键**恰好**是任务状态闭集（`local_agent/job_state.py` 的 `JOB_STATES`），没有的状态是 0 而不是
+    缺键——这条由服务端填充 + 测试守住（`dict[str, int]` 而不是 `Literal` 键：闭集只有一处来源，
+    这里再写一份字面量就是第二套）。
+    `pending_count` = `waiting_user` + `needs_review`：入口角标用它（为 0 时页面不显示角标）。
+    """
+
+    tasks: list[TaskView]
+    counts: dict[str, int]
+    pending_count: int
 
 
 def redact_values(values: Mapping[str, str], secrets: list[str]) -> dict[str, str]:

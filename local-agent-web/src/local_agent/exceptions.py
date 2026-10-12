@@ -23,6 +23,10 @@ class SessionStoreError(LocalAgentError):
     """会话索引操作被拒绝：会话不存在、名称为空或超长等。"""
 
 
+class JobStoreError(LocalAgentError):
+    """任务索引操作被拒绝：任务不存在、状态取值越界、改写终态等（架构 §17.1）。"""
+
+
 class MemoryStoreError(LocalAgentError):
     """记忆操作被拒绝：作用域无法确定、记忆层未启用、可选依赖缺失等。"""
 

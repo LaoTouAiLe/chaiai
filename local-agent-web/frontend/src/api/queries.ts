@@ -13,6 +13,7 @@ import {
   createSession,
   getCapabilities,
   getHealth,
+  getTasks,
   getMemoryPage,
   getUsagePage,
   getSessionSnapshot,
@@ -44,6 +45,26 @@ export const queryKeys = {
   snapshot: (sessionId: string) => ['snapshot', sessionId] as const,
   modelConnections: ['model-connections'] as const,
   capabilities: ['capabilities'] as const,
+  tasks: (workspaceId: string | null) => ['tasks', workspaceId] as const,
+}
+
+/**
+ * 任务中心（T62；§17.6）：只读索引，按当前工作区取。
+ *
+ * **即时更新走事件，不靠快轮询**：`useSessionStream` 收到 §17.3 的任务事件就失效这份查询
+ * （`job_queued` / `job_progress` / `job_waiting` / `job_completed` / `task_cancelled`）。
+ *
+ * 为什么还留一条 15 秒的兜底，它只管两种情况：① SSE 是**按会话订阅**的，页面只订阅当前打开的那个
+ * 会话，因此**别的会话**（`jobs.background=true` 时的后台任务）状态变化没有事件能到这个页面；
+ * ② 断线期间漏掉的事件不会重放（事件流没有持久游标，§15.6）。默认路径（`background=false`，任务就在
+ * 本页提交的那一轮里跑）由事件即时更新，兜底不会成为"主要机制"。
+ */
+export function useTasks(workspaceId: string | null) {
+  return useQuery({
+    queryKey: queryKeys.tasks(workspaceId),
+    queryFn: () => getTasks(workspaceId),
+    refetchInterval: 15000,
+  })
 }
 
 /**
@@ -195,7 +216,7 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
     mutationFn: async (request: { sessionId: string; text: string; context: SubmissionContext }) => {
       const existing = pending.current.get(request.sessionId)
       const text = request.text
-      const signature = JSON.stringify([text, request.context.parent_turn_id ?? null, request.context.expected_branch_id ?? null])
+      const signature = JSON.stringify([text, request.context.parent_turn_id ?? null, request.context.expected_branch_id ?? null, request.context.workflow ?? null])
       const same = existing?.signature === signature
       const requestId = same ? existing.id : newRequestId()
       const boundContext = same ? existing.context : request.context

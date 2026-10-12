@@ -97,6 +97,20 @@ export function durationLabel(elapsedMs: number | null | undefined): string {
   return `${(elapsedMs / 1000).toFixed(1)}s`
 }
 
+/**
+ * **已运行多久**的人读标签（秒 / 分秒 / 时分），运行中的计时器与任务中心共用一处格式。
+ *
+ * 与 `durationLabel` 的分工：那个是"一次工具调用花了多久"（毫秒/秒精度），这个是"这一轮跑了多久"
+ * （秒起步、要能读成"3 分 12 秒"）。负数按 0 处理：时钟回拨或时间戳在未来时不能显示 "-2 秒"。
+ */
+export function elapsedLabel(elapsedMs: number): string {
+  const seconds = Math.max(0, Math.floor(elapsedMs / 1_000))
+  if (seconds < 60) return `${seconds} 秒`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes} 分 ${seconds % 60} 秒`
+  return `${Math.floor(minutes / 60)} 时 ${minutes % 60} 分`
+}
+
 /** 参数：只搬**已脱敏**的键值对（契约保证这些值不含密钥），保持契约顺序。 */
 function parameterPairs(tool: ToolUse): readonly { name: string; value: string }[] {
   return Object.entries(tool.redacted_arguments ?? {}).map(([name, value]) => ({ name, value }))

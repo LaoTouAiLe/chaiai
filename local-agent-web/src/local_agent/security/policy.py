@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from local_agent.cancellation import CancellationToken
 from local_agent.config import (
     AppConfig,
     SecurityConfig,
@@ -39,6 +40,7 @@ from local_agent.security.path_guard import (
     protected_target_reason,
     resolve_target,
 )
+from local_agent.security.process_guard import ProcessRegistry
 from local_agent.security.shell_guard import prepare_shell
 
 #: 只读工具。
@@ -111,10 +113,20 @@ class SecurityPolicy:
         workspace: WorkspaceConfig,
         secret_values: tuple[str, ...] = (),
         external_policy: ExternalPathPolicy | None = None,
+        cancellation: CancellationToken | None = None,
+        allow_result_spill: bool = True,
     ) -> None:
         self.workspace_root = workspace_root
         self.security = security
         self.workspace = workspace
+        #: 本轮执行的取消信号（§17.4）：它让本方法成为"取消后不再启动工具调用"的**第二道门**。
+        #: 缺省 `None` 表示这次运行不参与取消（CLI / 测试的轻量路径、以及 v0.5 之前的行为）。
+        self.cancellation = cancellation
+        #: T67 子策略禁止只读检索工具的显式落盘；不是模型可变参数或用户配置。
+        self.allow_result_spill = allow_result_spill
+        #: 本轮在跑的子进程登记表（§17.4 第二片）：取消时按**进程树**终止（Windows `taskkill /F /T`、
+        #: POSIX `killpg`）。它与令牌绑定，因此"取消"与"已启动进程的终止"是同一次动作的两半。
+        self.processes = ProcessRegistry(cancellation)
         #: 工作区外路径的档位与逐条授权（T38；架构 §1.5）。界面上的档位存在设置库里，
         #: 由应用层解析后传进来；缺省取 ``config.yaml`` 的出厂默认。放开不等于关闭安全校验：
         #: 越界判定、受保护目标、外部 cwd 强制审批与四项硬约束都照旧生效。
@@ -133,6 +145,8 @@ class SecurityPolicy:
         workspace_root: Path,
         environ: Mapping[str, str] | None = None,
         external_policy: ExternalPathPolicy | None = None,
+        cancellation: CancellationToken | None = None,
+        allow_result_spill: bool = True,
     ) -> SecurityPolicy:
         """按配置构造策略；密钥值从环境变量读取，仅用于输出脱敏。
 
@@ -142,6 +156,7 @@ class SecurityPolicy:
             environ: 环境变量映射，默认取 ``os.environ``。
             external_policy: 外部路径档位与授权。界面上的档位可在设置库里被改，应用层解析后
                 从这里传进来；给 ``None`` 时取 ``config.yaml`` 的出厂默认。
+            cancellation: 本轮执行的取消信号（§17.4）；``None`` 表示这次运行不参与取消。
 
         Returns:
             构造好的策略对象。外部档位只是放开"显式绝对路径的受控外部访问"（架构 §1.5），
@@ -166,9 +181,16 @@ class SecurityPolicy:
             workspace=app_config.workspace,
             secret_values=secret_values,
             external_policy=external_policy,
+            cancellation=cancellation,
+            allow_result_spill=allow_result_spill,
         )
 
     # ------------------------------------------------------------------ 路径
+
+    def require_result_spill(self) -> None:
+        """检索工具自己的第二道门：子策略不能借 save_full 写文件。"""
+        if not self.allow_result_spill:
+            raise SecurityError("当前策略禁止保存检索结果文件")
 
     def resolve_target(self, path: str) -> ResolvedTarget:
         """解析路径并给出访问级别（目标可以不存在）。判定与执行共用这一个入口。
@@ -251,9 +273,19 @@ class SecurityPolicy:
         未接入或未列入放行清单的工具一律拒绝（失败闭合），不做"默认放行"。
         """
         args = dict(arguments or {})
+        if self.cancellation is not None and self.cancellation.cancelled:
+            # 取消是安全 / 审批门的**第一条判定**（§17.4）：用的就是本方法本来就有的"拒绝"出口，
+            # 不新增旁路。已经开始的工具调用不在这里处理（终止属 T60 的第二片，§17.4 明写不承诺）。
+            return SafetyDecision(
+                allowed=False,
+                requires_approval=False,
+                reason=self.cancellation.refusal_reason(),
+            )
         if tool_name in CONTROL_TOOLS:
             return SafetyDecision(allowed=True, requires_approval=False, reason="当前任务计划更新")
         if tool_name in READ_ONLY_TOOLS:
+            if tool_name in {"grep", "glob"} and args.get("save_full") and not self.allow_result_spill:
+                return SafetyDecision(False, False, "当前策略禁止保存检索结果文件")
             return SafetyDecision(allowed=True, requires_approval=False, reason="只读工具")
         if tool_name == "edit_file":
             return self._classify_edit(args)

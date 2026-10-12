@@ -29,6 +29,7 @@
 任务结论只按当前项目）过滤后，用 ``confidence × importance`` 排序；任务结论没有重要度字段，
 按**有效重要度 1.0** 处理（分数就等于 ``confidence``）。
 ``memory.long_term`` 的 ``confidence_threshold`` / ``importance_threshold`` **只做召回过滤**，
+事实同时检查置信度与有效重要度；任务结论仅检查置信度，不受重要度阈值限制。
 不影响写入，也不参与冲突裁决。
 
 **自动老化在召回时实时生效**（T18 裁定）：``aging_enabled=true`` 时，超过 ``forget_after_days``

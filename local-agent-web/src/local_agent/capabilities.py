@@ -21,6 +21,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+
+def readonly_child_capabilities(parent: tuple[str, ...]) -> tuple[str, ...]:
+    """T67 只收窄父有效权限，保持其固定顺序。"""
+    return tuple(capability for capability in parent if capability in {"files_read", "code_search"})
+
 #: 能力闭集 → 该能力的工具名（**顺序即绑定顺序**）。
 #:
 #: 新增工具时必须同时登记能力归属：漏登记会在构造注册表时失败（见
@@ -309,13 +314,20 @@ def untrusted_tool_names() -> tuple[str, ...]:
     return tuple(names)
 
 
-def is_visible(mode: str, capabilities: Sequence[str] | None, name: str) -> bool:
+def is_visible(
+    mode: str, capabilities: Sequence[str] | None, name: str, *, cancelled: bool = False
+) -> bool:
     """``name`` 是否可见（=会被发给模型）。
 
     **可见性是执行侧的前置条件**（架构 §6.9、§16.1）：安全门与执行节点都必须用它做拦截，
     否则"没绑定给模型"就只是"没告诉它"，模型自己报出名字照样能跑——2026-10-08 的真实基线
     实证过一次：``reviewer`` 档（只读）照提示词里的 ``write_file`` 说明发起调用，文件真的被创建了。
+
+    ``cancelled=True`` 时**一律不可见**（架构 §17.4）：取消就是"这一轮没有任何可用能力"，
+    判定写在这里而不是各节点各写一遍——"取消后不再启动新的工具调用"必须挂在**同一道门**上。
     """
+    if cancelled:
+        return False
     return name in tool_names_for(mode, capabilities)
 
 

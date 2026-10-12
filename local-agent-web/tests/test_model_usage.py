@@ -17,6 +17,8 @@ from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, SystemMessage
+from langchain_core.tools import StructuredTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from local_agent.application import projection as proj
 from local_agent.application import service as app_service
@@ -319,6 +321,21 @@ def test_tools_schema_fingerprint_is_deterministic_and_absent_without_tools() ->
     assert tools_fingerprint(tools) == tools_fingerprint(list(tools))
     assert tools_fingerprint([]) is None
     assert tools_fingerprint(None) is None
+
+
+def test_tool_fingerprint_detects_parameter_schema_changes() -> None:
+    """同名同说明的工具变更参数类型，缓存观测也必须记录变化。"""
+    def text_lookup(value: str) -> str:
+        return value
+
+    def integer_lookup(value: int) -> str:
+        return str(value)
+
+    before = StructuredTool.from_function(text_lookup, name="lookup", description="查询")
+    after = StructuredTool.from_function(integer_lookup, name="lookup", description="查询")
+    assert convert_to_openai_tool(before) != convert_to_openai_tool(after)
+    assert tools_fingerprint([before]) != tools_fingerprint([after])
+    assert tools_fingerprint([before]) == tools_fingerprint([convert_to_openai_tool(before)])
 
 
 def test_request_fingerprints_split_system_history_and_current_messages() -> None:

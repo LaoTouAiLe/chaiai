@@ -28,6 +28,7 @@ from local_agent.api.schemas import (
     PATH_MAX_CHARS,
     ApprovalDecisionRequest,
     ArrangeBranchRequest,
+    CancelTaskRequest,
     CreateSessionRequest,
     ErrorResponse,
     ExternalPathGrantRequest,
@@ -56,6 +57,7 @@ from local_agent.application.models import (
     PermissionsView,
     SessionSnapshot,
     SessionSummaryView,
+    TaskCenterView,
     WorkspaceRef,
 )
 from local_agent.exceptions import SessionStoreError
@@ -303,9 +305,33 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     def end_interrupted_request(session_id: str, payload: RecoveryRequest) -> SessionSnapshot:
         return service.end_interrupted_request(session_id, payload.request_id, payload.expected_snapshot_id)
 
+    @router.post("/sessions/{session_id}/cancel", response_model=CommandResultView, responses=_NOT_FOUND)
+    def cancel_task(session_id: str, payload: CancelTaskRequest) -> CommandResultView:
+        """取消在跑的任务（§17.4）：**幂等**，没有可取消的任务时返回当时的结局。"""
+        return service.cancel_task(session_id, payload.reason)
+
     @router.post("/sessions/{session_id}/archive", response_model=SessionSummaryView, responses=_STATE_CONFLICT)
     def archive_session(session_id: str) -> SessionSummaryView:
         return service.archive_session(session_id)
+
+    # ---- 任务中心（T62；§17.6）--------------------------------------------------
+
+    @router.get("/tasks", response_model=TaskCenterView,
+                summary="任务中心（只读索引，不读会话 Checkpoint）")
+    def list_tasks(
+        workspace_id: str | None = Query(default=None, min_length=1, max_length=128),
+        include_finished: bool = Query(default=True),
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> TaskCenterView:
+        """当前工作区的任务列表：状态、已运行时长与"在等什么"。
+
+        **只读**，且字段全部由任务索引 + 会话索引推出（§17.6）：不读任何会话的 Checkpoint，
+        因此"任务在等什么"不可能与真源不一致。页面**不展示** `task_id`（它是稳定引用，只作列表键
+        与动作参数，与 `session_id` 同一口径）。
+        """
+        return service.list_tasks(
+            workspace_id=workspace_id, include_finished=include_finished, limit=limit
+        )
 
     @router.post("/sessions/{session_id}/restore", response_model=SessionSummaryView, responses=_NOT_FOUND)
     def restore_session(session_id: str) -> SessionSummaryView:
@@ -343,6 +369,7 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     def submit_message(session_id: str, payload: SubmitMessageRequest) -> CommandResultView:
         """同步跑完这一轮，返回**稳定的命令结果引用**：结局不依赖 SSE（§15.3）。"""
         return service.submit_message(session_id, payload.text, payload.client_request_id,
+                                      workflow=payload.workflow,
                                       parent_turn_id=payload.parent_turn_id,
                                       expected_branch_id=payload.expected_branch_id,
                                       expected_snapshot_id=payload.expected_snapshot_id)

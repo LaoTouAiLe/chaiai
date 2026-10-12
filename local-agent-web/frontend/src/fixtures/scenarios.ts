@@ -1424,6 +1424,119 @@ export const sidebarCollapsedScenario: ConversationScenario = {
   sidebarCollapsed: true,
 }
 
+/**
+ * v0.6 T62：任务中心面板（契约 §17.6）。
+ *
+ * 这条基线要证的不是"面板好看"，而是"**任务到哪一步了、在等什么、能做什么**"三件事说得清：
+ * 所以 fixture 让**七个状态各出现一行**（排队 / 正在执行 / 在等你的决定 / 已完成 / 失败 / 已取消 /
+ * 需要人工核对），其中"需要人工核对"那一行必须带上"可能已部分执行、可能仍有残留进程"与
+ * "不自动重跑"——重启收口之后最容易让人误会的就是这两句。
+ *
+ * 时间戳是相对固定时刻 `2026-10-10T12:00:00Z` 写的，因此截图用例会**钉住时钟**
+ * （`page.clock.setFixedTime`）：否则"已运行 X 分 Y 秒"每跑一次都不同，基线必然是花的。
+ *
+ * 文案逐字来自 §17.6 的闭集表与 `tasks/adapters.ts` 的映射，前端不在这里自造措辞：
+ * 那份映射由 `tasks/adapters.test.ts` 守着，改文案要两边一起改。
+ */
+export const tasksScenario: ConversationScenario = {
+  id: 'tasks',
+  sessionId: 's-shell',
+  purpose: '任务中心面板：七个任务状态 + 已运行时长 + "在等什么" + 恢复入口文案',
+  session: shellScenario.session,
+  messages: shellScenario.messages,
+  plan: shellScenario.plan,
+  stats: shellScenario.stats,
+  context: shellScenario.context,
+  takeover: { kind: 'none' },
+  settings: null,
+  modelMenu: null,
+  tasks: {
+    tasks: [
+      {
+        taskId: 'job-running',
+        sessionId: 's-running',
+        sessionTitle: '重构检索适配层',
+        state: 'running',
+        detail: null,
+        createdAt: '2026-10-10T11:57:00Z',
+        startedAt: '2026-10-10T11:57:30Z',
+        finishedAt: null,
+      },
+      {
+        taskId: 'job-waiting',
+        sessionId: 's-waiting',
+        sessionTitle: '删除临时目录',
+        state: 'waiting_user',
+        detail: '等待你批准删除 delete-me/（递归删除需要二次确认）。',
+        createdAt: '2026-10-10T11:55:00Z',
+        startedAt: '2026-10-10T11:55:10Z',
+        finishedAt: null,
+      },
+      {
+        taskId: 'job-review',
+        sessionId: 's-review',
+        sessionTitle: '批量改名脚本',
+        state: 'needs_review',
+        detail:
+          '服务重启时这个任务正在执行，无法证明它跑到哪一步：可能已部分执行（已写出的内容不会回滚）、可能仍有残留进程。不会自动重跑，请人工核对后重新提交。',
+        createdAt: '2026-10-10T11:30:00Z',
+        startedAt: '2026-10-10T11:30:05Z',
+        finishedAt: '2026-10-10T11:41:00Z',
+      },
+      {
+        taskId: 'job-queued',
+        sessionId: 's-queued',
+        sessionTitle: '整理依赖清单',
+        state: 'queued',
+        detail: null,
+        createdAt: '2026-10-10T11:59:30Z',
+        startedAt: null,
+        finishedAt: null,
+      },
+      {
+        taskId: 'job-completed',
+        sessionId: 's-completed',
+        sessionTitle: '给 README 补快速开始',
+        state: 'completed',
+        detail: null,
+        createdAt: '2026-10-10T11:20:00Z',
+        startedAt: '2026-10-10T11:20:02Z',
+        finishedAt: '2026-10-10T11:21:32Z',
+      },
+      {
+        taskId: 'job-cancelled',
+        sessionId: 's-cancelled',
+        sessionTitle: '跑全量测试',
+        state: 'cancelled',
+        detail: '用户取消',
+        createdAt: '2026-10-10T11:10:00Z',
+        startedAt: '2026-10-10T11:10:01Z',
+        finishedAt: '2026-10-10T11:12:40Z',
+      },
+      {
+        taskId: 'job-failed',
+        sessionId: 's-failed',
+        sessionTitle: '检查端点连通性',
+        state: 'failed',
+        detail: '这一轮在执行前就被拒绝（模型连接不可用）。',
+        createdAt: '2026-10-10T11:00:00Z',
+        startedAt: '2026-10-10T11:00:01Z',
+        finishedAt: '2026-10-10T11:00:03Z',
+      },
+    ],
+    counts: {
+      queued: 1,
+      running: 1,
+      waiting_user: 1,
+      completed: 1,
+      failed: 1,
+      cancelled: 1,
+      needs_review: 1,
+    },
+    pendingCount: 2,
+  },
+}
+
 const sessionBusy: ErrorNoticeView = {
   code: 'SESSION_BUSY',
   category: 'system',
@@ -1554,6 +1667,7 @@ export const scenarios: readonly ConversationScenario[] = [
   loadingHistoryScenario,
   meterOpenScenario,
   capabilitiesScenario,
+  tasksScenario,
   sidebarCollapsedScenario,
   errorCodesScenario,
 ]

@@ -37,7 +37,8 @@ def build_plan_tools() -> list[BaseTool]:
         """更新当前任务计划（不是文件操作）。提交完整清单，最多五步，最多一步 in_progress。
 
         用 pending / in_progress / completed / blocked / skipped 表达进度。
-        只有已经看到结果并确认目标达成的步骤才能 completed，不能提前完成同批尚未执行的工具。
+        只有已经看到结果并确认目标达成的步骤才能 completed。
+        每次带新 completed 的更新必须单独调用，不与任何其它工具同批；成功后再发下一批工具。
         已完成步骤必须保留；调整计划时解释原因，任务受阻时用 blocked；任务全部做完才交付最终回答。
         """
         return PlanUpdate.model_validate({"plan": plan, "explanation": explanation}).model_dump_json()

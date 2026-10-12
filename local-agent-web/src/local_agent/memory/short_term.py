@@ -29,23 +29,21 @@ Checkpoint 里的 ``messages`` 是审计与恢复用的原始记录，**不因�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 
-#: 压中段时，工具结果保留的**头部**字符数。
-#:
-#: 2026-09-30 由 4096 下调到 3072：压完的**输出**大小约等于「头 + 尾 + 标记」，与阈值无关，
-#: 所以总占用由这两个常量决定。实测一次真实对话读到 26 条工具结果，按 4096+1024（约 5.2k/条）
-#: 合计约 135k 字符，**超过了 120k 的窗口预算**，于是"安全网"整步省略触发——它重写窗口中段，
-#: 供应商前缀缓存整段失效：紧接两次调用的缓存读从 48,512 **塌到 3,456**，单这一次就多花约 9 万
-#: 未命中 token（相当于那次提问全部未命中的 79%）。降到这里后 26 条约 100k，留出余量。
+from local_agent.context.token_budget import estimate_messages_tokens
+from local_agent.memory.tool_output import project_file_tool_output
+
+#: 压力阶段的头部字符预算；沿用已有配置口径，不以首次出站裁剪换缓存比例。
 TOOL_RESULT_HEAD_CHARS = 3072
-#: 压中段时，工具结果保留的**尾部**字符数（对标 dsh 的 ``tailChars``，按同一比例下调）。
+#: 压中段时保留的尾部字符预算；文件投影在该预算内按行保留。
 TOOL_RESULT_TAIL_CHARS = 768
 #: 超过这个长度的**正文字段**才值得压（对标 dsh 的 ``thresholdChars``）。
 TOOL_RESULT_SQUEEZE_CHARS = 8192
@@ -75,6 +73,8 @@ class PromptWindow:
     omitted_tool_steps: int = 0
     #: 被整步省略的**原始**消息条数（不含代替它们的占位说明）。
     omitted_messages: int = 0
+    #: 本次压力阶段新增的实际替换正文，由压缩节点保存后跨轮重放。
+    tool_result_overrides: dict[str, str] = field(default_factory=dict)
 
     @property
     def dropped_messages(self) -> int:
@@ -97,6 +97,9 @@ def select_prompt_window(
     tool_result_keep_chars: int = 0,
     covered_messages: int = 0,
     prune_tool_steps: bool = True,
+    prune_tool_results: bool = False,
+    tool_output_overrides: Mapping[str, str] | None = None,
+    retain_tokens: int = 0,
 ) -> PromptWindow:
     """选出本轮送模型的消息窗口。
 
@@ -106,6 +109,9 @@ def select_prompt_window(
         max_messages: ``memory.short_term.prompt_window_messages``，窗口条数上限。
         preserve_recent_turns: ``memory.compression.preserve_recent_turns``，至少保留的最近轮次；
             小于等于 0 表示不按轮次保底（只按条数裁剪）。
+        retain_tokens: ``memory.compression.retain_ratio × llm.context_window_tokens`` 的 token
+            预算；大于 0 时把 ``preserve_recent_turns`` 收紧成"token 装得下的最近轮数"（下限 1 轮），
+            使保留下限与窗口联动。``0`` 表示不做联动，即改动前的行为。
         preserve_recent_tool_steps: ``memory.compression.preserve_recent_tool_steps``，窗口里**至少**
             保留的**最近完整工具步**数量（下限）；更早的工具步按预算省略
             （见 :func:`_omit_older_tool_steps`）。**默认 ``-1`` 表示不裁剪**（安全默认）；
@@ -113,9 +119,9 @@ def select_prompt_window(
         preserve_recent_tool_step_chars: ``memory.compression.tool_step_budget_chars``，工具步内容的
             **字符预算**：从最新一步往回累计，超预算的更早步骤才整步省略。``0`` 表示不按预算
             多留（退化成只按 ``preserve_recent_tool_steps`` 条数省略，即 2026-09-30 之前的行为）。
-        tool_result_keep_chars: ``memory.compression.tool_result_keep_chars``，**单条工具结果**的字符
-            阈值：超过它的结果**无条件**压成「头 + 中段标记 + 尾」（见
-            :func:`_squeeze_oversized_results`）。``0`` 表示不压。
+        tool_result_keep_chars: 压力阶段的单条正文阈值，``0`` 禁止正文裁剪。
+        prune_tool_results: 调用方已确认上下文压力达标时才允许新裁剪。
+        tool_output_overrides: 已保存的模型正文替换；即使本次不再有压力也持续重放。
         covered_messages: 已经被会话摘要覆盖的消息条数
             （``context_budget.summary_covered_messages``）。这些消息**不再进窗口**——摘要已经
             代表它们（架构 §10.5 第 5 条）；不排除的话每轮都会重发同一批历史，压缩反而让
@@ -128,16 +134,21 @@ def select_prompt_window(
     total = len(items)
     if not enabled or total == 0:
         return PromptWindow(messages=items, total_messages=total)
-    # 超阈值的工具结果**无条件**压中段（2026-09-30，对标 dsh 的按条阈值裁剪器）。
-    # 放在切片之前：整条序列都压，于是左边被摘要覆盖的那段、以及后面的预算计算，看到的都是压过的
-    # 尺寸——按预算触发时这一步根本没机会跑（实测窗口才 45k token 就远没到 80k 的线）。
-    squeezed = _squeeze_oversized_results(items, tool_result_keep_chars)
-    if squeezed is not None:
-        items = squeezed
+    # 先重放明确保存的压力替换；正常读取只添加行号，不预先删除证据。
+    items, result_overrides = project_tool_messages(
+        items, tool_result_keep_chars if prune_tool_results else 0,
+        overrides=tool_output_overrides,
+    )
     floor = max(0, min(int(covered_messages), total))
     start = max(floor, total - max(1, int(max_messages)))
     if preserve_recent_turns > 0:
-        start = max(floor, min(start, recent_turns_start(items, preserve_recent_turns)))
+        # 保留下限与窗口联动：先按 token 预算收紧轮数，再取该轮数的起点。
+        # **必须用原始 ``messages``**（不是投影后的 ``items``）：摘要边界（compression_node）
+        # 也用同一份原始序列做同样的计算，否则窗口与摘要的边界会漂移。
+        turns = turns_fitting_tokens(
+            messages, max_turns=preserve_recent_turns, retain_tokens=retain_tokens
+        )
+        start = max(floor, min(start, recent_turns_start(items, turns)))
     start = _align_to_turn_start(items, start, floor=floor)
     window, omitted_steps, omitted_messages = (
         _omit_older_tool_steps(
@@ -151,6 +162,7 @@ def select_prompt_window(
         covered_messages=floor,
         omitted_tool_steps=omitted_steps,
         omitted_messages=omitted_messages,
+        tool_result_overrides=result_overrides,
     )
 
 
@@ -174,6 +186,43 @@ def recent_turns_start(messages: Sequence[AnyMessage], turns: int) -> int:
     if not starts:
         return 0
     return starts[max(0, len(starts) - turns)]
+
+
+def turns_fitting_tokens(
+    messages: Sequence[AnyMessage], *, max_turns: int, retain_tokens: int
+) -> int:
+    """把 ``max_turns`` 按 token 预算收紧后的**实际保留轮数**（下限 1 轮）。
+
+    起因：``preserve_recent_turns`` 是硬编码条数，窗口很小时"至少保留 8 轮"会恒等于"整段历史
+    都留下"——保留下限大于窗口，压缩因此**触发也压不动**，且没有任何可见信号。这里把它与窗口
+    联动：从**最新**一轮往回累计 token，装得下就继续留，装不下就在那里停住。
+
+    ``retain_tokens <= 0`` 时不做联动，直接返回 ``max_turns``（即改动前的行为）。
+    最近一轮**无条件保留**：即使它单独就超过预算，也至少留 1 轮——否则窗口会把当前问题也裁掉。
+
+    ``compression_node`` 与 :func:`select_prompt_window` 都用它，因此窗口与摘要边界仍共用同一个
+    结果（用**同一份原始消息序列**调用）。
+    """
+    if max_turns <= 0:
+        return 0
+    if retain_tokens <= 0:
+        return max_turns
+    starts = turn_starts(messages)
+    if not starts:
+        return 1
+    used = 0
+    kept = 0
+    for index in range(len(starts) - 1, -1, -1):
+        begin = starts[index]
+        end = starts[index + 1] if index + 1 < len(starts) else len(messages)
+        cost = estimate_messages_tokens(messages[begin:end])
+        if kept >= 1 and used + cost > retain_tokens:
+            break
+        used += cost
+        kept += 1
+        if kept >= max_turns:
+            break
+    return max(1, kept)
 
 
 def _align_to_turn_start(
@@ -298,57 +347,84 @@ def _first_kept_by_budget(
     *,
     keep: int,
     max_chars: int,
+    max_tokens: int = 0,
 ) -> int:
     """从最新一步往回累计，返回第一个**保留**步在 ``spans`` 里的下标（更早的都要省/压）。
 
     ``keep`` 是**下限**：下限之内无条件保留（避免把最近的关键上下文省掉）。``max_chars <= 0``
     时只看 ``keep``，即"只按条数省"的旧行为。
     """
-    if max_chars <= 0:
+    if max_chars <= 0 and max_tokens <= 0:
         return len(spans) - keep
     used = 0
+    used_tokens = 0
     index = len(spans)
     while index > 0:
         begin, end = spans[index - 1]
         cost = sum(len(str(getattr(item, "content", ""))) for item in items[begin:end])
-        # 下限之内无条件保留；之外要装得下才留。
-        if index <= len(spans) - keep and used + cost > max_chars:
+        token_cost = estimate_messages_tokens(items[begin:end])
+        # 下限之内无条件保留；之外须同时装入字符和实际 token 预算。
+        if index <= len(spans) - keep and (
+            (max_chars > 0 and used + cost > max_chars)
+            or (max_tokens > 0 and used_tokens + token_cost > max_tokens)
+        ):
             break
         used += cost
+        used_tokens += token_cost
         index -= 1
     return index
 
 
-def _squeeze_oversized_results(
-    items: Sequence[AnyMessage], threshold_chars: int
-) -> list[AnyMessage] | None:
-    """把所有**超阈值**的工具结果压成「头 + 中段标记 + 尾」；无改动返回 ``None``。
+def tool_output_key(message: ToolMessage) -> str:
+    """按消息身份和原文指纹定位，跨轮重复调用 ID 或分支不会错用旧替换。"""
+    raw = json.dumps([message.name, message.tool_call_id, message.content], ensure_ascii=False)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f"{message.id or 'tool'}:{digest}"
 
-    与"窗口超预算才压"的区别是**无条件**（只要单条结果超阈值就压）。为什么必须改成无条件——实测
-    一次真实对话：未命中的大头正是"大工具结果**第一次**进历史"那几次（单个 2 万字符的读取约 1.2 万
-    token，全价未命中，那一跳的命中率只有 **22.6%**），而窗口当时才约 45k token，**根本没到 80k 的
-    预算线**，于是按预算触发的裁剪器**一次都没跑**——机制存在，等于没生效。对标 dsh：它的
-    ``compaction-tool-result-pruner`` 是按**单条结果**的阈值（8192 字符）无条件跑的。
 
-    **为什么不破坏前缀**：这一步在**每次组装窗口时**都执行，且对同一输入是确定性的，所以一条结果
-    **第一次被发出去时就已经是压过的形态**，之后每次都是同一份字节——不存在"先发全量、之后再改写"。
-    """
-    if threshold_chars <= 0:
-        return None
-    squeezed = list(items)
-    changed = False
-    for index, message in enumerate(squeezed):
-        if not isinstance(message, ToolMessage):
+def project_tool_messages(
+    items: Sequence[AnyMessage], threshold_chars: int = 0,
+    *, overrides: Mapping[str, str] | None = None,
+) -> tuple[list[AnyMessage], dict[str, str]]:
+    """重放保存的工具视图，只返回本次实际新裁剪的正文；原始消息不变。"""
+    projected = list(items)
+    replacements: dict[str, str] = {}
+    for index, message in enumerate(items):
+        if not isinstance(message, ToolMessage) or not isinstance(message.content, str):
             continue
-        text = str(message.content)
-        shrunk = _squeeze_tool_payload(text, threshold_chars)
-        if shrunk != text:
-            squeezed[index] = message.model_copy(update={"content": shrunk})
-            changed = True
-    return squeezed if changed else None
+        key = tool_output_key(message)
+        if overrides is not None and key in overrides:
+            text = overrides[key]
+        else:
+            full = _squeeze_tool_payload(message.content, 0, tool_name=message.name)
+            text = (_squeeze_tool_payload(message.content, threshold_chars, tool_name=message.name)
+                    if threshold_chars > 0 else full)
+            # 极小阈值下，缺口元数据可能比原正文更长；无收益就保持完整证据。
+            if len(text) >= len(full):
+                text = full
+            if text != full:
+                replacements[key] = text
+        if text != message.content:
+            projected[index] = message.model_copy(update={"content": text})
+    return projected, replacements
 
 
-def _squeeze_tool_payload(text: str, threshold_chars: int) -> str:
+def tool_summary_boundary(
+    messages: Sequence[AnyMessage], *, keep: int, max_chars: int, max_tokens: int = 0,
+) -> int:
+    """压力下可摘要的完整工具前缀；保留最近工具证据，不能拆开调用和结果。"""
+    spans = tool_step_spans(messages)
+    if keep < 0 or len(spans) <= keep:
+        return 0
+    first_kept = _first_kept_by_budget(
+        messages, spans, keep=keep, max_chars=max_chars, max_tokens=max_tokens,
+    )
+    return spans[first_kept - 1][1] if first_kept > 0 else 0
+
+
+def _squeeze_tool_payload(
+    text: str, threshold_chars: int, *, tool_name: str | None = None,
+) -> str:
     """**JSON 感知**的中段裁剪：只压正文字段，保持 JSON 合法与数据边界完整。
 
     为什么不直接切字符串：工具结果是 JSON（元数据在前、正文在后），按字符切会把结构切坏，模型看到
@@ -360,28 +436,38 @@ def _squeeze_tool_payload(text: str, threshold_chars: int) -> str:
     ``next_start_line`` 续读才拿到末尾的）。两端都留，模型至少知道这一步的结果长什么样；
     中间那条说明是可执行的（告诉它怎么拿回完整内容），不是一句感叹。
     """
-    if threshold_chars <= 0 or len(text) <= threshold_chars:
-        return text
     try:
         payload = json.loads(text)
     except ValueError:
-        return text  # 不是 JSON：宁可长，也不要把别人的结构切坏
+        return (_head_and_tail(text, threshold_chars) if threshold_chars > 0
+                and len(text) > threshold_chars else text)
     if not isinstance(payload, dict):
+        return text
+    projected = project_file_tool_output(
+        payload, tool_name=tool_name, threshold_chars=threshold_chars,
+        head_chars=TOOL_RESULT_HEAD_CHARS, tail_chars=TOOL_RESULT_TAIL_CHARS,
+    )
+    if projected is not None:
+        return json.dumps(projected, ensure_ascii=False, separators=(",", ":"))
+    if threshold_chars <= 0 or len(text) <= threshold_chars:
         return text
     changed = False
     for key, value in list(payload.items()):
-        if isinstance(value, str) and len(value) > TOOL_RESULT_SQUEEZE_CHARS:
-            payload[key] = _head_and_tail(value)
+        if isinstance(value, str) and len(value) > threshold_chars:
+            payload[key] = _head_and_tail(value, threshold_chars)
             changed = True
     if not changed:
         return text
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _head_and_tail(text: str) -> str:
+def _head_and_tail(text: str, threshold_chars: int = TOOL_RESULT_SQUEEZE_CHARS) -> str:
     """保留头 :data:`TOOL_RESULT_HEAD_CHARS` + 尾 :data:`TOOL_RESULT_TAIL_CHARS`，中间插可执行说明。"""
-    head = text[:TOOL_RESULT_HEAD_CHARS]
-    tail = text[-TOOL_RESULT_TAIL_CHARS:]
+    budget = max(0, min(TOOL_RESULT_HEAD_CHARS + TOOL_RESULT_TAIL_CHARS, threshold_chars - 128))
+    head_chars = budget * TOOL_RESULT_HEAD_CHARS // (TOOL_RESULT_HEAD_CHARS + TOOL_RESULT_TAIL_CHARS)
+    tail_chars = budget - head_chars
+    head = text[:head_chars]
+    tail = text[-tail_chars:] if tail_chars else ""
     omitted = len(text) - len(head) - len(tail)
     return (
         f"{head}\n"

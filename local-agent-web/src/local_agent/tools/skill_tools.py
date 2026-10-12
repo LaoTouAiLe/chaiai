@@ -170,7 +170,7 @@ def build_skill_tools(
         if resources:
             notes.append(
                 f"该技能自带资源目录：{'、'.join(resources)}。它们**只作为文本资源**，本工具不会执行其中的脚本；"
-                "资源不在工作区内时读文件工具也打不开，需要内容请让用户提供。"
+                "需要技能目录内的资源内容时，使用 skill_load 的 resource 参数传入技能目录内的相对路径。"
             )
         return SkillLoadResult(
             name=skill.name, content=content, resources=list(resources), note=" ".join(notes) or None

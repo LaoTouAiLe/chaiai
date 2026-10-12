@@ -8,8 +8,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+import httpx
 from langchain_core.messages import (
     AIMessage,
     AIMessageChunk,
@@ -240,3 +242,99 @@ def test_plain_answer_message_also_carries_reasoning_content() -> None:
     )
 
     assert payload["messages"][1][REASONING_CONTENT_KEY] == REASONING
+
+
+def test_deepseek_request_enforces_configured_output_cap_on_the_wire() -> None:
+    captured = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "test", "object": "chat.completion", "created": 0,
+            "model": "deepseek-flash", "choices": [{"index": 0, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": "OK"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatOpenAIWithReasoning(
+            model="deepseek-flash", api_key="sk-test-not-used",  # type: ignore[arg-type]
+            base_url="http://127.0.0.1:1/v1", max_completion_tokens=4096,
+            http_client=client,
+        )
+        assert model.invoke([HumanMessage(content="test")]).content == "OK"
+        assert model.bind(max_completion_tokens=16).invoke([HumanMessage(content="probe")]).content == "OK"
+    assert [request.get("max_tokens") for request in captured] == [4096, 16]
+    assert all("max_completion_tokens" not in request for request in captured)
+
+
+def test_deepseek_stream_limit_and_endpoint_alias_are_compatible() -> None:
+    model = ChatOpenAIWithReasoning(
+        model="vendor-alias", api_key="sk-test-not-used",  # type: ignore[arg-type]
+        base_url="https://api.deepseek.com/v1", max_completion_tokens=4096,
+    )
+    payload = model._get_request_payload([HumanMessage(content="test")], stream=True)
+    assert payload["max_tokens"] == 4096
+    assert payload["stream"] is True
+    assert "max_completion_tokens" not in payload
+
+
+def test_official_openai_output_parameter_is_preserved() -> None:
+    model = ChatOpenAIWithReasoning(
+        model="o4-mini", api_key="sk-test-not-used",  # type: ignore[arg-type]
+        base_url="https://api.openai.com/v1", max_completion_tokens=4096,
+    )
+    payload = model._get_request_payload([HumanMessage(content="test")])
+    assert payload["max_completion_tokens"] == 4096
+    assert "max_tokens" not in payload
+
+
+def test_deepseek_summary_keeps_output_budget_for_body_and_main_requests_unchanged() -> None:
+    from local_agent.memory.summarizer import summarize_conversation
+
+    captured = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        captured.append(body)
+        summary = "会话摘要" in body["messages"][0]["content"]
+        disabled = body.get("thinking") == {"type": "disabled"}
+        content = "目标：核对检索；未完成：核对路由" if summary and disabled else "" if summary else "main answer"
+        return httpx.Response(200, json={
+            "id": "summary", "object": "chat.completion", "created": 0,
+            "model": "deepseek-flash", "choices": [{"index": 0,
+                "finish_reason": "stop" if content else "length",
+                "message": {"role": "assistant", "content": content,
+                            "reasoning_content": "" if disabled else "thinking"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1 if content else 4096,
+                      "total_tokens": 2 if content else 4097},
+        })
+
+    with httpx.Client(transport=httpx.MockTransport(respond)) as client:
+        model = ChatOpenAIWithReasoning(
+            model="deepseek-flash", api_key="sk-test-not-used",  # type: ignore[arg-type]
+            base_url="http://127.0.0.1:1/v1", max_completion_tokens=4096,
+            extra_body={"vendor_setting": "preserved"}, http_client=client,
+        )
+        assert model.invoke([HumanMessage(content="first")]).content == "main answer"
+        result = summarize_conversation(model, messages=[HumanMessage(content="查检索")],
+                                        previous_summary=None, max_chars=160)
+        assert result == "目标：核对检索；未完成：核对路由"
+        assert model.invoke([HumanMessage(content="next")]).content == "main answer"
+    assert "thinking" not in captured[0] and "thinking" not in captured[2]
+    assert captured[1]["thinking"] == {"type": "disabled"}
+    assert all(body["vendor_setting"] == "preserved" and body["max_tokens"] == 4096 for body in captured)
+    assert model.extra_body == {"vendor_setting": "preserved"}
+
+
+def test_summary_does_not_send_deepseek_options_to_other_providers() -> None:
+    from local_agent.llm.usage_recording import use_model_purpose
+
+    for name in ["o4-mini", "deepseek-r1"]:
+        model = ChatOpenAIWithReasoning(
+            model=name, api_key="sk-test-not-used",  # type: ignore[arg-type]
+            base_url="https://other.example/v1", extra_body={"vendor_setting": "preserved"},
+        )
+        with use_model_purpose("summarize"):
+            payload = model._get_request_payload([HumanMessage(content="summary")])
+        assert payload["extra_body"] == {"vendor_setting": "preserved"}

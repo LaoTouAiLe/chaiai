@@ -241,7 +241,7 @@ export function submitMessage(
 }
 
 export type SubmissionContext = Pick<components['schemas']['SubmitMessageRequest'],
-  'parent_turn_id' | 'expected_branch_id' | 'expected_snapshot_id'>
+  'parent_turn_id' | 'expected_branch_id' | 'expected_snapshot_id' | 'workflow'>
 
 export function getConversationMap(sessionId: string, query = '') {
   return request<components['schemas']['ConversationMapView']>(
@@ -394,6 +394,22 @@ export type CapabilityStatusDto = components['schemas']['CapabilityStatusView']
  */
 export function getCapabilities(): Promise<CapabilitiesDto> {
   return request<CapabilitiesDto>('/api/capabilities')
+}
+
+// ---- 任务中心（T62；§17.6）---------------------------------------------------
+
+export type TasksDto = components['schemas']['TaskCenterView']
+export type TaskDto = components['schemas']['TaskView']
+
+/**
+ * 当前工作区的任务列表（状态、已运行时长、"在等什么"）。
+ *
+ * **只读**：服务端只读任务索引 + 会话索引，不读任何会话的 Checkpoint（§17.6），
+ * 所以这个请求没有副作用，也不会推进任何一轮。`workspace_id` 省略时列出全部工作区。
+ */
+export function getTasks(workspaceId: string | null): Promise<TasksDto> {
+  const query = workspaceId === null ? '' : `?workspace_id=${encodeURIComponent(workspaceId)}`
+  return request<TasksDto>(`/api/tasks${query}`)
 }
 
 export type MemoryFilters = NonNullable<paths['/api/data-center/memories']['get']['parameters']['query']>

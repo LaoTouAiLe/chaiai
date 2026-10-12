@@ -452,6 +452,49 @@ export interface CapabilitiesView {
   capabilities: readonly CapabilityStatusView[]
 }
 
+/**
+ * 任务状态（v0.6 T62；契约 §17.1、§17.6）。
+ *
+ * 后端给的是**闭集**，页面不许自造第八种。`needs_review` = "服务重启后证明不了任务结局"
+ * （§17.5）：可能已部分执行、可能仍有残留进程，**不自动重跑**，由人工核对。
+ */
+export type TaskState =
+  | 'queued'
+  | 'running'
+  | 'waiting_user'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'needs_review'
+
+/**
+ * 任务中心的一行（§17.6）。
+ *
+ * **没有 `run_id` / `thread_id` / `request_id`，也没有工具名**（§15.8 的字段门槛）：
+ * `taskId` 只作列表键与动作参数，页面上一个字都不显示。"在等什么"也不在这里——它是 `state`
+ * 的函数，由页面推导（那样就不可能与真源不一致）。
+ */
+export interface TaskRowView {
+  taskId: string
+  sessionId: string
+  /** 会话标题：任务中心靠它让用户认出"这是哪个会话在跑"。 */
+  sessionTitle: string
+  state: TaskState
+  /** 服务端写好的可读原因（失败 / 取消 / 需核对）；没有就是 `null`。 */
+  detail: string | null
+  createdAt: string
+  startedAt: string | null
+  finishedAt: string | null
+}
+
+/** 任务中心的一页；`counts` 覆盖全部任务（不受列表截断影响），没有的状态是 0。 */
+export interface TasksView {
+  tasks: readonly TaskRowView[]
+  counts: Readonly<Record<TaskState, number>>
+  /** 等你处理（在等审批 + 需要人工核对）：入口角标用，为 0 时页面不显示角标。 */
+  pendingCount: number
+}
+
 export interface SettingsView {
   /**
    * v0.4 settings has two usable sections — chat connections and permissions — so
@@ -598,6 +641,14 @@ export interface ConversationScenario {
    * 展示组件本来也不认识 fetch。
    */
   capabilities?: CapabilitiesView | null
+  /**
+   * 非空时覆盖层显示「任务中心」面板（v0.6 T62；§17.6）。
+   *
+   * 与 `capabilities` 同一套理由：面板在产品里是**侧栏的 live-only 入口**，原型宿主默认不渲染它，
+   * 所以既有场景的 DOM 与截图逐字节不变；要给它视觉基线，就只在这个场景上挂一份视图模型
+   * （数据是 fixture，展示组件本来也不认识 fetch）。
+   */
+  tasks?: TasksView | null
   /** Non-null when the composer's model menu is open. */
   modelMenu: ModelMenuView | null
   /** Non-null when the conversation shows an empty state instead of a flow. */

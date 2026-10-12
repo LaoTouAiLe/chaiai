@@ -194,6 +194,7 @@ def read_file_content(
     line_count = len(text.splitlines())
     selected = _select_lines(text, start_line=start_line, end_line=end_line)
     first_line = max(1, int(start_line)) if start_line else 1
+    original_selected = selected
     truncated = False
     if len(selected) > max_chars:
         selected = selected[:max_chars]
@@ -207,10 +208,18 @@ def read_file_content(
     # （见 :class:`ReadFileResult` 的字段说明）。
     returned = selected.splitlines()
     last_line = first_line + len(returned) - 1 if returned else first_line - 1
-    has_more = bool(text) and last_line < line_count
+    partial_lines: list[int] = []
+    if selected and not selected.endswith(("\n", "\r")):
+        cut_in_line = (
+            len(original_selected) > max_chars
+            and original_selected[max_chars:max_chars + 1] not in ("\n", "\r")
+        )
+        if cut_in_line or (size_limited and last_line == line_count):
+            partial_lines = [last_line]
+    has_more = bool(partial_lines) or (bool(text) and last_line < line_count)
     next_start_line: int | None = None
     if has_more:
-        next_start_line = last_line + 1
+        next_start_line = partial_lines[0] if partial_lines else last_line + 1
         note_parts.append(
             f"已返回第 {first_line}–{last_line} 行，共 {line_count} 行；"
             f"需要后续内容请传 start_line={next_start_line}"
@@ -229,6 +238,7 @@ def read_file_content(
         last_line=max(last_line, 0),
         has_more=has_more,
         next_start_line=next_start_line,
+        partial_lines=partial_lines,
     )
 
 

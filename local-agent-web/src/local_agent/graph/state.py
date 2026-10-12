@@ -23,6 +23,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AnyMessage, ToolCall
 from langgraph.graph.message import add_messages
 
+from local_agent.cancellation import CancellationToken
 from local_agent.capabilities import DEFAULT_PROFILE, PROFILES
 from local_agent.config import RunConfig
 from local_agent.context.token_budget import ContextBudget, TokenUsage
@@ -33,8 +34,14 @@ from local_agent.memory.schemas import MemoryReference, Origin
 from local_agent.model_settings.models import ModelBinding
 from local_agent.security.approval import ApprovalDecision, ApprovalRequest
 from local_agent.security.policy import SecurityPolicy
+from local_agent.session_kind import SessionKind
 from local_agent.tools.result_types import ToolResultRecord
 from local_agent.tools.tool_registry import ToolRegistry
+from local_agent.workflow_contracts import (
+    CodeWorkflowState,
+    DelegatedWorkflowState,
+    ReadonlyWorkflowState,
+)
 
 AgentMode = Literal["chat", "tool"]
 #: 任务状态。``blocked`` 表示**本轮已经结束、但在等用户补充信息**（反思给出 ``ask_user``，
@@ -391,6 +398,9 @@ class AgentState(TypedDict, total=False):
     # 本轮输入与路由（覆盖语义）
     user_input: str
     session_mode: Literal["chat", "agent"]
+    #: 会话来源（架构 §10.6、§17.1）：只决定记忆候选的**来源级别**，不进系统提示（不改变稳定前缀）。
+    #: 由应用服务在每次提交时按会话索引写入；旧 Checkpoint 缺这个字段时按 ``interactive`` 处理。
+    session_kind: SessionKind
     normalized_request: str
     mode: AgentMode
     route_reason: str
@@ -409,6 +419,9 @@ class AgentState(TypedDict, total=False):
     #: T43：缺失表示旧挂起运行；新用户提交固定使用版本 1。
     agent_loop_version: int
     plan_managed: bool
+    workflow: ReadonlyWorkflowState | CodeWorkflowState | DelegatedWorkflowState | None
+    workflow_request: dict[str, Any] | None
+    workflow_limits: dict[str, Any] | None
 
     # 工具调用与结果
     pending_tool_calls: list[ToolCall]
@@ -509,3 +522,12 @@ class RuntimeContext:
     request_id: str = ""
     #: 用量录音机（T34）。为 ``None`` 时不记录用量（CLI/测试的轻量路径照常工作）。
     usage_recorder: ModelCallRecorder | None = None
+    #: 本轮执行的取消信号（§17.4）。为 ``None`` 表示这次运行不参与取消（CLI / 大部分测试）。
+    #: 它是**可变对象**：取消发生在别的线程（HTTP 请求线程、超时看守线程），执行线程只是读它。
+    cancellation: CancellationToken | None = None
+    #: T65 显式选择，只供图入口使用；未选中时不改变自由循环。
+    readonly_research: Mapping[str, Any] | None = None
+    code_change: Mapping[str, Any] | None = None
+    delegated_research: Mapping[str, Any] | None = None
+    #: T68 身份索引投影回调；不传给子上下文、不写 Checkpoint。
+    child_index: Callable[[str, list[str]], None] | None = None

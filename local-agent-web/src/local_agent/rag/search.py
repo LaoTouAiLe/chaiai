@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import time
@@ -29,6 +28,7 @@ from pathlib import Path
 from typing import Literal
 
 from local_agent.config import RagConfig
+from local_agent.rag.walk import iter_candidate_files
 from local_agent.security.path_guard import is_sensitive_path, is_within
 from local_agent.security.shell_guard import build_environment, resolve_executable
 
@@ -93,32 +93,9 @@ _STOPWORDS = frozenset(
     }
 )
 
-#: 扫描时直接跳过的目录（不区分大小写）；隐藏目录另有一层判断。
-#:
-#: 2026-09-30 起**公开**：``tools/search_tools.py`` 的 ``grep`` / ``glob`` 复用同一份清单。
-#: 两处各留一份必然悄悄分叉（本模块开头的注释警告过同类漂移），而"跳过哪些目录"直接决定检索
-#: 结果是否可信，不能有两套。
-SKIPPED_DIRS = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".svn",
-        ".venv",
-        "venv",
-        "env",
-        "node_modules",
-        "__pycache__",
-        ".mypy_cache",
-        ".ruff_cache",
-        ".pytest_cache",
-        ".tox",
-        ".idea",
-        ".vscode",
-        "site-packages",
-        "dist",
-        "build",
-    }
-)
+#: 遍历与"跳过什么"都在 :mod:`local_agent.rag.walk`（实现）与 :mod:`local_agent.rag.ignore`
+#: （静态依赖目录清单 :data:`~local_agent.rag.ignore.SKIPPED_DIRS` + `.gitignore` 规则）——
+#: v0.6 T63 第三片搬到那里，`grep` / `glob` / 本模块共用同一份，不再各留一套。
 
 #: 判断"二进制文件"的 NUL 探测窗口（与 ``read_file`` 同一口径）。
 _BINARY_PROBE_BYTES = 4096
@@ -538,35 +515,27 @@ def _walk_files(
 ) -> tuple[list[Path], list[str], bool]:
     """有界、可复现地遍历工作区里的候选文件。
 
-    跳过隐藏目录与常见依赖目录；跳过隐藏文件、符号链接（可能指向工作区外）与敏感文件
-    （密钥文件不进入检索结果）。目录名与文件名都排序，保证同一个工作区上的结果稳定。
+    遍历与跳过口径都在 :func:`local_agent.rag.walk.iter_candidate_files`：隐藏目录/文件、依赖目录、
+    `.gitignore`、符号链接（可能指向工作区外）与敏感文件（密钥不进结果），并**同级轮转**产出
+    （超限时结果分布在多个目录，而不是被名字最靠前的子树吃光——与 `grep` / `glob` 同一份实现）。
     达到文件数上限或时间上限即停止，并如实标注"结果不完整"。
     """
     root = workspace_root.resolve()
     files: list[Path] = []
     notes: list[str] = []
     truncated = False
-    for current, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(
-            name
-            for name in dirnames
-            if not name.startswith(".") and name.casefold() not in SKIPPED_DIRS
-        )
-        for filename in sorted(filenames):
-            if len(files) >= config.max_files:
-                truncated = True
-                notes.append(f"已达文件数上限 {config.max_files}，未继续遍历剩余目录")
-                return files, notes, truncated
-            if time.monotonic() > deadline:
-                truncated = True
-                notes.append(f"已达时间上限 {config.timeout_seconds} 秒，未继续遍历剩余目录")
-                return files, notes, truncated
-            if filename.startswith("."):
-                continue
-            path = Path(current) / filename
-            if path.is_symlink() or is_sensitive_path(path):
-                continue
-            files.append(path)
+    # 遍历与跳过口径走 :func:`local_agent.rag.walk.iter_candidate_files`——与 `grep` / `glob`
+    # **共用同一份实现**（§6.7：静态清单 + `.gitignore` + 同级轮转），这里只叠加限额与如实标注。
+    for path in iter_candidate_files(root, workspace_root=root):
+        if len(files) >= config.max_files:
+            truncated = True
+            notes.append(f"已达文件数上限 {config.max_files}，未继续遍历剩余目录")
+            return files, notes, truncated
+        if time.monotonic() > deadline:
+            truncated = True
+            notes.append(f"已达时间上限 {config.timeout_seconds} 秒，未继续遍历剩余目录")
+            return files, notes, truncated
+        files.append(path)
     return files, notes, truncated
 
 

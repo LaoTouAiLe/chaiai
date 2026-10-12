@@ -50,9 +50,11 @@ function formatExact(value: number): string {
  */
 function MeterDetail({ meter }: { meter: ContextMeterView }) {
   const known = meter.usedTokens !== null && meter.windowTokens !== null && meter.windowTokens > 0
+  // 百分比**如实**反映用量：分子超过分母（发送前估算超出窗口）时显示 >100%，
+  // 而不是和圆环一起被钳成 100% 造成"正好满"的假象。
   const percent =
     known && meter.usedTokens !== null && meter.windowTokens !== null
-      ? Math.round(Math.min(meter.usedTokens / meter.windowTokens, 1) * 100)
+      ? Math.round((meter.usedTokens / meter.windowTokens) * 100)
       : null
 
   return (
@@ -99,10 +101,13 @@ function MeterDetail({ meter }: { meter: ContextMeterView }) {
  */
 export function ContextMeter({ meter, open = false, onToggle }: ContextMeterProps) {
   const known = meter.usedTokens !== null && meter.windowTokens !== null && meter.windowTokens > 0
-  const ratio = known && meter.usedTokens !== null && meter.windowTokens !== null
-    ? Math.min(meter.usedTokens / meter.windowTokens, 1)
+  // 分子超过分母时圆环填充封顶整圈（视觉上不可能超过一圈），但**数字**如实（>100%），
+  // 两者口径分开：过去数字也被钳成 100%，于是"读数是 2,000,000 / 1,000,000 却写 100%"自相矛盾。
+  const rawRatio = known && meter.usedTokens !== null && meter.windowTokens !== null
+    ? meter.usedTokens / meter.windowTokens
     : 0
-  const percent = Math.round(ratio * 100)
+  const fillRatio = Math.min(rawRatio, 1)
+  const percent = Math.round(rawRatio * 100)
   const label = known
     ? `上下文已用 ${String(percent)}%（${formatTokens(meter.usedTokens ?? 0)} / ${formatTokens(meter.windowTokens ?? 0)}，${SCOPE_LABEL[meter.scope]}）`
     : `上下文用量未知（${SCOPE_LABEL[meter.scope]}）`
@@ -112,7 +117,7 @@ export function ContextMeter({ meter, open = false, onToggle }: ContextMeterProp
     ? `上下文已用 ${String(percent)}%（${formatExact(meter.usedTokens ?? 0)} / ${formatExact(meter.windowTokens ?? 0)} tokens，${SCOPE_LABEL[meter.scope]}）`
     : `上下文用量未知（${SCOPE_LABEL[meter.scope]}）`
 
-  const nearLimit = known && ratio >= 0.8
+  const nearLimit = known && rawRatio >= 0.8
 
   return (
     <div className={styles.meter} title={detail}>
@@ -127,7 +132,7 @@ export function ContextMeter({ meter, open = false, onToggle }: ContextMeterProp
       >
         <span
           className={known ? (nearLimit ? `${styles.ring} ${styles.ringWarn}` : styles.ring) : `${styles.ring} ${styles.ringUnknown}`}
-          style={{ '--law-meter-ratio': `${String(ratio)}` } as CSSProperties}
+          style={{ '--law-meter-ratio': `${String(fillRatio)}` } as CSSProperties}
           role="img"
           aria-label={label}
         >

@@ -20,8 +20,17 @@ import type {
   ModelMenuItemView,
   PermissionsView,
   SettingsView,
+  TaskRowView,
+  TaskState,
+  TasksView,
 } from '../fixtures/types'
-import type { CapabilitiesDto, HealthDto, ModelConnectionDto, PermissionsDto } from './client'
+import type {
+  CapabilitiesDto,
+  HealthDto,
+  ModelConnectionDto,
+  PermissionsDto,
+  TasksDto,
+} from './client'
 
 const CAPABILITY_ORDER = ['chat', 'tools', 'streaming'] as const
 
@@ -143,6 +152,47 @@ export function toCapabilitiesView(dto: CapabilitiesDto): CapabilitiesView {
         hint: row.hint ?? null,
       }),
     ),
+  }
+}
+
+/**
+ * 任务中心（v0.6 T62；§17.6）：DTO 说什么就是什么。
+ *
+ * `counts` 在这里补齐成**完整闭集**：契约给的是一个字典，页面要的是 `Record<TaskState, number>`。
+ * 缺键会让筛选栏显示成 `undefined`——那看起来像"这个状态不存在"，比不显示更糟。多出来的键
+ * （后端先加了新状态）**忽略**：页面不认识的状态本来就不该被当成已知状态渲染。
+ *
+ * **不派生"在等什么"**：它是 `state` 的函数，由展示层按闭集推导（契约就是这么定的），
+ * 这里只搬事实。
+ */
+export function toTasksView(dto: TasksDto): TasksView {
+  const counts: Record<TaskState, number> = {
+    queued: 0,
+    running: 0,
+    waiting_user: 0,
+    completed: 0,
+    failed: 0,
+    cancelled: 0,
+    needs_review: 0,
+  }
+  for (const [state, count] of Object.entries(dto.counts ?? {})) {
+    if (state in counts) counts[state as TaskState] = count
+  }
+  return {
+    tasks: (dto.tasks ?? []).map(
+      (row): TaskRowView => ({
+        taskId: row.task_id,
+        sessionId: row.session_id,
+        sessionTitle: row.session_title,
+        state: row.state,
+        detail: row.detail ?? null,
+        createdAt: row.created_at,
+        startedAt: row.started_at ?? null,
+        finishedAt: row.finished_at ?? null,
+      }),
+    ),
+    counts,
+    pendingCount: dto.pending_count,
   }
 }
 

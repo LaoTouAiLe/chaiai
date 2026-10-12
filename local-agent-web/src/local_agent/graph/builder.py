@@ -21,8 +21,11 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from local_agent.cancellation import CancellationToken
 from local_agent.capabilities import effective_capabilities
 from local_agent.config import RunConfig
+from local_agent.graph.code_workflow import build_code_subgraph
+from local_agent.graph.delegated_workflow import build_delegated_subgraph
 from local_agent.graph.edges import ChatStateGraph, add_minimal_chat_edges
 from local_agent.graph.nodes import (
     AGENT_DECISION_NODE,
@@ -56,6 +59,7 @@ from local_agent.graph.nodes import (
     task_memory_node,
     tool_execution_node,
 )
+from local_agent.graph.readonly_workflow import build_readonly_subgraph
 from local_agent.graph.routers import (
     COMPLETION_ROUTER,
     MODE_ROUTER,
@@ -83,6 +87,7 @@ from local_agent.llm.usage_recording import (
 from local_agent.security.path_guard import ExternalPathPolicy
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.tool_registry import ToolRegistry
+from local_agent.workflow_contracts import CODE_CHANGE, DELEGATED_RESEARCH, READONLY_RESEARCH
 
 #: 当前阶段的图类型：State 为 AgentState，运行上下文为 RuntimeContext。
 ChatGraph = CompiledStateGraph[AgentState, RuntimeContext, AgentState, AgentState]
@@ -121,6 +126,9 @@ def build_chat_graph(checkpointer: BaseCheckpointSaver | None = None) -> ChatGra
     add(TASK_MEMORY_NODE, task_memory_node)
     add(CHAT_NODE, chat_node)
     add(FINAL_RESPONSE_NODE, final_response_node)
+    graph.add_node(READONLY_RESEARCH, build_readonly_subgraph(_usage_aware))
+    graph.add_node(CODE_CHANGE, build_code_subgraph(_usage_aware))
+    graph.add_node(DELEGATED_RESEARCH, build_delegated_subgraph(_usage_aware, checkpointer))
     add_minimal_chat_edges(graph)
     return graph.compile(checkpointer=checkpointer)
 
@@ -211,10 +219,12 @@ def _usage_aware(name: str, node: Callable[..., Any]) -> Callable[..., Any]:
         state_run_id = merged.get("run_id")
         if isinstance(state_run_id, str) and state_run_id and recorder.run_id != state_run_id:
             recorder.bind_run(state_run_id)
+        # 委派节点返回的调用也来自原 record_model_call；先纳入明细，再追加父录音机的新记录。
+        incoming = [*update.get("model_call_records", []), *recorder.finished_records()]
         result: AgentState = {
             **update,
             "model_call_records": merge_appended(
-                state.get("model_call_records", []), recorder.finished_records(), model_call_key
+                state.get("model_call_records", []), incoming, model_call_key
             ),
         }
         if recorder.run_id:
@@ -236,7 +246,8 @@ def _build_turn_record(state: Mapping[str, Any], recorder: ModelCallRecorder) ->
     final_at = getattr(existing, "final_at", None) if existing is not None else None
     if final_state in {"completed", "failed", "blocked"} and final_at is None:
         final_at = datetime.now(timezone.utc)
-    calls = [record for record in recorder.finished_records() if record.run_id == run_id]
+    calls = merge_appended([], [*(state.get("model_call_records") or []), *recorder.finished_records()], model_call_key)
+    calls = [record for record in calls if record.run_id == run_id]
     elapsed = None
     if isinstance(final_at, datetime):
         elapsed = max(0, round((final_at - submitted).total_seconds() * 1000))
@@ -310,6 +321,11 @@ def build_runtime_context(
     request_id: str | None = None,
     provider_name: str | None = None,
     usage_recorder: ModelCallRecorder | None = None,
+    cancellation: CancellationToken | None = None,
+    readonly_research: Mapping[str, Any] | None = None,
+    code_change: Mapping[str, Any] | None = None,
+    delegated_research: Mapping[str, Any] | None = None,
+    child_index: Callable[[str, list[str]], None] | None = None,
 ) -> RuntimeContext:
     """构造单次调用的运行上下文（架构 §4.1）。
 
@@ -337,7 +353,11 @@ def build_runtime_context(
         ConfigError: 配置要求放开工作区边界（本版本不支持）。
     """
     policy = security_policy or SecurityPolicy.from_config(
-        app_config, workspace_root=workspace_root, external_policy=external_policy
+        app_config,
+        workspace_root=workspace_root,
+        external_policy=external_policy,
+        # 取消令牌同时进两道门：安全 / 审批门（策略）与能力可见性门（节点的 `is_visible`）——§17.4。
+        cancellation=cancellation,
     )
     registry = tool_registry or ToolRegistry.build(
         policy,
@@ -373,6 +393,11 @@ def build_runtime_context(
         current_time=datetime.now(timezone.utc),
         request_id=request_id or uuid4().hex,
         usage_recorder=usage_recorder,
+        cancellation=cancellation,
+        readonly_research=readonly_research,
+        code_change=code_change,
+        delegated_research=delegated_research,
+        child_index=child_index,
     )
 
 

@@ -20,8 +20,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-#: 聊天库（Checkpoint + 会话索引 + 请求台账）当前代码期望的结构版本（等于最后一个迁移的编号）。
-CHAT_SCHEMA_VERSION = 6
+#: 聊天库（Checkpoint + 会话索引 + 请求台账 + 任务索引）当前代码期望的结构版本（等于最后一个迁移的编号）。
+CHAT_SCHEMA_VERSION = 10
 
 #: 长期记忆库当前代码期望的结构版本。
 LONG_TERM_SCHEMA_VERSION = 3
@@ -256,6 +256,109 @@ CREATE TABLE IF NOT EXISTS external_path_grants (
 );
 """
 
+#: 聊天库 v7（T57）：会话来源列 + 持久任务索引（架构 §10.6、§17.1）。
+#:
+#: ``sessions.kind`` 用 ``ALTER TABLE ADD COLUMN`` 追加在末尾（与 v4 的 ``mode`` 同一写法）。
+#: ``DEFAULT 'interactive'`` 只服务**历史行**：v0.6 之前每个会话都是用户在页面上创建的，属 ``interactive``；
+#: 新会话由 ``session_store.create`` 显式给值，写侧校验会拒绝闭集外的取值。
+#:
+#: ``jobs`` 与**会话索引、Checkpoint 同库同事务边界**（架构 §17.1）：它只回答"任务在哪一步"，
+#: 业务状态真源仍是 Checkpoint，事件是它的单向投影——不得被当作第二套任务真源。
+_CHAT_V7_JOBS_SQL = """
+ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'interactive'
+    CHECK (kind IN ('interactive', 'scheduled', 'heartbeat'));
+
+CREATE TABLE jobs (
+    job_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    state TEXT NOT NULL CHECK (
+        state IN ('queued', 'running', 'waiting_user', 'completed', 'failed', 'cancelled')
+    ),
+    run_id TEXT,
+    attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt > 0),
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    detail TEXT
+);
+CREATE INDEX idx_jobs_state ON jobs (state);
+CREATE INDEX idx_jobs_session ON jobs (session_id, created_at);
+"""
+
+#: 聊天库 v8（T61）：任务状态闭集追加 ``needs_review``（架构 §17.1、§17.5）。
+#:
+#: **SQLite 改不了 CHECK 约束**，只能重建表——标准四步：建新表（带新闭集）→ 逐列拷贝 →
+#: 删旧表 → 改名（索引随旧表一起被删，所以重建）。``jobs`` 里没有外键指向它，改名不会牵连别的表；
+#: 数据一行不改（`checks` 只放宽了一个取值，旧数据必然满足新约束）。
+#:
+#: 为什么必须走迁移而不是只改 Python 侧闭集：``state`` 的 CHECK 是**写侧的最后一个守卫**，
+#: 只改一半会让"索引允许的状态"与"实现能写出的状态"不一致——实测就是写 ``needs_review`` 时抛
+#: ``CHECK constraint failed``，而不是悄悄写进去。
+_CHAT_V8_JOBS_NEEDS_REVIEW_SQL = """
+CREATE TABLE jobs_v8 (
+    job_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    state TEXT NOT NULL CHECK (
+        state IN ('queued', 'running', 'waiting_user', 'completed', 'failed', 'cancelled',
+                  'needs_review')
+    ),
+    run_id TEXT,
+    attempt INTEGER NOT NULL DEFAULT 1 CHECK (attempt > 0),
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT,
+    detail TEXT
+);
+INSERT INTO jobs_v8 (
+    job_id, session_id, state, run_id, attempt,
+    created_at, started_at, updated_at, finished_at, detail
+)
+SELECT job_id, session_id, state, run_id, attempt,
+       created_at, started_at, updated_at, finished_at, detail
+FROM jobs;
+DROP TABLE jobs;
+ALTER TABLE jobs_v8 RENAME TO jobs;
+CREATE INDEX idx_jobs_state ON jobs (state);
+CREATE INDEX idx_jobs_session ON jobs (session_id, created_at);
+"""
+
+_CHAT_V9_SUBAGENT_SQL = """
+CREATE TABLE sessions_v9 (
+    session_id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL UNIQUE,
+    title TEXT NOT NULL,
+    workspace_root TEXT NOT NULL,
+    project_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_checkpoint_id TEXT,
+    status TEXT NOT NULL DEFAULT 'idle',
+    mode TEXT NOT NULL DEFAULT 'agent' CHECK (mode IN ('chat', 'agent')),
+    archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+    kind TEXT NOT NULL DEFAULT 'interactive'
+        CHECK (kind IN ('interactive', 'scheduled', 'heartbeat', 'subagent'))
+);
+INSERT INTO sessions_v9 SELECT * FROM sessions;
+DROP TABLE sessions;
+ALTER TABLE sessions_v9 RENAME TO sessions;
+CREATE INDEX idx_sessions_status ON sessions (status);
+CREATE INDEX idx_sessions_updated_at ON sessions (updated_at);
+CREATE UNIQUE INDEX idx_sessions_single_active ON sessions (status) WHERE status = 'active';
+CREATE INDEX idx_sessions_workspace ON sessions (workspace_root);
+"""
+
+_CHAT_V10_CHILDREN_SQL = """
+CREATE TABLE job_children (
+    parent_job_id TEXT NOT NULL REFERENCES jobs(job_id),
+    parent_run_id TEXT NOT NULL,
+    child_id TEXT NOT NULL,
+    PRIMARY KEY(parent_job_id, child_id)
+);
+CREATE INDEX job_children_run ON job_children(parent_run_id);
+"""
+
 #: 聊天库的迁移；(版本号, 该版本的结构变更 SQL)，只允许在末尾追加，不允许改写已发布的版本。
 _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SESSIONS_SQL),
@@ -307,6 +410,10 @@ _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
         CREATE INDEX conversation_turn_parent
             ON conversation_turns(session_id, parent_turn_id, ordinal);
     """),
+    (7, _CHAT_V7_JOBS_SQL),
+    (8, _CHAT_V8_JOBS_NEEDS_REVIEW_SQL),
+    (9, _CHAT_V9_SUBAGENT_SQL),
+    (10, _CHAT_V10_CHILDREN_SQL),
 )
 
 #: 长期库 v3（T52）：给 ``facts`` 与 ``task_conclusions`` 加 ``origin`` 列（架构 §10.3、§16.2）。
@@ -373,6 +480,21 @@ def _apply(
     for target, script in migrations:
         if target <= version:
             continue
+        if script == _CHAT_V9_SUBAGENT_SQL:
+            _apply_sessions_v9(connection, script, target)
+            version = target
+            continue
+        if script == _CHAT_V10_CHILDREN_SQL:
+            connection.commit()
+            try:
+                connection.executescript("BEGIN IMMEDIATE;\n" + script)
+                connection.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", (target, _now()))
+                connection.commit()
+            except sqlite3.Error:
+                connection.rollback()
+                raise
+            version = target
+            continue
         connection.executescript(script)
         connection.execute(
             "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
@@ -382,6 +504,24 @@ def _apply(
         version = target
     connection.commit()
     return version
+
+
+def _apply_sessions_v9(connection: sqlite3.Connection, script: str, target: int) -> None:
+    """被引用父表重建：临时关外键，DDL/版本同事务，复核后恢复原设置。"""
+    connection.commit()
+    foreign_keys = int(connection.execute("PRAGMA foreign_keys").fetchone()[0])
+    connection.execute("PRAGMA foreign_keys=OFF")
+    try:
+        connection.executescript("BEGIN IMMEDIATE;\n" + script)
+        if connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise sqlite3.IntegrityError("会话来源迁移后外键校验失败")
+        connection.execute("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", (target, _now()))
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.execute(f"PRAGMA foreign_keys={foreign_keys}")
 
 
 def apply_migrations(connection: sqlite3.Connection) -> int:

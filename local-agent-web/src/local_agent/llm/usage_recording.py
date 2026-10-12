@@ -31,6 +31,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Literal, TypeVar
 
+from langchain_core.tools import BaseTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
+
 from local_agent.llm.usage import ActualUsage, extract_usage
 
 __all__ = [
@@ -455,7 +458,9 @@ def tools_fingerprint(tools: Sequence[object] | None) -> str | None:
 
 
 def _tool_identity(tool: object) -> object:
-    """把工具规约成可确定性序列化的形状（OpenAI schema 字典原样，其它取名字与说明）。"""
+    """使用绑定时的完整工具 Schema；字典原样保留，兼容对象取名字与说明。"""
+    if isinstance(tool, BaseTool):
+        return convert_to_openai_tool(tool)
     if isinstance(tool, Mapping):
         return dict(tool)
     return {

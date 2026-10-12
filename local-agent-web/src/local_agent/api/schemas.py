@@ -20,6 +20,7 @@ from local_agent.application.models import (
     ExternalPathAccess,
     ExternalPathsMode,
 )
+from local_agent.workflow_contracts import WorkflowRequest
 
 #: 会话名与请求标识的长度上限：够用即可，真正的截断规则在会话库里。
 TITLE_MAX_CHARS = 1000
@@ -82,11 +83,22 @@ class RecoveryRequest(_Request):
     confirm_reviewed: Literal[True]
 
 
+class CancelTaskRequest(_Request):
+    """取消当前会话在跑的任务（架构 §15.2、§17.4）。**幂等**：没有可取消的任务时是空操作。
+
+    刻意**不带** `client_request_id`：取消不进幂等台账（重复调用本来就是空操作），
+    要求一个用不上的幂等键只会让调用方以为"取消也会被去重"。
+    """
+
+    reason: str = Field(default="", max_length=200)
+
+
 class SubmitMessageRequest(_Request):
     """提交消息。`client_request_id` 是幂等键（§6.1），由前端生成并复用。"""
 
     text: str = Field(min_length=1, max_length=MESSAGE_MAX_CHARS)
     client_request_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_CHARS)
+    workflow: WorkflowRequest | None = None
     parent_turn_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)
     expected_branch_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)
     expected_snapshot_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)

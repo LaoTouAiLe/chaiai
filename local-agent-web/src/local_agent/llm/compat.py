@@ -11,7 +11,7 @@ are **not** extracted or preserved"，并建议对 DeepSeek 这类端点改用 p
 实测 ``deepseek-flash`` 与 ``deepseek-v4-pro`` 都会在第一次工具往返之后失败，工具模式因此
 根本跑不完一轮任务。
 
-两处改动，都很窄：
+兼容改动限于供应商字段：
 
 1. **响应侧**（``_create_chat_result`` / ``_convert_chunk_to_generation_chunk``）：把原始响应
    或流式 delta 里的 ``reasoning_content`` 收进
@@ -27,7 +27,10 @@ are **not** extracted or preserved"，并建议对 DeepSeek 这类端点改用 p
 处理会让这类响应丢掉字段，第二次请求照样 400。所以判据是"字段**存在**"（``None`` 才表示不存在，
 即非思考模型），空串照传。
 
-普通非思考模型（响应里没有 ``reasoning_content``）行为完全不变：不新增字段、不改内容。
+DeepSeek 请求另将 SDK 的 ``max_completion_tokens`` 转回供应商接受的 ``max_tokens``，
+保留逐调用覆盖，确保思考和回答总输出均受配置上限约束。其它供应商保持 SDK 原字段。
+摘要用途另对 DeepSeek 官方端点或 Flash/V4 关闭 thinking，防止思考吃满预算后没有摘要正文；
+主决策及其它供应商不受此用途设置影响。响应里没有 ``reasoning_content`` 时不补字段。
 
 口径边界：``reasoning_content`` 只进 Checkpoint 的**消息元数据**（与 ``additional_kwargs`` 里
 已有的其它字段同级），不进 ``decision_trace`` / ``tool_events`` / ``error_events`` /
@@ -38,12 +41,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 from langchain_core.language_models import LanguageModelInput
 from langchain_core.messages import AIMessage, AIMessageChunk
 from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 from pydantic import PrivateAttr
+
+from local_agent.llm.usage_recording import current_purpose
 
 #: 供应商扩展字段名（DeepSeek 思考模式）。
 REASONING_CONTENT_KEY = "reasoning_content"
@@ -52,7 +58,7 @@ REASONING_CONTENT_KEY = "reasoning_content"
 class ChatOpenAIWithReasoning(ChatOpenAI):
     """保留并在需要时回传 ``reasoning_content`` 的 ``ChatOpenAI``。
 
-    只影响 OpenAI 兼容端点的供应商扩展字段；官方 OpenAI 模型上等价于原类。
+    保留供应商推理字段，并转换 DeepSeek 输出上限字段；官方 OpenAI 保持原行为。
     """
 
     #: 这个供应商**确实会用**该字段（见过一次响应或流式 delta 带它）。流式路径要用它决定
@@ -96,6 +102,23 @@ class ChatOpenAIWithReasoning(ChatOpenAI):
         **kwargs: Any,
     ) -> dict[str, Any]:
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+        # DeepSeek accepts max_tokens, while this SDK serializes its alias as
+        # max_completion_tokens. Preserve per-call overrides, including probes.
+        if self.model_name.startswith("deepseek-") or (
+            urlsplit(str(self.openai_api_base or "")).hostname == "api.deepseek.com"
+        ):
+            limit = payload.pop("max_completion_tokens", None)
+            if limit is not None:
+                payload["max_tokens"] = limit
+        # Flash/V4 defaults to high-effort thinking. Summaries need a body within
+        # the same output cap; preserve main calls and unrelated provider fields.
+        if current_purpose() == "summarize" and (
+            self.model_name.startswith(("deepseek-flash", "deepseek-v4-"))
+            or urlsplit(str(self.openai_api_base or "")).hostname == "api.deepseek.com"
+        ):
+            extra = dict(payload.get("extra_body") or {})
+            extra["thinking"] = {"type": "disabled"}
+            payload["extra_body"] = extra
         messages = self._convert_input(input_).to_messages()
         wire = payload.get("messages")
         if not isinstance(wire, list) or len(wire) != len(messages):

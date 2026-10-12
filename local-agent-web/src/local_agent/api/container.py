@@ -18,6 +18,7 @@ from filelock import FileLock, Timeout
 from langchain_core.language_models import BaseChatModel
 
 from local_agent import config as config_module
+from local_agent.application.jobs import JobRuntime
 from local_agent.application.service import ApplicationService
 from local_agent.config import AppConfig, ConfigError, LlmConfig
 from local_agent.graph import builder
@@ -30,6 +31,7 @@ from local_agent.model_settings import (
 )
 from local_agent.persistence import checkpoint as checkpoint_module
 from local_agent.persistence.checkpoint import ChatDatabase
+from local_agent.persistence.job_store import JobStore
 from local_agent.persistence.request_ledger import RequestLedger
 
 #: 单实例锁的后缀：与聊天库同目录，既不在库内也不进 Git。
@@ -187,7 +189,21 @@ def open_runtime(
             connections=None if settings is None else settings.connections,
             permissions=None if settings is None else settings.permissions,
             preferences=None if settings is None else settings.preferences,
+            # 任务索引与**会话索引、Checkpoint 同库同连接**（§17.1）；worker 只在
+            # `jobs.background=true` 时才起，默认路径与 v0.5 一致。
+            jobs=JobRuntime(
+                # 与 Checkpoint **同一把锁**：worker 线程与会话索引、Checkpoint 共用一条连接，
+                # 跨线程不串行会踩掉彼此的事务（见 `persistence/job_store.py` 的模块 docstring）。
+                JobStore(database.connection, lock=database.checkpointer.lock),
+                background=app_config.jobs.background,
+                max_concurrent_jobs=app_config.jobs.max_concurrent_jobs,
+            ),
         )
+        if lock is not None:
+            # 重启后的任务收口（架构 §17.5）：**只在持单实例锁时做**——拿到锁就等于"本进程是这个
+            # 库唯一的服务进程"，索引里剩下的非终态任务必然是上一次进程留下的。拿不到锁说明另一个
+            # 进程正占着这个库（`open_runtime` 会直接抛错），那些任务可能是它正在跑的活。
+            service.recover_interrupted_jobs()
     except BaseException:
         # 装配失败不能留下"锁被一个不存在的服务占着"的状态。
         if lock is not None:

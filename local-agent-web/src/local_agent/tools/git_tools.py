@@ -133,7 +133,7 @@ def _decode(data: bytes) -> str:
 
 def run_git(args: Sequence[str], cwd: Path, timeout_seconds: float) -> GitRun:
     """默认 runner：``git -C <cwd> <args>``，``shell=False``，超时即终止。"""
-    argv = ["git", "-C", str(cwd), *args]
+    argv = ["git", "--literal-pathspecs", "-C", str(cwd), *args]
     try:
         completed = subprocess.run(
             argv,
@@ -234,6 +234,8 @@ class _Git:
             raw, base_dir=self.workspace_root, workspace_root=self.workspace_root
         )
         relative = resolved.relative_to(self.workspace_root.resolve()).as_posix()
+        if raw.startswith(":") or relative.startswith(":"):
+            raise SecurityError("Git 路径必须是普通文件路径，不接受 pathspec magic")
         if relative in (".", ""):
             return "."
         if relative == ".git" or relative.startswith(".git/"):

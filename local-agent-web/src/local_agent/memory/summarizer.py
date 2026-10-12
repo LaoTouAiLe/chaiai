@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 
 from langchain_core.language_models import BaseChatModel
@@ -23,7 +24,7 @@ from langchain_core.messages import (
 
 from local_agent.context.token_budget import estimate_messages_tokens
 from local_agent.exceptions import LocalAgentError
-from local_agent.llm.usage_recording import record_model_call
+from local_agent.llm.usage_recording import record_model_call, use_model_purpose
 
 #: 摘要指令；要求模型只输出摘要正文，便于直接落库。
 SUMMARIZE_INSTRUCTION = (
@@ -64,22 +65,54 @@ def summarize_conversation(
         LocalAgentError: 没有可摘要的消息、模型返回空内容或不是 AI 消息。
     """
     body = render_conversation(messages).strip()
-    previous = (previous_summary or "").strip()
+    previous, protected = _evidence_body((previous_summary or "").strip())
     if not body and not previous:
         raise LocalAgentError("没有可摘要的对话内容")
     text = body if not previous else _PREVIOUS_SUMMARY_TEMPLATE.format(summary=previous) + body
-    outbound = [SystemMessage(content=SUMMARIZE_INSTRUCTION), HumanMessage(content=text)]
-    response = record_model_call(
-        lambda: model.invoke(outbound),
-        estimated_prompt_tokens=estimate_messages_tokens(outbound),
-        messages=outbound,
-    )
+    instruction = SUMMARIZE_INSTRUCTION
+    if protected:
+        instruction += "目标和计划由程序单独保留；本次只合并证据、约束和未完成事项，不复述目标/计划包装。\n"
+    if max_chars > 0:
+        instruction += f"摘要正文最多 {max_chars} 字符，优先保留目标、约束、关键证据与未完成事项。\n"
+    outbound = [SystemMessage(content=instruction), HumanMessage(content=text)]
+    with use_model_purpose("summarize"):
+        response = record_model_call(
+            lambda: model.invoke(outbound),
+            estimated_prompt_tokens=estimate_messages_tokens(outbound),
+            messages=outbound,
+        )
     if not isinstance(response, AIMessage):
         raise LocalAgentError("摘要模型没有返回 AI 消息")
-    summary = _content_text(response).strip()
+    summary, _ = _evidence_body(_content_text(response).strip())
     if not summary:
         raise LocalAgentError("摘要模型返回了空内容")
     return _clamp(summary, max_chars)
+
+
+def _evidence_body(text: str) -> tuple[str, bool]:
+    """Strip only validated program-generated goal/plan wrappers before evidence clamping."""
+    protected = False
+    while True:
+        candidate = text.removeprefix("【已有摘要（需要合并进来）】\n")
+        if not candidate.startswith("【本轮任务目标】\n"):
+            return text, protected
+        _, marker, after = candidate.partition("\n【已记录显式计划，标题与状态须保留】\n")
+        if not marker:
+            return text, protected
+        plan_line, _, body = after.partition("\n")
+        try:
+            plan = json.loads(plan_line)
+        except ValueError:
+            return text, protected
+        if not isinstance(plan, list) or not plan or not all(
+            isinstance(step, dict) and set(step) == {"step", "status"}
+            and isinstance(step["step"], str)
+            and isinstance(step["status"], str)
+            and step["status"] in {"pending", "running", "in_progress", "completed", "failed"}
+            for step in plan
+        ):
+            return text, protected
+        text, protected = body.lstrip(), True
 
 
 def render_conversation(messages: Sequence[AnyMessage]) -> str:

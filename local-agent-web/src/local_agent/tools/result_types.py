@@ -61,6 +61,8 @@ class ReadFileResult(BaseModel):
     last_line: int = 0
     has_more: bool = False
     next_start_line: int | None = None
+    #: 实际返回的不完整行，续读必须从该行开始而不能跳过。
+    partial_lines: list[int] = Field(default_factory=list)
 
 
 #: ``grep`` 的输出模式：正文命中 / 只列文件名 / 只给计数。

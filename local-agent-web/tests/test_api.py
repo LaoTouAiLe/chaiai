@@ -43,10 +43,27 @@ from local_agent.application.errors import (
     SESSION_NOT_FOUND,
     WORKSPACE_NOT_FOUND,
 )
+from local_agent.application.jobs import JobRuntime
 from local_agent.application.models import SCHEMA_VERSION
+from local_agent.application.recovery import (
+    NEEDS_REVIEW_DETAIL,
+    PROVABLE_DETAIL,
+    UNSTARTED_DETAIL,
+)
 from local_agent.application.service import EventSubscription
 from local_agent.capabilities import CAPABILITY_TOOLS
 from local_agent.config import AppConfig
+from local_agent.persistence.job_store import (
+    JOB_STATE_CANCELLED,
+    JOB_STATE_COMPLETED,
+    JOB_STATE_FAILED,
+    JOB_STATE_NEEDS_REVIEW,
+    JOB_STATE_QUEUED,
+    JOB_STATE_RUNNING,
+    JOB_STATE_WAITING_USER,
+    JOB_STATES,
+    JobStore,
+)
 from local_agent.security.path_guard import normalize_grant_path
 
 ModelFactory = Callable[..., Any]
@@ -1842,6 +1859,10 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/sessions/{session_id}/select",
         "/api/sessions/{session_id}/mode",
         "/api/sessions/{session_id}/recovery",
+        # v0.6 T60：取消在跑的任务（幂等，§17.4）
+        "/api/sessions/{session_id}/cancel",
+        # v0.6 T62：任务中心（只读索引，不读会话 Checkpoint，§17.6）
+        "/api/tasks",
         "/api/sessions/{session_id}/archive",
         "/api/sessions/{session_id}/restore",
         "/api/sessions/{session_id}/events",
@@ -1935,6 +1956,59 @@ def test_status_mapping_covers_every_application_code() -> None:
     assert app_errors.ERROR_CATEGORIES  # 分类集合仍在（契约未变）
 
 
+# ---- 任务中心：真源与"等你处理"（T62 的**两个补充**，架构 §17.6）------------
+#
+# 任务中心的基础验收（状态 / 计数 / 顺序 / 字段门槛 / limit / 筛选与归档 / 只读 / 空工作区）在文件末尾
+# 那一节，**不在这里重复**。这一节只补它没覆盖的两条口径：
+#   ① **不读任何会话的 Checkpoint**——§17.6 明写"数据只来自任务索引 + 会话索引"，所以把那条路封死
+#      之后它必须照常工作（"不读"这件事要有证据，不是靠注释声明）；
+#   ② **`needs_review` 与 `waiting_user` 一样要被发现**：两者都进入口角标（§17.6），
+#      这是 T61 的三类判定在页面上的落点。
+
+
+def _store(runtime: ApiRuntime) -> JobStore:
+    """任务索引的直连读写（与 `_plant` 同一把锁），用于把索引摆成想要的形状。"""
+    return JobStore(runtime.database.connection, lock=runtime.database.checkpointer.lock)
+
+
+def test_task_center_never_reads_a_session_checkpoint(
+    api: tuple[TestClient, ApiRuntime], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """把"读 Checkpoint"这条路封死，任务中心照样工作——它只有索引这一个真源（§17.6）。"""
+    client, runtime = api
+    sid = _create_session(client)
+    assert _submit(client, sid, "你好", "tasks-no-checkpoint").json()["status"] == "completed"
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("任务中心不应读会话的 Checkpoint")
+
+    monkeypatch.setattr(type(runtime.service), "_read", boom)
+
+    page = _tasks(client)
+
+    assert [item["session_id"] for item in page["tasks"]] == [sid]
+
+
+def test_task_center_surfaces_what_waits_for_the_user(open_api: OpenApi) -> None:
+    """入口角标 = 在等审批 + 需要人工核对；两者要能在同一页里被发现（§17.6 与 T61 的三类判定接通）。"""
+    call = {"name": "delete_file", "args": {"path": "note.txt"}, "id": "tasks-badge-call"}
+    client, runtime = open_api(decision="tool", reply="好的", tool_calls=[call])
+    sid = _create_session(client)
+    assert _submit(client, sid, "删除 note.txt", "tasks-badge").json()["status"] == "awaiting_approval"
+    # 重启收口留下的 `needs_review`（T61）也必须出现在任务中心：它同样属于"等你核对"
+    planted = _plant(runtime, sid, JOB_STATE_RUNNING)
+    _store(runtime).update_state(planted.job_id, JOB_STATE_NEEDS_REVIEW, detail=NEEDS_REVIEW_DETAIL)
+
+    page = _tasks(client)
+
+    by_id = {item["task_id"]: item for item in page["tasks"]}
+    assert by_id[planted.job_id]["state"] == JOB_STATE_NEEDS_REVIEW
+    assert any(item["state"] == JOB_STATE_WAITING_USER for item in page["tasks"])
+    assert page["pending_count"] >= 2
+    # 原因由服务端写好、页面原样显示（"不自动重跑"那句文案在前端，这里钉住它的依据）
+    assert "可能仍有残留进程" in (by_id[planted.job_id]["detail"] or "")
+
+
 # ---- 入口 -------------------------------------------------------------------
 
 
@@ -1991,3 +2065,686 @@ def test_non_loopback_host_needs_explicit_opt_in() -> None:
     assert config_module.WebConfig(host="0.0.0.0", allow_non_loopback=True).host == "0.0.0.0"
     assert config_module.is_loopback_host("localhost") is True
     assert config_module.is_loopback_host("example.com") is False
+
+
+# ------------------------------------------------------------- v0.6 T58 后台任务
+
+
+def _enable_background(runtime: ApiRuntime) -> JobStore:
+    """把已装配运行时的任务运行时换成 `background=true`（用的是与 container 同一对装配件）。
+
+    为什么不在配置里开：`open_api` 夹具在 `open_runtime` 之前就固定了配置形状。这里换运行时
+    用的是同一对对象（`JobStore` + `JobRuntime`）与**同一把锁**，所以测到的仍是生产路径。
+    """
+    assert runtime.service._jobs is not None
+    runtime.service._jobs.close()
+    store = JobStore(runtime.database.connection, lock=runtime.database.checkpointer.lock)
+    runtime.service._jobs = JobRuntime(
+        store, background=True, max_concurrent_jobs=1, on_transition=runtime.service._on_job_transition
+    )
+    return store
+
+
+def _wait_for(predicate: Callable[[], bool], timeout: float = 15.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return predicate()
+
+
+def _stages(runtime: ApiRuntime, session_id: str) -> list[str]:
+    """该会话当前 Checkpoint 里的**决策阶段序列**（架构 §4.2 的 `decision_trace`）。
+
+    节点名本身不落库，但每个阶段都对应一次节点写入，因此它等价于"跑过哪些节点、什么顺序"。
+    """
+    session = runtime.database.sessions.get(session_id)
+    assert session is not None
+    state = runtime.service._graph.get_state(
+        {"configurable": {"thread_id": session.thread_id}}
+    ).values
+    return [str(record.get("stage")) for record in state.get("decision_trace", [])]
+
+
+def _visible(runtime: ApiRuntime, client: TestClient, session_id: str) -> dict[str, Any]:
+    """会话的可见结果（只取稳定字段：状态、消息角色序列、正文、决策阶段序列）。"""
+    view = client.get(f"/api/sessions/{session_id}").json()
+    messages = view["messages"]
+    return {
+        "state": view["session_state"],
+        "roles": [str(item.get("role") or item.get("kind") or "") for item in messages],
+        "text": "".join(str(item.get("text") or item.get("content") or "") for item in messages),
+        "stages": _stages(runtime, session_id),
+    }
+
+
+def test_background_submit_returns_running_and_converges_through_the_index(
+    open_api: OpenApi,
+) -> None:
+    client, runtime = open_api(decision="chat", reply="后台回答")
+    store = _enable_background(runtime)
+    sid = _create_session(client)
+
+    response = _submit(client, sid, "你好", "bg-1")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # 提交立即返回"已被接受、在运行"，并给出任务标识（§17.2）
+    assert body["status"] == "running" and body["job_id"]
+
+    # 结局由任务索引 + Checkpoint 快照收敛，不靠 SSE
+    assert _wait_for(lambda: store.get(body["job_id"]).state == JOB_STATE_COMPLETED)
+    snapshot = client.get(f"/api/sessions/{sid}").json()
+    assert snapshot["session_state"] == "completed"
+    assert "后台回答" in json.dumps(snapshot, ensure_ascii=False)
+
+    # 幂等不变：同 id 重试拿原结果，不再登记第二个任务
+    replay = _submit(client, sid, "你好", "bg-1").json()
+    assert replay["job_id"] == body["job_id"]
+    assert len(store.list_for_session(sid)) == 1
+
+
+def test_background_second_submit_of_the_same_session_is_busy(open_api: OpenApi) -> None:
+    """单飞不变：同一会话有非终态任务时第二个提交仍 `SESSION_BUSY`，不排队（§15.2）。"""
+    client, runtime = open_api(decision="chat", reply="慢回答")
+    store = _enable_background(runtime)
+    sid = _create_session(client)
+    # 直接占住会话：登记一个非终态任务（等价于"任务还在等 worker"）
+    store.create(session_id=sid)
+
+    blocked = _submit(client, sid, "再来一次", "bg-busy")
+
+    assert blocked.status_code == 409
+    assert SESSION_BUSY in blocked.text
+
+
+def test_background_and_inline_run_the_same_turn(open_api: OpenApi) -> None:
+    """同一固定场景在两种调度时机下**可见结果与决策阶段序列逐项一致**（§17.2 的验收口径）。
+
+    两种时机用**同一套运行时**（单实例锁按聊天库路径加，一个用例只能开一套），先内联跑一个会话，
+    再换成后台调度跑另一个会话：调度时机是运行时的属性，不是会话的。
+    """
+    client, runtime = open_api(decision="chat", reply="一致的回答")
+
+    inline_sid = _create_session(client, title="内联")
+    inline_body = _submit(client, inline_sid, "同一句话", "same-1").json()
+    assert inline_body["status"] == "completed" and inline_body["job_id"] is None
+
+    store = _enable_background(runtime)
+    bg_sid = _create_session(client, title="后台")
+    bg_body = _submit(client, bg_sid, "同一句话", "same-2").json()
+    assert bg_body["status"] == "running"
+    assert _wait_for(lambda: store.get(bg_body["job_id"]).state == JOB_STATE_COMPLETED)
+
+    inline_visible = _visible(runtime, client, inline_sid)
+    background_visible = _visible(runtime, client, bg_sid)
+
+    assert "一致的回答" in inline_visible["text"]  # 防止"两边都读空了也算相等"
+    assert inline_visible["stages"]
+    assert background_visible == inline_visible
+
+
+@pytest.mark.asyncio
+async def test_background_job_lifecycle_reaches_the_same_stream(open_api: OpenApi) -> None:
+    """任务生命周期事件与轮次事件走**同一条** SSE（§17.3）：排队 → 运行 → 完成。"""
+    client, runtime = open_api(
+        decision="chat", reply="后台回答", web_overrides={**SSE_WEB, "sse_idle_timeout_seconds": 3.0}
+    )
+    _enable_background(runtime)
+    session_id = _create_session(client)
+    app = create_app(runtime)
+
+    stream = asyncio.create_task(_collect_stream(app, _sse_url(session_id), limit=10.0))
+    for _ in range(200):
+        if runtime.service._bus.subscriber_count(session_id) >= 1:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.to_thread(runtime.service.submit_message, session_id, "你好", "req-bg")
+
+    frames = await stream
+    job_names = {"job_queued", "job_progress", "job_waiting", "job_completed", "task_cancelled"}
+    job_frames = [(name, data) for name, data in frames if name in job_names]
+
+    assert [name for name, _ in job_frames] == ["job_queued", "job_progress", "job_completed"]
+    queued = job_frames[0][1]
+    # 排队时还没有轮次：task_id / job_id 非空、run_id 为空（§17.3 的信封例外）
+    assert queued["task_id"] == queued["job_id"] and queued["run_id"] is None
+    assert queued["payload"]["state"] == "queued"
+    progress = job_frames[1][1]
+    # 进 running 早于图交出轮次，因此这里仍然没有 run_id（§17.3 的信封口径）
+    assert progress["payload"]["state"] == "running" and progress["run_id"] is None
+    completed = job_frames[2][1]
+    assert completed["payload"]["state"] == "completed" and completed["run_id"]
+    # 任务结算发生在整轮收尾之后
+    kinds = [name for name, _ in frames]
+    assert kinds.index("job_completed") > kinds.index("task_completed")
+
+
+# ------------------------------------------------------------- v0.6 T60 取消
+
+
+def test_cancelled_turn_never_executes_a_tool(
+    open_api: OpenApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """取消后**一个工具都不执行**（§17.4）：走的是既有的两道门，节点控制流没变。"""
+    client, runtime = open_api(
+        decision="tool",
+        reply="好的",
+        tool_calls=[
+            {"name": "write_file", "args": {"path": "cancelled.txt", "content": "不该出现"}, "id": "c1"}
+        ],
+    )
+    sid = _create_session(client)
+    workspace = Path(runtime.database.sessions.get(sid).workspace_root)
+    original = runtime.service._context
+
+    def cancelled_context(session, env):  # type: ignore[no-untyped-def]
+        context = original(session, env)
+        # 把这一轮的令牌先取消掉：等价于"这一轮已经被取消"，且与真实取消走同一个令牌对象。
+        assert context.cancellation is not None
+        context.cancellation.cancel("测试取消")
+        return context
+
+    monkeypatch.setattr(runtime.service, "_context", cancelled_context)
+
+    response = _submit(client, sid, "写一个文件", "cancel-1")
+
+    assert response.status_code == 200, response.text
+    # 副作用从未发生
+    assert not (workspace / "cancelled.txt").exists()
+    # 而且如实告诉模型为什么没执行（拒绝理由来自安全门，不是伪造的"成功"）
+    snapshot = client.get(f"/api/sessions/{sid}").json()
+    assert "测试取消" in json.dumps(snapshot, ensure_ascii=False)
+
+
+def test_cancel_task_marks_the_job_and_is_idempotent(open_api: OpenApi) -> None:
+    client, runtime = open_api(decision="chat", reply="后台回答")
+    store = _enable_background(runtime)
+    sid = _create_session(client)
+
+    # 空操作：这个会话没有非终态任务
+    idle = client.post(f"/api/sessions/{sid}/cancel", json={}).json()
+    assert idle["status"] != "cancelled"
+    assert store.list_for_session(sid) == []
+
+    # 占住会话（等价于"任务还在等 worker"），再取消
+    job = store.create(session_id=sid)
+    cancelled = client.post(f"/api/sessions/{sid}/cancel", json={"reason": "用户取消"}).json()
+
+    assert cancelled["status"] == "cancelled"
+    stored = store.get(job.job_id)
+    assert stored.state == JOB_STATE_CANCELLED and "用户取消" in (stored.detail or "")
+    # 幂等：再取消一次是空操作，既不新建任务也不改写终态
+    again = client.post(f"/api/sessions/{sid}/cancel", json={}).json()
+    assert again["status"] != "cancelled"
+    assert [item.job_id for item in store.list_for_session(sid)] == [job.job_id]
+    assert store.get(job.job_id).detail == stored.detail
+
+
+def test_expire_overdue_tasks_cancels_past_budget(open_api: OpenApi) -> None:
+    """超时走**同一条取消路径**，不另写一套中止逻辑（§17.4）。"""
+    client, runtime = open_api(decision="chat", reply="后台回答")
+    store = _enable_background(runtime)
+    sid = _create_session(client)
+    job = store.create(session_id=sid)
+    # 把一个任务的登记时刻挪到很久以前：等价于"它已经跑了很久"
+    runtime.database.connection.execute(
+        "UPDATE jobs SET created_at = ? WHERE job_id = ?",
+        ("2020-01-01T00:00:00+00:00", job.job_id),
+    )
+    runtime.database.connection.commit()
+    runtime.service._max_task_seconds = 5.0
+
+    expired = runtime.service.expire_overdue_tasks()
+
+    assert expired == [job.job_id]
+    stored = store.get(job.job_id)
+    assert stored.state == JOB_STATE_CANCELLED
+    assert "max_task_seconds" in (stored.detail or "")
+    # 不限时长时什么都不做（默认配置就是这一档）
+    runtime.service._max_task_seconds = None
+    assert runtime.service.expire_overdue_tasks() == []
+
+
+# ---- 重启收口（T61，架构 §17.5）--------------------------------------------
+#
+# 真实"重启"= 关掉这一套运行时（释放单实例锁）再开一套：收口在 `open_runtime` 持锁时执行一次。
+# 每个用例都覆盖一类判定，四类合起来就是"重启后能区分可恢复 / 失败 / 需要人工核对"。
+
+
+def _plant(runtime: ApiRuntime, session_id: str, state: str):  # type: ignore[no-untyped-def]
+    """把索引摆成"上一次进程留下的样子"：重启前的磁盘状态就是这个。"""
+    store = JobStore(runtime.database.connection, lock=runtime.database.checkpointer.lock)
+    return store.create(session_id=session_id, state=state)
+
+
+def test_restart_closes_a_never_started_task_as_failed(open_api: OpenApi) -> None:
+    """`queued` 是**能证明**的"什么都没跑"：重启后按失败收口，并如实说明可以安全重提（§17.5）。"""
+    client, runtime = open_api(decision="chat", reply="假回答")
+    sid = _create_session(client)
+    job = _plant(runtime, sid, JOB_STATE_QUEUED)
+    runtime.close()
+
+    _client, reopened = open_api(decision="chat", reply="假回答")
+
+    row = reopened.service._jobs.list_for_session(sid)[-1]
+    assert row.job_id == job.job_id
+    assert row.state == JOB_STATE_FAILED
+    assert row.detail == UNSTARTED_DETAIL
+    assert row.finished_at is not None
+
+
+def test_restart_marks_an_unprovable_task_for_human_review(open_api: OpenApi) -> None:
+    """"可能已部分执行"：证明不了就标 `needs_review`，不自动重放，也不假装失败（§17.5）。"""
+    client, runtime = open_api(decision="chat", reply="假回答")
+    sid = _create_session(client)
+    job = _plant(runtime, sid, JOB_STATE_RUNNING)
+    runtime.close()
+
+    _client, reopened = open_api(decision="chat", reply="假回答")
+
+    row = reopened.service._jobs.list_for_session(sid)[-1]
+    assert row.job_id == job.job_id
+    assert row.state == JOB_STATE_NEEDS_REVIEW
+    assert row.detail == NEEDS_REVIEW_DETAIL
+    # 说明里必须出现"可能仍有残留进程"：重启窗口内进程树是否真的死了，台账证明不了（§17.5）
+    assert "可能仍有残留进程" in row.detail
+    # 它是**终态**：会话不会因为一条查不清的旧任务被永久卡住
+    assert reopened.service._jobs.begin(session_id=sid).state == JOB_STATE_QUEUED
+
+
+def test_restart_proves_a_terminal_turn_and_settles_the_task(
+    open_api: OpenApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """崩溃窗口：图跑完了、Checkpoint 已终态、台账记了轮次，只有索引没结算（§17.5 的"可证明"）。"""
+    client, runtime = open_api(decision="chat", reply="假回答")
+    sid = _create_session(client)
+    jobs = runtime.service._jobs
+    assert jobs is not None
+    # 模拟"进程在结算任务之前挂掉"：让 settle 什么都不做（图、Checkpoint、台账全是真的）
+    monkeypatch.setattr(JobRuntime, "_settle", lambda self, job_id, result: None)
+
+    submitted = _submit(client, sid, "你好", "restart-proof")
+    assert submitted.status_code == 200 and submitted.json()["status"] == "completed"
+    before_messages = len(client.get(f"/api/sessions/{sid}").json()["messages"])
+    stale = jobs.list_for_session(sid)[-1]
+    assert stale.state == JOB_STATE_RUNNING and stale.run_id is None
+
+    monkeypatch.undo()
+    runtime.close()
+
+    client2, reopened = open_api(decision="chat", reply="假回答")
+
+    row = reopened.service._jobs.list_for_session(sid)[-1]
+    assert row.job_id == stale.job_id
+    assert row.state == JOB_STATE_COMPLETED
+    assert row.detail == PROVABLE_DETAIL
+    # **没有**重新跑一轮：消息条数不变（补的是索引，不是执行）
+    assert len(client2.get(f"/api/sessions/{sid}").json()["messages"]) == before_messages
+
+
+def test_replay_proves_the_outcome_and_settles_the_task_without_a_restart(
+    open_api: OpenApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """崩溃后**同一 request id 重试**也要收口：不必等重启，会话不被一条旧任务卡住（§17.5）。"""
+    client, runtime = open_api(decision="chat", reply="假回答")
+    sid = _create_session(client)
+    jobs = runtime.service._jobs
+    assert jobs is not None
+    monkeypatch.setattr(JobRuntime, "_settle", lambda self, job_id, result: None)
+    assert _submit(client, sid, "你好", "replay-proof").status_code == 200
+    stale = jobs.list_for_session(sid)[-1]
+    assert stale.state == JOB_STATE_RUNNING
+    monkeypatch.undo()
+
+    # 台账仍为"执行中"，只读核对能证明终态 → 补齐结果，并**顺手把任务索引收口**（同一个纯函数）
+    replayed = _submit(client, sid, "你好", "replay-proof")
+
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.json()["replayed"] is True
+    row = jobs.list_for_session(sid)[-1]
+    assert row.job_id == stale.job_id
+    assert row.state == JOB_STATE_COMPLETED
+    assert row.detail == PROVABLE_DETAIL
+    # 会话不再被那条旧任务卡住：`begin` 只在"有非终态任务"时拒绝（§17.2），所以这里为空
+    # 就等于"下一次提交开得出新任务"。不再真跑一轮新对话：那要另配一次模型鉴权，与本片无关。
+    assert jobs.active_for_session(sid) is None
+    assert len(jobs.list_for_session(sid)) == 1
+
+
+# ---- 任务中心（T62，架构 §17.6）---------------------------------------------
+#
+# 只读端点：字段全部由**任务索引 + 会话索引**推出，不读任何会话的 Checkpoint。索引里的行用
+# `_plant` 摆成各种状态（等价于"这些任务真的跑过"），因此这里测的是投影与聚合，不依赖模型。
+
+
+def _tasks(client: TestClient, **params: object) -> dict:
+    response = client.get("/api/tasks", params=params)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_task_center_lists_states_counts_and_order(open_api: OpenApi) -> None:
+    client, runtime = open_api(decision="chat", reply="假回答")
+    sid = _create_session(client, title="跑很久的会话")
+    completed = _plant(runtime, sid, JOB_STATE_COMPLETED)
+    waiting = _plant(runtime, sid, JOB_STATE_WAITING_USER)
+    running = _plant(runtime, sid, JOB_STATE_RUNNING)
+
+    body = _tasks(client)
+
+    # 最新登记的在最前面（契约：按登记时间倒序）
+    assert [item["task_id"] for item in body["tasks"]] == [
+        running.job_id,
+        waiting.job_id,
+        completed.job_id,
+    ]
+    # 会话标题进页面（任务中心靠它认出"哪个会话在跑"）
+    assert {item["session_title"] for item in body["tasks"]} == {"跑很久的会话"}
+    # 计数覆盖全部任务，且每个状态都有键（没有的是 0，不是缺键）
+    assert set(body["counts"]) == set(JOB_STATES)
+    assert body["counts"][JOB_STATE_RUNNING] == 1
+    assert body["counts"][JOB_STATE_WAITING_USER] == 1
+    assert body["counts"][JOB_STATE_COMPLETED] == 1
+    assert body["counts"][JOB_STATE_NEEDS_REVIEW] == 0
+    # 入口角标 = 等你处理（在等审批 + 需要人工核对）
+    assert body["pending_count"] == 1
+
+
+def test_task_center_has_no_internal_identifiers(open_api: OpenApi) -> None:
+    """字段门槛（§15.8）：行里不出现 run / thread / request 标识，也没有指纹或工具名。"""
+    client, _runtime = open_api(decision="chat", reply="假回答")
+    sid = _create_session(client)
+    assert _submit(client, sid, "你好", "task-center-1").status_code == 200
+
+    body = _tasks(client)
+    rendered = json.dumps(body, ensure_ascii=False)
+
+    assert body["tasks"], "提交过后应当能看到这一轮的任务"
+    assert "run_id" not in rendered
+    assert "thread_id" not in rendered
+    assert "request_id" not in rendered
+    assert "fingerprint" not in rendered
+    # 只给页面需要的四组字段：引用、会话、状态、时间
+    assert set(body["tasks"][0]) == {
+        "task_id",
+        "session_id",
+        "session_title",
+        "workspace",
+        "state",
+        "detail",
+        "created_at",
+        "started_at",
+        "finished_at",
+    }
+
+
+def test_task_center_counts_are_exact_beyond_the_limit(open_api: OpenApi) -> None:
+    client, runtime = open_api(decision="chat", reply="假回答")
+    sid = _create_session(client)
+    for _ in range(3):
+        _plant(runtime, sid, JOB_STATE_COMPLETED)
+
+    body = _tasks(client, limit=1)
+
+    assert len(body["tasks"]) == 1
+    assert body["counts"][JOB_STATE_COMPLETED] == 3  # 计数不受 limit 截断
+
+
+def test_task_center_filters_finished_and_hides_archived_sessions(open_api: OpenApi) -> None:
+    client, runtime = open_api(decision="chat", reply="假回答")
+    sid = _create_session(client)
+    _plant(runtime, sid, JOB_STATE_COMPLETED)
+    running = _plant(runtime, sid, JOB_STATE_RUNNING)
+
+    unfinished = _tasks(client, include_finished=False)
+    assert [item["task_id"] for item in unfinished["tasks"]] == [running.job_id]
+    # 计数仍然覆盖全部（筛的是列表，不是聚合）
+    assert unfinished["counts"][JOB_STATE_COMPLETED] == 1
+
+    assert client.post(f"/api/sessions/{sid}/archive").status_code == 200
+    assert _tasks(client)["tasks"] == []  # 归档 = 离开视线（§17.6 明写这条口径）
+
+
+def test_task_center_never_writes(open_api: OpenApi) -> None:
+    """只读：连读两次不改索引里的任何一行（`updated_at` 逐项不变）。"""
+    client, runtime = open_api(decision="chat", reply="假回答")
+    sid = _create_session(client)
+    _plant(runtime, sid, JOB_STATE_WAITING_USER)
+    store = JobStore(runtime.database.connection, lock=runtime.database.checkpointer.lock)
+    before = [(job.job_id, job.state, job.updated_at) for job in store.list_for_session(sid)]
+
+    _tasks(client)
+    _tasks(client, include_finished=False)
+
+    after = [(job.job_id, job.state, job.updated_at) for job in store.list_for_session(sid)]
+    assert after == before
+
+
+def test_task_center_is_empty_not_an_error_on_a_fresh_workspace(open_api: OpenApi) -> None:
+    client, _runtime = open_api(decision="chat", reply="假回答")
+    _create_session(client)
+
+    body = _tasks(client)
+
+    assert body["tasks"] == []
+    assert set(body["counts"]) == set(JOB_STATES)
+    assert all(count == 0 for count in body["counts"].values())
+    assert body["pending_count"] == 0
+
+
+def test_restart_keeps_a_waiting_task_resumable(open_api: OpenApi) -> None:
+    """停在审批上的任务：重启后索引与 Checkpoint 都不动，用户还能接着办（§17.5 的"可恢复"）。"""
+    call = {"name": "delete_file", "args": {"path": "note.txt"}, "id": "restart-call"}
+    client, runtime = open_api(decision="tool", reply="好的", tool_calls=[call])
+    sid = _create_session(client)
+    assert _submit(client, sid, "删除 note.txt", "wait-1").json()["status"] == "awaiting_approval"
+    waiting = runtime.service._jobs.active_for_session(sid)
+    assert waiting is not None and waiting.state == JOB_STATE_WAITING_USER
+    before = (waiting.updated_at, waiting.detail)
+    runtime.close()
+
+    client2, reopened = open_api(decision="tool", reply="好的", tool_calls=[call])
+
+    row = reopened.service._jobs.list_for_session(sid)[-1]
+    # 一个字节都没改：不写库就不发事件（§17.3 的同状态不算迁移）
+    assert (row.state, row.updated_at, row.detail) == (JOB_STATE_WAITING_USER, *before)
+    # 而且真的还能继续：重启后的审批照常走通，任务随之收敛到终态
+    approval = client2.get(f"/api/sessions/{sid}").json()["approval"]
+    decided = client2.post(
+        f"/api/sessions/{sid}/approvals/{approval['approval_id']}",
+        json={"decision": "reject", "client_request_id": "wait-2", "reason": "先别删"},
+    )
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["status"] == "completed"
+    assert reopened.service._jobs.list_for_session(sid)[-1].state == JOB_STATE_COMPLETED
+
+
+@pytest.mark.parametrize("restart", ["none", "before_resume", "after_registration"])
+def test_cancelled_approval_stays_cancelled_after_rejected_submit_and_restart(
+    open_api: OpenApi, tmp_path: Path, restart: str
+) -> None:
+    call = {"name": "delete_file", "args": {"path": "note.txt"}, "id": "cancelled-delete"}
+    client, runtime = open_api(decision="tool", reply="好的", tool_calls=[call])
+    target = tmp_path / WORKSPACE_NAME / "note.txt"
+    target.write_text("保留这个测试文件", encoding="utf-8")
+    sid = _create_session(client)
+    assert _submit(client, sid, "删除 note.txt", "cancel-wait").json()["status"] == "awaiting_approval"
+    approval = client.get(f"/api/sessions/{sid}").json()["approval"]
+    assert client.post(f"/api/sessions/{sid}/cancel", json={"reason": "不再删除"}).json()["status"] == "cancelled"
+    if restart == "after_registration":
+        # 模拟恢复请求登记了补建任务、尚未驱动图时进程退出。
+        runtime.service._jobs.resume(session_id=sid)
+    if restart != "none":
+        runtime.close()
+        client, runtime = open_api(decision="tool", reply="好的", tool_calls=[call])
+    rejected = _submit(client, sid, "新的请求", "cancel-rejected")
+    assert rejected.status_code == 409 and rejected.json()["error"]["code"] == SESSION_BUSY
+    assert "没有取消接口" not in rejected.text and "不公开取消" not in rejected.text
+    decided = client.post(f"/api/sessions/{sid}/approvals/{approval['approval_id']}",
+                          json={"decision": "approve", "client_request_id": "cancel-decide"})
+    assert decided.status_code == 200, decided.text
+    assert target.read_text(encoding="utf-8") == "保留这个测试文件"
+    assert runtime.service._token_for(sid).cancelled
+    assert runtime.service._jobs.list_for_session(sid)[0].state == JOB_STATE_CANCELLED
+    # 新的有效提交可以换令牌；旧取消不会粘住后续任务。
+    healthy = _submit(client, sid, "新的一轮", "cancel-new-turn")
+    assert healthy.status_code == 200, healthy.text
+    assert not runtime.service._token_for(sid).cancelled
+
+
+def test_queued_cancel_releases_session_for_explicit_recovery(open_api: OpenApi) -> None:
+    client, runtime = open_api(decision="chat", reply="新任务完成")
+    store = _enable_background(runtime)
+    jobs = runtime.service._jobs
+    assert jobs is not None
+    blocker_sid = _create_session(client)
+    sid = _create_session(client)
+    started, release = threading.Event(), threading.Event()
+
+    def blocker():  # type: ignore[no-untyped-def]
+        started.set()
+        assert release.wait(10)
+        return SimpleNamespace(status="completed", run_id="blocker-run")
+
+    try:
+        jobs.dispatch(jobs.begin(session_id=blocker_sid), blocker)
+        assert started.wait(5)
+        accepted = _submit(client, sid, "排队消息", "queued-cancel")
+        assert accepted.status_code == 200, accepted.text
+        job_id = accepted.json()["job_id"]
+        assert store.get(job_id).state == JOB_STATE_QUEUED
+        assert client.post(f"/api/sessions/{sid}/cancel", json={}).status_code == 200
+        release.set()
+        assert jobs.wait_for_idle(10)
+        assert not runtime.service._lock_for(sid).locked()
+        assert _stages(runtime, sid) == []  # 被取消的队列项没有启动图。
+        snapshot = client.get(f"/api/sessions/{sid}").json()
+        recovered = client.post(f"/api/sessions/{sid}/recovery", json={
+            "request_id": "queued-cancel", "expected_snapshot_id": snapshot["snapshot_id"],
+            "confirm_reviewed": True,
+        })
+        assert recovered.status_code == 200, recovered.text
+        next_request = _submit(client, sid, "新消息", "queued-next")
+        assert next_request.status_code == 200, next_request.text
+        assert jobs.wait_for_idle(10)
+        assert store.get(next_request.json()["job_id"]).state == JOB_STATE_COMPLETED
+    finally:
+        release.set()
+
+
+@pytest.mark.parametrize("restart", ["before_resume", "after_registration"])
+@pytest.mark.parametrize("legacy_null_binding", [False, True])
+def test_cancel_before_job_settlement_persists_the_run_for_approval_restart(
+    open_api: OpenApi, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restart: str,
+    legacy_null_binding: bool,
+) -> None:
+    call = {"name": "delete_file", "args": {"path": "note.txt"}, "id": "before-settle-delete"}
+    client, runtime = open_api(decision="tool", reply="好的", tool_calls=[call])
+    store = _enable_background(runtime)
+    jobs = runtime.service._jobs
+    entered = threading.Event()
+    release = threading.Event()
+    original = jobs._settle
+
+    def settle(job_id, result):
+        entered.set()
+        assert release.wait(15)
+        original(job_id, result)
+
+    monkeypatch.setattr(jobs, "_settle", settle)
+    target = tmp_path / WORKSPACE_NAME / "note.txt"
+    target.write_text("必须保留", encoding="utf-8")
+    sid = _create_session(client)
+    submitted = _submit(client, sid, "删除 note.txt", "before-settle-submit")
+    try:
+        assert submitted.status_code == 200, submitted.text
+        assert entered.wait(15)
+        approval = client.get(f"/api/sessions/{sid}").json()["approval"]
+        assert store.get(submitted.json()["job_id"]).run_id is None
+        cancelled = client.post(f"/api/sessions/{sid}/cancel", json={"reason": "保留文件"})
+        assert cancelled.status_code == 200, cancelled.text
+        saved = store.get(submitted.json()["job_id"])
+        session = runtime.database.sessions.get(sid)
+        assert saved.state == JOB_STATE_CANCELLED
+        assert saved.run_id == runtime.service._current_run_id(session)
+        assert saved.run_id is not None
+    finally:
+        release.set()
+    assert jobs.wait_for_idle(15)
+    if legacy_null_binding:
+        # 升级前已保存的缺失绑定记录：不通过回写终态修复，更不能默认准许执行。
+        runtime.database.connection.execute(
+            "UPDATE jobs SET run_id=NULL WHERE job_id=?", (submitted.json()["job_id"],),
+        )
+        runtime.database.connection.commit()
+    if restart == "after_registration":
+        jobs.resume(session_id=sid)
+    runtime.close()
+
+    client, reopened = open_api(decision="tool", reply="好的", tool_calls=[call])
+    decided = client.post(
+        f"/api/sessions/{sid}/approvals/{approval['approval_id']}",
+        json={"decision": "approve", "client_request_id": "before-settle-approve"},
+    )
+    assert decided.status_code == 200, decided.text
+    assert target.read_text(encoding="utf-8") == "必须保留"
+    assert reopened.service._token_for(sid).cancelled
+    # 即使旧空绑定记录保留，已验收的新一轮可以独立处理自己的审批。
+    healthy = _submit(client, sid, "新的一轮", "after-unbound-cancel")
+    assert healthy.status_code == 200, healthy.text
+    assert not reopened.service._token_for(sid).cancelled
+
+
+def test_stale_timeout_scan_never_cancels_the_next_submission(
+    open_api: OpenApi, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, runtime = open_api(decision="chat", reply="新任务完成")
+    store = _enable_background(runtime)
+    jobs = runtime.service._jobs
+    sid = _create_session(client)
+    old = store.create(session_id=sid, state=JOB_STATE_RUNNING)
+    runtime.database.connection.execute(
+        "UPDATE jobs SET created_at=? WHERE job_id=?",
+        ("2020-01-01T00:00:00+00:00", old.job_id),
+    )
+    runtime.database.connection.commit()
+    runtime.service._max_task_seconds = 5.0
+    captured = threading.Event()
+    release = threading.Event()
+    original = jobs.jobs_in_flight
+    expired: list[str] = []
+    errors: list[Exception] = []
+
+    def scan():
+        snapshot = original()
+        captured.set()
+        assert release.wait(15)
+        return snapshot
+
+    def expire():
+        try:
+            expired.extend(runtime.service.expire_overdue_tasks())
+        except Exception as exc:
+            errors.append(exc)
+            raise
+
+    monkeypatch.setattr(jobs, "jobs_in_flight", scan)
+    thread = threading.Thread(target=expire)
+    thread.start()
+    try:
+        assert captured.wait(15)
+        jobs.recover(old.job_id, target=JOB_STATE_COMPLETED)
+        submitted = _submit(client, sid, "新的一轮", "next-after-stale-scan")
+        assert submitted.status_code == 200, submitted.text
+        token = runtime.service._token_for(sid)
+        assert not token.cancelled
+    finally:
+        release.set()
+        thread.join(15)
+    assert not thread.is_alive() and not errors
+    assert expired == []
+    assert not token.cancelled
+    assert jobs.wait_for_idle(15)
+    assert store.get(submitted.json()["job_id"]).state == JOB_STATE_COMPLETED

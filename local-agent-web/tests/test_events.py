@@ -174,7 +174,7 @@ def _snapshot(**overrides: Any) -> SessionSnapshot:
 
 
 def test_event_type_set_matches_contract() -> None:
-    # 契约里的 19 种事件，一个不多一个不少。
+    # 契约里的 24 种事件（19 + v0.6 T59 的任务生命周期五项），一个不多一个不少。
     assert EVENT_TYPES == (
         "session_snapshot",
         "message_started",
@@ -195,14 +195,18 @@ def test_event_type_set_matches_contract() -> None:
         "model_call_completed",
         "task_completed",
         "task_failed",
+        "job_queued",
+        "job_progress",
+        "job_waiting",
+        "job_completed",
+        "task_cancelled",
     )
     # 声明的类型必须都有对应的具体模型（否则解析永远失败）。
     schema = TypeAdapter(EventEnvelope).json_schema()
     assert set(schema["discriminator"]["mapping"]) == set(EVENT_TYPES)
 
-    # v0.6 的类型不得提前预留（§15.4）。
-    for reserved in RESERVED_FOR_V06:
-        assert reserved not in EVENT_TYPES
+    # v0.6 的五个类型已于 T59 全部转正；预留集合保持为空——不得再往里塞未实现的东西（§15.4）。
+    assert RESERVED_FOR_V06 == ()
 
 
 def test_every_event_carries_the_common_fields() -> None:

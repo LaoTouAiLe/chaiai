@@ -25,6 +25,7 @@ export default defineConfig({
     '**/conversation-streaming.spec.ts',
     '**/conversation-variants.spec.ts',
     '**/approval-live.spec.ts',
+    '**/workflow-live.spec.ts',
   ],
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),

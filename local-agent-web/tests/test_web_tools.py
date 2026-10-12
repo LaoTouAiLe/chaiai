@@ -14,8 +14,17 @@ from __future__ import annotations
 
 import gzip
 import json
+import socket
+import ssl
+import threading
 import zlib
+from email.message import Message
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from io import BytesIO
 from pathlib import Path
+from unittest.mock import MagicMock
+from urllib.request import HTTPHandler, ProxyHandler, build_opener
+from urllib.response import addinfourl
 
 import pytest
 from pydantic import ValidationError
@@ -146,7 +155,147 @@ def test_fetch_checks_the_redirect_target() -> None:
     assert "重定向" in str(error.value) or "内网" in str(error.value) or "本机" in str(error.value)
 
 
+@pytest.mark.parametrize("target", [
+    "http://127.0.0.1:8000/private", "http://10.0.0.1/private",
+    "http://169.254.169.254/private", "http://localhost/private",
+    "http://internal.example/private",
+])
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_default_transport_blocks_redirect_before_target_request(monkeypatch, target, code):
+    visited = []
+
+    class MemoryHTTP(HTTPHandler):
+        def http_open(self, request):
+            visited.append(request.full_url)
+            headers = Message()
+            headers["Content-Type"] = "text/plain"
+            headers["Location"] = target
+            response = addinfourl(BytesIO(b"redirect"), headers, request.full_url, code)
+            response.msg = "Redirect"
+            return response
+
+    monkeypatch.setattr(web_tools, "_system_resolver", lambda host: ["127.0.0.1"])
+    monkeypatch.setattr(web_tools, "build_opener", lambda *handlers: build_opener(
+        ProxyHandler({}), MemoryHTTP(), *handlers,
+    ))
+    with pytest.raises(web_tools.WebAccessError):
+        web_tools.fetch("http://93.184.216.34/public", config=_enabled())
+    assert visited == ["http://93.184.216.34/public"]
+
+
+def test_default_transport_follows_public_redirect_chain(monkeypatch):
+    visited = []
+
+    class MemoryHTTP(HTTPHandler):
+        def http_open(self, request):
+            visited.append(request.full_url)
+            headers = Message()
+            headers["Content-Type"] = "text/plain; charset=utf-8"
+            code = 200 if request.full_url.endswith("/final") else 302
+            if code == 302:
+                headers["Location"] = "/second" if len(visited) == 1 else "/final"
+            response = addinfourl(BytesIO(b"public body"), headers, request.full_url, code)
+            response.msg = "OK" if code == 200 else "Found"
+            return response
+
+    monkeypatch.setattr(web_tools, "build_opener", lambda *handlers: build_opener(
+        ProxyHandler({}), MemoryHTTP(), *handlers,
+    ))
+    result = web_tools.fetch("http://93.184.216.34/public", config=_enabled())
+    assert result.text == "public body"
+    assert visited == [f"http://93.184.216.34/{p}" for p in ["public", "second", "final"]]
+
+
 # --------------------------------------------------------------------- 搜索结果
+
+
+def test_default_transport_blocks_dns_rebinding_before_loopback_request(monkeypatch) -> None:
+    visited = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            visited.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"owned loopback response")
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    original = socket.getaddrinfo
+
+    def dns(host, port, *args, **kwargs):
+        if host == "owned-rebind.example":
+            ip = "93.184.216.34" if port is None else "127.0.0.1"
+            return original(ip, port, *args, **kwargs)
+        return original(host, port, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", dns)
+    monkeypatch.setenv("http_proxy", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("HTTP_PROXY", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("NO_PROXY", "")
+    try:
+        with pytest.raises(web_tools.WebAccessError, match="内网"):
+            web_tools.fetch(
+                f"http://owned-rebind.example:{server.server_port}/owned", config=_enabled(),
+            )
+        assert visited == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+
+
+@pytest.mark.parametrize("addresses", [[], ["invalid"], ["93.184.216.34", "127.0.0.1"]])
+def test_connection_rejects_every_unverifiable_candidate_before_opening_socket(
+    monkeypatch, addresses,
+) -> None:
+    candidates = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 80)) for ip in addresses]
+    monkeypatch.setattr(socket, "getaddrinfo", lambda *args, **kwargs: candidates)
+    factory = MagicMock()
+    monkeypatch.setattr(socket, "socket", factory)
+    with pytest.raises(web_tools.WebAccessError):
+        web_tools._connect_public(("public.example", 80), 2)
+    factory.assert_not_called()
+
+
+def test_connection_retries_only_the_same_validated_numeric_addresses(monkeypatch) -> None:
+    addresses = [("93.184.216.34", 80), ("8.8.8.8", 80)]
+    candidates = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", addr) for addr in addresses]
+    resolver = MagicMock(return_value=candidates)
+    monkeypatch.setattr(socket, "getaddrinfo", resolver)
+    first = MagicMock()
+    first.connect.side_effect = OSError("first candidate unavailable")
+    second = MagicMock()
+    monkeypatch.setattr(socket, "socket", MagicMock(side_effect=[first, second]))
+    assert web_tools._connect_public(("public.example", 80), 2) is second
+    resolver.assert_called_once()
+    first.connect.assert_called_once_with(addresses[0])
+    first.close.assert_called_once()
+    second.connect.assert_called_once_with(addresses[1])
+    second.settimeout.assert_called_once_with(2)
+
+
+def test_pinned_https_preserves_hostname_and_certificate_verification(monkeypatch) -> None:
+    handler = web_tools._PinnedHTTPSHandler()
+    context = handler._ssl_context
+    assert context.check_hostname
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    handle = MagicMock()
+    connect = MagicMock(return_value=handle)
+    monkeypatch.setattr(web_tools, "_connect_public", connect)
+    wrap = MagicMock(side_effect=ssl.SSLCertVerificationError("untrusted certificate"))
+    monkeypatch.setattr(context, "wrap_socket", wrap)
+    connection = web_tools._PinnedHTTPSConnection("public.example:443", timeout=2, context=context)
+    with pytest.raises(ssl.SSLCertVerificationError):
+        connection.connect()
+    connect.assert_called_once_with(("public.example", 443), 2, None)
+    wrap.assert_called_once_with(handle, server_hostname="public.example")
+    assert connection.host == "public.example"
 
 
 def test_search_returns_structured_sources() -> None:

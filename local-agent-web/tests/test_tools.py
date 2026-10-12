@@ -1372,8 +1372,11 @@ def test_run_shell_marks_timeout(tmp_path: Path, app_config: AppConfig) -> None:
     )
 
     assert result.timed_out
-    assert result.exit_code is None
+    # v0.6 T60 起超时也按**进程树**终止（架构 §17.4）：进程被真正回收，因此退出码是**真实**值
+    # （v0.5 的 `None` 表示"没等到它结束"，现在是"等到了，它是被终止的"），终止手段写进 note。
+    assert result.exit_code is not None
     assert result.note is not None and "未结束" in result.note
+    assert "taskkill" in result.note or "killpg" in result.note
 
 
 def test_run_shell_truncates_output(tmp_path: Path, app_config: AppConfig) -> None:

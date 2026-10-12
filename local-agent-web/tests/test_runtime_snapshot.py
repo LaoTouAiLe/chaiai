@@ -228,7 +228,8 @@ def test_stable_prefix_is_byte_identical_across_turns_while_the_summary_changes(
     for text in ("第一句", "第二句", "第三句"):
         _run(graph, context, text)
 
-    blocks = [block[0] for block in _snapshot_blocks(model) if block]
+    # 旧锚点覆盖后保留历史冻结块；末块才是本轮当前快照。
+    blocks = [block[-1] for block in _snapshot_blocks(model) if block]
     assert len(blocks) == 3
     assert len(set(_system_texts(model))) == 1  # 三轮的稳定前缀逐字节相同
     # 第 1 轮还没有摘要，第 2 轮起摘要进了快照：动态段确实变了，前缀却没变。
