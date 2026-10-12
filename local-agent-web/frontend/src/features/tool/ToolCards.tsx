@@ -2,6 +2,7 @@ import { useState, type ReactNode } from 'react'
 import { Check, Copy, Doc } from '../../components/icons'
 import type { ToolCardView } from '../../fixtures/types'
 import { copyText } from '../conversation/clipboard'
+import { useLineWindow, windowOf, type LineWindow } from './lineWindow'
 import styles from './ToolCards.module.css'
 
 interface CardShellProps {
@@ -40,9 +41,32 @@ function CardShell({ title, meta, children, label }: CardShellProps) {
   )
 }
 
+/**
+ * 长正文的"显示更多"（v0.8 T73；契约 §19.3）。
+ *
+ * 只在**确有没显示的行**时渲染：正文短于一屏时这里什么都不输出，卡片 DOM 与视觉基线
+ * 与从前逐字相同。文案只说"还有多少行没显示"——行号由契约字段给出（`read` 的 `first_line`、
+ * `search` 的 `line_number`），这里再编一套必然与卡片里的号对不上。
+ */
+function MoreLines({ lineWindow }: { lineWindow: LineWindow }) {
+  if (!lineWindow.more) return null
+  return (
+    <div className={styles.more}>
+      <span className={styles.moreCount}>{lineWindow.label}</span>
+      <button type="button" className={styles.moreButton} onClick={lineWindow.showMore}>
+        显示更多
+      </button>
+    </div>
+  )
+}
+
 function ReadCard({ card }: { card: Extract<ToolCardView, { kind: 'read' }> }) {
-  const first = card.lines[0]?.number ?? 1
-  const last = card.lines[card.lines.length - 1]?.number ?? first
+  const lineWindow = useLineWindow(card.lines.length)
+  const lines = windowOf(card.lines, lineWindow.shown)
+  // 行号直接读视图模型：适配层已经用契约的 `first_line` 把它摆成**文件**行号（§19.3），
+  // 组件不再重编号——"把窗口当成第 1 行起"正是这里从前的老毛病。
+  const first = lines[0]?.number ?? 1
+  const last = lines[lines.length - 1]?.number ?? first
   return (
     <CardShell
       label="读取结果"
@@ -50,17 +74,16 @@ function ReadCard({ card }: { card: Extract<ToolCardView, { kind: 'read' }> }) {
       meta={`第 ${String(first)}–${String(last)} 行 / 共 ${String(card.totalLines)} 行`}
     >
       <div className={styles.code}>
-        {card.lines.map((line) => (
+        {lines.map((line) => (
           <div key={line.number} className={styles.codeRow}>
             <span className={styles.codeGutter}>{line.number}</span>
             <span className={styles.codeText}>{line.text}</span>
           </div>
         ))}
       </div>
+      <MoreLines lineWindow={lineWindow} />
       {card.truncated === true ? (
-        <p className={styles.note}>
-          正文较长，仅显示前 {String(card.lines.length)} 行。如需更多，可让助手按行继续读取。
-        </p>
+        <p className={styles.note}>正文较长，页面里是服务端给的有界预览；完整内容可让助手按行区间读取。</p>
       ) : null}
     </CardShell>
   )
@@ -68,8 +91,22 @@ function ReadCard({ card }: { card: Extract<ToolCardView, { kind: 'read' }> }) {
 
 function SearchCard({ card }: { card: Extract<ToolCardView, { kind: 'search' }> }) {
   const countsMatches = card.shape === 'matches' && card.totalUnit === 'matches'
-  const shown = countsMatches ? card.groups.reduce((sum, group) => sum + group.matches.length, 0)
-    : card.shape === 'matches' ? card.groups.length : card.paths.length
+  // 窗口按**一条序列**算（matches 拍平、paths 本来就是一条），但渲染结构不动：分组照旧是
+  // 分组，只是被窗口整个裁掉的组不再渲染。这样"还有多少行没显示"与屏幕上少掉的行数一致。
+  const rowCount = card.shape === 'matches'
+    ? card.groups.reduce((sum, group) => sum + group.matches.length, 0)
+    : card.paths.length
+  const lineWindow = useLineWindow(rowCount)
+  let budget = lineWindow.shown
+  const groups = card.groups.flatMap((group) => {
+    const visible = group.matches.slice(0, Math.max(0, budget))
+    budget -= visible.length
+    // 本来就没有匹配的组照旧渲染（空组不是"被裁掉"）；有匹配但一行都没轮上的组才去掉。
+    return visible.length === 0 && group.matches.length > 0 ? [] : [{ path: group.path, matches: visible }]
+  })
+  const paths = card.shape === 'matches' ? [] : windowOf(card.paths, lineWindow.shown)
+  const shown = countsMatches ? groups.reduce((sum, group) => sum + group.matches.length, 0)
+    : card.shape === 'matches' ? groups.length : paths.length
   const unit = countsMatches ? '处匹配' : card.shape === 'matches' ? '个文件' : '个路径'
   return (
     <CardShell
@@ -79,7 +116,7 @@ function SearchCard({ card }: { card: Extract<ToolCardView, { kind: 'search' }> 
     >
       {card.shape === 'matches' ? (
         <ul className={styles.groups}>
-          {card.groups.map((group) => (
+          {groups.map((group) => (
             <li key={group.path} className={styles.group}>
               <div className={styles.groupPath}>{group.path}</div>
               {group.matches.map((match) => (
@@ -93,16 +130,17 @@ function SearchCard({ card }: { card: Extract<ToolCardView, { kind: 'search' }> 
         </ul>
       ) : (
         <ul className={styles.paths}>
-          {card.paths.map((path) => (
+          {paths.map((path) => (
             <li key={path} className={styles.pathRow}>
               {path}
             </li>
           ))}
         </ul>
       )}
+      <MoreLines lineWindow={lineWindow} />
       {card.truncated ? (
         <p className={styles.note}>
-          结果已截断，仅显示前 {String(shown)} {unit}。可缩小范围后继续搜索。
+          结果已截断，页面里是服务端给的有界预览；完整内容可让助手按行区间读取，或缩小范围后继续搜索。
         </p>
       ) : null}
     </CardShell>
@@ -117,6 +155,20 @@ function TerminalCard({ card }: { card: Extract<ToolCardView, { kind: 'terminal'
   // Real shell calls carry stdout/stderr as separate facts; prototype fixtures do
   // not, and keep rendering the single `output` body unchanged.
   const hasStreams = card.stdout !== undefined || card.stderr !== undefined
+  // 一条窗口盖住两个流（stdout 在前、stderr 在后，与显示顺序一致）：窗口没到末尾时，
+  // 末尾那一段自然只露出一部分。窗口短于正文时一切照旧——`split`/`join` 是恒等变换。
+  const stdoutLines = card.stdout === undefined ? [] : card.stdout.split('\n')
+  const stderrLines = card.stderr === undefined ? [] : card.stderr.split('\n')
+  const bodyLines = card.output.split('\n')
+  const lineWindow = useLineWindow(
+    hasStreams ? stdoutLines.length + stderrLines.length : bodyLines.length,
+  )
+  const visibleStdout = windowOf(stdoutLines, lineWindow.shown)
+  const visibleStderr = windowOf(stderrLines, Math.max(0, lineWindow.shown - stdoutLines.length))
+  // 窗口还没走到 stderr 就先不渲染它那一块：否则屏幕上会出现"标准错误输出："配一段空白，
+  // 读起来像"stderr 是空的"，那是**与事实相反**的（事实是"还没轮到这里"，由窗口文案说明）。
+  // 窗口没裁掉任何东西时（原型夹具）一律照旧渲染，DOM 与基线不变。
+  const showStderr = card.stderr !== undefined && (visibleStderr.length > 0 || !lineWindow.more)
   return (
     <CardShell
       label="终端输出"
@@ -134,17 +186,20 @@ function TerminalCard({ card }: { card: Extract<ToolCardView, { kind: 'terminal'
     >
       {hasStreams ? (
         <>
-          {card.stdout === undefined ? null : <pre className={styles.terminal}>{card.stdout}</pre>}
-          {card.stderr === undefined ? null : (
+          {card.stdout === undefined
+            ? null
+            : <pre className={styles.terminal}>{visibleStdout.join('\n')}</pre>}
+          {showStderr ? (
             <>
               <p className={styles.note}>标准错误输出：</p>
-              <pre className={styles.terminal}>{card.stderr}</pre>
+              <pre className={styles.terminal}>{visibleStderr.join('\n')}</pre>
             </>
-          )}
+          ) : null}
         </>
       ) : (
-        <pre className={styles.terminal}>{card.output}</pre>
+        <pre className={styles.terminal}>{windowOf(bodyLines, lineWindow.shown).join('\n')}</pre>
       )}
+      <MoreLines lineWindow={lineWindow} />
       {card.timedOut === true ? (
         <p className={styles.note}>命令超时，已停止执行。</p>
       ) : null}
@@ -152,6 +207,9 @@ function TerminalCard({ card }: { card: Extract<ToolCardView, { kind: 'terminal'
         <p className={styles.note}>
           输出较长，当前省略了 {String(card.collapsedLines)} 行。
         </p>
+      ) : null}
+      {card.truncated === true ? (
+        <p className={styles.note}>输出较长，页面里是服务端给的有界预览；完整内容可让助手按行区间读取。</p>
       ) : null}
     </CardShell>
   )
@@ -165,15 +223,20 @@ function TerminalCard({ card }: { card: Extract<ToolCardView, { kind: 'terminal'
  * instead of re-deriving structure from prose.
  */
 function ResultCard({ card }: { card: Extract<ToolCardView, { kind: 'result' }> }) {
+  const lines = card.body === '' ? [] : card.body.split('\n')
+  const lineWindow = useLineWindow(lines.length)
   return (
     <CardShell
       label="工具结果"
       title={card.target === '' ? '工具结果' : card.target}
       meta={card.summary}
     >
-      {card.body === '' ? null : <pre className={styles.terminal}>{card.body}</pre>}
+      {card.body === ''
+        ? null
+        : <pre className={styles.terminal}>{windowOf(lines, lineWindow.shown).join('\n')}</pre>}
+      <MoreLines lineWindow={lineWindow} />
       {card.truncated ? (
-        <p className={styles.note}>内容较长，当前只显示部分结果。</p>
+        <p className={styles.note}>内容较长，页面里是服务端给的有界预览；完整内容可让助手按行区间读取。</p>
       ) : null}
     </CardShell>
   )
@@ -205,9 +268,12 @@ function TodoCard({ card }: { card: Extract<ToolCardView, { kind: 'todo' }> }) {
 }
 
 function GenericCard({ card }: { card: Extract<ToolCardView, { kind: 'generic' }> }) {
+  const lines = card.detail.split('\n')
+  const lineWindow = useLineWindow(lines.length)
   return (
     <CardShell label="工具结果" title={card.headline} meta="结果详情">
-      <p className={styles.generic}>{card.detail}</p>
+      <p className={styles.generic}>{windowOf(lines, lineWindow.shown).join('\n')}</p>
+      <MoreLines lineWindow={lineWindow} />
     </CardShell>
   )
 }

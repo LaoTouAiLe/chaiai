@@ -26,6 +26,7 @@ from local_agent.security.approval import action_fingerprint
 from local_agent.security.path_guard import (
     ExternalPathPolicy,
     GrantAccess,
+    display_path,
     is_sensitive_path,
     normalize_grant_path,
 )
@@ -147,6 +148,23 @@ def test_sensitive_name_patterns() -> None:
     assert is_sensitive_path(Path("id_rsa"))
     assert not is_sensitive_path(Path("README.md"))
     assert not is_sensitive_path(Path("main.py"))
+
+
+def test_display_path_is_relative_inside_and_absolute_outside(tmp_path: Path) -> None:
+    """展示路径口径（§15.8、v0.8 T73）：工作区内相对、工作区外保持绝对。
+
+    "工作区外"那一支不能改成相对（那样用户核对不了真实目标），"工作区内"那一支不能留绝对
+    （§15.8 明令优先相对路径）——两个方向都是硬要求，所以这条用例把**两支**都钉住。
+    """
+    workspace = tmp_path / "ws"
+    nested = workspace / "src" / "pkg"
+    nested.mkdir(parents=True)
+    outside = tmp_path / "elsewhere"
+
+    assert display_path(workspace, workspace) == "."
+    assert display_path(nested, workspace) == "src/pkg"
+    # 工作区外：原样绝对路径（获授权后用户要能核对真实目标）。
+    assert display_path(outside, workspace) == outside.as_posix()
 
 
 def test_policy_redacts_secret_values(app_config: AppConfig, tmp_path: Path) -> None:

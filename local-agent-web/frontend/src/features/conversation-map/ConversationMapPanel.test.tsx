@@ -28,6 +28,8 @@ const snapshot: components['schemas']['SessionSnapshot'] = {
   session_id: 's1', snapshot_id: 'cp1', title: '测试', branch_id: 'main', branch_title: '原讨论',
   workspace: { workspace_id: 'w1', display_name: '工作区' }, session_state: 'completed',
   created_at: '2026-10-07T00:00:00Z',
+  // 本用例只看分支图，与流式无关（§19.4 的字段是契约必填，给个明确取值即可）。
+  answer_streaming: false,
   messages: [{ kind: 'user', message_id: 'u1', text: '分析缓存' }, { kind: 'assistant', message_id: 'a1', text: '该轮独立回答', complete: true, chunk_sequence: 0, reasoning_truncated: false, stream_channel: 'text' }],
 }
 function mount(busy = false) {

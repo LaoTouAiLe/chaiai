@@ -1145,6 +1145,35 @@ def test_read_outcome_is_parsed_from_the_full_message_not_the_truncated_preview(
     assert tool.outcome.total == 3
 
 
+def test_read_outcome_carries_the_first_line_of_the_window() -> None:
+    """带 `start_line` 的读取要**如实**带上窗口首行行号（v0.8 T73、§19.3）。
+
+    页面据此把行号还原成文件真实行号：少了它，窗口会被当成"第 1 行起"编号，
+    与 §6.7 落盘文件（`路径:行号:内容`）就对不上，也就无法核对。
+    """
+    payload = {
+        "path": "big.txt",
+        "encoding": "utf-8",
+        "sha256": "x",
+        "line_count": 1000,
+        "truncated": False,
+        "is_binary": False,
+        "content": "a\nb",
+        "note": "已返回第 200–201 行，共 1000 行",
+        "first_line": 200,
+        "last_line": 201,
+        "has_more": True,
+        "next_start_line": 202,
+    }
+    tool = _only_tool(_tool_state("read_file", payload))
+
+    assert tool.outcome is not None
+    assert tool.outcome.first_line == 200
+    # 载荷里没有（旧工具载荷）就是 `None`：页面退回"页内序号"的措辞，**不编一个 1** 出来。
+    without = {key: value for key, value in payload.items() if key != "first_line"}
+    assert _only_tool(_tool_state("read_file", without)).outcome.first_line is None
+
+
 def test_unknown_tool_and_unparseable_payload_keep_the_generic_renderer() -> None:
     # 认不出的工具不能假装有结构；解析不出也一样，必须退回安全的通用渲染器。
     assert _only_tool(_tool_state("frobnicate", {"whatever": 1})).outcome is None

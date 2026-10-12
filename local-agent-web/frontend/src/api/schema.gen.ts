@@ -2724,6 +2724,11 @@ export interface components {
          *     `snapshot_id` 一起让恢复逻辑能判断"这份快照来自哪个契约版本"。
          */
         SessionSnapshot: {
+            /**
+             * Answer Streaming
+             * @default false
+             */
+            answer_streaming: boolean;
             approval?: components["schemas"]["ApprovalView"] | null;
             /**
              * Branch Id
@@ -3213,6 +3218,8 @@ export interface components {
             diff?: components["schemas"]["FileDiffView"] | null;
             /** Exit Code */
             exit_code?: number | null;
+            /** First Line */
+            first_line?: number | null;
             /**
              * Kind
              * @enum {string}

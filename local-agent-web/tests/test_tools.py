@@ -1342,7 +1342,9 @@ def test_run_shell_executes_whitelisted_command(tmp_path: Path, app_config: AppC
     assert "Python" in result.stdout
     assert not result.timed_out
     assert result.duration_ms >= 0
-    assert Path(result.cwd) == tmp_path.resolve()
+    # 展示路径（§6.6 / §15.8，v0.8 T73）：工作区内给**相对**路径，绝不把工作区绝对路径写给模型与页面。
+    assert result.cwd == "."
+    assert not Path(result.cwd).is_absolute()
     # 执行的是判定阶段解析出的绝对路径，而不是再搜一次 PATH
     assert Path(result.argv[0]).is_file()
     assert Path(result.argv[0]).name.casefold().startswith("python")

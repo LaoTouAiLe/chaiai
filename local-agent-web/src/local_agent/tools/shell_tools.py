@@ -21,6 +21,7 @@ from langchain_core.tools import BaseTool, tool
 
 from local_agent.exceptions import SecurityError
 from local_agent.security.approval import action_fingerprint
+from local_agent.security.path_guard import display_path
 from local_agent.security.policy import SecurityPolicy
 from local_agent.security.process_guard import ProcessCancelledError
 from local_agent.security.shell_guard import (
@@ -134,7 +135,9 @@ def run_shell_command(
     return ShellResult(
         command=command,
         argv=build_shell_invocation(plan),
-        cwd=str(plan.cwd),
+        # 展示路径（§6.6 / §15.8）：工作区内给相对路径、工作区外保持绝对。工具结果只喂模型与页面，
+        # 而页面此前就此显示工作区绝对路径（v0.8 T73 实证）。
+        cwd=display_path(plan.cwd, policy.workspace_root),
         exit_code=outcome.exit_code,
         stdout=stdout,
         stderr=stderr,

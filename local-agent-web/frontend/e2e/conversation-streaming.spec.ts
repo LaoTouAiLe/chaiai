@@ -14,6 +14,9 @@ test('最终回答真正增量出现，并在完成与刷新后只留一份', as
   await page.getByRole('button', { name: '新建会话' }).click()
   await created
   await subscribed
+  // 这条服务**开了流式**（`serve_fake.py --streaming`）：页面不得再说"未流式"（v0.8 T74/§19.4）。
+  // 与 `conversation-live.spec.ts` 里那条断言成对：那个字段是真的跟着服务端走，不是写死的文案。
+  await expect(page.getByText('未流式')).toHaveCount(0)
   // 切换到闲聊**不会**新建会话，也不再产生第二条 `/events` 订阅（2026-10-08 起模式切换用 PATCH
   // 改当前会话，见 `conversation-live.spec.ts` 的"在当前会话切换模式"用例），所以这里等 PATCH。
   const switched = page.waitForResponse((response) =>

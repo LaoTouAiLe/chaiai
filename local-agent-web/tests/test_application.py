@@ -708,6 +708,81 @@ def test_turn_events_are_projected_from_the_state(
     harness.service.unsubscribe_events(subscription)
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+def test_snapshot_states_whether_the_next_answer_streams(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, streaming: bool
+) -> None:
+    """T74（§19.4）：没有设置库的旧配置模式，判据取 `llm.streaming`。"""
+    data = app_config.model_dump()
+    data["llm"]["streaming"] = streaming
+    harness = _harness(tmp_path, model_factory, AppConfig.model_validate(data), decision="chat")
+    session_id = _session(harness)
+
+    assert harness.service.get_session_snapshot(session_id).answer_streaming is streaming
+
+
+#: 只可能出现在流式路径上的事件：比对两态业务结果时必须先把它们去掉（§19.4）。
+_STREAM_ONLY_EVENTS = frozenset({"message_started", "message_delta"})
+
+
+def test_streaming_and_plain_runs_agree_item_by_item(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """T74 验收①：**同一条提问**在流式开关两态下，业务结果逐项一致（§19.4）。
+
+    唯一允许的差异是增量本身。所以去掉 `message_started` / `message_delta` 之后，事件类型序列
+    与最终快照（消息、会话状态、审批）必须逐项相同——"流式只是传输形态"这句话要能被用例抓住，
+    而不是停在文档里。
+    """
+
+    def run(streaming: bool) -> tuple[list[Any], Any]:
+        data = app_config.model_dump()
+        data["llm"]["streaming"] = streaming
+        # 两态各用一份独立工作区与库：否则第二次会读到第一次的会话与 Checkpoint。
+        run_root = tmp_path / ("stream" if streaming else "plain")
+        run_root.mkdir(parents=True, exist_ok=True)
+        harness = _harness(
+            run_root,
+            model_factory,
+            AppConfig.model_validate(data),
+            decision="tool",
+            reply="依据工具结果：note.txt 的内容是保留我",
+            tool_calls=[{"name": "read_file", "args": {"path": "note.txt"}, "id": "call-1"}],
+            stream_chunks=6,
+        )
+        session_id = _session(harness)
+        subscription = harness.service.subscribe_events(session_id)
+        subscription.poll()
+        harness.service.submit_message(session_id, "读取 note.txt", "req-1")
+        events = subscription.poll()
+        snapshot = harness.service.get_session_snapshot(session_id)
+        harness.service.unsubscribe_events(subscription)
+        return events, snapshot
+
+    def business(events: list[Any]) -> list[str]:
+        return [event.event_type for event in events if event.event_type not in _STREAM_ONLY_EVENTS]
+
+    plain_events, plain_snapshot = run(False)
+    streamed_events, streamed_snapshot = run(True)
+
+    # 前提：流式那一趟**确实**产生了增量（否则这条用例可能什么都没证明）。
+    assert [
+        event.event_type for event in streamed_events if event.event_type in _STREAM_ONLY_EVENTS
+    ]
+    assert business(streamed_events) == business(plain_events)
+
+    def shape(snapshot: Any) -> Any:
+        return (
+            snapshot.session_state,
+            [(message.kind, getattr(message, "text", None)) for message in snapshot.messages],
+            None if snapshot.approval is None else snapshot.approval.status,
+            snapshot.final_result is not None,
+        )
+
+    assert shape(streamed_snapshot) == shape(plain_snapshot)
+    assert shape(plain_snapshot)[1]  # 快照不是空的：比对的是真结果，不是两个空壳
+
+
 def test_final_answer_stream_reaches_sse_with_the_checkpoint_message_id(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:

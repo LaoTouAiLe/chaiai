@@ -60,8 +60,13 @@ class LlmConfig(_StrictModel):
     timeout_seconds: int = Field(default=120, gt=0)
     retry_count: int = Field(default=2, ge=0, le=10)
     #: 网页是否按增量流式展示**最终回答**（T23）。默认关闭：流式只是展示层优化，关闭时行为与
-    #: 之前完全一致；打开后它同时作用于模型构造（``streaming``）与页面 sink——只在"最终回答"
-    #: 那两个调用点流式（见 ``local_agent.ui.streaming``），其它调用一律照常一次性拿全。
+    #: 之前完全一致；打开后它只作用于"最终回答"这一条路径的调用点（见 ``local_agent.ui.streaming``
+    #: 与 ``local_agent.ui.decision_streaming``），其它调用一律照常一次性拿全。
+    #:
+    #: 2026-10-12（v0.8 T74）修正两处过时描述：① 原注释说"作用于模型构造（``streaming``）"——
+    #: 实际**没有**传给 `ChatOpenAI`（``llm/factory.py`` 明确刻意不传，两个取值都会踩坑）；
+    #: ② 原注释说"两个调用点"，实际是**三个**（两个"最终回答" + 主循环的工具决策流式）。
+    #: 口径与呈现见 §19.4：本开关不改变业务结果，只决定有没有增量。
     streaming: bool = False
 
     @model_validator(mode="after")

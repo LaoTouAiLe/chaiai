@@ -164,6 +164,39 @@ describe('mapTool', () => {
     expect(texts).toEqual(['a', 'b', 'c'])
   })
 
+  it('numbers a windowed read from the line the server actually started at', () => {
+    // v0.8 T73（§19.3）：`first_line` 是"这段正文从文件第几行开始"。少了它，页面会把
+    // 从第 200 行起的窗口编号成 1 起——与 §6.7 落盘文件（`路径:行号:内容`）对不上。
+    const row = mapTool(
+      toolMessage('ok', {
+        outcome: {
+          kind: 'read',
+          target: 'big.txt',
+          text: 'a\nb',
+          total: 1000,
+          first_line: 200,
+          truncated: false,
+        },
+      }).tool,
+    )
+
+    expect(row.card).toMatchObject({ kind: 'read', firstLine: 200 })
+    const numbers = row.card.kind === 'read' ? row.card.lines.map((line) => line.number) : []
+    expect(numbers).toEqual([200, 201])
+  })
+
+  it('falls back to numbering from the first line when the payload has no window start', () => {
+    // 取不到就是取不到：退回从 1 起（与从前逐字相同），不编一个"看起来对"的行号。
+    const row = mapTool(
+      toolMessage('ok', {
+        outcome: { kind: 'read', target: 'a.txt', text: 'a', total: 1, truncated: false },
+      }).tool,
+    )
+
+    expect(row.card.kind === 'read' ? row.card.firstLine : 'unexpected').toBeUndefined()
+    expect(row.card.kind === 'read' ? row.card.lines[0]?.number : 0).toBe(1)
+  })
+
   it('splits stdout, stderr and the exit code instead of merging them into one blob', () => {
     const row = mapTool(
       toolMessage('ok', {
@@ -190,6 +223,29 @@ describe('mapTool', () => {
       stdout: 'out',
       stderr: 'err',
     })
+  })
+
+  it('carries the server-side truncation of a shell body into the card', () => {
+    // §19.3：服务端把输出截断过就要在页面上说出来。此前 shell 卡不带这个事实，
+    // 于是"这段 stdout 只是有界预览"在页面上**无从得知**。
+    const row = mapTool(
+      toolMessage('ok', {
+        tool_name: 'run_shell',
+        redacted_arguments: { command: 'pytest -q' },
+        outcome: {
+          kind: 'shell',
+          target: '.',
+          summary: '退出码 1',
+          stdout: 'out',
+          stderr: 'err',
+          exit_code: 1,
+          timed_out: false,
+          truncated: true,
+        },
+      }).tool,
+    )
+
+    expect(row.card).toMatchObject({ kind: 'terminal', truncated: true })
   })
 
   it('renders a mutation as a result card with the summary and the bounded body', () => {
@@ -748,5 +804,12 @@ describe('labels', () => {
       status: 'completed',
       modelLabel: 'mid-model',
     })
+  })
+
+  it('carries the server word on streaming into the session summary', () => {
+    // §19.4：页面判"在不在流式"只读这一个字段，所以它必须**原样**搬过来——
+    // 不推断（"有增量"不算）、不替服务端决定（缺字段就是缺，不给默认值）。
+    expect(mapSession(snapshot({ answer_streaming: true }), 'mid-model').answerStreaming).toBe(true)
+    expect(mapSession(snapshot({ answer_streaming: false }), 'mid-model').answerStreaming).toBe(false)
   })
 })

@@ -25,6 +25,19 @@ const mock = vi.hoisted(() => ({
   workspaceMutate: vi.fn(),
   resolvePending: false,
   resolveError: null as null | Error,
+  /**
+   * 服务端说的"这一轮在不在流式"（§19.4）。`undefined` = 服务端没说（旧快照/夹具）：
+   * 页面那时**不得**做任何流式声明，既有用例的默认行为因此不变。
+   */
+  answerStreaming: undefined as boolean | undefined,
+  /** 临时增量尾部：只有它的存在**不足以**说明在流式（T74 用例就是冲这一点来的）。 */
+  tail: null as null | {
+    messageId: string
+    modelCallId: string | null
+    text: string
+    sequence: number
+    channel?: 'text' | 'reasoning'
+  },
 }))
 
 /** 快照里的挂起审批（传输形状；页面经 `mapApproval` 映射成卡片视图模型）。 */
@@ -115,6 +128,7 @@ vi.mock('../api/queries', () => ({
       messages: mock.messages,
       model_selection: mock.selection,
       approval: mock.approval,
+      answer_streaming: mock.answerStreaming,
     },
     isFetching: false,
   }),
@@ -146,11 +160,11 @@ vi.mock('../api/queries', () => ({
 }))
 
 vi.mock('../api/useSessionStream', () => ({
-  useSessionStream: () => ({ connected: true, notices: [] }),
+  useSessionStream: () => ({ connected: true, reconnecting: false, notices: [] }),
 }))
 
 vi.mock('../stores/stream', () => ({
-  useStreamTail: () => null,
+  useStreamTail: () => mock.tail,
 }))
 
 beforeEach(() => {
@@ -173,6 +187,9 @@ beforeEach(() => {
   mock.workspaceMutate.mockReset()
   mock.selection = null
   mock.creating = false
+  // 默认"服务端没说"与"没有尾部"：既有用例的措辞一字不变（要验 T74 的用例各自设置）。
+  mock.answerStreaming = undefined
+  mock.tail = null
   useUiStore.setState({ workspaceId: 'w1', activeSessionId: 's1', drafts: { s1: '保留这段草稿' } })
 })
 
@@ -443,5 +460,66 @@ describe('LiveApp pending approval', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('模型选择已被其他页面修改')
     expect(screen.getByRole('button', { name: '刷新状态' })).toBeInTheDocument()
     expect(mock.modelMutate).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * 未流式（v0.8 T74；契约 §19.4）。
+ *
+ * 这一组守的是"不假装在流"：判据只能来自**服务端**（快照的 `answer_streaming`），
+ * 而"有增量"或"消息没完"都不算判据——后者在刚连上、网络慢、回答极短时都会给出错误答案。
+ */
+describe('LiveApp 未流式', () => {
+  const renderApp = () => render(
+    <QueryClientProvider client={new QueryClient()}><LiveApp /></QueryClientProvider>,
+  )
+
+  it('says the answer arrives in one piece instead of leaving the user guessing', () => {
+    mock.sessionState = 'running'
+    mock.answerStreaming = false
+    renderApp()
+
+    expect(screen.getByText('未启用流式：回答会在完成时一次性显示。')).toBeInTheDocument()
+    expect(screen.queryByText('正在接收回答')).not.toBeInTheDocument()
+  })
+
+  it('never claims to be receiving increments while the server says it is not streaming', () => {
+    // 关键反例：**即使**此刻手上有尾部文本，服务端说没在流式时也不能说"正在接收回答"。
+    mock.sessionState = 'running'
+    mock.answerStreaming = false
+    mock.tail = { messageId: 'a-1', modelCallId: 'call-1', text: '增量文本', sequence: 1 }
+    renderApp()
+
+    expect(screen.queryByText('正在接收回答')).not.toBeInTheDocument()
+    expect(screen.queryByText('正在思考')).not.toBeInTheDocument()
+    expect(screen.getByText('正在处理请求')).toBeInTheDocument()
+  })
+
+  it('keeps the increment wording when the server says it is streaming', () => {
+    // 另一半：守卫不是把这句话一律删掉——服务端说在流式且确实有增量时，照旧说"正在接收回答"。
+    mock.sessionState = 'running'
+    mock.answerStreaming = true
+    mock.tail = { messageId: 'a-1', modelCallId: 'call-1', text: '增量文本', sequence: 1 }
+    renderApp()
+
+    expect(screen.getByText('正在接收回答')).toBeInTheDocument()
+    expect(screen.queryByText('未启用流式：回答会在完成时一次性显示。')).not.toBeInTheDocument()
+  })
+
+  it('marks the session as 未流式 next to the model, and only when the server said so', () => {
+    mock.answerStreaming = false
+    const notStreaming = renderApp()
+    expect(screen.getByText('未流式')).toBeInTheDocument()
+    notStreaming.unmount()
+
+    // 服务端说在流式 / 没说（旧快照）：不显示这个标注，也不给相反暗示。
+    mock.answerStreaming = true
+    const streaming = renderApp()
+    expect(screen.queryByText('未流式')).not.toBeInTheDocument()
+    streaming.unmount()
+
+    mock.answerStreaming = undefined
+    renderApp()
+    expect(screen.queryByText('未流式')).not.toBeInTheDocument()
   })
 })

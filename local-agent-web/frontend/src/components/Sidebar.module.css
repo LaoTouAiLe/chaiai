@@ -273,6 +273,17 @@
   line-height: var(--law-leading-xs);
 }
 
+/* 会话行上的"现在在做什么"（v0.8 T71；§19.1）。
+   只在实时视图里渲染（夹具不传 `stateLabel`），所以原型与视觉基线一字不变。
+   与状态点同一个 warn 令牌：点给"有没有事"，这行字给"是哪种事"。 */
+.sessionState {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  color: var(--law-state-warn);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
 .footer {
   margin-top: auto;
   padding-top: var(--law-space-md);

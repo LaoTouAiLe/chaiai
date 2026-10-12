@@ -326,6 +326,10 @@ class ToolOutcomeView(_Dto):
     matches: list[SearchMatchView] = Field(default_factory=list)
     #: 总条目数或文件总行数；未知为 `None`。
     total: int | None = Field(default=None, ge=0)
+    #: 展示正文的**首行在源文件里的行号**（1 基）；只有 `read` 给，其余为 `None`（v0.8 T73）。
+    #: 页面据此把行号还原成文件真实行号（§19.3）——投影只搬运工具结果里**已有**的 `first_line`，
+    #: 不新增工具、不加参数、不新增读取通道。取不到时页面退回"页内序号"的如实措辞。
+    first_line: int | None = Field(default=None, ge=1)
     stdout: str | None = None
     stderr: str | None = None
     exit_code: int | None = None
@@ -775,6 +779,12 @@ class SessionSnapshot(_Dto):
     #: 页面据此把"我看到的选择"回传，写入才不会被另一个页面悄悄覆盖（§6.1）。
     #: 只读展示，切换它不修改正在运行的那一轮（那一轮用提交时固定的连接）。
     model_selection: ModelSelectionView | None = None
+    #: 本会话**下一轮**是否按增量流式展示最终回答（v0.8 T74，§19.4）。
+    #:
+    #: 页面**只能**用这个字段判断"在不在流式"：拿"有没有增量"或"上一条消息完不完整"去推断，
+    #: 在刚连上、网络慢、回答极短时都会得出错误答案。它与那一轮实际生效的配置同源（连接模式取
+    #: 该会话选中的连接，旧配置模式取 `llm.streaming`），是**配置的只读投影**，不新增真源。
+    answer_streaming: bool = False
     errors: list[ErrorView] = Field(default_factory=list)
     usage: TurnRecordView | None = None
     #: 本轮逐次模型调用明细（§15.6）：统计行的可展开部分用它，来源与 `usage` 同为 Checkpoint

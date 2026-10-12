@@ -68,6 +68,13 @@ export type ToolCardView =
     /** Total lines in the file, so a windowed read can say "showing N of M". */
     totalLines: number
     language: string
+    /**
+     * File line number of `lines[0]` (1-based) — from the contract's `first_line`
+     * (§19.3). Without it the card can only number the window from 1, which
+     * silently disagrees with the file. Optional so prototype fixtures (no
+     * windowed reads) are unaffected.
+     */
+    firstLine?: number
     /** Body was capped for display; optional so prototype fixtures are unaffected. */
     truncated?: boolean
   }
@@ -100,6 +107,12 @@ export type ToolCardView =
     stdout?: string
     stderr?: string
     timedOut?: boolean
+    /**
+     * The server clipped the streams for display (§15.8). Optional so prototype
+     * fixtures are unaffected; when true the card must say the body is a bounded
+     * preview and how to get the whole thing (§19.3).
+     */
+    truncated?: boolean
   }
   | {
     kind: 'result'
@@ -310,6 +323,15 @@ export interface SessionSummaryView {
   workspace: string | null
   status: 'idle' | 'running' | 'awaiting-approval' | 'completed'
   modelLabel: string
+  /**
+   * Whether this session's next answer arrives as increments (`true`) or in one
+   * piece (`false`) — straight from the contract's `answer_streaming` (§19.4).
+   *
+   * Optional so prototype fixtures are unaffected: absent means "the server did
+   * not say", and the page must then show **no** streaming claim at all rather
+   * than guess from whether increments happen to be arriving.
+   */
+  answerStreaming?: boolean
 }
 
 export interface ContextMeterView {

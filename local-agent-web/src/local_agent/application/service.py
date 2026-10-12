@@ -2564,6 +2564,7 @@ class ApplicationService:
             has_live_interrupt=view.has_live_interrupt,
             secrets=self._secrets,
             model_selection=self._session_model_selection(session.session_id),
+            answer_streaming=self._session_answer_streaming(session),
             workspace_root=Path(session.workspace_root),
             confirmation_stage=view.confirmation_stage,
         )
@@ -2593,6 +2594,33 @@ class ApplicationService:
             connection_id=selection.connection_id,
             config_version=str(selection.config_version),
         )
+
+    def _session_answer_streaming(self, session: Session) -> bool:
+        """本会话**下一轮**是否会按增量流式展示最终回答（§19.4）。
+
+        与提交时**真正生效**的那份配置同源：连接模式按"会话选择 → 默认连接"解析（和
+        :meth:`_resolve_binding` 同一条口径），旧配置模式取进程级 ``llm.streaming``。
+
+        两条边界：① **不抛异常**——展示字段不该让整份快照失败（同 :meth:`_session_model_selection`：
+        设置库坏了就退回进程级配置，页面宁可少一个提示也不要整页打不开）；② **不读 Checkpoint**，
+        它只回答"如果现在发一条消息，会不会流式"，与已跑过的轮次无关。
+        """
+        llm_streaming = self._app_config.llm.streaming if self._app_config.llm is not None else False
+        store = self._connections
+        if store is None:
+            return bool(llm_streaming)
+        try:
+            selection = self._sqlite_access(partial(_selected_or_default, store, session.session_id))
+            connection = (
+                None
+                if selection is None or selection.connection_id is None
+                else self._sqlite_access(partial(store.get, selection.connection_id))
+            )
+        except ModelSettingsError:
+            return bool(llm_streaming)
+        if connection is None or not connection.enabled:
+            return bool(llm_streaming)
+        return bool(connection.to_llm_config().streaming)
 
     def _snapshot_event(self, session: Session, view: _ThreadView) -> EventEnvelope:
         snapshot = self._snapshot(session, view)

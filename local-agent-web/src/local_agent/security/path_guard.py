@@ -113,6 +113,20 @@ def is_within(path: Path, root: Path) -> bool:
     return resolved_path == resolved_root or resolved_root in resolved_path.parents
 
 
+def display_path(path: Path, workspace_root: Path) -> str:
+    """展示用路径（架构 §15.8）：**工作区内用相对路径**，工作区外保持绝对。
+
+    规则只有这一处（`tools/file_tools.py` 的 `_display_path` 与 `tools/shell_tools.py` 的
+    `ShellResult.cwd` 都走这里），因为"页面/模型看得见的路径长什么样"必须是**一个**口径：
+    工作区内写相对路径（工作区根本身是 ``"."``）；工作区外**必须可核对真实目标**，所以保持绝对——
+    而不是把所有绝对路径一概抹掉（§15.8 明令不许那么做）。
+    """
+    try:
+        return path.relative_to(workspace_root).as_posix() or "."
+    except ValueError:
+        return path.as_posix()
+
+
 @dataclass(frozen=True)
 class ResolvedTarget:
     """一次路径解析的结果：规范化绝对路径 + 是否在工作区外 + 访问级别（架构 §1.5）。"""

@@ -49,6 +49,26 @@ describe('Sidebar 添加工作区', () => {
   })
 })
 
+it('会话行显示"现在在做什么"，没有状态的行不占位（v0.8 T71；§19.1）', () => {
+  render(<Sidebar workspaces={[{
+    id: 'workspace-1', title: '项目', sessions: [
+      { id: 'session-1', title: '跑着的会话', status: 'running', stateLabel: '正在跑', timeLabel: '', selected: false },
+      { id: 'session-2', title: '等你处理的会话', status: 'awaiting-approval', stateLabel: '在等你处理', timeLabel: '', selected: false },
+      { id: 'session-3', title: '闲着的会话', status: 'idle', timeLabel: '', selected: false },
+    ],
+  }]} />)
+
+  // 状态点区分不开"正在跑"与"等你处理"（同一个 warn 令牌），所以可见措辞必须自己说清楚。
+  expect(screen.getByText('正在跑')).toBeInTheDocument()
+  expect(screen.getByText('在等你处理')).toBeInTheDocument()
+  // 屏幕阅读器读的是那份隐藏文本（点本身是装饰）。
+  expect(screen.getByText('运行中')).toHaveClass('visually-hidden')
+  expect(screen.getByText('等待审批')).toHaveClass('visually-hidden')
+  // 没有状态的行只有"空闲"，不编一个状态点。
+  expect(screen.getByText('空闲')).toHaveClass('visually-hidden')
+  expect(screen.queryByText('需人工核对')).not.toBeInTheDocument()
+})
+
 it('搜索会话会筛选侧栏，并能清空恢复', () => {
   render(<Sidebar workspaces={[{
     id: 'workspace-1', title: '项目', sessions: [

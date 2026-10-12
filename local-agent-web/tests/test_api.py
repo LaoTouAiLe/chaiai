@@ -1420,6 +1420,57 @@ CONNECTION_PAYLOAD: dict[str, Any] = {
 }
 
 
+def test_snapshot_reports_whether_the_next_answer_streams(
+    api: tuple[TestClient, ApiRuntime]
+) -> None:
+    """T74（§19.4）：页面判"在不在流式"**只能用**服务端给的 `answer_streaming`。
+
+    这里跑连接模式的两条来源：① 会话选中的连接；② 没有会话选择时跟随**默认连接**（旧配置模式
+    取 `llm.streaming` 的那条在 `test_application.py` 里按配置各跑一遍）。两条都对得上，页面才
+    敢说"未流式"——否则它只能靠"有没有增量"猜，而那在刚连上、回答极短时是错的。
+    """
+    client, _ = api
+    imported = client.get("/api/model-connections").json()[0]
+    assert imported["streaming"] is False  # 旧配置幂等导入的那条默认不开流式
+
+    streamed = client.post(
+        "/api/model-connections", json={**CONNECTION_PAYLOAD, "streaming": True}
+    )
+    assert streamed.status_code == 200, streamed.text
+    streamed_id = streamed.json()["connection_id"]
+
+    session_id = _create_session(client)
+    # ① 还没选：跟随默认连接（没开流式）⇒ 快照说"未流式"。
+    assert client.get(f"/api/sessions/{session_id}").json()["answer_streaming"] is False
+
+    # ② 选中开了流式的连接 ⇒ 快照改口（页面据此不再显示"未流式"）。
+    selected = client.put(
+        f"/api/sessions/{session_id}/model",
+        json={
+            "connection_id": streamed_id,
+            "expected_selection": {"connection_id": None, "config_version": None},
+            "expected_version": int(streamed.json()["config_version"]),
+        },
+    )
+    assert selected.status_code == 200, selected.text
+    assert selected.json()["answer_streaming"] is True
+    assert client.get(f"/api/sessions/{session_id}").json()["answer_streaming"] is True
+
+    # 回到"跟随默认"⇒ 快照也回到默认那条的口径（不是把上一次的选择留在页面上）。
+    cleared = client.put(
+        f"/api/sessions/{session_id}/model",
+        json={
+            "connection_id": None,
+            "expected_selection": {
+                "connection_id": streamed_id,
+                "config_version": int(streamed.json()["config_version"]),
+            },
+        },
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["answer_streaming"] is False
+
+
 def test_model_connection_routes_cover_the_lifecycle(api: tuple[TestClient, ApiRuntime]) -> None:
     """六条连接路由 + 会话模型路由：读接口不回密钥、编辑要版本号、删除只停用（§6.8）。"""
     client, runtime = api
@@ -2748,3 +2799,80 @@ def test_stale_timeout_scan_never_cancels_the_next_submission(
     assert not token.cancelled
     assert jobs.wait_for_idle(15)
     assert store.get(submitted.json()["job_id"]).state == JOB_STATE_COMPLETED
+
+
+# ---- v0.8 T75：直接伪造 HTTP 请求的负例（计划 §T75 验收①、§4 硬验收）--------
+#
+# 这一节只收**之前没有负例**的那几条改状态路由。整份文件本来就都是"绕过页面直打 API"
+# （TestClient，不经浏览器、不带页面状态），所以这里的用例同时是"后端不依赖页面的自律"的证明。
+
+
+def test_new_session_rejects_an_unlisted_workspace_id(api: tuple[TestClient, ApiRuntime]) -> None:
+    """`POST /sessions` 的 `workspace_id` 只认**已列出**的工作区。
+
+    没列出就 404，**不**按路径现建：否则"新建会话"会变成一条隐式的、绕过工作区登记的入口
+    （§15.8 的工作区边界是登记过的那些根，不是"谁能给我一个路径"）。
+    """
+    client, _ = api
+    _create_session(client)  # 建一条会话，工作区因此被登记进列表
+
+    forged = client.post(
+        "/api/sessions", json={"title": "伪造工作区", "workspace_id": "not-a-listed-workspace"}
+    )
+    assert forged.status_code == 404, forged.text
+    assert forged.json()["error"]["code"] == WORKSPACE_NOT_FOUND
+
+    # 同一条路由带**已列出**的 id 仍然可用：拒绝的是那个 id，不是整条路由。
+    listed = client.get("/api/workspaces").json()[0]["workspace_id"]
+    ok = client.post("/api/sessions", json={"title": "正常", "workspace_id": listed})
+    assert ok.status_code == 200, ok.text
+
+
+def test_branch_routes_reject_an_unknown_branch_and_a_bad_arrangement(
+    api: tuple[TestClient, ApiRuntime]
+) -> None:
+    """分支两条路由的负例：未知分支不能选中/改名，分支名与位置只由**服务端**裁定。
+
+    伪造请求能过的只有 HTTP 形状；空白名（长度合规但内容是空的）照样要被拒——
+    否则"名字"就成了可以塞进任何东西的展示字段。
+    """
+    client, _ = api
+    session_id = _create_session(client)
+    branch_id = client.get(f"/api/sessions/{session_id}/conversation-map").json()["active_branch_id"]
+
+    unknown = client.post(f"/api/sessions/{session_id}/branches/ghost/select")
+    assert unknown.status_code == 409, unknown.text
+
+    renamed = client.patch(
+        f"/api/sessions/{session_id}/branches/ghost", json={"title": "改名", "position": 0}
+    )
+    assert renamed.status_code == 409, renamed.text
+
+    blank = client.patch(
+        f"/api/sessions/{session_id}/branches/{branch_id}", json={"title": "   ", "position": 0}
+    )
+    assert blank.status_code == 409, blank.text
+
+    # 负数位置在**形状**这一层就被拒（422），不会流到服务里被当成"最后一个"。
+    negative = client.patch(
+        f"/api/sessions/{session_id}/branches/{branch_id}", json={"title": "改名", "position": -1}
+    )
+    assert negative.status_code == 422, negative.text
+
+
+def test_restore_rejects_an_unknown_session(api: tuple[TestClient, ApiRuntime]) -> None:
+    """`POST /sessions/{id}/restore` 对不存在的会话给 404，而不是"恢复成功"的空操作。
+
+    已归档的会话照旧能恢复——拒绝的是"找不到会话"，不是"没归档"。
+    """
+    client, _ = api
+
+    missing = client.post("/api/sessions/ghost-session/restore")
+    assert missing.status_code == 404, missing.text
+    assert missing.json()["error"]["code"] == SESSION_NOT_FOUND
+
+    session_id = _create_session(client)
+    assert client.post(f"/api/sessions/{session_id}/archive").status_code == 200
+    restored = client.post(f"/api/sessions/{session_id}/restore")
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["session_id"] == session_id

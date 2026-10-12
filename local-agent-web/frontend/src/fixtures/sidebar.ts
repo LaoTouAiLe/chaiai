@@ -4,6 +4,13 @@ export interface SidebarSessionFixture {
   id: string
   title: string
   status: SessionSummaryView['status']
+  /**
+   * 来自任务索引的"现在在做什么"（v0.8 T71；§19.1）。
+   *
+   * **可选**：原型夹具不传，因此原型与视觉基线的 DOM 一字不变——只有实时视图（LiveApp）
+   * 拿到任务中心的数据时才会渲染它。
+   */
+  stateLabel?: string
   timeLabel: string
   selected: boolean
 }

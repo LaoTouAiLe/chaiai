@@ -144,14 +144,21 @@ function outcomeCard(tool: ToolUse, outcome: ToolOutcome): ToolCardView {
       }
     }
     case 'read': {
+      // 行号来自**文件**，不是窗口内的序号（契约的 `first_line`，§19.3）：少了它，带
+      // `start_line` 的读取会在页面上被编号成"第 1 行起"，与文件对不上。取不到（原型夹具）
+      // 就退回 1 并如实标注（`ReadCard` 会说这是页内序号）。
+      const firstLine = outcome.first_line ?? null
       const body = outcome.text ?? ''
-      const lines = body === '' ? [] : body.split('\n').map((text, index) => ({ number: index + 1, text }))
+      const lines = body === ''
+        ? []
+        : body.split('\n').map((text, index) => ({ number: (firstLine ?? 1) + index, text }))
       return {
         kind: 'read',
         path: outcome.target ?? '读取结果',
         lines,
         totalLines: outcome.total ?? lines.length,
         language: '',
+        ...(firstLine === null ? {} : { firstLine }),
         truncated: outcome.truncated,
       }
     }
@@ -179,6 +186,8 @@ function outcomeCard(tool: ToolUse, outcome: ToolOutcome): ToolCardView {
         stdout: outcome.stdout ?? undefined,
         stderr: outcome.stderr ?? undefined,
         timedOut: outcome.timed_out ?? undefined,
+        // 服务端把输出截断过就如实说（§19.3）——此前页面对"这份 stdout 只是有界预览"只字未提。
+        truncated: outcome.truncated,
         collapsedLines: 0,
       }
     case 'edit':
@@ -561,6 +570,9 @@ export function mapSession(snapshot: Snapshot, modelLabel: string): SessionSumma
     workspace: snapshot.workspace?.display_name ?? null,
     status: mapSessionState(snapshot.session_state),
     modelLabel,
+    // §19.4：**服务端说**这一轮在不在流式，页面照搬不推断（"有没有增量"在刚连上、网络慢、
+    // 回答极短时都会给出错误答案）。
+    answerStreaming: snapshot.answer_streaming,
   }
 }
 

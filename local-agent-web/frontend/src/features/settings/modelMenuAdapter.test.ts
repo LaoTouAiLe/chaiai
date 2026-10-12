@@ -17,6 +17,7 @@ const snapshot = (overrides: Partial<Snapshot> = {}): Snapshot => ({
   branch_title: '原讨论',
   session_state: 'idle',
   created_at: '2026-09-27T00:00:00Z',
+  answer_streaming: false,
   ...overrides,
 })
 

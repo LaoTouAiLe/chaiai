@@ -35,7 +35,8 @@ import {
   mapTurnStats,
   modelLabelFor,
 } from '../features/conversation/adapters'
-import { mapSidebar } from '../features/sidebar/adapters'
+import { mapSidebar, sessionTaskStates } from '../features/sidebar/adapters'
+import { toTasksView } from '../api/viewModels'
 import { ModelSettingsDialog } from '../features/settings/ModelSettingsDialog'
 import { parseSelectionVersion, selectionExpectation, toModelMenu } from '../features/settings/modelMenuAdapter'
 import { traceFromMessages } from '../features/trace/adapters'
@@ -192,8 +193,11 @@ export function LiveApp() {
         sessions: sessionList,
         activeSessionId,
         activeStatus: snapshot === null ? null : mapSession(snapshot, modelLabel).status,
+        // 其余行的"现在在做什么"来自**任务索引**（v0.8 T71；§19.1）：与入口角标、任务中心
+        // 共用同一个 query，不新增端点、不新增真源；没有任务的行不显示状态。
+        sessionTasks: sessionTaskStates(tasks.data === undefined ? null : toTasksView(tasks.data)),
       }),
-    [activeSessionId, modelLabel, sessionList, snapshot, workspaces.data],
+    [activeSessionId, modelLabel, sessionList, snapshot, tasks.data, workspaces.data],
   )
 
   const draft = activeSessionId === null ? '' : (drafts[activeSessionId] ?? '')
@@ -238,6 +242,11 @@ export function LiveApp() {
 
     // 安全阶段摘要（§6.7）：只表达"现在在做什么"，不暴露节点名或隐藏推理。
     const toolInFlight = [...messages].reverse().find((message) => message.kind === 'tool' && message.tool.status === 'running')
+    // v0.8 T74（§19.4）：增量措辞要**两个条件同时成立**——服务端说本会话在流式（快照的
+    // `answer_streaming`）**且**确实收到了增量。光看尾部不够：旧快照、刚被改过的配置都会让
+    // "正在接收回答"变成假话；而"没有增量"也不能反推"没在流式"（刚连上、网络慢、回答极短）。
+    const answerStreaming = snapshot?.answer_streaming === true
+    const streamingTail = answerStreaming ? tail : null
     // Model-call start events currently arrive with completion. Only the snapshot's
     // running state, actual tool states and safe answer tail can describe activity.
     const activity = submit.isPending && !running && !awaitingApproval ? {
@@ -249,11 +258,15 @@ export function LiveApp() {
       startedAt: snapshot?.usage?.run_id === snapshot?.current_task?.run_id ? snapshot?.usage?.submitted_at ?? null : null,
       label: awaitingApproval ? '等待你确认'
         : toolInFlight?.kind === 'tool' ? `正在${toolLabel(toolInFlight.tool.name)}`
-          : tail !== null && tail.text !== '' ? '正在接收回答'
-            : tail?.channel === 'reasoning' ? '正在思考' : '正在处理请求',
+          : streamingTail !== null && streamingTail.text !== '' ? '正在接收回答'
+            : streamingTail?.channel === 'reasoning' ? '正在思考' : '正在处理请求',
+      // 未流式时**明说**回答会一次性出现（§19.4）：否则用户面对的是"长时间什么都没发生"，
+      // 只能自己猜是不是卡住了。这一句只在确实没在等工具、也没在等审批时出现。
       detail: awaitingApproval ? '下方有一项操作需要你的决定，确认前不会执行。'
         : toolInFlight?.kind === 'tool' && toolInFlight.tool.target !== null ? toolInFlight.tool.target
-          : '任务仍在运行，你可以继续写下一条消息的草稿。',
+          : snapshot?.answer_streaming === false
+            ? '未启用流式：回答会在完成时一次性显示。'
+            : '任务仍在运行，你可以继续写下一条消息的草稿。',
     } : null
 
     return {
@@ -552,6 +565,13 @@ export function LiveApp() {
             上下文包含会话开头到本轮，原后续问答保留。
             <button type="button" disabled={running || awaitingApproval || submit.isPending}
               onClick={() => setFollowup(null)}>取消历史追问</button></p>}
+        {stream.reconnecting ? (
+          // 断线必须可见（v0.8 T72；§19.2）：连不上时如实说明，并写明"不会自动重发请求"。
+          // 一轮正常收尾后的 500ms 重订阅不算断线，所以不会在这里闪。
+          <p className={styles.notice} role="status">
+            连接已中断，正在重连。会话在服务端继续推进；恢复后会以最新状态为准，不会自动重发请求。
+          </p>
+        ) : null}
         {stream.notices.length === 0 ? null : (
           // 传输层提示（超限/空闲超时/无法解析的帧）如实显示：它们不代表数据损坏，但用户有权知道。
           <p className={styles.notice} role="status">

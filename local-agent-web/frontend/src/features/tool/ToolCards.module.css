@@ -239,3 +239,37 @@
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
 }
+
+/* ---- 长正文的行窗口（v0.8 T73；契约 §19.3）------------------------------- */
+
+.more {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  padding: var(--law-space-sm) var(--law-space-lg);
+  border-top: 1px solid var(--law-border-l1);
+  background: var(--law-surface-sunken);
+}
+
+.moreCount {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.moreButton {
+  margin-left: auto;
+  padding: 0 var(--law-space-md);
+  height: 22px;
+  flex: 0 0 auto;
+  border-radius: var(--law-radius-sm);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.moreButton:hover {
+  background: var(--law-button-ghost-hover);
+  color: var(--law-text-primary);
+}

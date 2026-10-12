@@ -142,7 +142,10 @@ test('tool checkpoint renders every card shape, capped results included', async 
 
   await expect(page.getByText('退出码 1')).toBeVisible()
   await expect(page.getByText('退出码 0')).toBeAttached()
-  await expect(page.getByText(/结果已截断，仅显示前 2 个文件/)).toBeVisible()
+  // v0.8 T73（§19.3）：被截断的结果必须同时说清"这是有界预览"与"怎么拿到完整的"——
+  // 只说一句"已截断"会让人以为剩下的一定能在这个页面上看到。两张被截断的卡都要说（各一句）。
+  await expect(page.getByText(/结果已截断，页面里是服务端给的有界预览/)).toHaveCount(2)
+  await expect(page.getByText(/完整内容可让助手按行区间读取/)).toHaveCount(2)
   await expect(page.getByText(/当前省略了 8 行/)).toBeVisible()
   // The unknown tool must land on the safe renderer, never a specialised card.
   await expect(page.getByText('结果详情', { exact: true })).toBeAttached()

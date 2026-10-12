@@ -27,13 +27,34 @@ export interface SessionStreamState {
   notices: string[]
   /** 订阅是否活着（用于呈现"正在接收"）。 */
   connected: boolean
+  /**
+   * 连接**曾经断过**、现在还在重连（§19.2："断线必须可见"）。
+   *
+   * 只在**连不上**（取快照/订阅失败）的那条路径上置位：一轮正常收尾后 500ms 重订阅是常规生命周期，
+   * 不该让页面闪一下"正在重连"。恢复（成功取到快照）即清零。
+   */
+  reconnecting: boolean
 }
 
 const MAX_BACKOFF_MS = 5_000
 
+/**
+ * 事件幂等只保留**最近**这么多个标识（§19.1）：重连时的历史重放是常态，但事件量可能有界地很大，
+ * 所以这是"有界集合"而不是"记住全部"。
+ */
+const MAX_SEEN_EVENT_IDS = 200
+
+/**
+ * 连接类提示（§19.1）：连接恢复并成功取到快照后必须清掉，否则横幅会一直挂着，用户以为没恢复。
+ *
+ * 只按**名字**过滤：4xx 之类"重连也没意义"的提示（会话被拒等）不属于连接类，保留原样。
+ */
+const CONNECTION_NOTICES = new Set(['stream_overrun', 'snapshot_refresh_failed', 'unparsable_event'])
+
 export function useSessionStream(sessionId: string | null): SessionStreamState {
   const queryClient = useQueryClient()
   const [connected, setConnected] = useState(false)
+  const [reconnecting, setReconnecting] = useState(false)
   const [notices, setNotices] = useState<string[]>([])
 
   useEffect(() => {
@@ -42,6 +63,17 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
     let stopped = false
     let attempt = 0
     let timer: ReturnType<typeof setTimeout> | undefined
+    // 事件幂等（§19.1）：重连时服务端会把当前轮的历史事件再投影一次，重复投递不得产生第二次效果。
+    // 有界：超出窗口就丢掉最早的一半（`Set` 保序，取尾部即最近）。
+    let seenEvents = new Set<string>()
+    const firstTimeSeen = (id: string): boolean => {
+      if (seenEvents.has(id)) return false
+      seenEvents.add(id)
+      if (seenEvents.size > MAX_SEEN_EVENT_IDS) {
+        seenEvents = new Set([...seenEvents].slice(MAX_SEEN_EVENT_IDS / 2))
+      }
+      return true
+    }
 
     const refreshSnapshot = async () => {
       // 权威状态：任何"我可能漏了东西"的情况都回到它。
@@ -134,14 +166,22 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
         // 每次（重）连都先重建权威状态，再订阅：这是"断线先取快照"的落地位置。
         // （任务列表不在这里重取：它有自己的兜底间隔，见 `queries.ts` 的 `useTasks`。
         //  这里只做一件事，重连路径才不会有第二条"顺手刷新"的逻辑。）
-        await refreshSnapshot()
+        const snapshot = await refreshSnapshot()
         if (stopped) return
+        // 重连先把本地尾部对账到权威快照（§19.1）：重放的历史事件不得把已完成的文本再拼一遍。
+        const store = useStreamStore.getState()
+        store.setTail(sessionId, reconcile(tailOf(store.tails, sessionId), snapshot))
+        // 连接恢复且成功取到快照 ⇒ 连接类提示该消失，不常驻。
+        setNotices((current) => current.filter((name) => !CONNECTION_NOTICES.has(name)))
         setConnected(true)
+        setReconnecting(false)
         await readSessionEvents(
           sessionId,
           {
             onEvent: (event) => {
               attempt = 0 // 收到事件说明连接是通的，退避从头算
+              // 幂等（§19.1）：同一个事件只应用一次。重连后的历史重放是常态，不是新事实。
+              if (!firstTimeSeen(event.event_id)) return
               handle(event)
             },
             onNotice: (name) => {
@@ -170,7 +210,9 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
           setNotices((current) => [...current, error.code ?? 'stream_rejected'])
           return
         }
+        // 连不上（服务没起来 / 网络断 / 取快照失败）：**如实**标成"正在重连"（§19.2），不静默。
         attempt += 1
+        setReconnecting(true)
         timer = setTimeout(() => void connect(), Math.min(500 * attempt, MAX_BACKOFF_MS))
       }
     }
@@ -185,5 +227,5 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
     }
   }, [queryClient, sessionId])
 
-  return { connected, notices }
+  return { connected, reconnecting, notices }
 }

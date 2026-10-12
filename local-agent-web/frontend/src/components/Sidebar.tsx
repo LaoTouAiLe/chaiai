@@ -22,6 +22,13 @@ interface SidebarSession {
   id: string
   title: string
   status: SessionSummaryView['status']
+  /**
+   * "现在在做什么"（v0.8 T71；§19.1）。**可选**：原型不传，所以既有 DOM 与视觉基线不变。
+   *
+   * 状态点颜色区分不开"正在跑"与"等你处理"（两者共用 warn 令牌），所以这一行走**可见文字**；
+   * 屏幕阅读器仍读 `STATUS_TEXT` 那份隐藏文本。
+   */
+  stateLabel?: string
   timeLabel: string
   selected: boolean
 }
@@ -232,6 +239,9 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
                         <span className={`${styles.dot} ${statusClass(session.status)}`} aria-hidden="true" />
                         <span className="visually-hidden">{STATUS_TEXT[session.status]}</span>
                         <span className={styles.sessionTitle}>{session.title}</span>
+                        {session.stateLabel === undefined ? null : (
+                          <span className={styles.sessionState}>{session.stateLabel}</span>
+                        )}
                         <span className={styles.sessionTime}>{session.timeLabel}</span>
                       </button>
                       {management === undefined ? null : <SidebarItemMenu title={session.title} kind="会话"

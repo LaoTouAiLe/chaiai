@@ -22,6 +22,10 @@ test('两轮真实对话，刷新后内容一致', async ({ page }) => {
   const input = page.getByPlaceholder('给智能体发消息')
   await expect(input).toBeVisible()
 
+  // 这条服务**没开流式**（`serve_fake.py` 的默认）：页面必须明说"未流式"。
+  // 判据来自服务端（快照的 `answer_streaming`，v0.8 T74/§19.4），不是页面自己推断。
+  await expect(page.getByText('未流式')).toBeVisible()
+
   // 3) 第一轮：回答来自真后端（假模型的固定文本）。
   await input.fill('第一轮')
   await page.getByRole('button', { name: '发送消息' }).click()

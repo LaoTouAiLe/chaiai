@@ -29,7 +29,7 @@ from local_agent.security.diff_guard import (
     edit_input_mode,
     parse_patch,
 )
-from local_agent.security.path_guard import assert_not_protected_target, is_within
+from local_agent.security.path_guard import assert_not_protected_target, display_path, is_within
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.result_types import (
     DeleteFileResult,
@@ -847,8 +847,5 @@ def _depth(path: Path, root: Path) -> int:
 
 
 def _display_path(path: Path, workspace_root: Path) -> str:
-    """展示用路径：工作区内用相对路径，避免把绝对路径写进上下文。"""
-    try:
-        return path.relative_to(workspace_root).as_posix() or "."
-    except ValueError:
-        return path.as_posix()
+    """展示用路径：口径在 :func:`local_agent.security.path_guard.display_path`（一处实现）。"""
+    return display_path(path, workspace_root)

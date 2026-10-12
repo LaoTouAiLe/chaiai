@@ -215,6 +215,16 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                 >
                   {actions !== undefined && session.modelLabel === '' ? '选择模型' : session.modelLabel}
                 </button>
+                {/* v0.8 T74（§19.4）：关闭流式时**明说**"未流式"——否则用户只会看到一段长时间的
+                    什么都没发生，然后再一次出现整段回答。未知（原型夹具）不显示任何东西。 */}
+                {session.answerStreaming === false ? (
+                  <span
+                    className={styles.streamNote}
+                    title="未启用流式：回答在完成时一次性出现，不是逐字出现。可在设置里为该模型连接打开流式。"
+                  >
+                    未流式
+                  </span>
+                ) : null}
                 <div className={styles.spacer} />
                 {/* 计量器与发送是一个整体：窄窗整组折到第二行，而不是把发送挤出视口。 */}
                 <div className={styles.right}>

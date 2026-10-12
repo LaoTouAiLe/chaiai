@@ -4664,6 +4664,11 @@
       "SessionSnapshot": {
         "description": "`session_snapshot` 事件的载荷，也是刷新恢复的权威展示状态。\n\n只读：生成快照不得写回 State、调用模型或执行工具（§15.4）。`schema_version` 与\n`snapshot_id` 一起让恢复逻辑能判断\"这份快照来自哪个契约版本\"。",
         "properties": {
+          "answer_streaming": {
+            "default": false,
+            "title": "Answer Streaming",
+            "type": "boolean"
+          },
           "approval": {
             "anyOf": [
               {
@@ -5795,6 +5800,18 @@
               }
             ],
             "title": "Exit Code"
+          },
+          "first_line": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Line"
           },
           "kind": {
             "enum": [

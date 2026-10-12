@@ -166,6 +166,24 @@
   white-space: nowrap;
 }
 
+/* 「未流式」：一个**中性**标注，不是告警（关掉流式是正当选择，§19.4）。
+   2026-10-12 实测（真服务截图）：原来的"浅灰底 + caption 文字"（#939aaa）太淡，看起来像**禁用**
+   而不是"一条说明"。改成与设置页信息小标同一套写法：加边、正文用 secondary——可读，且没有
+   下拉箭头，不会让人误以为是个能点的选择器。 */
+.streamNote {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  flex: 0 0 auto;
+  padding: 0 var(--law-space-md);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-pill);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  white-space: nowrap;
+}
+
 .chip:hover {
   color: var(--law-text-primary);
 }

@@ -609,6 +609,37 @@ def test_recursive_delete_first_stage_edit_ends_immediately(
     assert [record["decision"] for record in result["approval_history"]] == ["edit"]
 
 
+def test_edit_never_executes_the_edited_arguments(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """`edit` **只把修改意见交回模型**，不执行改后的动作——越区目标因此不会因为"用户改过"被放行。
+
+    与 `approve` 的分工要钉住：`approve` 执行的是审批请求里**人工看到的那一份**参数；
+    `edit` 什么都不执行，下一次调用必须重新过安全门。所以这里一次工具执行都不该发生，
+    工作区外的目标也必须一字未动（§T75 验收①、§6.5）。
+    """
+    outside = tmp_path / "outside.txt"
+    outside.write_text("工作区外的文件", encoding="utf-8", newline="")
+    _, folder, graph, context = _recursive_delete_flow(tmp_path, model_factory, app_config)
+
+    result = graph.invoke(
+        Command(
+            resume={
+                "decision": "edit",
+                "edited_arguments": {"path": str(outside), "recursive": True},
+                "reason": "改成删工作区外那个",
+            }
+        ),
+        config=_config(THREAD),
+        context=context,
+    )
+
+    assert outside.is_file()  # 工作区外目标一字未动
+    assert folder.is_dir()  # 原目标也没被"顺手"执行
+    assert not result.get("tool_results")
+    assert not result.get("__interrupt__")
+
+
 def _numbered_lines(prefix: str, count: int) -> str:
     return "\n".join(f"{prefix} {index}" for index in range(count))
 

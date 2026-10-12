@@ -730,6 +730,10 @@ def _tool_outcome(
 
     if tool_name == "read_file":
         lines = _int_of(payload.get("line_count"))
+        # 展示正文的**首行在文件里的行号**（v0.8 T73，§19.3）：工具结果里本来就有 `first_line`
+        # （`ReadFileResult`），此前没透出来，页面只能把窗口当"第 1 行起"编号——带 `start_line`
+        # 的读取因此在页面上显示错误行号。这里只搬运，不重算；取不到（旧载荷）就是 `None`。
+        first_line = _int_of(payload.get("first_line"))
         summary = f"{lines if lines is not None else 0} 行"
         if note:
             summary = f"{summary} · {note}"
@@ -746,6 +750,7 @@ def _tool_outcome(
             summary=sanitize_text(summary, secrets),
             text=text,
             total=lines,
+            first_line=first_line if first_line is not None and first_line >= 1 else None,
             truncated=clipped or bool(payload.get("truncated")),
         )
 
@@ -1712,6 +1717,7 @@ def project_snapshot(
     has_live_interrupt: bool = False,
     secrets: Iterable[str] = (),
     model_selection: ModelSelectionView | None = None,
+    answer_streaming: bool = False,
     workspace_root: Path | None = None,
     confirmation_stage: int = 1,
 ) -> SessionSnapshot:
@@ -1741,6 +1747,9 @@ def project_snapshot(
         approval=approval,
         memory=project_memory(state, secrets=secrets),
         model_selection=model_selection,
+        # 同样是调用方给的配置投影（§19.4）：投影层不读设置库，否则同一份 Checkpoint 会因
+        # 设置变化投影出不同字节。
+        answer_streaming=answer_streaming,
         errors=project_errors(state, secrets=secrets),
         usage=project_usage(state),
         model_calls=project_model_calls(state, run_id),
