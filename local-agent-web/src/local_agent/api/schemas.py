@@ -20,6 +20,7 @@ from local_agent.application.models import (
     ExternalPathAccess,
     ExternalPathsMode,
 )
+from local_agent.attachments import MAX_ATTACHMENTS_PER_MESSAGE
 from local_agent.workflow_contracts import WorkflowRequest
 
 #: 会话名与请求标识的长度上限：够用即可，真正的截断规则在会话库里。
@@ -28,6 +29,8 @@ REQUEST_ID_MAX_CHARS = 128
 MESSAGE_MAX_CHARS = 100_000
 PATH_MAX_CHARS = 4096
 REASON_MAX_CHARS = 2000
+#: 服务凭据（Tavily）的长度上限：常见密钥是几十个字符，512 只用来挡住"粘进来一整篇文档"。
+KEY_MAX_CHARS = 512
 
 
 class _Request(BaseModel):
@@ -96,17 +99,28 @@ class CancelTaskRequest(_Request):
 class SubmitMessageRequest(_Request):
     """提交消息。`client_request_id` 是幂等键（§6.1），由前端生成并复用。"""
 
-    text: str = Field(min_length=1, max_length=MESSAGE_MAX_CHARS)
+    text: str = Field(default="", max_length=MESSAGE_MAX_CHARS)
     client_request_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_CHARS)
+    #: 随这条消息一起交给模型的图片（2026-10-16）：**引用**（上传接口返回的 `attachment_id`），
+    #: 不是字节——字节留在 `data/attachments/` 里，消息里只放能定位它的相对路径。
+    #: 默认空 ⇒ 老客户端照常工作；上限与存储层同一条口径（`MAX_ATTACHMENTS_PER_MESSAGE`）。
+    attachments: list[str] = Field(
+        default_factory=list, max_length=MAX_ATTACHMENTS_PER_MESSAGE
+    )
     workflow: WorkflowRequest | None = None
     parent_turn_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)
     expected_branch_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)
     expected_snapshot_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)
 
     @model_validator(mode="after")
-    def _text_is_not_blank(self) -> SubmitMessageRequest:
-        if not self.text.strip():
-            msg = "text 不能只有空白字符"
+    def _text_or_attachments(self) -> SubmitMessageRequest:
+        """文字与图片**至少有一个**（2026-10-16）。
+
+        `text` 因此允许为空：只贴一张图、一个字不打也是合法提问（"看看这是什么"）。但不能两者都空：
+        那样提交的是一条**什么都不含**的消息，模型没有可回应的内容，用户也看不出自己漏了什么。
+        """
+        if not self.text.strip() and not self.attachments:
+            msg = "text 与 attachments 至少要有一个"
             raise ValueError(msg)
         return self
 
@@ -145,6 +159,47 @@ MODEL_ID_MAX_CHARS = 200
 SECRET_MAX_CHARS = 4096
 
 
+class AttachmentUploadRequest(_Request):
+    """上传一张图片（2026-10-16）。
+
+    为什么是 **base64 的 JSON** 而不是 multipart：后者要给运行时（以及打包）多加一个
+    `python-multipart` 依赖，而 4 MB 上限下 base64 的 33% 开销无所谓；契约与生成类型也干净。
+
+    **没有 media_type 字段**是刻意的：客户端声明与扩展名一样不可信（`报告.png` 完全可能是 HTML），
+    媒体类型一律由服务端按**魔数**判定。
+    """
+
+    #: 图片字节的 base64（标准编码，带 padding）。上限按"解码后 ≤ 4 MB"卡，
+    #: 这里给一个略大的字符上限，免得把超大请求体先读进内存再拒绝。
+    data_base64: str = Field(min_length=1)
+
+
+class OssCredentialRequest(_Request):
+    """对象存储的访问密钥（2026-10-20）。
+
+    形状只挡空值与超长；内容不做任何校验（与 Tavily 同一条口径）。写入即整体覆盖，
+    页面**不回读**：只回答"已配置 / 未配置"。
+    """
+
+    access_key: str = Field(min_length=1, max_length=KEY_MAX_CHARS)
+    secret_key: str = Field(min_length=1, max_length=KEY_MAX_CHARS)
+
+
+class OssCredentialView(BaseModel):
+    """对象存储密钥状态：只报有没有，不回读任何一位密钥。"""
+
+    configured: bool
+    store: Literal["os", "local", "memory"] | None = None
+    note: str | None = None
+
+
+class OssTestResult(BaseModel):
+    """「测试对象存储」的结果：能否写入、公开地址能否访问。"""
+
+    ok: bool
+    detail: str
+
+
 class ModelConnectionRequest(_Request):
     """新增 / 编辑一条模型连接（§6.8）。
 
@@ -163,6 +218,10 @@ class ModelConnectionRequest(_Request):
     timeout_seconds: int = Field(default=120, gt=0)
     retry_count: int = Field(default=2, ge=0, le=10)
     streaming: bool = False
+    #: 用户声明：**这条连接支持图片输入**（2026-10-16）。默认关（失败闭合）——勾错会让每次带图的
+    #: 请求失败，所以页面上必须写清"不确定就别勾"。它是**声明**，与 `capabilities` 那组**实测报告**
+    #: 分开：收不收图只能靠发图试，测不出来与不支持是两回事。
+    supports_vision: bool = False
     auth_mode: Literal["api_key", "none"] = "api_key"
     #: 用户对"非回环明文 HTTP"的明确确认（§6.8 第 5 条）。
     allow_plaintext_http: bool = False
@@ -240,9 +299,11 @@ class HealthView(BaseModel):
     schema_version: int = SCHEMA_VERSION
     model_configured: bool
     model_name: str
-    #: `os` = 持久（重启后仍在）；`memory` = 仅本进程内有效。
-    credential_store: Literal["os", "memory"] = "memory"
-    #: 降级原因；`credential_store="os"` 时为 `null`。
+    #: `local` = 持久，密钥在**本地设置库**里（2026-10-13 起的默认，§6.8）；
+    #: `os` = 历史值（系统凭据存储，v1.0 之前默认，现无代码路径产出）；
+    #: `memory` = 仅本进程内有效（重启后需重新录入）。
+    credential_store: Literal["os", "local", "memory"] = "memory"
+    #: 降级原因；持久存储（`local` / `os`）时为 `null`。
     credential_note: str | None = None
     #: 只说到"本地库"这一层：具体的后端标识（配置里的 `sqlite_checkpoint`）属内部细节，
     #: 不该固化进公开契约（前端也不需要）。
@@ -262,18 +323,42 @@ class PickDirectoryView(BaseModel):
     path: str | None = None
 
 
-# ---- 能力与档位（§16.6）----------------------------------------------------
+# ---- 能力开关（§16.1、§16.6）------------------------------------------------
 
 
-class ProfileRequest(_Request):
-    """切换当前 Agent 档位（§16.6 档位切换）。
+class CapabilitiesRequest(_Request):
+    """改能力开关（§16.1、§16.6）。
 
-    可选值由**服务端枚举**（内置三档 + `profiles.custom`）：这里只做形状校验（非空、长度），
-    **取值是否合法由领域层裁定**（未知档位给 422，理由里带上可选值）——传输层不另立一套档位名，
-    与 `PermissionsModeRequest` 同一条口径。
+    只报告**这次动过的那几项**（合并式）：页面点一下开关就发一项，其余保持原样。取值是否合法由领域层
+    裁定（未登记的能力名给 422，理由里带上可开关集）——传输层不另立一套能力名，与
+    `PermissionsModeRequest` 同一条口径。
     """
 
-    profile: str = Field(min_length=1, max_length=REQUEST_ID_MAX_CHARS)
+    changes: dict[str, bool] = Field(min_length=1)
+
+
+# ---- 技能（技能管理页，2026-10-16；§16.5）----------------------------------
+
+
+class SkillRootRequest(_Request):
+    """添加一个技能发现根（2026-10-20）。
+
+    只收**绝对路径**：相对路径的基准在冻结形态是数据目录、在源码形态是配置文件目录，
+    让用户在这里猜基准只会得到"路径明明对却什么都扫不到"。`~` 由页面展开后再提交。
+    """
+
+    path: str = Field(min_length=1, max_length=TITLE_MAX_CHARS)
+
+
+class SkillToggleRequest(_Request):
+    """启用/禁用一个技能（技能管理页，2026-10-16；§16.5）。
+
+    **一次一个**：界面就是一个开关，报一批既没有对应操作，也会让"哪个名字错了"变含混。
+    名字是否真有这个技能由领域层裁定（422，理由里带上当前可用的名字）。
+    """
+
+    name: str = Field(min_length=1)
+    enabled: bool
 
 
 # ---- 权限（T38；§1.5）------------------------------------------------------
@@ -287,6 +372,16 @@ class PermissionsModeRequest(_Request):
     """
 
     mode: ExternalPathsMode
+
+
+class WebSearchKeyRequest(_Request):
+    """录入 / 覆盖联网检索的服务凭据（Tavily）。
+
+    形状只挡空值：**内容不在这里做任何校验**（长度上限只是防"把整篇文档粘进来"），
+    密钥对不对只有发起一次真实检索才知道——那件事由用户自己决定何时做。
+    """
+
+    api_key: str = Field(min_length=1, max_length=KEY_MAX_CHARS)
 
 
 class ExternalPathGrantRequest(_Request):

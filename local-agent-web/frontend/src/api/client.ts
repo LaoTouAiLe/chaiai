@@ -241,7 +241,49 @@ export function submitMessage(
 }
 
 export type SubmissionContext = Pick<components['schemas']['SubmitMessageRequest'],
-  'parent_turn_id' | 'expected_branch_id' | 'expected_snapshot_id' | 'workflow'>
+  'parent_turn_id' | 'expected_branch_id' | 'expected_snapshot_id' | 'workflow' | 'attachments'>
+
+/**
+ * 上传一张图片（2026-10-16），返回它的**引用**。
+ *
+ * 为什么是 base64 的 JSON 而不是 multipart：后者要给运行期（以及打包）多带一个
+ * `python-multipart` 依赖，而 4 MB 上限下 base64 的开销无所谓；契约与生成类型也干净。
+ * **媒体类型不由页面声明**：服务端按魔数判定（`报告.png` 完全可能是 HTML），所以这里只发字节。
+ */
+/**
+ * 一张已上传图片的**取回地址**（2026-10-16）。
+ *
+ * 引用是相对路径（含 `/`），所以走**查询参数**而不是路径参数——路径参数里的 `/` 会被当成路由分隔符。
+ * 地址里带会话 id：服务端只认**本会话**的引用（跨会话取不到，这是它的边界之一）。
+ */
+export function attachmentUrl(sessionId: string, attachmentId: string): string {
+  return `/api/sessions/${encodeURIComponent(sessionId)}/attachments?attachment_id=${encodeURIComponent(attachmentId)}`
+}
+
+export function uploadAttachment(
+  sessionId: string,
+  dataBase64: string,
+): Promise<Schemas['AttachmentView']> {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`, {
+    method: 'POST',
+    body: JSON.stringify({ data_base64: dataBase64 }),
+  })
+}
+
+/**
+ * 取消当前会话在跑的任务（§17.4，T60 起公开）。
+ *
+ * **幂等**：没有可取消的任务时是空操作，返回当时的结局，不报错、也不产生事件。
+ * **不撤销**已经发生的副作用（改过的文件、发出去的请求都不回滚）；**不释放**会话锁——
+ * 释放的前提是这一轮真的收敛（模型流被打断、本轮落到 `cancelled`），所以停止是"等它收敛"。
+ * 它**不带幂等键**：重复调用本来就是空操作，要求一个用不上的键只会让人以为取消会被去重。
+ */
+export function cancelTask(sessionId: string, reason = ''): Promise<Schemas['CommandResultView']> {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
+    method: 'POST',
+    body: JSON.stringify({ reason }),
+  })
+}
 
 export function getConversationMap(sessionId: string, query = '') {
   return request<components['schemas']['ConversationMapView']>(
@@ -381,31 +423,81 @@ export function getPreferences(): Promise<PreferencesDto> {
   return request('/api/preferences')
 }
 
-// ---- 能力状态（T56；§16.6）---------------------------------------------------
+// ---- 能力开关（T56；§16.1、§16.6）------------------------------------------
 
 export type CapabilitiesDto = components['schemas']['CapabilitiesView']
 export type CapabilityStatusDto = components['schemas']['CapabilityStatusView']
 
 /**
- * 当前档位与每个能力的可用性（原因 + 可照做的下一步）。
+ * 能力开关表与每个能力的可用性（原因 + 可照做的下一步）。
  *
- * 服务端**每次现算**（取决于配置开关与这台机器上装没装 git），所以这里不做长缓存：
- * 改完配置或装好依赖后刷新即得，页面不保存一份可能已经过期的结论。
+ * 服务端**每次现算**（取决于开关与这台机器上装没装 git），所以这里不做长缓存：打开开关或装好依赖
+ * 后刷新即得，页面不保存一份可能已经过期的结论。
  */
 export function getCapabilities(): Promise<CapabilitiesDto> {
   return request<CapabilitiesDto>('/api/capabilities')
 }
 
 /**
- * 切换当前 Agent 档位（§16.6）：**保存即生效、作用于下一轮**（改完不用重启）。
+ * 改能力开关（§16.1）：**保存即生效、作用于下一轮**（改完不用重启）。
  *
- * 可选值由服务端枚举（`CapabilitiesView.profiles`），页面不自己拼档位名——打错名字会拿到 422，
- * 理由里带着可选值；没有设置库时是 503（改动存不下来）。
+ * 只报告**这次动过的那几项**（服务端合并式写入），其余保持原样。可开关集由服务端枚举
+ * （`CapabilitiesView.switchable`），页面不自己拼能力名——打错名字会拿到 422，理由里带着可开关集；
+ * 没有设置库时是 503（改动存不下来）。
  */
-export function setActiveProfile(profile: string): Promise<CapabilitiesDto> {
-  return request<CapabilitiesDto>('/api/capabilities/profile', {
+export function setCapabilities(changes: Record<string, boolean>): Promise<CapabilitiesDto> {
+  return request<CapabilitiesDto>('/api/capabilities', {
     method: 'PUT',
-    body: JSON.stringify({ profile }),
+    body: JSON.stringify({ changes }),
+  })
+}
+
+// ---- 技能管理（技能管理页，2026-10-16；§16.5）--------------------------------
+
+export type SkillsDto = components['schemas']['SkillsView']
+export type SkillEntryDto = components['schemas']['SkillEntryView']
+
+/**
+ * 本机发现到的技能与启用状态。
+ *
+ * 服务端**每次现算**（技能是每轮在发现根里现扫的），所以这里不做长缓存：刚放进去或刚删掉的技能，
+ * 下一次打开这一页就该看到真实结果。逐条 `enabled` 是**用户**的选择——库里只记被禁用的那些，
+ * 新装/未动过的技能默认可用。
+ */
+export function getSkills(): Promise<SkillsDto> {
+  return request<SkillsDto>('/api/skills')
+}
+
+/**
+ * 启用/禁用一个技能（§16.5）：**保存即生效、作用于下一轮**。
+ *
+ * 一次一个（界面就是一个开关）。禁用**不删除任何文件**，只让这个技能对模型不可用；名字不在当前
+ * 发现到的技能里会拿到 422，理由里带着可选项；没有设置库时是 503（改动存不下来）。
+ */
+export function setSkillEnabled(name: string, enabled: boolean): Promise<SkillsDto> {
+  return request<SkillsDto>('/api/skills', {
+    method: 'PUT',
+    body: JSON.stringify({ name, enabled }),
+  })
+}
+
+/**
+ * 添加一个技能发现根（2026-10-20）：**只引用目录，不复制文件**。
+ *
+ * 只接受绝对路径：相对路径的基准在冻结形态是数据目录、源码形态是配置文件目录，让用户猜基准
+ * 只会得到"路径明明对却什么都扫不到"。`~` 由调用方展开成绝对路径再提交。
+ */
+export function addSkillRoot(path: string): Promise<SkillsDto> {
+  return request<SkillsDto>('/api/skills/roots', {
+    method: 'POST',
+    body: JSON.stringify({ path }),
+  })
+}
+
+/** 移除一个**自己添加**的发现根：不删文件，只是不再扫描。 */
+export function removeSkillRoot(path: string): Promise<SkillsDto> {
+  return request<SkillsDto>(`/api/skills/roots?path=${encodeURIComponent(path)}`, {
+    method: 'DELETE',
   })
 }
 
@@ -450,6 +542,64 @@ export function testMemoryPreferences(values: PreferenceValues, expectedVersion:
   return request('/api/preferences/memory/test', {
     method: 'POST', body: JSON.stringify({ values, expected_version: expectedVersion }),
   })
+}
+
+export type WebSearchKeyDto = components['schemas']['WebSearchKeyView']
+
+/**
+ * 联网检索的服务凭据（Tavily）状态。
+ *
+ * 返回值里**没有密钥**（连掩码都没有）：页面只据此决定是提示"去录入"还是"可以开始检索"，
+ * 以及是否存在设置库里（`store`）。读取失败时服务端会如实说明，不假装"已配置"。
+ */
+export function getWebSearchKey(): Promise<WebSearchKeyDto> {
+  return request<WebSearchKeyDto>('/api/web-search/credential')
+}
+
+/**
+ * 写入（覆盖）检索服务凭据：**保存即生效**，下一轮检索就用它。
+ *
+ * 只写不回读：要替换就再写一次，要清空走 `clearWebSearchKey`——"清空"与"改成空白"是两种意图，
+ * 服务端也只接受前者来表达删除（空白密钥是 422）。
+ */
+export function setWebSearchKey(apiKey: string): Promise<WebSearchKeyDto> {
+  return request<WebSearchKeyDto>('/api/web-search/credential', {
+    method: 'PUT',
+    body: JSON.stringify({ api_key: apiKey }),
+  })
+}
+
+/** 删除已保存的凭据（幂等）。删掉之后旧环境变量仍然有效，返回的 `source` 会如实反映这一点。 */
+export function clearWebSearchKey(): Promise<WebSearchKeyDto> {
+  return request<WebSearchKeyDto>('/api/web-search/credential', { method: 'DELETE' })
+}
+
+/** 对象存储密钥状态（2026-10-20）：只报"有没有"，不回读密钥。 */
+export function getOssCredential(): Promise<components['schemas']['OssCredentialView']> {
+  return request<components['schemas']['OssCredentialView']>('/api/attachments/oss/credential')
+}
+
+/** 保存（覆盖）Access Key / Secret Key；写入即整体替换，空值由服务端拒绝。 */
+export function setOssCredential(
+  accessKey: string,
+  secretKey: string,
+): Promise<components['schemas']['OssCredentialView']> {
+  return request<components['schemas']['OssCredentialView']>('/api/attachments/oss/credential', {
+    method: 'PUT',
+    body: JSON.stringify({ access_key: accessKey, secret_key: secretKey }),
+  })
+}
+
+/** 删除已保存的对象存储密钥（幂等）。 */
+export function clearOssCredential(): Promise<components['schemas']['OssCredentialView']> {
+  return request<components['schemas']['OssCredentialView']>('/api/attachments/oss/credential', {
+    method: 'DELETE',
+  })
+}
+
+/** 测试对象存储：上传一张 1×1 测试图，再检查公开地址能否访问。 */
+export function testOssStorage(): Promise<components['schemas']['OssTestResult']> {
+  return request<components['schemas']['OssTestResult']>('/api/attachments/oss/test', { method: 'POST' })
 }
 
 /** 切换档位。改动**作用于下一轮**：正在跑或等待审批的那些运行已按当时的档位判定完。 */

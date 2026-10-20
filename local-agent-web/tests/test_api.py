@@ -15,6 +15,8 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -81,6 +83,10 @@ REAL_DIST = PROJECT_ROOT / "frontend" / "dist"
 
 def _config(tmp_path: Path, app_config: AppConfig, **web_overrides: Any) -> AppConfig:
     """把示例配置改成本用例的临时路径；`web` 段按需覆盖。"""
+    # 这组恢复用例显式启用可选文件审批；产品默认免审批由 test_autonomy_policy 覆盖。
+    app_config.security.require_approval.delete_file = True
+    app_config.security.require_approval.overwrite_existing_file = True
+    app_config.security.require_approval.large_batch_edit = True
     workspace = tmp_path / WORKSPACE_NAME
     workspace.mkdir(exist_ok=True)
     web = app_config.web.model_copy(update=web_overrides) if web_overrides else app_config.web
@@ -238,6 +244,99 @@ def test_preferences_save_conflict_validation_and_safe_overview(api: tuple[TestC
     values["memory"]["confidence_threshold"] = .8
     values["advanced"] = {"compression_enabled": False}
     assert client.put("/api/preferences", json={"values": values, "expected_version": 1}).status_code == 422
+
+
+def test_web_search_preferences_and_credential_are_settings_backed(
+    api: tuple[TestClient, ApiRuntime], tmp_path: Path
+) -> None:
+    """联网检索的两件事各走各的入口：数值偏好走 `/preferences`，密钥走 `/web-search/credential`。
+
+    这一条盯住四件容易做错的事：初值来自配置、越界值当面拒、**密钥不回读**、删除幂等。
+    """
+    client, runtime = api
+    view = client.get("/api/preferences").json()
+    web = view["values"]["web_access"]
+    assert web["max_results"] == runtime.service._app_config.web_access.max_results
+    assert web["domain_policy"] == runtime.service._app_config.web_access.domain_policy
+
+    web["max_results"] = 9
+    web["domain_policy"] = "allowlist"
+    web["allowed_domains"] = ["Docs.Example.COM"]  # 服务端归一：大写/前导点收敛成策略比较的形式
+    saved = client.put("/api/preferences", json={"values": view["values"], "expected_version": 0})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["values"]["web_access"]["allowed_domains"] == ["docs.example.com"]
+    assert client.get("/api/preferences").json()["values"]["web_access"]["max_results"] == 9
+
+    # 越界与非法域名当面拒（422），不静默截断、也不存进去半份
+    view["values"]["web_access"]["max_results"] = 99
+    assert client.put("/api/preferences", json={"values": view["values"], "expected_version": 1}).status_code == 422
+    view["values"]["web_access"]["max_results"] = 9
+    view["values"]["web_access"]["denied_domains"] = ["https://example.com/path"]
+    assert client.put("/api/preferences", json={"values": view["values"], "expected_version": 1}).status_code == 422
+    assert client.get("/api/preferences").json()["version"] == 1
+
+    # 凭据：只报状态、不回读；空白用 DELETE 表达，所以空白密钥是 422
+    secret = "tvly-offline-secret-value"
+    assert client.get("/api/web-search/credential").json() == {
+        "configured": False, "source": "none", "store": "local", "note": None,
+    }
+    blank = client.put("/api/web-search/credential", json={"api_key": "   "})
+    assert blank.status_code == 422 and blank.json()["error"]["code"] == MODEL_SETTINGS_INVALID
+    stored = client.put("/api/web-search/credential", json={"api_key": secret})
+    assert stored.status_code == 200, stored.text
+    assert stored.json()["configured"] is True and stored.json()["source"] == "settings"
+    # 密钥不进任何响应，也不进设置库之外的别处；但必须进**脱敏集合**（否则会被回显到输出里）
+    assert secret not in stored.text
+    assert secret not in client.get("/api/web-search/credential").text
+    assert secret in runtime.service._secrets
+    # 只有设置库一处落盘：会话库（Checkpoint / 台账）里不该出现它
+    assert secret not in (tmp_path / "data" / "checkpoints.sqlite").read_bytes().decode("utf-8", "ignore")
+
+    assert client.delete("/api/web-search/credential").status_code == 200
+    assert client.get("/api/web-search/credential").json()["configured"] is False
+    assert client.delete("/api/web-search/credential").status_code == 200  # 不存在也算成功（幂等）
+
+
+def test_saved_search_settings_and_key_reach_the_bound_tools(
+    open_api: OpenApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**功能证明**：设置页里存下的检索参数与密钥，真的进了下一轮工具。
+
+    只断言接口回读是"只改显示"也能通过的；这里让假模型真的发出 `web_search`，把工具闭包里的
+    `search` 换成记录器，断言它收到的 `api_key` 与 `config.web_access` 恰好来自设置库。
+    """
+    from local_agent.tools import web_tools
+
+    seen: list[dict[str, Any]] = []
+
+    def fake_search(query: str, **kwargs: Any) -> web_tools.WebSearchResult:
+        seen.append({"query": query, **kwargs})
+        return web_tools.WebSearchResult(
+            query=query, results=[], provider="tavily", executed_query=query,
+            retrieved_at="2026-10-15T00:00:00+00:00",
+        )
+
+    monkeypatch.setattr(web_tools, "search", fake_search)
+    client, _runtime = open_api(
+        decision="tool", reply="已检索", tool_calls=[
+            {"name": "web_search", "args": {"query": "示例"}, "id": "call-1"},
+        ],
+    )
+    values = client.get("/api/preferences").json()["values"]
+    values["web_access"]["max_results"] = 7
+    values["web_access"]["provider"] = "tavily"
+    assert client.put("/api/preferences", json={"values": values, "expected_version": 0}).status_code == 200
+    assert client.put(
+        "/api/web-search/credential", json={"api_key": "tvly-bound-secret"}
+    ).status_code == 200
+
+    session_id = _create_session(client)
+    assert _submit(client, session_id, "搜一下", "req-web-search").status_code == 200
+    assert seen, "模型发出的 web_search 没有被执行"
+    assert seen[0]["api_key"] == "tvly-bound-secret"
+    # `search` 收到的是 `web_access` 段本身（不是整份 AppConfig）
+    assert seen[0]["config"].max_results == 7
+    assert seen[0]["config"].provider == "tavily"
 
 
 def test_memory_cache_change_can_be_saved_but_requires_restart_before_probe(
@@ -543,7 +642,7 @@ def test_capabilities_endpoint_explains_what_is_unavailable(
 
     assert response.status_code == 200
     body = response.json()
-    assert body["profile"]
+    assert set(body["switches"]) == set(CAPABILITY_TOOLS), "闭集里每个能力都要有一个开关状态"
     rows = {row["capability"]: row for row in body["capabilities"]}
     assert set(rows) == set(CAPABILITY_TOOLS), "闭集里每个能力都要有一行"
 
@@ -553,79 +652,88 @@ def test_capabilities_endpoint_explains_what_is_unavailable(
             continue
         # 不可用必须能解释、能照做；"只灰掉不解释"会让用户以为功能坏了
         assert row["hint"], row["capability"]
-        assert row["reason"] in {"profile", "disabled", "missing_dependency"}
+        assert row["reason"] in {"disabled", "missing_dependency"}
 
     # 默认配置里 Git 关着：要说明是"开关没打开"，而不是笼统的不可用
     assert rows["git_write"]["reason"] == "disabled"
-    assert "git.enabled" in rows["git_write"]["hint"]
-    # coder 不声明 web：这是档位问题，提示指向 profiles.active
-    assert rows["web"]["reason"] == "profile"
+    assert "不用重启" in rows["git_write"]["hint"]
+    # 联网自 2026-10-14 起是**常态能力**：可用且锁定，理由讲"为什么关不掉"（不是"去面板打开它"）
+    assert rows["web"]["reason"] == "available" and rows["web"]["locked"] is True
+    assert rows["web"]["hint"] is None
+    # 基础能力不可关闭：页面据此画"始终开启"，而不是给一个点不动的控件
+    assert rows["files_read"]["locked"] is True and rows["files_read"]["available"] is True
 
     # 页面区块不出现原始工具名（§16.6、§15.8 的字段门槛）
     for name in (name for names in CAPABILITY_TOOLS.values() for name in names):
         assert name not in response.text, f"能力状态里泄露了工具名 {name}"
 
 
-def test_profile_switching_is_a_settings_backed_choice(
+def test_capability_switches_are_a_settings_backed_choice(
     api: tuple[TestClient, ApiRuntime]
 ) -> None:
-    """档位可以在页面里切（§16.6 档位切换）：可选集由服务端给、存设置库、读回一致、非法值 422。"""
+    """能力开关可以在页面里改（§16.1）：可开关集由服务端给、存设置库、读回一致、非法值 422。"""
     client, _runtime = api
 
     view = client.get("/api/capabilities").json()
-    assert view["profiles"] == ["coder", "researcher", "reviewer"]  # 内置三档，顺序稳定
-    assert view["profile"] == view["default_profile"] == "coder"  # 还没切过：等于出厂默认
+    # 可开关集 = 闭集减去不可关闭的三个（两个基础 + 常态化的联网），顺序稳定；页面照它渲染。
+    assert view["switchable"] == [name for name in CAPABILITY_TOOLS
+                                  if name not in {"task_lifecycle", "files_read", "code_search", "web"}]
+    assert view["switches"]["files_write"] is True  # 还没改过：等于出厂默认
     assert view["store_unavailable"] is False
 
-    switched = client.put("/api/capabilities/profile", json={"profile": "researcher"})
+    switched = client.put("/api/capabilities", json={"changes": {"files_write": False}})
     assert switched.status_code == 200, switched.text
-    assert switched.json()["profile"] == "researcher"
-    assert switched.json()["default_profile"] == "coder"  # 出厂默认不变：切档不写回 config.yaml
+    assert switched.json()["switches"]["files_write"] is False
     rows = {row["capability"]: row for row in switched.json()["capabilities"]}
-    # 只读档：写文件能力立刻变成"当前档位没有"，并按档位措辞给下一步。
+    # 关掉之后立刻变成"开关已关闭"，并按开关措辞给下一步（不是"换档"）。
     assert rows["files_write"]["available"] is False
-    assert rows["files_write"]["reason"] == "profile"
+    assert rows["files_write"]["reason"] == "disabled"
+    # 只报告动过的那一项：其余开关保持原样（合并式写入）。
+    assert switched.json()["switches"]["shell"] is True
     # 读回一致（页面刷新后看到的仍是用户的选择）。
-    assert client.get("/api/capabilities").json()["profile"] == "researcher"
+    assert client.get("/api/capabilities").json()["switches"]["files_write"] is False
 
-    bad = client.put("/api/capabilities/profile", json={"profile": "nope"})
+    bad = client.put("/api/capabilities", json={"changes": {"nope": True}})
     assert bad.status_code == 422, bad.text
     assert bad.json()["error"]["code"] == MODEL_SETTINGS_INVALID
-    # 理由里带上可选值：页面据此提示，不用自己拼一份档位名。
-    assert "coder" in bad.json()["error"]["message"]
-    # 空名在**形状**这一层就被拒，不会流到领域层（与权限档位同一条口径）。
-    assert client.put("/api/capabilities/profile", json={"profile": ""}).status_code == 422
+    # 理由里带上可开关集：页面据此提示，不用自己拼一份能力名。
+    assert "shell" in bad.json()["error"]["message"]
+    # 空变更在**形状**这一层就被拒，不会流到领域层（与权限档位同一条口径）。
+    assert client.put("/api/capabilities", json={"changes": {}}).status_code == 422
 
 
-def test_switching_the_profile_changes_the_bound_tools(open_api: OpenApi) -> None:
-    """§16.6 档位切换的**功能证明**：页面切的档位必须改变真正绑给模型的能力集。
+def test_switching_capabilities_changes_the_bound_tools(open_api: OpenApi) -> None:
+    """§16.1 能力开关的**功能证明**：页面关掉的开关必须改变真正绑给模型的能力集。
 
-    只读档（`reviewer`）下，模型请求写文件必须被拒且**没有副作用**；切到全能力档（`coder`）后
-    同一次调用必须真的落盘。这就是"能调"与"只改显示"的分界——只改显示的实现也能让第一条通过，
-    但第二条必然失败。
+    关掉写文件后，模型请求写文件必须被拒且**没有副作用**；再打开之后同一次调用必须真的落盘。
+    这就是"能开关"与"只改显示"的分界——只改显示的实现也能让第一条通过，但第二条必然失败。
     """
     client, runtime = open_api(
         decision="tool",
         reply="好的",
         tool_calls=[
-            {"name": "write_file", "args": {"path": "切换档位.txt", "content": "内容"}, "id": "call-1"}
+            {"name": "write_file", "args": {"path": "切换开关.txt", "content": "内容"}, "id": "call-1"}
         ],
         # 两次提交都要发出同一个工具调用：否则第二次决策调用不会带工具（假模型的既定行为）。
         repeated_tool_calls=True,
     )
 
-    assert client.put("/api/capabilities/profile", json={"profile": "reviewer"}).status_code == 200
+    assert client.put(
+        "/api/capabilities", json={"changes": {"files_write": False}}
+    ).status_code == 200
     session_id = _create_session(client)
     workspace_root = Path(runtime.database.sessions.get(session_id).workspace_root)
 
     assert _submit(client, session_id, "写一个文件", "req-readonly").status_code == 200
     # 能力之外：既不调用也不执行（§6.9 的执行边界），所以工作区里不该多出文件。
-    assert not (workspace_root / "切换档位.txt").exists()
+    assert not (workspace_root / "切换开关.txt").exists()
 
-    assert client.put("/api/capabilities/profile", json={"profile": "coder"}).status_code == 200
+    assert client.put(
+        "/api/capabilities", json={"changes": {"files_write": True}}
+    ).status_code == 200
     assert _submit(client, session_id, "再写一次", "req-full").status_code == 200
-    # 同一个调用，这次真的执行了——档位真的改变了绑给模型的能力集。
-    assert (workspace_root / "切换档位.txt").read_text(encoding="utf-8") == "内容"
+    # 同一个调用，这次真的执行了——开关真的改变了绑给模型的能力集。
+    assert (workspace_root / "切换开关.txt").read_text(encoding="utf-8") == "内容"
 
 
 def test_session_lifecycle_over_http(api: tuple[TestClient, ApiRuntime]) -> None:
@@ -1533,6 +1641,79 @@ def test_snapshot_reports_whether_the_next_answer_streams(
     assert cleared.json()["answer_streaming"] is False
 
 
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("change", ["select", "edit"])
+def test_current_stream_mode_stays_bound_while_next_config_changes(
+    open_api: OpenApi, monkeypatch: pytest.MonkeyPatch, streaming: bool, change: str,
+) -> None:
+    """两种开关 × 换连接/改版本：当前轮固定，下一轮选择独立变化。"""
+    from local_agent.model_settings.models import CapabilityReport
+
+    client, runtime = open_api(decision="chat", reply="固定配置的回答。")
+    created = client.post("/api/model-connections", json={
+        **CONNECTION_PAYLOAD, "streaming": streaming, "api_key": "sk-stream-mode-test",
+    })
+    assert created.status_code == 200, created.text
+    connection = created.json()
+    runtime.settings.connections.record_check(
+        connection["connection_id"],
+        CapabilityReport(chat="pass", streaming="pass", checked_at=datetime.now(timezone.utc)),
+        expected_version=int(connection["config_version"]),
+    )
+    sid = _create_session(client)
+    assert client.patch(f"/api/sessions/{sid}/mode", json={"mode": "chat", "expected_mode": "agent"}).status_code == 200
+    selection = client.put(f"/api/sessions/{sid}/model", json={
+        "connection_id": connection["connection_id"],
+        "expected_version": int(connection["config_version"]),
+        "expected_selection": {"connection_id": None, "config_version": None},
+    })
+    assert selection.status_code == 200, selection.text
+    started, release = threading.Event(), threading.Event()
+    model = runtime.model
+    assert model is not None
+    original = type(model)._generate
+
+    def blocked(self: Any, *args: Any, **kwargs: Any) -> Any:
+        if self is model:
+            started.set()
+            assert release.wait(15)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(model), "_generate", blocked)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(runtime.service.submit_message, sid, "开始回答", "stream-mode-fixed")
+        try:
+            assert started.wait(15)
+            before = client.get(f"/api/sessions/{sid}").json()
+            assert before["session_state"] == "running"
+            assert before["current_answer_streaming"] is streaming
+            if change == "select":
+                next_connection = client.post("/api/model-connections", json={**CONNECTION_PAYLOAD, "streaming": not streaming}).json()
+                updated = client.put(f"/api/sessions/{sid}/model", json={
+                    "connection_id": next_connection["connection_id"],
+                    "expected_version": int(next_connection["config_version"]),
+                    "expected_selection": {
+                        "connection_id": connection["connection_id"],
+                        "config_version": int(connection["config_version"]),
+                    },
+                })
+            else:
+                updated = client.patch(f"/api/model-connections/{connection['connection_id']}", json={
+                    **CONNECTION_PAYLOAD, "streaming": not streaming,
+                    "expected_version": int(connection["config_version"]),
+                })
+            assert updated.status_code == 200, updated.text
+            after = client.get(f"/api/sessions/{sid}").json()
+            assert after["session_state"] == "running"
+            assert after["current_task"]["run_id"] == before["current_task"]["run_id"]
+            assert after["current_answer_streaming"] is streaming
+            assert after["answer_streaming"] is not streaming
+        finally:
+            release.set()
+        assert future.result(timeout=15).status == "completed"
+    assert client.get(f"/api/sessions/{sid}").json()["current_answer_streaming"] is None
+
+
 def test_model_connection_routes_cover_the_lifecycle(api: tuple[TestClient, ApiRuntime]) -> None:
     """六条连接路由 + 会话模型路由：读接口不回密钥、编辑要版本号、删除只停用（§6.8）。"""
     client, runtime = api
@@ -1551,9 +1732,11 @@ def test_model_connection_routes_cover_the_lifecycle(api: tuple[TestClient, ApiR
     body = created.json()
     assert body["status"] == "unverified"  # 保存即可用，但状态如实是"未验证"
     assert body["config_version"] == "1"
-    # 持久凭据可用时是 configured；安全降级到进程内时必须如实标为 session_only。
+    # 持久凭据可用时是 configured；降级到进程内时必须如实标为 session_only。
+    # 2026-10-13 起持久后端是本地设置库（`local`），`os` 只剩历史值——两者都算持久。
     credential_kind, _ = runtime.service.credential_store_state()
-    assert body["key_status"] == ("configured" if credential_kind == "os" else "session_only")
+    persistent = credential_kind in {"local", "os"}
+    assert body["key_status"] == ("configured" if persistent else "session_only")
     assert "sk-second-secret" not in created.text
     connection_id = body["connection_id"]
 
@@ -1792,10 +1975,55 @@ def test_permissions_endpoint_reports_the_factory_default(
 
     body = client.get("/api/permissions").json()
 
-    assert body["mode"] == "whitelist" and body["default_mode"] == "whitelist"
+    assert body["mode"] == "workspace-write" and body["default_mode"] == "workspace-write"
     assert body["grants"] == []
     # 设置库打得开：改档位与加授权都存得下来。
     assert body["store_unavailable"] is False
+    # 写侧沙箱不再是独立开关：视图里没有它，也没有它的写入入口。
+    assert "shell_sandbox" not in body
+
+
+def test_skills_view_is_readable_and_rejects_names_it_did_not_discover(
+    api: tuple[TestClient, ApiRuntime], tmp_path: Path,
+) -> None:
+    """技能管理页的读写口（2026-10-16；§16.5）：清单可读、总闸如实回报、未发现的名字给 422。
+
+    刻意**不假设发现了几个技能**：发现根包含用户主目录（`~/.agents/skills` 等），"这台机器上有几个"
+    是环境事实，写进断言等于让用例随别人的机器变红。禁用过滤这条语义由工具层与加载器层的用例钉住
+    （它们可以注入发现根），这一条只管接口形状与错误口径。
+    """
+    client, _runtime = api
+
+    view = client.get("/api/skills").json()
+    assert view["store_unavailable"] is False
+    # 总闸回显的是 `skill` 能力开关（出厂默认关）；它与逐条开关是两件事。
+    assert view["enabled"] is False
+    for entry in view["skills"]:
+        assert entry["name"] and entry["description"] and entry["source"]
+        # 默认可用：库里只记被禁用的那些，所以新装/未动过的技能一律是开的。
+        assert entry["enabled"] is True
+        assert "path" not in entry, "不回技能目录的绝对路径"
+
+    unknown = client.put("/api/skills", json={"name": "no-such-skill", "enabled": False})
+    assert unknown.status_code == 422
+    # 错误信封是 `{"error": {...}}`（§15.5，刻意不用 FastAPI 的 `detail`），所以整段文本里找那句话。
+    assert "没有发现名为 no-such-skill 的技能" in unknown.text
+
+    # 发现根（2026-10-20）：只接受绝对路径与已存在的目录；加进去出现在 roots 里，移除即消失。
+    relative = client.post("/api/skills/roots", json={"path": "relative/dir"})
+    assert relative.status_code == 422
+    missing = client.post("/api/skills/roots", json={"path": str(tmp_path / "nope")})
+    assert missing.status_code == 422
+    custom = tmp_path / "my-skills"
+    custom.mkdir()
+    added = client.post("/api/skills/roots", json={"path": str(custom)})
+    assert added.status_code == 200, added.text
+    assert any(
+        root["removable"] and root["path"] == str(custom) for root in added.json()["roots"]
+    ), "添加后应出现在发现根列表里"
+    removed = client.delete("/api/skills/roots", params={"path": str(custom)})
+    assert removed.status_code == 200, removed.text
+    assert all(not root["removable"] for root in removed.json()["roots"])
 
 
 def test_permissions_mode_and_grants_round_trip(
@@ -1806,9 +2034,9 @@ def test_permissions_mode_and_grants_round_trip(
     outside = tmp_path / "outside"
     outside.mkdir()
 
-    switched = client.put("/api/permissions", json={"mode": "allow"})
+    switched = client.put("/api/permissions", json={"mode": "danger-full-access"})
     assert switched.status_code == 200, switched.text
-    assert switched.json()["mode"] == "allow"
+    assert switched.json()["mode"] == "danger-full-access"
 
     created = client.post(
         "/api/permissions/grants", json={"path": str(outside), "access": "read"}
@@ -1955,6 +2183,66 @@ def test_data_center_read_only_api_and_filter_validation(api: tuple[TestClient, 
     assert runtime.model.decision_calls == calls
 
 
+def test_attachment_upload_round_trips_and_rejects_bad_input(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    """上传接口（2026-10-16）：存得住、取得回，坏输入按 422/404 说清原因。
+
+    这条钉的是**服务端判定**这条纪律：客户端不声明媒体类型（也不被信任），
+    所以"改名成 png 的 HTML"拿不到一个可用的附件引用。
+    """
+    import base64
+
+    client, _runtime = api
+    session = client.post("/api/sessions", json={"workspace_id": None}).json()["session_id"]
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+    uploaded = client.post(
+        f"/api/sessions/{session}/attachments",
+        json={"data_base64": base64.b64encode(png).decode("ascii")},
+    )
+    assert uploaded.status_code == 200
+    body = uploaded.json()
+    assert body["media_type"] == "image/png"
+    assert body["byte_count"] == len(png)
+    assert body["attachment_id"].endswith(".png")
+
+    # 取回：走查询参数（引用是相对路径，含 `/`）。
+    fetched = client.get(
+        f"/api/sessions/{session}/attachments", params={"attachment_id": body["attachment_id"]}
+    )
+    assert fetched.status_code == 200
+    assert fetched.headers["content-type"] == "image/png"
+    assert fetched.content == png
+
+    # 改名成 png 的 HTML：按魔数拒绝（不是"存进去但用不了"）。
+    fake = client.post(
+        f"/api/sessions/{session}/attachments",
+        json={"data_base64": base64.b64encode(b"<!DOCTYPE html><html></html>").decode("ascii")},
+    )
+    assert fake.status_code == 422
+    assert "不是受支持的图片" in fake.json()["detail"]
+
+    # 超上限：如实拒绝，不截断（2026-10-20 起单图有 4 MiB 兜底；页面会先压到 2 MB）。
+    big = client.post(
+        f"/api/sessions/{session}/attachments",
+        json={"data_base64": base64.b64encode(png + b"\x00" * 7_000_000).decode("ascii")},
+    )
+    assert big.status_code == 422
+    assert "图片太大" in big.json()["detail"]
+
+    # base64 不是合法编码：当场拒绝，别存进一坨坏数据。
+    assert client.post(
+        f"/api/sessions/{session}/attachments", json={"data_base64": "not base64!!"}
+    ).status_code == 422
+
+    # 别的会话的引用取不到（引用不可信，不能当跨会话读文件的通道）。
+    other = client.post("/api/sessions", json={"workspace_id": None}).json()["session_id"]
+    assert client.get(
+        f"/api/sessions/{other}/attachments", params={"attachment_id": body["attachment_id"]}
+    ).status_code == 404
+
+
 def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> None:
     client, _runtime = api
     response = client.get("/api/openapi.json")
@@ -1972,6 +2260,12 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/sessions/{session_id}/select",
         "/api/sessions/{session_id}/mode",
         "/api/sessions/{session_id}/recovery",
+        # 2026-10-16：聊天里上传图片（base64 进、字节出；媒体类型由服务端按魔数判定）。
+        # 取回内容走**查询参数**（引用是相对路径，含 `/`，不能当路径参数）。
+        "/api/sessions/{session_id}/attachments",
+        # 2026-10-20：对象存储（S3 兼容）的凭据与"测试上传"。密钥只写不回读。
+        "/api/attachments/oss/credential",
+        "/api/attachments/oss/test",
         # v0.6 T60：取消在跑的任务（幂等，§17.4）
         "/api/sessions/{session_id}/cancel",
         # v0.6 T62：任务中心（只读索引，不读会话 Checkpoint，§17.6）
@@ -1991,15 +2285,20 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/model-connections/{connection_id}/test",
         "/api/model-connections/default",
         "/api/permissions",
-        # v0.5 T56：当前档位与能力状态（只讲能力、不讲工具，§16.6）
+        # v0.5 T56 读 + §16.1 写（2026-10-13 由"切档位"改为"改开关"）：只讲能力、不讲工具。
+        # 改开关后下一轮生效、不用重启；档位选择器已下线，`/api/capabilities/profile` 随之删除。
         "/api/capabilities",
-        # §16.6 档位切换（2026-10-12）：切当前档位，下一轮生效
-        "/api/capabilities/profile",
         "/api/preferences",
         "/api/preferences/memory/test",
         "/api/data-center/memories",
         "/api/data-center/usage",
         "/api/permissions/grants",
+        # 联网检索的服务凭据（Tavily）：读状态 + 写入/删除，密钥不回读（§6.8）。
+        "/api/web-search/credential",
+        # 技能管理页（2026-10-16）：读清单 + 逐条启用/禁用（§16.5）。
+        "/api/skills",
+        # 发现根（2026-10-20）：添加 / 移除用户自己的技能目录（只引用，不复制）。
+        "/api/skills/roots",
     }
     text = json.dumps(schema, ensure_ascii=False)
     # 内部**类型名**与模块名不得出现。刻意不查 "checkpoint" 这个词：公开 DTO 里本来就有

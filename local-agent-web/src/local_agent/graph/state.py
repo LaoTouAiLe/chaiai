@@ -23,9 +23,12 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AnyMessage, ToolCall
 from langgraph.graph.message import add_messages
 
+from local_agent.attachments import LoadedAttachment
+from local_agent.message_flags import DEFAULT_IMAGE_CONTEXT_TURNS
 from local_agent.cancellation import CancellationToken
 from local_agent.capabilities import DEFAULT_PROFILE, PROFILES
 from local_agent.config import RunConfig
+from local_agent.context.compression_progress import CompressionProgress
 from local_agent.context.token_budget import ContextBudget, TokenUsage
 from local_agent.graph.scope import tool_scope_key
 from local_agent.llm.models import ModelCapabilities
@@ -50,7 +53,13 @@ AgentMode = Literal["chat", "tool"]
 #: 它与 ``running`` 必须分开：``running`` 对外的含义是"还在跑"，用它来表示"结束了但没达成目标"
 #: 会让回答被投影层丢掉（``project_final_result`` 对 ``running`` 返回 ``None``）、也不发终态事件，
 #: 页面于是永远停在"正在生成回答…"（复审实证，2026-09-28）。
-TaskStatus = Literal["pending", "running", "waiting_approval", "blocked", "completed", "failed"]
+#: ``cancelled``（2026-10-13 追加）＝**被用户停下来的那一轮**，与任务索引的 `cancelled` 同名同义：
+#: 它是终态，但既不是 `completed`（没有达成）也不是 `failed`（不是执行失败）——把它判成失败会
+#: 让页面把"你自己停的"说成"出错了"（§17.4）。会话状态不回落到 `cancelled`：取消后会话就是空闲，
+#: 可以立刻发下一条（见 `projection.project_session_state`）。
+TaskStatus = Literal[
+    "pending", "running", "waiting_approval", "blocked", "completed", "failed", "cancelled"
+]
 EvidenceType = Literal["file_hash", "diff", "exit_code", "stdout", "test_result"]
 
 # 架构 §4.3 未给出具体字段的结构：仍为字典占位的部分由对应任务替换为具体类型
@@ -288,6 +297,48 @@ class ToolEvent:
     run_id: str = ""
 
 
+class UserAttachmentRef(TypedDict):
+    """随一条用户消息提交的一张图片的**引用**（2026-10-16）。
+
+    为什么要在 State 里累积：图像字节已经作为内容块进了用户消息 ✔，但**内容块里没有引用**
+    （给模型的是 `data:` URL ✗）——于是刷新之后页面无从知道"这条消息带了哪张图" ✗，缩略图就画不出来 ✗。
+    这里按 `tool_events` / `compaction_events` 同一条口径把引用累积下来：写进 Checkpoint、
+    重启可读；DTO 只回引用，**不回磁盘路径、不回字节**。
+    """
+
+    run_id: str
+    #: 这条引用属于哪条消息（用户消息的 id 就是 `{run_id}:user`）。
+    message_id: str
+    attachment_id: str
+    media_type: str
+
+
+class CompactionEvent(TypedDict):
+    """一次**实际生效**的上下文压缩的事实（2026-10-16；轨迹页的"压缩发生点"与时间轴读它）。
+
+    为什么要在 State 里累积一条：``context_compression`` 只有**最新一次**的进度（覆盖语义），
+    所以"这一轮到底压过几次、折叠掉多少条消息、压缩前后估算量差多少"在刷新之后无从查证。
+    累积式字段与 ``tool_events`` / ``approval_history`` 同一条做法：写进 Checkpoint，
+    重启可读、可审计（这是"证据"而不是"提示"）。
+
+    **只在真的压过时追加**（把工具正文折叠、或生成/更新了摘要），失败分支不追加——
+    失败已经有 ``error_events``，两类事实不混在一起。
+    """
+
+    operation_id: str
+    run_id: str
+    at: datetime
+    #: 本次折叠掉的消息条数（摘要覆盖范围向前推进了几条）。
+    folded_messages: int
+    #: 摘要累计覆盖到第几条消息（压缩后的稳定边界）。
+    covered_messages: int
+    #: 压缩前/后的**估算**输入 token（与计量器同源，不是供应商实际量）。
+    tokens_before: int
+    tokens_after: int
+    #: 上下文窗口（用于算占用率）。
+    window_tokens: int
+
+
 @dataclass(frozen=True)
 class EvidenceReference:
     """架构 §4.3 的证据引用。"""
@@ -425,6 +476,12 @@ class AgentState(TypedDict, total=False):
 
     # 工具调用与结果
     pending_tool_calls: list[ToolCall]
+    #: **已排队、还没问过审批**的调用（2026-10-15，B2）：同一条回复里有多个需要审批的动作时，
+    #: 一次只弹一张卡；批准并执行完由 `route_after_tool_execution` 回到安全门继续处理下一个。
+    #: 它存在的理由：原来这里把其余调用直接回填成 `denied`，用户看到的是"稍微多改点就被拒"
+    #: ——那是审批节流，不是安全边界。覆盖语义：安全门每次重新算这一批。
+    deferred_tool_calls: list[ToolCall]
+    tool_feedback_required: bool
     tool_events: Annotated[list[ToolEvent], operator.add]
     tool_results: Annotated[list[ToolResultRecord], operator.add]
 
@@ -457,12 +514,22 @@ class AgentState(TypedDict, total=False):
     error_events: Annotated[list[ErrorEvent], operator.add]
     retry_count: int
     loop_count: int
-    max_loop_count: int
+    max_loop_count: int | None
+    model_next_action: Literal["continue", "finish", "ask_user"]
+    model_final_response: str
 
     # 预算与压缩
     token_usage: TokenUsage
     context_budget: ContextBudget
     compression_count: int
+    compression_sequence: int
+    context_compression: CompressionProgress
+    #: 每次**实际生效**的压缩一条（累积；2026-10-16）。见 :class:`CompactionEvent`。
+    #: 与 `context_compression` 的分工：那个是"最新一次的进度"（覆盖），这个是**历史事实**。
+    compaction_events: Annotated[list[CompactionEvent], operator.add]
+    #: 随用户消息提交的图片引用（累积；2026-10-16）。见 :class:`UserAttachmentRef`。
+    #: 消息内容块里只有 `data:` URL ✗，所以"这条消息带了哪张图"必须另外记一份，页面才画得出缩略图 ✔。
+    user_attachment_refs: Annotated[list[UserAttachmentRef], operator.add]
     #: 压力阶段保存的工具模型正文，按消息身份及原文指纹定位，跨轮合并。
     tool_output_overrides: Annotated[dict[str, str], merge_mapping]
 
@@ -507,10 +574,16 @@ class RuntimeContext:
     app_config: RunConfig
     user_id: str | None = None
     config_profile: str = "default"
-    #: 当前 Agent Profile 的名字（诊断与页面用）与它解析出的能力集合（架构 §16.1）。
-    #: 默认取 ``coder``，即 v0.4 ``tool`` 模式的工具集——既有调用点的行为因此不变。
-    agent_profile: str = DEFAULT_PROFILE
+    #: 本次运行的**能力开关表**（架构 §16.1）：用户改过的存在设置库，config.yaml 只给出厂默认。
+    #: 页面要如实回显"哪一项开着"，所以随上下文一起带到执行侧，而不是只带收窄后的能力集合。
+    agent_switches: Mapping[str, bool] = field(default_factory=dict)
+    #: 开关表解析出的能力集合（架构 §16.1）：**执行侧唯一依据**（可见性门、提示裁剪都用它）。
+    #: 默认取 ``coder`` 档的能力集，即 v0.4 ``tool`` 模式的工具集——既有调用点的行为因此不变。
     agent_capabilities: tuple[str, ...] = PROFILES[DEFAULT_PROFILE]
+    #: 用户在设置里**禁用的技能名**（技能管理页，2026-10-16）：技能清单与 `skill_load` 都照它过滤。
+    #: 与能力开关同源（都来自设置库、每轮现取），随上下文一起带到执行侧——清单与工具必须看到
+    #: **同一份事实**，否则会出现 2026-10-09 那类"清单里有、`skill_load` 说没有"的错位。
+    disabled_skills: frozenset[str] = frozenset()
     #: 合并后的 AGENTS 规则文本，由 load_agents 节点写入（架构 §4.1、§7.2）。
     agents_context: str | None = None
     #: 启动时探测到的模型能力（架构 §11.7）；工具模式据此失败闭合。
@@ -520,6 +593,17 @@ class RuntimeContext:
     approval_channel: object | None = None
     current_time: datetime | None = None
     request_id: str = ""
+    #: 这次运行要交给模型的图片（2026-10-16）：入口节点把它们写成消息里的**引用**。
+    #:
+    #: 为什么在运行期上下文而不是在 State 里：它是一次运行的**临时输入**，State 会进 Checkpoint。
+    #: 2026-10-20 起 State 只存引用（短字符串），字节在文件系统/对象存储里，出站前才物化。
+    user_attachments: tuple[LoadedAttachment, ...] = ()
+    #: 图片引用的读取器（2026-10-20）：出站前把引用物化成请求里能用的形态。
+    #: 入参是引用（`attachment` / `file` / `url`），返回 `(字节, media_type)`、
+    #: 或一个 http(s) URL 字符串（对象存储：不必下载）；读不到返回 ``None``（调用方用占位）。
+    image_reader: Callable[[Mapping[str, Any]], tuple[bytes, str] | str | None] | None = None
+    #: 出站请求保留图片的**最近轮数**（含当前轮，2026-10-20 可在设置里改）：1 = 只发当前轮。
+    image_context_turns: int = DEFAULT_IMAGE_CONTEXT_TURNS
     #: 用量录音机（T34）。为 ``None`` 时不记录用量（CLI/测试的轻量路径照常工作）。
     usage_recorder: ModelCallRecorder | None = None
     #: 本轮执行的取消信号（§17.4）。为 ``None`` 表示这次运行不参与取消（CLI / 大部分测试）。
@@ -531,3 +615,10 @@ class RuntimeContext:
     delegated_research: Mapping[str, Any] | None = None
     #: T68 身份索引投影回调；不传给子上下文、不写 Checkpoint。
     child_index: Callable[[str, list[str]], None] | None = None
+    #: **委派审计槽**（§18.7）：工具触发路径上，子任务的工具事件与模型调用明细先落在这里，
+    #: 由节点收尾（`graph/builder._usage_aware`）排空并改写成父轮次的 `run_id` 后并回父 State。
+    #:
+    #: 为什么需要它：工具只能给模型返回一个字符串，没法把 `tool_events` / `model_call_records`
+    #: 交回父状态；而"用完即弃"会让这次委派的轨迹与用量在页面上查不到。它是**每次运行一个新列表**
+    #: 的可变槽（`default_factory`），不传给子上下文、不写 Checkpoint。
+    delegation_audit: list[Mapping[str, Any]] | None = field(default_factory=list)

@@ -12,6 +12,8 @@ import { SettingsDialog } from './SettingsDialog'
 import { useModelSettings } from './useModelSettings'
 import { usePermissions } from './usePermissions'
 import { PreferenceSection } from './PreferenceSection'
+import { CapabilitiesSection } from '../capabilities/CapabilitiesSection'
+import { SkillsSection } from '../skills/SkillsSection'
 import styles from './SettingsDialog.module.css'
 
 export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
@@ -109,9 +111,16 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
       settings={view}
       form={form}
       extraSections={{
+        // 技能管理页（2026-10-16）：与权限分区并列的"带开关的管理列表"，容器自己取数与写入。
+        skills: <SkillsSection />,
+        // 能力（2026-10-19）：从顶栏面板搬进设置，内嵌模式（不叠遮罩、不显示"关闭"）。
+        capabilities: <CapabilitiesSection embedded />,
         general: <PreferenceSection group="general" />,
         execution: <PreferenceSection group="execution" />,
         retrieval: <PreferenceSection group="retrieval" />,
+        web_access: <PreferenceSection group="web_access" />,
+        // 图片与附件（2026-10-20）：目前只有"图片上下文轮数"；存储后端等 OSS 接入后再加。
+        attachments: <PreferenceSection group="attachments" />,
         memory: <PreferenceSection group="memory" />,
         medium_term: <PreferenceSection group="medium_term" />,
         embedding: <PreferenceSection group="embedding" />,

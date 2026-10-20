@@ -9,7 +9,8 @@ import copy
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -218,7 +219,7 @@ def test_pending_and_approval_arguments_are_sanitized_before_display() -> None:
     """待执行参数与审批参数还没经过工具层，进 DTO 之前必须先脱敏（§15.8）。
 
     工具层的 `redacted_arguments` 是"已经执行过"的调用；`pending_tool_calls` 与
-    `pending_approval.arguments` 是原文，密钥样式串与绝对路径不能被原样回显。
+    `pending_approval.arguments` 是原文，密钥样式串脱敏，绝对路径保留。
     """
     state = _state(
         tool_events=[],
@@ -233,7 +234,7 @@ def test_pending_and_approval_arguments_are_sanitized_before_display() -> None:
     )
     pending = proj.project_tools(state)[0]
     assert pending.redacted_arguments["content"] == "***"
-    assert pending.redacted_arguments["path"] == "[已隐藏的绝对路径]"
+    assert pending.redacted_arguments["path"] == "C:\\Users\\me\\.env"
 
     request = _pending_request()
     request["arguments"] = {"api_key": "sk-abcdefgh", "target": "C:\\Users\\me\\.env"}
@@ -267,12 +268,11 @@ def test_display_text_from_tools_approval_plan_and_result_is_sanitized() -> None
 
     assert secret not in dumped
     assert configured_secret not in dumped
-    assert "C:\\Users\\me\\.env" not in dumped
     assert snapshot.plan is not None and "***" in snapshot.plan.goal
     assert snapshot.approval is not None and "***" in snapshot.approval.impact_summary
     assert snapshot.final_result is not None and "***" in snapshot.final_result.summary
     tool = proj.project_tools(state, secrets=(configured_secret,))[0]
-    assert tool.output_preview == "返回 *** 和 ***，见 [已隐藏的绝对路径]"
+    assert tool.output_preview == "返回 *** 和 ***，见 C:\\Users\\me\\.env"
 
 
 def test_provider_reasoning_is_visible_but_secrets_and_metadata_stay_private() -> None:
@@ -289,7 +289,7 @@ def test_provider_reasoning_is_visible_but_secrets_and_metadata_stay_private() -
     assert "reasoning_content" not in dumped
     assert "私有思考" in dumped
     assert "sk-hidden-secret" not in dumped
-    assert "C:/Users/me/private.txt" not in dumped
+    assert "C:/Users/me/private.txt" in dumped
     assert state["messages"][1].additional_kwargs["reasoning_content"].endswith("private.txt")
 
 
@@ -299,6 +299,30 @@ def test_reply_overrides_are_applied_before_rendering() -> None:
     views = proj.project_messages_view(state)
     assistant = [view for view in views if view.kind == "assistant"][-1]
     assert assistant.text == "（这是修正后的回答）"  # type: ignore[union-attr]
+
+
+def test_tool_image_message_is_not_rendered_as_a_user_turn() -> None:
+    """工具读到的图片被包成 user 消息（端点只允许 user 带图）：它不能显示成用户发言。
+
+    2026-10-20：`view_image` 的图像块改由一条 user 消息承载（ToolMessage 带图会让 DeepSeek 400），
+    那条消息带 `local_agent_tool_image` 标记，投影层按标记跳过。
+    """
+    state = _state(messages=[
+        HumanMessage(content="帮我看下这个", id="u1"),
+        HumanMessage(
+            content=[
+                {"type": "text", "text": "（工具图片，不是用户发言）"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            ],
+            id="t1:image",
+            additional_kwargs={"local_agent_tool_image": True},
+        ),
+    ])
+
+    views = proj.project_messages_view(state)
+
+    users = [view for view in views if view.kind == "user"]
+    assert [user.text for user in users] == ["帮我看下这个"]  # type: ignore[union-attr]
 
 
 def test_messages_without_ids_are_rejected_instead_of_rendered_vague() -> None:
@@ -513,7 +537,11 @@ def test_prepare_context_resets_the_per_run_memory_write_count() -> None:
     """
     from local_agent.graph.nodes import prepare_context_node
 
-    update = prepare_context_node({"user_input": "1 加 1 等于几？", "memory_write_count": 6})
+    # 入口节点从**运行期上下文**取这次提交的图片（2026-10-16）；本用例不看图，给一个空上下文。
+    update = prepare_context_node(
+        {"user_input": "1 加 1 等于几？", "memory_write_count": 6},
+        cast(Any, SimpleNamespace(context=SimpleNamespace(user_attachments=()))),
+    )
     assert update["memory_write_count"] is None
 
 
@@ -557,6 +585,57 @@ def test_projection_agrees_with_graph_on_recall_failure() -> None:
     )
     assert proj._stage_failed(past, "recall_memory") is False
     assert nodes._recall_failed(past) is False
+
+
+@pytest.mark.parametrize("status", ["ok", "error", "denied"])
+def test_web_sources_come_from_successful_tool_payloads_only(status: str) -> None:
+    payload = {"query": "MCP", "retrieved_at": "2026-10-14T12:00:00Z", "results": [
+        {"title": "MCP 文档", "url": "https://modelcontextprotocol.io/introduction"},
+        {"title": "unsafe", "url": "javascript:alert(1)"},
+        {"title": "private", "url": "http://127.0.0.1/"},
+    ]}
+    state = _state(messages=[ToolMessage(content=json.dumps(payload), tool_call_id="web")],
+                   tool_results=[], tool_events=[{
+                       "tool_call_id": "web", "tool_name": "web_search", "run_id": "run-1", "status": status,
+                   }])
+    row = proj.project_tool_rows(state)[0][1]
+    assert len(row.web_sources) == (1 if status == "ok" else 0)
+    if row.web_sources:
+        assert row.web_sources[0].kind == "search"
+        assert row.web_sources[0].retrieved_at == payload["retrieved_at"]
+
+
+def test_web_citation_flags_follow_the_turn_when_call_ids_are_reused() -> None:
+    from local_agent.tools.web_identity import source_id
+
+    url = "https://docs.example.com/intro"
+    payload = json.dumps({"url": url, "title": "Official", "text": "content"})
+    messages = [HumanMessage(content="first"),
+                ToolMessage(content=payload, tool_call_id="same", name="web_fetch"),
+                AIMessage(content=f"Answer [{source_id(url)}]"), HumanMessage(content="second"),
+                ToolMessage(content=payload, tool_call_id="same", name="web_fetch"),
+                AIMessage(content=f"Example only: `[{source_id(url)}]`")]
+    events = [{"tool_call_id": "same", "tool_name": "web_fetch", "run_id": run, "status": "ok"}
+              for run in ("run-1", "run-2")]
+    rows = proj.project_tool_rows(_state(messages=messages, tool_results=[], tool_events=events))
+    assert [(run, row.web_sources[0].cited) for run, row in rows] == [("run-1", True), ("run-2", False)]
+
+
+def test_rejected_plain_text_does_not_consume_a_later_turns_reused_call_payload() -> None:
+    from local_agent.tools.web_identity import source_id
+
+    url = "https://docs.example.com/intro"
+    messages = [HumanMessage(content="first"),
+                ToolMessage(content="被安全策略拒绝", tool_call_id="same", name="web_fetch"),
+                AIMessage(content="未取得来源"), HumanMessage(content="second"),
+                ToolMessage(content=json.dumps({"url": url, "text": "actual content"}), tool_call_id="same", name="web_fetch"),
+                AIMessage(content=f"已核实 [{source_id(url)}]")]
+    events = [{"tool_call_id": "same", "tool_name": "web_fetch", "run_id": run, "status": status}
+              for run, status in (("run-1", "denied"), ("run-2", "ok"))]
+    rows = proj.project_tool_rows(_state(messages=messages, tool_results=[], tool_events=events))
+    assert rows[0][1].web_sources == []
+    assert rows[1][1].web_sources[0].url == url
+    assert rows[1][1].web_sources[0].cited is True
 
 
 # ---- 审批 ------------------------------------------------------------------
@@ -803,6 +882,27 @@ def test_internal_stages_map_to_public_codes_without_leaking_node_names() -> Non
         assert stage not in canonical_json(views[0]), f"{stage} 泄露进了 DTO"
 
 
+def test_the_mechanical_failure_notice_reaches_users_without_internal_jargon() -> None:
+    """红卡正文来自节点文案、由投影**原样**透出（只换 title/hint），所以这道断言必须在投影这一层。
+
+    2026-10-15 实测原文：「本轮没有拿到可验证的证据」+「机械校验未通过：本轮工具结果不能作为
+    已验证证据」——标题是给用户看的，正文却是我们的评级名。断言里同时保留反向：去术语不能把
+    "结果没核对通过、不能当依据"这个事实一起删掉。
+    """
+    from local_agent.graph import nodes
+
+    views = proj.project_errors(_state(error_events=[_error_event(
+        "reflection_node:mechanical", nodes.MECHANICAL_FAILURE_MESSAGE,
+    )]))
+
+    notice = views[0]
+    assert notice.code == app_errors.EVIDENCE_NOT_VERIFIED
+    text = f"{notice.title}{notice.message}{notice.hint}"
+    for banned in ("机械", "校验", "证据等级", "verified", "failed"):
+        assert banned not in text, f"红卡里出现了内部术语：{banned}"
+    assert "核对" in notice.message and "依据" in notice.message
+
+
 def test_errors_are_deduplicated_and_carry_actionable_text() -> None:
     event = _error_event("tool_execution")
     views = proj.project_errors(_state(error_events=[event, dict(event)]))
@@ -827,8 +927,8 @@ def test_errors_are_sanitized_before_reaching_the_page() -> None:
     view = proj.project_errors(state)[0]
     dumped = canonical_json(view)
     assert "sk-abcdefghijklmnop" not in dumped
-    assert "C:\\Users\\asus" not in dumped
-    assert "[已隐藏的绝对路径]" in view.message
+    assert "C:\\Users\\asus\\secret.txt" in view.message
+    assert "[已隐藏的绝对路径]" not in view.message
     assert "***" in view.message
 
 
@@ -842,14 +942,37 @@ def test_error_rows_in_the_flow_match_the_error_index() -> None:
     assert "tool_execution" not in flow_errors[0].message_id
 
 
-def test_public_failure_text_keeps_reason_without_raw_operation_or_machine_path() -> None:
+def test_public_failure_text_keeps_reason_and_the_path_to_check() -> None:
+    """失败文案要**能用来核对**：换掉内部工具名，但项目路径必须留下（2026-10-15，B-31 收尾）。
+
+    原来这条断言的是"机器路径都不出现"，于是最需要核对的那句变成
+    「父目录不存在，未创建文件：[已隐藏的绝对路径]」——用户看不出是哪个路径被拒。
+    用户目录同样保留，见 :func:`proj.sanitize_text` 的用例。
+    """
     event = _error_event("safety_gate", "工具被安全策略拒绝：read_file；目标不是文件或不存在：E:/project/private/missing.txt")
     view = proj.project_errors(_state(error_events=[event]))[0]
     assert "读取文件" in view.message
     assert "目标不是文件或不存在" in view.message
     assert "read_file" not in view.message
-    assert "E:/project" not in view.message
-    assert "[已隐藏的绝对路径]" in view.message
+    # 项目路径原样保留：这才是用户拿去核对/改配置的依据。
+    assert "E:/project/private/missing.txt" in view.message
+    assert "[已隐藏的绝对路径]" not in view.message
+
+
+def test_environment_unavailable_is_not_reported_as_a_policy_block() -> None:
+    """环境不可用（找不到命令）**不能**报成"被安全策略拦截"（2026-10-14 实测）。
+
+    `time /t` 这类命令被拒时，用户能做的是换一条等价命令，而不是"把请求改成合规"——卡片与建议
+    必须跟着事实走。这条把投影层的分流钉住：stage `tool_environment` → `TOOL_UNAVAILABLE`。
+    """
+    event = _error_event(
+        "tool_environment", "命令在当前环境不可用：运行命令（当前环境找不到可执行文件：time）"
+    )
+
+    view = proj.project_errors(_state(error_events=[event]))[0]
+
+    assert "不可用" in view.message
+    assert "安全策略" not in view.message
 
 
 def test_other_runs_errors_are_not_shown_in_this_turn() -> None:
@@ -1036,7 +1159,6 @@ def test_projection_does_not_mutate_its_input() -> None:
 
     dumped = canonical_json(snapshot)
     assert "sk-" not in dumped
-    assert not json.dumps(snapshot.model_dump(mode="json")).count("C:\\")
 
 
 # ---- 工具的结构化结果与机械证据（T31） --------------------------------------
@@ -1094,6 +1216,51 @@ def _only_tool(state: dict[str, Any]) -> Any:
     tools = proj.project_tools(state)
     assert len(tools) == 1
     return tools[0]
+
+
+def test_delegation_outcome_lists_each_child_with_its_counts() -> None:
+    """自主委派（§18.7）：子任务结局必须是**字段**，不是让用户去读一段 JSON。
+
+    逐项对齐参照实现的任务面板（成员 / 状态 / 工具调用次数 / token 预留），另加证据条数与失败原因：
+    用户要判断的是"哪一路查到了、花了多少、哪一路没成"，这三件事都得能被直接渲染。
+    """
+    tool = _only_tool(
+        _tool_state(
+            "delegate_research",
+            {
+                "status": "failed",
+                "report": "已核对的子任务原文：\n# 取消（docs/cancel.md:1）",
+                "children": [
+                    {
+                        "scope": "docs", "status": "completed", "tool_calls": 4, "model_calls": 1,
+                        "evidence_count": 6, "error": None,
+                    },
+                    {
+                        "scope": "src", "status": "failed", "tool_calls": 0, "model_calls": 1,
+                        "evidence_count": 0, "error": "子任务超时",
+                    },
+                ],
+                "note": "本次委派未完成：src 子任务超时。",
+            },
+        )
+    )
+
+    assert tool.outcome is not None
+    assert tool.outcome.kind == "delegation"
+    assert [(child.scope, child.status) for child in tool.outcome.children] == [
+        ("docs", "completed"),
+        ("src", "failed"),
+    ]
+    assert tool.outcome.children[0].tool_calls == 4
+    assert tool.outcome.children[0].evidence_count == 6
+    assert tool.outcome.children[1].error == "子任务超时"
+    # **预留 token 不进这个 DTO**（2026-10-13 裁定）：它是切出来的上限、每路几乎一样，
+    # 摆在对话卡里会被读成"这一路花了多少"。这条断言就是那道边界。
+    assert "model_tokens_reserved" not in tool.outcome.model_dump()
+    assert tool.outcome.summary is not None
+    assert "2 个子任务 · 1 个已完成" in tool.outcome.summary
+    # 报告正文原样带过去（有界）；页面不解析它，只把它当有界预览摆出来。
+    assert "docs/cancel.md:1" in (tool.outcome.text or "")
 
 
 def test_shell_outcome_separates_stdout_stderr_exit_code_and_timeout() -> None:
@@ -1255,8 +1422,8 @@ def test_outcome_text_and_target_are_sanitized() -> None:
     )
 
     assert tool.outcome is not None
-    # 私人绝对路径与密钥样式串都不进页面（§15.8）。
-    assert "C:\\" not in (tool.outcome.target or "")
+    # 路径保留，密钥样式串继续脱敏。
+    assert tool.outcome.target == "C:\\Users\\someone\\private"
     assert secret not in (tool.outcome.stdout or "")
     assert "***" in (tool.outcome.stdout or "")
 
@@ -1332,6 +1499,176 @@ def test_structured_diff_is_bounded_and_marked_truncated() -> None:
     assert tool.outcome.truncated is True
 
 
+def test_user_message_carries_attachment_refs_and_never_the_bytes() -> None:
+    """随消息发出的图片（2026-10-16）：消息 DTO 只回**引用**，绝不放字节。
+
+    为什么要有这条：图像字节在消息的**内容块**里（`data:` URL ✗）——若投影把它当文本回给页面，
+    一条消息就能把快照撑大好几 MB ✗（快照每次刷新都要传一遍 ✗）。页面真正需要的只是
+    "这条消息带了哪张图" ✔：引用足够它自己去 `GET …/attachments?attachment_id=…` 取缩略图 ✔。
+    """
+
+    def ref(attachment_id: str, message_id: str = "run-1:user") -> dict[str, Any]:
+        return {
+            "run_id": "run-1",
+            "message_id": message_id,
+            "attachment_id": attachment_id,
+            "media_type": "image/png",
+        }
+
+    picture = "2026/10/16/" + "a" * 32 + "/" + "b" * 16 + ".png"
+    other = "2026/10/16/" + "c" * 32 + "/" + "d" * 16 + ".png"
+    state = _state(
+        messages=[
+            HumanMessage(
+                content=[
+                    {"type": "text", "text": "这张图是什么颜色？"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}},
+                ],
+                id="run-1:user",
+            )
+        ],
+        # 引用是**累积字段**（落 Checkpoint）；别的消息的引用不该挂到这条上。
+        user_attachment_refs=[ref(picture), ref(other, message_id="run-2:user")],
+    )
+
+    views = proj.project_messages_view(state)
+
+    assert [view.kind for view in views] == ["user"]
+    user = views[0]
+    assert user.attachments == [picture]
+    # 文本只取文本段；`data:` URL 一个字都不进 DTO。
+    assert user.text == "这张图是什么颜色？"
+    assert "base64" not in user.text
+
+
+def test_a_picture_only_message_projects_with_empty_text() -> None:
+    """只发图不发字（2026-10-16）：文本为空是**正常**的，引用照样在——页面据此只画图。"""
+    picture = "2026/10/16/" + "a" * 32 + "/" + "b" * 16 + ".jpg"
+    state = _state(
+        messages=[
+            HumanMessage(
+                content=[
+                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,QUJD"}}
+                ],
+                id="run-1:user",
+            )
+        ],
+        user_attachment_refs=[
+            {
+                "run_id": "run-1",
+                "message_id": "run-1:user",
+                "attachment_id": picture,
+                "media_type": "image/jpeg",
+            }
+        ],
+    )
+
+    user = proj.project_messages_view(state)[0]
+
+    assert user.text == ""
+    assert user.attachments == [picture]
+
+
+def test_trace_events_merge_tool_approval_and_compaction_on_one_timeline() -> None:
+    """轨迹事件时间线（2026-10-16）：工具 / 审批 / 压缩合成一条按时刻排序的线。
+
+    这条钉的是**审计面**——审批要给出**等待时长**（请求→决定），压缩要给出"折叠了几条、前后差多少"，
+    而不是只留一句"压缩过"。同时钉住两条边界：只投影**本轮**的；State 里是 dataclass 还是 dict
+    都要读得出来（反序列化回来的 Checkpoint 是 dict，只看 `getattr` 会静默取空）。
+    """
+    requested = datetime(2026, 10, 16, 3, 0, 0, tzinfo=timezone.utc)
+    decided = datetime(2026, 10, 16, 3, 0, 12, tzinfo=timezone.utc)
+    state = _state(
+        approval_history=[
+            {
+                "approval_id": "ap-1",
+                "run_id": "run-1",
+                "tool_call_id": "t1",
+                "action_fingerprint": "fp",
+                # 真实决策值就是这三个：`approve` / `edit` / `reject`（`security/approval.py`）。
+                "decision": "approve",
+                "edited_arguments": None,
+                # 实测的真实形状（用户实拍）：客户端把样板文案当 reason 发上来，半角英文、与结论重复。
+                "reason": "人工审批: approve",
+                "created_at": decided,
+                "requested_at": requested,
+            }
+        ],
+        compaction_events=[
+            {
+                "operation_id": "run-1:compression:1",
+                "run_id": "run-1",
+                "at": datetime(2026, 10, 16, 3, 1, 0, tzinfo=timezone.utc),
+                "folded_messages": 6,
+                "covered_messages": 18,
+                "tokens_before": 41_000,
+                "tokens_after": 21_000,
+                "window_tokens": 655_000,
+            },
+            # 别的轮次的压缩不进本轮时间线。
+            {
+                "operation_id": "run-2:compression:1",
+                "run_id": "run-2",
+                "at": datetime(2026, 10, 16, 3, 2, 0, tzinfo=timezone.utc),
+                "folded_messages": 3,
+                "covered_messages": 9,
+                "tokens_before": 10,
+                "tokens_after": 5,
+                "window_tokens": 655_000,
+            },
+        ],
+    )
+
+    events = proj.project_trace_events(state, "run-1")
+
+    # `_state()` 里的 tool_events 是 dict 形态（生产是 dataclass）：两种都要读出来。
+    assert [event.kind for event in events] == ["tool", "approval", "compaction"]
+    assert [event.event_id for event in events] == ["t1", "ap-1", "run-1:compression:1"]
+
+    approval = events[1]
+    assert approval.wait_ms == 12_000
+    assert approval.status == "approve"
+    # 结论用**中文枚举**当主文案（2026-10-16）：客户端把 `人工审批: approve` 这样的自由文本
+    # 当 reason 发上来时，原样渲染就会漏进中文界面（而且和结论说的是同一件事）——轨迹不复制它。
+    assert approval.label == "已批准"
+    assert "approve" not in approval.label
+
+    compaction = events[2]
+    assert compaction.folded_messages == 6
+    assert (compaction.tokens_before, compaction.tokens_after) == (41_000, 21_000)
+    assert "6 条" in compaction.label
+
+
+@pytest.mark.parametrize(
+    "value", [None, {}, [], "not-a-number", float("nan"), float("inf"), -float("inf")],
+    ids=["missing", "mapping", "list", "text", "nan", "positive-infinity", "negative-infinity"],
+)
+def test_trace_unknown_token_counts_do_not_break_the_timeline(value: object) -> None:
+    """坏事件数字只表示未记录，不能抛异常或伪装成零。"""
+    state = _state(tool_events=[], compaction_events=[{
+        "operation_id": "run-1:compression:1", "run_id": "run-1", "folded_messages": 3,
+        "tokens_before": value, "tokens_after": value,
+    }])
+
+    events = proj.project_trace_events(state, "run-1")
+
+    assert len(events) == 1 and events[0].folded_messages == 3
+    assert events[0].tokens_before is None and events[0].tokens_after is None
+    assert events[0].model_dump(mode="json")["tokens_before"] is None
+
+
+@pytest.mark.parametrize("value", [0, "0", 42, "42"])
+def test_trace_numeric_token_counts_preserve_recorded_zero(value: int | str) -> None:
+    state = _state(tool_events=[], compaction_events=[{
+        "operation_id": "run-1:compression:1", "run_id": "run-1", "folded_messages": 3,
+        "tokens_before": value, "tokens_after": value,
+    }])
+
+    event = proj.project_trace_events(state, "run-1")[0]
+
+    assert event.tokens_before == event.tokens_after == int(value)
+
+
 def test_approval_target_comes_from_the_structured_request() -> None:
     # 目标取结构化参数，不从影响摘要文本里反推；认不出的工具如实为空。
     def target(tool_name: str, arguments: dict[str, Any]) -> str | None:
@@ -1384,12 +1721,13 @@ def test_approval_shows_resolved_external_target_and_confirmation_stage(tmp_path
     assert view.confirmation_stage == 2
 
 
-def test_forward_slash_windows_path_is_hidden_in_untrusted_text() -> None:
-    assert proj.sanitize_text("错误位于 C:/Users/someone/private.txt") == "错误位于 [已隐藏的绝对路径]"
+def test_forward_slash_windows_path_is_preserved() -> None:
+    assert proj.sanitize_text("错误位于 C:/Users/someone/private.txt") == "错误位于 C:/Users/someone/private.txt"
 
 
 @pytest.mark.parametrize("status", ["error", "denied"])
-def test_failed_tool_preview_keeps_reason_without_machine_path(status: str) -> None:
+def test_failed_tool_preview_keeps_reason_and_path(status: str) -> None:
+    """工具行上的失败原因同样要能核对：换掉内部名，路径留下（2026-10-15，B-31 收尾）。"""
     reason = "read_file：目标不是文件或不存在：E:/project/private/missing.txt"
     state = _tool_state("read_file", reason, preview=reason)
     state["tool_events"][0]["status"] = status
@@ -1397,13 +1735,12 @@ def test_failed_tool_preview_keeps_reason_without_machine_path(status: str) -> N
     view = proj.project_tools(state)[0]
     assert "读取文件" in (view.output_preview or "")
     assert "目标不是文件或不存在" in (view.output_preview or "")
-    assert "E:/project" not in (view.output_preview or "")
+    assert "E:/project/private/missing.txt" in (view.output_preview or "")
 
 
-def test_project_path_is_visible_but_private_path_with_spaces_is_fully_hidden() -> None:
+def test_project_and_user_paths_with_spaces_are_preserved() -> None:
     assert proj.sanitize_text("目标 E:/pylianxi/other project/main.py") == "目标 E:/pylianxi/other project/main.py"
-    assert proj.sanitize_text('目标 "C:/Users/Some Name/private.txt"') == '目标 "[已隐藏的绝对路径]"'
-    assert proj.sanitize_text("用户输入 C:/Users/Some Name/private.txt", hide_private_paths=False) == "用户输入 C:/Users/Some Name/private.txt"
+    assert proj.sanitize_text('目标 "C:/Users/Some Name/private.txt"') == '目标 "C:/Users/Some Name/private.txt"'
 
 
 def test_approval_target_is_sanitized_and_absent_after_the_request_is_gone() -> None:
@@ -1415,7 +1752,7 @@ def test_approval_target_is_sanitized_and_absent_after_the_request_is_gone() -> 
         has_live_interrupt=True,
     )
     assert pending is not None
-    assert pending.target == "[已隐藏的绝对路径]"
+    assert pending.target == "C:\\Users\\someone\\private"
 
     # 请求已被清掉（只剩决定）时没有原始参数可比对，如实为空而不是去别处猜。
     decided = proj.project_approval(

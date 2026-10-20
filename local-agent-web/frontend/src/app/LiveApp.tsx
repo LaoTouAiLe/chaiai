@@ -12,13 +12,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 
+import { Notice } from '../components/Notice'
 import { Composer } from '../components/Composer'
 import { Sidebar } from '../components/Sidebar'
 import { TopBar } from '../components/TopBar'
 import { Conversation } from '../features/conversation/Conversation'
-import { WorkflowControls } from '../features/workflow/WorkflowControls'
-import { emptyWorkflowDraft, workflowDraftValid, workflowSelection } from '../features/workflow/draft'
-import type { WorkflowDraft } from '../features/workflow/draft'
 import { WorkflowStatus } from '../features/workflow/WorkflowStatus'
 import { mapWorkflow } from '../features/workflow/adapters'
 import { toolLabel } from '../features/tool/display'
@@ -43,15 +41,15 @@ import { traceFromMessages } from '../features/trace/adapters'
 import { TraceView } from '../features/trace/TraceView'
 import { ConversationMapPanel } from '../features/conversation-map/ConversationMapPanel'
 import { DataCenter } from '../features/data-center/DataCenter'
-import { CapabilitiesSection } from '../features/capabilities/CapabilitiesSection'
 import { TasksSection } from '../features/tasks/TasksSection'
 import type { components } from '../api/schema.gen'
-import { ApiError, archiveSession, listSessions, removeWorkspace, renameSession, renameWorkspace, restoreSession, selectSession } from '../api/client'
-import { queryKeys, useHealth, useModelConnections, useSessions, useSnapshot, useSubmitMessage, useTasks, useWorkspaces, useCreateSession, useSelectWorkspace, useSelectSessionModel, useResolveApproval, usePickWorkspaceDirectory, useSetSessionMode, useEndInterruptedRequest } from '../api/queries'
+import { ApiError, archiveSession, listSessions, removeWorkspace, renameSession, renameWorkspace, restoreSession, selectSession, uploadAttachment } from '../api/client'
+import { queryKeys, useHealth, useModelConnections, useSessions, useSnapshot, useSubmitMessage, useTasks, useWorkspaces, useCreateSession, useSelectWorkspace, useSelectSessionModel, useResolveApproval, usePickWorkspaceDirectory, useSetSessionMode, useEndInterruptedRequest, useCancelTask } from '../api/queries'
 import { useSessionStream } from '../api/useSessionStream'
 import { useStreamTail } from '../stores/stream'
 import { useUiStore } from '../stores/ui'
 import type { ConversationScenario, MessageView } from '../fixtures/types'
+import { prepareImageForUpload } from './imageCompression'
 import styles from './App.module.css'
 import { useArchivedSessions } from '../api/queries'
 
@@ -76,8 +74,6 @@ export function LiveApp() {
   const setWorkspace = useUiStore((state) => state.setWorkspace)
   const openSession = useUiStore((state) => state.openSession)
   const setDraft = useUiStore((state) => state.setDraft)
-  const [workflowDrafts, setWorkflowDrafts] = useState<Record<string, WorkflowDraft>>({})
-  const workflowDraft = activeSessionId === null ? emptyWorkflowDraft : (workflowDrafts[activeSessionId] ?? emptyWorkflowDraft)
 
   // 侧栏折叠：`null` = 跟随窗口宽度，非 null = 用户手动选择过（手动优先）。
   const [collapsedPref, setCollapsedPref] = useState<boolean | null>(null)
@@ -95,8 +91,6 @@ export function LiveApp() {
 
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [dataCenterOpen, setDataCenterOpen] = useState(false)
-  // 「能力与档位」面板：纯界面状态，每次打开都重新取一次（服务端现算，页面不留旧结论）。
-  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false)
   // 「任务中心」面板（v0.6 T62；§17.6）：同样是纯界面状态。数据由 `useTasks` 提供——
   // 它与面板内的查询**同一个 key**，因此角标与列表不会各自缓存出一份不同的结论。
   const [tasksOpen, setTasksOpen] = useState(false)
@@ -112,10 +106,17 @@ export function LiveApp() {
     sessionId: string; turnId: string; question: string; ordinal: number;
     context: components['schemas']['SessionSnapshot']; baseSnapshotId: string; branchId: string;
   } | null>(null)
+  const [mapChat, setMapChat] = useState<{ sessionId: string; turnId: string } | null>(null)
   const [focusTurn, setFocusTurn] = useState<{ sessionId: string; turnId: string } | null>(null)
   // 工具行的展开态：**纯界面状态**，不来自快照。T32 的结构化 diff 就在展开后才可见
   // （`ToolRow` 收起时只有一行摘要），所以真会话必须能让用户按需展开。
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(() => new Set())
+  const [dismissedErrors, setDismissedErrors] = useState<ReadonlySet<string>>(() => new Set())
+  const errorActions = { dismissedIds: dismissedErrors, onToggle: (diagnosticId: string) => {
+    setDismissedErrors((previous) => {
+      const next = new Set(previous); if (!next.delete(diagnosticId)) next.add(diagnosticId); return next
+    })
+  } }
   const queryClient = useQueryClient()
 
   const health = useHealth()
@@ -130,6 +131,7 @@ export function LiveApp() {
   const createSession = useCreateSession()
   const setSessionMode = useSetSessionMode()
   const endInterrupted = useEndInterruptedRequest()
+  const cancelTask = useCancelTask()
   const [modeError, setModeError] = useState<{ sessionId: string; message: string } | null>(null)
   const [recoveryConfirm, setRecoveryConfirm] = useState(false)
   const selectWorkspace = useSelectWorkspace()
@@ -149,7 +151,9 @@ export function LiveApp() {
     parent_turn_id: selectedFollowup?.turnId,
     expected_branch_id: selectedFollowup?.branchId ?? snapshot?.branch_id,
     expected_snapshot_id: selectedFollowup?.baseSnapshotId ?? snapshot?.snapshot_id,
-    workflow: currentMode === 'agent' ? workflowSelection(workflowDraft) : null,
+    // 界面上不再有「执行方式」下拉（2026-10-13）：三类确定性工作流从输入区撤下，只保留内部/评测入口。
+    // 提交仍显式带 `workflow: null`——服务端那个可选字段仍在（§18.5），非页面调用方照样能用。
+    workflow: null,
   })
 
   // 刷新恢复：本地没有选中项时，按服务端的 `is_active` 回填（全库唯一 active）。
@@ -236,16 +240,15 @@ export function LiveApp() {
       // 展开态在这里注入：适配层只给"默认紧凑"，被点过的行按界面状态覆盖。
       .map((message) =>
         message.kind === 'tool'
-          ? { ...message, tool: { ...message.tool, expanded: expandedTools.has(message.id) } }
+          ? { ...message, tool: { ...message.tool, expanded: expandedTools.has(message.id)
+            || (message.tool.name === 'run_shell' && message.tool.status === 'running') } }
           : message,
       )
 
     // 安全阶段摘要（§6.7）：只表达"现在在做什么"，不暴露节点名或隐藏推理。
     const toolInFlight = [...messages].reverse().find((message) => message.kind === 'tool' && message.tool.status === 'running')
-    // v0.8 T74（§19.4）：增量措辞要**两个条件同时成立**——服务端说本会话在流式（快照的
-    // `answer_streaming`）**且**确实收到了增量。光看尾部不够：旧快照、刚被改过的配置都会让
-    // "正在接收回答"变成假话；而"没有增量"也不能反推"没在流式"（刚连上、网络慢、回答极短）。
-    const answerStreaming = snapshot?.answer_streaming === true
+    // 当前轮的固定配置与下一轮选择分开：切换模型不改变正在运行的回答。
+    const answerStreaming = snapshot?.current_answer_streaming === true
     const streamingTail = answerStreaming ? tail : null
     // Model-call start events currently arrive with completion. Only the snapshot's
     // running state, actual tool states and safe answer tail can describe activity.
@@ -264,7 +267,7 @@ export function LiveApp() {
       // 只能自己猜是不是卡住了。这一句只在确实没在等工具、也没在等审批时出现。
       detail: awaitingApproval ? '下方有一项操作需要你的决定，确认前不会执行。'
         : toolInFlight?.kind === 'tool' && toolInFlight.tool.target !== null ? toolInFlight.tool.target
-          : snapshot?.answer_streaming === false
+          : snapshot?.current_answer_streaming === false
             ? '未启用流式：回答会在完成时一次性显示。'
             : '任务仍在运行，你可以继续写下一条消息的草稿。',
     } : null
@@ -336,6 +339,9 @@ export function LiveApp() {
       traceFromMessages(
         scenario.messages,
         snapshot === null ? [] : (snapshot.model_calls ?? []).map(mapCall),
+        // 每轮统计（2026-10-16）：轨迹页与对话页用**同一份**锚点与数字（`mapTurnStats`），
+        // 于是"这一轮花了多少 / 缓存命不命中 / 上下文用掉多少"两个页签不会各说一套。
+        snapshot === null ? [] : mapTurnStats(snapshot, scenario.messages),
       ),
     [scenario.messages, snapshot],
   )
@@ -379,14 +385,31 @@ export function LiveApp() {
     })
   }
 
-  const send = () => {
-    if (currentMode === 'agent' && !workflowDraftValid(workflowDraft)) return
-    if (activeSessionId === null || draft.trim() === '' || running || awaitingApproval || interrupted || submit.isPending || createSession.isPending || setSessionMode.isPending) return
+  /**
+   * 把一张图交给服务端（2026-10-16），返回它的**引用**与本地预览地址。
+   *
+   * 走 base64 的 JSON（见 `uploadAttachment` 的注释）。`data:` 前缀只是传输封装——
+   * 服务端按**魔数**自己判类型，页面声明的类型它不看（改名成 png 的 HTML 会被当场拒掉）。
+   */
+  const attachFile = async (file: File) => {
+    if (activeSessionId === null) throw new Error('还没有打开会话')
+    // 先压再传（2026-10-20）：附件会以 data: URL 进消息、随请求体发给模型，几 MB 的截图
+    // 会被端点直接 400。压缩失败时抛出可执行的中文提示，Composer 原样显示。
+    const prepared = await prepareImageForUpload(file)
+    const saved = await uploadAttachment(activeSessionId, prepared.base64)
+    return { id: saved.attachment_id, previewUrl: URL.createObjectURL(prepared.blob) }
+  }
+
+  const send = (attachmentIds: readonly string[] = []): boolean => {
+    // 只贴图不写字也是合法提交（2026-10-16）：`text` 与 `attachments` 至少有一个。
+    // 返回 false = **这次提交没有被接受**（没有发请求）。调用方据此保留待发图片，
+    // 不能先清队列再问——2026-10-20 实测过"文字还在、图片没了"。
+    if (activeSessionId === null || (draft.trim() === '' && attachmentIds.length === 0) || running || awaitingApproval || interrupted || submit.isPending || createSession.isPending || setSessionMode.isPending) return false
     const text = draft
     // 先清草稿：提交的幂等键重试由用户发起（见 queries.ts），草稿不该在失败后被吞掉，
     // 但也不该在成功后又发一遍——所以这里清掉，失败时用户可以重新输入。
     setDraft(activeSessionId, '')
-    submit.mutate(text, {
+    submit.mutate({ text, attachments: attachmentIds }, {
       onSuccess: () => { setFollowup(null); setFocusTurn(null) },
       onError: () => {
         // 服务端可能先进入待审批，或另一页面抢先提交。只有用户尚未写新草稿时才恢复原文；
@@ -394,6 +417,7 @@ export function LiveApp() {
         if ((useUiStore.getState().drafts[activeSessionId] ?? '') === '') setDraft(activeSessionId, text)
       },
     })
+    return true
   }
 
   /**
@@ -437,6 +461,76 @@ export function LiveApp() {
     setWorkspace(workspaces.data?.some((item) => item.workspace_id === selected.workspace.workspace_id)
       ? selected.workspace.workspace_id : null)
   }
+
+  const displayScenario = selectedFollowup !== null && !running && !submit.isPending && snapshot?.snapshot_id === selectedFollowup.baseSnapshotId ? {
+    ...scenario,
+    messages: mapMessages(selectedFollowup.context).map((message) => message.kind === 'tool' ?
+      { ...message, tool: { ...message.tool, expanded: expandedTools.has(message.id) } } : message),
+    activity: null, empty: null, loading: null, stats: null,
+    turnStats: mapTurnStats(selectedFollowup.context, mapMessages(selectedFollowup.context), false),
+  } : scenario
+  const composer = <Composer
+    mode={currentMode}
+    session={session ?? { title: '新会话', workspace: null, status: 'idle', modelLabel: '' }}
+    plan={scenario.plan}
+    meter={scenario.context}
+    takeover={scenario.takeover}
+    modelMenu={scenario.modelMenu}
+    modelMenuActions={modelMenu === null ? undefined : {
+      busy: selectSessionModel.isPending,
+      onSelect: changeModel,
+      onFollowDefault: () => changeModel(null),
+      onManage: () => {
+        setModelMenuOpen(false)
+        setSettingsOpen(true)
+      },
+    }}
+    state={scenario.composer}
+    // §17.4：这一轮是不是"被停下来的"由服务端说（`final_result.state`），页面不自己推。
+    stopped={snapshot?.final_result?.state === 'cancelled'}
+    // 审批按钮的真实接线：提交后 isPending 立即为真 → 两个按钮立刻锁定，
+    // 之后卡片内容完全由重取到的快照决定（后端结果是权威）。
+    approvalActions={{
+      busy: approvalDecision.isPending,
+      onApprove: (confirmRecursive) => decideApproval('approve', confirmRecursive),
+      onReject: () => decideApproval('reject'),
+    }}
+    actions={{
+      draft,
+      onDraftChange: (text) => {
+        if (activeSessionId !== null) setDraft(activeSessionId, text)
+      },
+      onSend: send,
+      // 图片入口（2026-10-16）：粘贴与选图都走这一条（Composer 负责排队，LiveApp 只负责上传）。
+      onAttachFile: attachFile,
+      onToggleModelMenu: () => {
+        setModelError(null)
+        setModelMenuOpen((open) => !open)
+      },
+      onCloseModelMenu: () => setModelMenuOpen(false),
+      onToggleMeter: () => setMeterOpen((open) => !open),
+      onSelectMode: (mode) => {
+        if (activeSessionId === null || mode === currentMode || setSessionMode.isPending || running || awaitingApproval || interrupted || submit.isPending) return
+        setModeError(null)
+        const sessionId = activeSessionId
+        setSessionMode.mutate({ sessionId, mode, expectedMode: currentMode }, {
+          onError: (error) => setModeError({ sessionId, message: error instanceof ApiError
+            ? error.message : '模式切换未保存，请检查连接后重试。' }),
+        })
+      },
+      modeDisabled: activeSessionId === null || running || awaitingApproval || interrupted || submit.isPending || setSessionMode.isPending,
+      // 停止（§17.4）：只在**真的有在跑的轮次**时出现；等审批时没有在飞的调用，取消本就立即生效，
+      // 但那一轮由审批卡接管，不给停止按钮（避免两个入口表达同一次决定）。
+      onStop: () => {
+        if (activeSessionId === null || !running) return
+        cancelTask.mutate({ sessionId: activeSessionId, reason: '用户按下了停止' })
+      },
+      canStop: activeSessionId !== null && running && !awaitingApproval && !interrupted,
+      stopping: cancelTask.isPending,
+      // 任务进行中**允许继续写**，但不让发（T30 裁定）：草稿留在输入框里等这一轮结束。
+      canSend: activeSessionId !== null && draft.trim() !== '' && !running && !awaitingApproval && !interrupted && !submit.isPending && !cancelTask.isPending && !createSession.isPending && !setSessionMode.isPending,
+    }}
+  />
 
   return (
     <div className={styles.app} data-scenario="live">
@@ -539,11 +633,9 @@ export function LiveApp() {
           },
           onOpenSettings: () => setSettingsOpen(true),
           onOpenDataCenter: () => { setSettingsOpen(false); setDataCenterOpen(true) },
-          // 三个入口互斥：同时叠两个面板会让用户以为"设置里也能改能力"。
-          onOpenCapabilities: () => { setSettingsOpen(false); setDataCenterOpen(false); setCapabilitiesOpen(true) },
-          // 四个入口互斥：同时叠两个面板会让用户以为"设置里也能看任务"。
+          // 三个入口互斥：同时叠两个面板会让用户以为"设置里也能看任务"。
           onOpenTasks: () => {
-            setSettingsOpen(false); setDataCenterOpen(false); setCapabilitiesOpen(false); setTasksOpen(true)
+            setSettingsOpen(false); setDataCenterOpen(false); setTasksOpen(true)
           },
           pendingTasks: tasks.data?.pending_count ?? 0,
           onToggleCollapse: () => setCollapsedPref(!sidebarCollapsed),
@@ -560,29 +652,29 @@ export function LiveApp() {
           onOpenMap={() => setTab('map')}
         />
         {selectedFollowup === null ? snapshot?.branch_id && snapshot.branch_id !== 'main' ?
-          <p className={styles.notice}>当前分支：{snapshot.branch_title} · 新提问会接在此分支末尾。</p> : null :
-          <p className={styles.notice}>基于第{selectedFollowup.ordinal}轮继续提问：{selectedFollowup.question.slice(0, 100)}。
+          <Notice label="分支提示" scope={`${activeSessionId}:${snapshot.branch_id}`}>当前分支：{snapshot.branch_title} · 新提问会接在此分支末尾。</Notice> : null :
+          <Notice label="历史追问提示" scope={`${activeSessionId}:${selectedFollowup.turnId}`}>基于第{selectedFollowup.ordinal}轮继续提问：{selectedFollowup.question.slice(0, 100)}。
             上下文包含会话开头到本轮，原后续问答保留。
             <button type="button" disabled={running || awaitingApproval || submit.isPending}
-              onClick={() => setFollowup(null)}>取消历史追问</button></p>}
+              onClick={() => setFollowup(null)}>取消历史追问</button></Notice>}
         {stream.reconnecting ? (
           // 断线必须可见（v0.8 T72；§19.2）：连不上时如实说明，并写明"不会自动重发请求"。
           // 一轮正常收尾后的 500ms 重订阅不算断线，所以不会在这里闪。
-          <p className={styles.notice} role="status">
+          <Notice label="重连提示" scope={`${activeSessionId}:reconnecting`} role="status">
             连接已中断，正在重连。会话在服务端继续推进；恢复后会以最新状态为准，不会自动重发请求。
-          </p>
+          </Notice>
         ) : null}
         {stream.notices.length === 0 ? null : (
           // 传输层提示（超限/空闲超时/无法解析的帧）如实显示：它们不代表数据损坏，但用户有权知道。
-          <p className={styles.notice} role="status">
+          <Notice label="连接提示" scope={`${activeSessionId}:${stream.notices.join(",")}`} role="status">
             {stream.notices.includes('snapshot_refresh_failed')
               ? '暂时没能更新会话状态，正在恢复连接。请等待状态恢复后再操作。'
               : '实时连接需要重新同步，正在重新读取会话状态。不会自动重发请求。'}
-          </p>
+          </Notice>
         )}
         {approvalErrorMessage === null ? null : (
           // 决定没提交成功时如实说明，并指向"重取快照"这条唯一可靠的核对途径（§15.8）。
-          <p className={styles.notice} role="alert">
+          <Notice label="审批错误提示" scope={`${activeSessionId}:${approvalErrorMessage}`} role="alert">
             {approvalErrorMessage}{' '}
             <button
               type="button"
@@ -594,14 +686,20 @@ export function LiveApp() {
             >
               刷新状态
             </button>
-          </p>
+          </Notice>
         )}
+        {cancelTask.isError ? <Notice key={activeSessionId} label="停止错误提示" scope={cancelTask.error} role="alert">
+          {cancelTask.error instanceof ApiError ? cancelTask.error.message : '停止请求未能确认，请刷新状态后再次停止。'}
+          <button type="button" onClick={() => {
+            if (activeSessionId !== null) void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(activeSessionId) })
+          }}>刷新状态</button>
+        </Notice> : null}
         {submit.isError ? (
-          <p className={styles.notice} role="alert">
+          <Notice key={activeSessionId} label="提交错误提示" scope={submit.error} role="alert">
             {submit.error instanceof ApiError && submit.error.code !== null && submit.error.code !== 'RECOVERY_REQUIRED'
               ? `${submit.error.message}${submit.error.hint === null ? '' : ` ${submit.error.hint}`}`
               : '这次提交的执行结果尚不能确认。请先刷新会话核对状态；若可能涉及工具副作用，不要直接重复执行。'}
-          </p>
+          </Notice>
         ) : null}
         {interrupted ? <div className={styles.notice} role="alert">
           本轮执行已中断，工具执行结果需要核对。刷新不会重跑工具。
@@ -619,108 +717,55 @@ export function LiveApp() {
             }}>结束中断任务</button>
           {endInterrupted.isError ? <p>未能结束本轮，请刷新状态后重新核对。</p> : null}
         </div> : null}
-        {modeError?.sessionId === activeSessionId ? <p className={styles.notice} role="alert">{modeError.message}</p> : null}
+        {modeError?.sessionId === activeSessionId ? <Notice label="模式错误提示" scope={`${activeSessionId}:${modeError.message}`} role="alert">{modeError.message}</Notice> : null}
         {createSession.isError ? (
-          <p className={styles.notice} role="alert">没能新建会话。请检查工作区状态后重试。</p>
+          <Notice label="新建会话错误提示" scope={createSession.error} role="alert">没能新建会话。请检查工作区状态后重试。</Notice>
         ) : null}
         {failedWithoutDetail ? (
-          <p className={styles.notice} role="alert">
+          <Notice label="执行失败提示" scope={`${activeSessionId}:${snapshot?.snapshot_id}`} role="alert">
             这轮在给出最终回答前就结束了。可能是本轮达到了调用上限，或模型调用失败；
             请查看本轮记录后再发起新请求。
-          </p>
+          </Notice>
         ) : null}
         {modelError === null ? null : (
-          <p className={styles.notice} role="alert">
+          <Notice label="模型错误提示" scope={`${activeSessionId}:${modelError}`} role="alert">
             {modelError}{' '}
             <button type="button" onClick={() => {
               void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(activeSessionId ?? '') })
               void queryClient.invalidateQueries({ queryKey: queryKeys.modelConnections })
               setModelError(null)
             }}>刷新状态</button>
-          </p>
+          </Notice>
         )}
         {tab === 'map' && activeSessionId !== null ? (
           <ConversationMapPanel key={activeSessionId} sessionId={activeSessionId} scenario={scenario}
+            errorActions={errorActions}
             snapshotId={snapshot?.snapshot_id ?? null} busy={running || awaitingApproval || submit.isPending}
             onContinue={(node, context) => {
               if (snapshot === null || useUiStore.getState().activeSessionId !== activeSessionId) return
               setFollowup({ sessionId: activeSessionId, turnId: node.id, question: node.question,
                 ordinal: node.ordinal, context, baseSnapshotId: snapshot.snapshot_id, branchId: snapshot.branch_id ?? 'main' })
               setFocusTurn(null)
-              setTab('conversation')
+              setMapChat({ sessionId: activeSessionId, turnId: node.id })
             }}
+            followupTurnId={mapChat?.sessionId === activeSessionId ? mapChat.turnId : null}
+            onCloseFollowup={() => { setMapChat(null); setFollowup(null) }}
+            followupContent={<><Conversation scenario={displayScenario} autoFollow onToggleTool={toggleTool} errorActions={errorActions} />
+              {snapshot?.workflow ? <WorkflowStatus view={mapWorkflow(snapshot.workflow)} /> : null}{composer}</>}
             onLocate={(turnId) => {
-              setFollowup(null); setFocusTurn({ sessionId: activeSessionId, turnId }); setTab('conversation')
+              setMapChat(null); setFollowup(null); setFocusTurn({ sessionId: activeSessionId, turnId }); setTab('conversation')
             }}
-            onBranchChanged={() => { setFollowup(null); setFocusTurn(null) }} />
+            onBranchChanged={() => { setMapChat(null); setFollowup(null); setFocusTurn(null) }} />
         ) : tab === 'trace' ? (
           <TraceView trace={trace} />
         ) : (
-          <Conversation scenario={selectedFollowup !== null && snapshot?.snapshot_id === selectedFollowup.baseSnapshotId ? {
-            ...scenario,
-            messages: mapMessages(selectedFollowup.context).map((message) => message.kind === 'tool' ?
-              { ...message, tool: { ...message.tool, expanded: expandedTools.has(message.id) } } : message),
-            activity: null, empty: null, loading: null, stats: null,
-            turnStats: mapTurnStats(selectedFollowup.context, mapMessages(selectedFollowup.context), false),
-          } : scenario} autoFollow onToggleTool={toggleTool}
+          <Conversation scenario={displayScenario} autoFollow onToggleTool={toggleTool} errorActions={errorActions}
             focusTurnId={focusTurn?.sessionId === activeSessionId ? focusTurn.turnId : null} />
         )}
         {tab === 'conversation' && snapshot?.workflow ? <WorkflowStatus view={mapWorkflow(snapshot.workflow)} /> : null}
-        {/* 地图留出详情空间；历史追问回到同一个输入框，审批时保留接管按钮。 */}
-        {tab !== 'map' || awaitingApproval ? <Composer
-          workflowControls={<WorkflowControls draft={workflowDraft}
-            disabled={activeSessionId === null || currentMode !== 'agent' || running || awaitingApproval || interrupted || submit.isPending || createSession.isPending || setSessionMode.isPending}
-            onChange={(value) => { if (activeSessionId !== null) setWorkflowDrafts((items) => ({ ...items, [activeSessionId]: value })) }} />}
-          mode={currentMode}
-          session={session ?? { title: '新会话', workspace: null, status: 'idle', modelLabel: '' }}
-          plan={scenario.plan}
-          meter={scenario.context}
-          takeover={scenario.takeover}
-          modelMenu={scenario.modelMenu}
-          modelMenuActions={modelMenu === null ? undefined : {
-            busy: selectSessionModel.isPending,
-            onSelect: changeModel,
-            onFollowDefault: () => changeModel(null),
-            onManage: () => {
-              setModelMenuOpen(false)
-              setSettingsOpen(true)
-            },
-          }}
-          state={scenario.composer}
-          // 审批按钮的真实接线：提交后 isPending 立即为真 → 两个按钮立刻锁定，
-          // 之后卡片内容完全由重取到的快照决定（后端结果是权威）。
-          approvalActions={{
-            busy: approvalDecision.isPending,
-            onApprove: (confirmRecursive) => decideApproval('approve', confirmRecursive),
-            onReject: () => decideApproval('reject'),
-          }}
-          actions={{
-            draft,
-            onDraftChange: (text) => {
-              if (activeSessionId !== null) setDraft(activeSessionId, text)
-            },
-            onSend: send,
-            onToggleModelMenu: () => {
-              setModelError(null)
-              setModelMenuOpen((open) => !open)
-            },
-            onToggleMeter: () => setMeterOpen((open) => !open),
-            onSelectMode: (mode) => {
-              if (activeSessionId === null || mode === currentMode || setSessionMode.isPending || running || awaitingApproval || interrupted || submit.isPending) return
-              setModeError(null)
-              const sessionId = activeSessionId
-              setSessionMode.mutate({ sessionId, mode, expectedMode: currentMode }, {
-                onError: (error) => setModeError({ sessionId, message: error instanceof ApiError
-                  ? error.message : '模式切换未保存，请检查连接后重试。' }),
-              })
-            },
-            modeDisabled: activeSessionId === null || running || awaitingApproval || interrupted || submit.isPending || setSessionMode.isPending,
-            // 任务进行中**允许继续写**，但不让发（T30 裁定）：草稿留在输入框里等这一轮结束。
-            canSend: activeSessionId !== null && draft.trim() !== '' && (currentMode === 'chat' || workflowDraftValid(workflowDraft)) && !running && !awaitingApproval && !interrupted && !submit.isPending && !createSession.isPending && !setSessionMode.isPending,
-          }}
-        /> : null}
+        {/* 地图抽屉复用当前会话的输入与审批；未打开抽屉时审批仍可操作。 */}
+        {tab !== 'map' || (awaitingApproval && mapChat?.sessionId !== activeSessionId) ? composer : null}
         </>}
-        {capabilitiesOpen ? <CapabilitiesSection onClose={() => setCapabilitiesOpen(false)} /> : null}
         {tasksOpen ? (
           <TasksSection
             workspaceId={workspaceId}

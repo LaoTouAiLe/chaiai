@@ -1,0 +1,219 @@
+/* 「技能」分区的样式（技能管理页，2026-10-16）。落在设置对话框内部，所以不画整页容器。 */
+
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-md);
+}
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--law-space-lg);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--law-text-lg);
+  line-height: var(--law-leading-md);
+  font-weight: var(--law-weight-semibold);
+  color: var(--law-text-primary);
+}
+
+.note {
+  margin: var(--law-space-xs) 0 0;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-md);
+  overflow-wrap: anywhere;
+}
+
+.error {
+  margin: 0;
+  padding: var(--law-space-sm) var(--law-space-md);
+  border: 1px solid var(--law-state-error-secondary);
+  border-radius: var(--law-radius-md);
+  background: var(--law-state-error-subtle);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  overflow-wrap: anywhere;
+}
+
+/* 总闸关着：整页仍可读，但必须明说"现在对模型完全不可见"——否则用户会以为列出来就是生效。 */
+.masterOff {
+  margin: 0;
+  padding: var(--law-space-sm) var(--law-space-md);
+  border: 1px solid var(--law-state-warn-secondary);
+  border-radius: var(--law-radius-md);
+  background: var(--law-state-warn-subtle);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-md);
+  overflow-wrap: anywhere;
+}
+
+.empty {
+  margin: 0;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-md);
+  overflow-wrap: anywhere;
+}
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-md);
+}
+
+.row {
+  padding: var(--law-space-md);
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-lg);
+  background: var(--law-bg-layer-1);
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xs);
+}
+
+.rowHead {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm);
+}
+
+.name {
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-sm);
+  color: var(--law-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.source {
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xs);
+}
+
+.chip {
+  padding: 0 var(--law-space-xs);
+  border-radius: var(--law-radius-xs);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+}
+
+.ok {
+  background: var(--law-state-success-subtle);
+  color: var(--law-state-success);
+}
+
+.off {
+  background: var(--law-surface-selector);
+  color: var(--law-text-secondary);
+}
+
+.description {
+  margin: 0;
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-md);
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  margin: 0;
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+  overflow-wrap: anywhere;
+}
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-xs);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+}
+
+/* 发现根（2026-10-20）：回答"在扫哪些目录、各自发现几个"。 */
+.roots {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xs);
+  padding: var(--law-space-md);
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-lg);
+  background: var(--law-bg-layer-1);
+}
+
+.rootsTitle {
+  margin: 0;
+  font-size: var(--law-text-sm);
+  font-weight: var(--law-weight-semibold);
+  color: var(--law-text-primary);
+}
+
+.rootList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xs);
+}
+
+.rootRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm);
+}
+
+.rootPath {
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-xs);
+  color: var(--law-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.rootAdd {
+  display: flex;
+  gap: var(--law-space-xs);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.rootAdd input {
+  flex: 1 1 260px;
+  min-width: 180px;
+  padding: var(--law-space-xs) var(--law-space-sm);
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-md);
+  background: var(--law-bg-canvas);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+}
+
+.diagnostics {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+}
+
+.diagnostics > summary {
+  cursor: pointer;
+  color: var(--law-text-tertiary);
+}
+
+.diagnostics ul {
+  margin: var(--law-space-xs) 0 0;
+  padding-left: var(--law-space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xxs);
+  overflow-wrap: anywhere;
+}

@@ -3,10 +3,12 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { getPreferences, savePreferences, testMemoryPreferences } from '../../api/client'
 import type { MemoryProbeDto, PreferencesDto, PreferenceValues } from '../../api/client'
 import { generalDefaults, preferencesKey } from './preferencesContext'
+import { OssCredentialField } from './OssCredentialField'
+import { WebSearchKeyField } from './WebSearchKeyField'
 import styles from './PreferenceSection.module.css'
 
-export type PreferenceGroup = 'general' | 'execution' | 'retrieval' | 'memory' | 'medium_term' | 'embedding' | 'advanced'
-type Field = { key: string; label: string; note: string; min?: number; max?: number; step?: number | 'any'; type?: 'text'; providers?: readonly string[]; required?: boolean; options?: readonly (readonly [string, string])[] }
+export type PreferenceGroup = 'general' | 'execution' | 'retrieval' | 'web_access' | 'attachments' | 'memory' | 'medium_term' | 'embedding' | 'advanced'
+type Field = { key: string; label: string; note: string; min?: number; max?: number; step?: number | 'any'; type?: 'text'; providers?: readonly string[]; required?: boolean; unlimited?: boolean; options?: readonly (readonly [string, string])[]; when?: readonly (readonly [string, string])[] }
 const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
   general: [
     { key: 'theme', label: '主题', note: '跟随系统会随系统外观切换。', options: [['light', '浅色'], ['dark', '深色'], ['system', '跟随系统']] },
@@ -16,10 +18,11 @@ const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'reasoning_expanded', label: '默认展开 Think', note: '仅展示模型实际返回的思考内容，每条消息仍可单独折叠。' },
   ],
   execution: [
-    { key: 'max_tool_loops', label: '每轮工具循环上限', note: '到达上限后停止继续调用工具。', min: 1 },
-    { key: 'max_retries_per_step', label: '每步重试上限', note: '允许为 0；不会取消人工审批。', min: 0 },
-    { key: 'shell_timeout_seconds', label: '命令超时（秒）', note: '限制单次命令执行时长。', min: 1 },
+    { key: 'max_tool_loops', label: '每轮工具循环上限', note: '留空表示不限，由模型决定继续或结束。', min: 1, unlimited: true },
+    { key: 'max_retries_per_step', label: '重复失败反馈阈值', note: '超过后反馈给模型，不强制停止或转交用户。', min: 0 },
+    { key: 'shell_timeout_seconds', label: '命令超时（秒）', note: '留空表示默认不限时；命令仍可取消或单独指定超时。', min: 1, unlimited: true },
     { key: 'shell_max_output_chars', label: '命令输出上限（字符）', note: '限制保留的命令输出长度。', min: 1 },
+    { key: 'safe_delete', label: '安全删除（移入回收站）', note: '删除文件时移进数据目录的 trash 子目录（冻结版默认是 %LOCALAPPDATA%\\chaiai\\trash），而不是立即抹掉，可以手动找回；移动失败会报错而不会退化成直接删除。只对文件工具生效，终端里的删除命令不受它管辖。' },
   ],
   retrieval: [
     { key: 'enabled', label: '启用任务前自动检索', note: '控制工具任务开始前的自动代码检索；不影响模型主动调用 grep / glob。' },
@@ -27,6 +30,28 @@ const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'max_results', label: '返回结果上限', note: '限制任务前自动检索返回给模型的结果条数。', min: 1 },
     { key: 'timeout_seconds', label: '检索超时（秒）', note: '限制任务前自动检索时长。', min: 1 },
     { key: 'context_lines', label: '上下文行数', note: '匹配结果附近保留的代码行数，允许为 0。', min: 0 },
+  ],
+  web_access: [
+    { key: 'provider', label: '检索方式', note: '自动：配了 Tavily 密钥就用 API，否则用网页版检索。显式指定后，失败不会静默换后端。', options: [['auto', '自动'], ['tavily', 'Tavily API'], ['bing_html', 'Bing 网页版'], ['duckduckgo_html', 'DuckDuckGo 网页版']] },
+    { key: 'max_results', label: '检索结果条数上限', note: '模型未指定条数时用它（1–20）。', min: 1, max: 20 },
+    { key: 'max_chars', label: '单次取回正文上限（字符）', note: '超过即截断，并在结果里说明；模型可按 start_char 续读（500–100000）。', min: 500, max: 100000 },
+    { key: 'max_search_calls', label: '每轮检索次数上限', note: '留空表示不限。', min: 1, unlimited: true },
+    { key: 'max_read_pages', label: '每轮读取地址数上限', note: '留空表示不限。', min: 1, unlimited: true },
+    { key: 'max_reads_per_page', label: '单页面读取次数上限', note: '留空表示不限。', min: 1, unlimited: true },
+    { key: 'timeout_seconds', label: '单次请求超时（秒）', note: '超时按失败如实报告，不重试（1–120）。', min: 1, max: 120 },
+    { key: 'domain_policy', label: '域名策略', note: '默认放行：除黑名单外都允许（主流做法）。仅白名单：只允许白名单里的域名及其子域。两档都不放松本机与内网拦截。', options: [['allow', '默认放行'], ['allowlist', '仅白名单']] },
+    { key: 'denied_domains', label: '拒绝的域名', note: '只写主机名（如 example.com），多个用逗号或空格分隔；含其子域。', type: 'text' },
+    { key: 'allowed_domains', label: '仅白名单时允许的域名', note: '只写主机名，多个用逗号或空格分隔；仅在"仅白名单"档生效。', type: 'text' },
+  ],
+  attachments: [
+    { key: 'image_context_turns', label: '图片上下文轮数', note: '发给模型的图片覆盖最近几轮（含当前轮，1–10）。1 = 只发当前轮的图，下一轮就换成文字占位；值越大，历史图重发得越多（每张图固定按 1024 token 计）。', min: 1, max: 10 },
+    { key: 'backend', label: '图片存储位置', note: '本机：图片留在本机，发送时把内容编码进请求；对象存储：图片上传到 S3 兼容存储，请求里只发公开链接（需要桶允许公开读）。', options: [['local', '本机文件'], ['oss', '对象存储（S3 兼容）']] },
+    { key: 'oss_endpoint', label: '对象存储端点', note: 'S3 兼容端点，例如 https://oss-cn-hangzhou.aliyuncs.com；本机 MinIO 可用 http://127.0.0.1:9000。', type: 'text', when: [['backend', 'oss']] },
+    { key: 'oss_region', label: '区域', note: '多数 S3 兼容存储填 auto 即可；云厂商要求具体区域时按文档填。', type: 'text', when: [['backend', 'oss']] },
+    { key: 'oss_bucket', label: '桶名', note: '存图片的桶；需要允许公开读（模型与页面都直接取链接）。', type: 'text', when: [['backend', 'oss']] },
+    { key: 'oss_public_base_url', label: '公开访问前缀', note: '必须是 https 地址，例如 https://cdn.example.com；最终图片链接 = 前缀 + 对象键。', type: 'text', when: [['backend', 'oss']] },
+    { key: 'oss_key_prefix', label: '对象键前缀', note: '默认 chaiai/，便于与同桶其它数据分开。', type: 'text', when: [['backend', 'oss']] },
+    { key: 'oss_path_style', label: '使用 path-style 地址', note: 'MinIO/自建通常要开；云厂商默认关。', when: [['backend', 'oss']] },
   ],
   memory: [
     { key: 'enabled', label: '启用长期记忆', note: '控制长期记忆的读取与保存；关闭不会删除已有记录。' },
@@ -52,7 +77,7 @@ const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'allow_plaintext_http', label: '允许非本机端点明文 HTTP', note: '只在你确认可信网络中的明文传输风险时勾选；HTTPS 与本机回环 HTTP 无需勾选。', providers: ['openai_compatible'] },
   ],
 }
-const TITLES: Record<PreferenceGroup, string> = { general: '通用与外观', execution: '任务执行', retrieval: '任务前自动代码检索', memory: '长期记忆', medium_term: '中期记忆', embedding: '向量库与 Embedding', advanced: '高级配置概览' }
+const TITLES: Record<PreferenceGroup, string> = { general: '通用与外观', execution: '任务执行', retrieval: '任务前自动代码检索', web_access: '联网检索', attachments: '图片与附件', memory: '长期记忆', medium_term: '中期记忆', embedding: '向量库与 Embedding', advanced: '高级配置概览' }
 const ADVANCED: Record<string, string> = {
   compression_enabled: '启用压缩', compression_trigger_ratio: '压缩触发比例',
   preserve_recent_turns: '保留最近轮数', preserve_recent_tool_steps: '保留最近工具步数',
@@ -80,7 +105,10 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
   const view = query.data
   if (!view) return <div role="status">{query.isError ? '设置读取失败。' : '正在读取设置…'} <button onClick={() => void query.refetch()}>重新读取</button></div>
   if (group === 'advanced') return <section className={styles.section}>
-    <h3>{TITLES[group]}</h3><p className={styles.note}>只读 · 当前进程启动时加载的配置。压缩与历史规则需要单独验证，暂不开放页面修改。</p>
+    <header className={styles.head}>
+      <h3 className={styles.title}>{TITLES[group]}</h3>
+      <p className={styles.note}>只读 · 当前进程启动时加载的配置。压缩与历史规则需要单独验证，暂不开放页面修改。</p>
+    </header>
     <dl className={styles.overview}>{Object.entries(view.advanced).map(([key, value]) => <div key={key}><dt>{ADVANCED[key] ?? key}</dt><dd>{typeof value === 'boolean' ? (value ? '开启' : '关闭') : value}</dd></div>)}</dl>
   </section>
   const fields = draft?.fields ?? fieldsFor(view, group)
@@ -102,7 +130,16 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
     const base = draft?.base ?? view
     const original = base.values[group] ?? generalDefaults
     const numericKeys = new Set(Object.entries(original).filter(([, value]) => typeof value === 'number').map(([key]) => key))
-    const replacement = Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, numericKeys.has(key) ? Number(value) : value]))
+    // 域名清单是**数组**：输入框里是"a.com, b.com"，提交前拆回数组——否则会以字符串发出去，
+    // 被服务端按形状拒掉（422），用户看到的是"保存失败"却不知道自己哪里填错了。
+    const listKeys = new Set(Object.entries(original).filter(([, value]) => Array.isArray(value)).map(([key]) => key))
+    const replacement = Object.fromEntries(Object.entries(fields).map(([key, value]) => [
+      key,
+      FIELDS[group].some(field => field.key === key && field.unlimited) ? (value === '' || value === null ? null : Number(value))
+        : numericKeys.has(key) ? Number(value)
+        : listKeys.has(key) ? String(value).split(/[\s,，;；]+/).filter(Boolean)
+          : value,
+    ]))
     return { ...base.values, [group]: replacement }
   }
   const save = async () => {
@@ -138,10 +175,12 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
     if ((event.nativeEvent as SubmitEvent).submitter?.getAttribute('data-action') === 'test') void test()
     else void save()
   }}>
-    <h3>{TITLES[group]}</h3>
-    <p className={styles.note}>{group === 'general' ? '保存后立即生效；恢复初始值使用应用默认外观。' : group === 'embedding' ? '普通模型参数保存后从下一次新任务生效；更换本地缓存目录可能需要重启后端，准备状态会说明。正在执行或等待审批的任务保留原值。初值来自加载的 config.yaml。' : '保存后从下一次新任务生效；正在执行或等待审批的任务保留原值。初值来自加载的 config.yaml。'} 设置写入本地设置库。</p>
+    <header className={styles.head}>
+      <h3 className={styles.title}>{TITLES[group]}</h3>
+      <p className={styles.note}>{group === 'general' ? '保存后立即生效；恢复初始值使用应用默认外观。' : group === 'embedding' ? '普通模型参数保存后从下一次新任务生效；更换本地缓存目录可能需要重启后端，准备状态会说明。正在执行或等待审批的任务保留原值。初值来自加载的 config.yaml。' : '保存后从下一次新任务生效；正在执行或等待审批的任务保留原值。初值来自加载的 config.yaml。'} 设置写入本地设置库。</p>
+    </header>
     {(group === 'embedding' || group === 'medium_term') && resources?.restart_required ? <p role="alert" className={styles.error}>新缓存目录需重启后端生效。配置已保留，请重启后测试，再开始使用中期记忆的新任务。</p> : null}
-    {group === 'retrieval' || group === 'memory' || group === 'medium_term' || group === 'embedding' ? <p className={styles.note}>修改这些参数会改变模型收到的内容，可能影响回答质量与缓存命中率。</p> : null}
+    {group === 'retrieval' || group === 'web_access' || group === 'memory' || group === 'medium_term' || group === 'embedding' ? <p className={styles.note}>修改这些参数会改变模型收到的内容，可能影响回答质量与缓存命中率。</p> : null}
     {group === 'embedding' && resources ? <>
       <dl className={styles.overview} aria-label="向量库信息">
         <div><dt>向量库</dt><dd>{resources.backend}</dd></div>
@@ -155,26 +194,41 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
     </> : null}
     {!view.writable ? <p role="alert">设置库不可用，当前只读。</p> : null}
     <fieldset disabled={busy || !view.writable} className={styles.fields}>
-      {FIELDS[group].filter(field => !field.providers || field.providers.includes(String(fields.provider))).map(field => <label key={field.key} className={styles.field}>
-        <span><strong>{field.label}</strong><small>{field.note}</small></span>
-        {field.options ? <select aria-label={field.label} value={String(fields[field.key])} onChange={event => change(field.key, event.target.value)}>
-          {field.options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
-        </select> : typeof fields[field.key] === 'boolean' ? <input type="checkbox" aria-label={field.label} checked={Boolean(fields[field.key])} onChange={event => change(field.key, event.target.checked)} /> : field.type === 'text' ?
-          <input type="text" required={field.required && Boolean(fields.enabled)} aria-label={field.label} value={String(fields[field.key] ?? '')} onChange={event => change(field.key, event.target.value)} /> :
-          <input type="number" required aria-label={field.label} min={field.min} max={field.max} step={field.step ?? 1} value={String(fields[field.key])} onChange={event => change(field.key, event.target.value)} />}
+      {FIELDS[group].filter(field => (!field.providers || field.providers.includes(String(fields.provider))) && (!field.when || field.when.some(([key, value]) => String(fields[key]) === value))).map(field => <label key={field.key} className={styles.field}>
+        <span className={styles.fieldText}>
+          <strong>{field.label}</strong>
+          <small>{field.note}</small>
+        </span>
+        <span className={`${styles.control} ${field.type === 'text' ? styles.controlWide : ''}`}>
+          {field.options ? <select aria-label={field.label} value={String(fields[field.key])} onChange={event => change(field.key, event.target.value)}>
+            {field.options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+          </select> : typeof fields[field.key] === 'boolean' ? <span className={styles.switch}>
+            <input type="checkbox" aria-label={field.label} checked={Boolean(fields[field.key])} onChange={event => change(field.key, event.target.checked)} />
+            <span className={styles.switchTrack} aria-hidden="true" />
+          </span> : field.type === 'text' ?
+            <input type="text" required={field.required && Boolean(fields.enabled)} aria-label={field.label} value={String(fields[field.key] ?? '')} onChange={event => change(field.key, event.target.value)} /> :
+            <input type="number" required={!field.unlimited} aria-label={field.label} placeholder={field.unlimited ? '不限' : undefined} min={field.min} max={field.max} step={field.step ?? 1} value={String(fields[field.key] ?? '')} onChange={event => change(field.key, event.target.value)} />}
+        </span>
       </label>)}
     </fieldset>
-    {error ? <p role="alert" className={styles.error}>{error} <button type="button" disabled={busy} onClick={() => { void query.refetch().then(result => { if (!result.isError) { setDraft(null); setError(null); setProbe(null) } }) }}>重新读取并放弃草稿</button></p> : null}
-    {saved ? <p role="status" className={styles.saved}>{group === 'general' ? '已保存并生效' : (group === 'embedding' || group === 'medium_term') && resources?.restart_required ? '已保存，新缓存目录需重启后端生效' : '已保存，下一次新任务生效'}</p> : null}
-    {probe && probe.version === (draft?.base.version ?? view.version) ? <p role="status" className={probe.result.state === 'passed' ? styles.saved : styles.error}>
-      {probe.result.state === 'passed' ? '测试通过。' : '测试未通过。'}{probe.result.detail}{probe.result.dimension ? ` 向量维度：${probe.result.dimension}。` : ''}
-    </p> : null}
+    {/* 密钥不在偏好里（偏好会随 Checkpoint 走）：它有自己的接口，单独一块。 */}
+    {group === 'web_access' ? <WebSearchKeyField /> : null}
+    {group === 'attachments' ? <OssCredentialField /> : null}
     {group === 'embedding' ? <p className={styles.note}>测试使用当前分区草稿及其他分区的已保存值，不保存草稿、不写入记忆。本地模型可能下载权重；远端接口会发送一条固定测试文本并可能产生少量费用。</p> : null}
-    <div className={styles.actions}>
-      <button type="submit" className={styles.primary} disabled={!draft || busy || !view.writable}>{operation === 'save' ? '正在保存…' : '保存'}</button>
-      <button type="button" disabled={!draft || busy} onClick={() => { setDraft(null); setError(null); setSaved(false); setProbe(null) }}>取消修改</button>
-      <button type="button" disabled={busy || !view.writable} onClick={() => { setDraft({ base: view, fields: fieldsFor(view, group, true) }); setError(null); setSaved(false); setProbe(null) }}>恢复初始值</button>
-      {group === 'embedding' ? <button type="submit" data-action="test" disabled={busy || !view.writable}>{operation === 'test' ? '正在测试…' : '测试当前配置'}</button> : null}
+    <div className={styles.actionBar}>
+      <div className={styles.feedback}>
+        {error ? <p role="alert" className={styles.error}>{error} <button type="button" disabled={busy} onClick={() => { void query.refetch().then(result => { if (!result.isError) { setDraft(null); setError(null); setProbe(null) } }) }}>重新读取并放弃草稿</button></p> : null}
+        {saved ? <p role="status" className={styles.saved}>{group === 'general' ? '已保存并生效' : (group === 'embedding' || group === 'medium_term') && resources?.restart_required ? '已保存，新缓存目录需重启后端生效' : '已保存，下一次新任务生效'}</p> : null}
+        {probe && probe.version === (draft?.base.version ?? view.version) ? <p role="status" className={probe.result.state === 'passed' ? styles.saved : styles.error}>
+          {probe.result.state === 'passed' ? '测试通过。' : '测试未通过。'}{probe.result.detail}{probe.result.dimension ? ` 向量维度：${probe.result.dimension}。` : ''}
+        </p> : null}
+      </div>
+      <div className={styles.actions}>
+        <button type="submit" className={styles.primary} disabled={!draft || busy || !view.writable}>{operation === 'save' ? '正在保存…' : '保存'}</button>
+        <button type="button" disabled={!draft || busy} onClick={() => { setDraft(null); setError(null); setSaved(false); setProbe(null) }}>取消修改</button>
+        <button type="button" disabled={busy || !view.writable} onClick={() => { setDraft({ base: view, fields: fieldsFor(view, group, true) }); setError(null); setSaved(false); setProbe(null) }}>恢复初始值</button>
+        {group === 'embedding' ? <button type="submit" data-action="test" disabled={busy || !view.writable}>{operation === 'test' ? '正在测试…' : '测试当前配置'}</button> : null}
+      </div>
     </div>
   </form>
 }

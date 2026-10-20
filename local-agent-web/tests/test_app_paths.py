@@ -68,6 +68,26 @@ def test_frozen_without_a_bundled_frontend_returns_none(
     assert app_paths.bundled_static_dir() is None
 
 
+def test_bundled_binary_prefers_the_package_copy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """随包的外部可执行文件（如 rg.exe）在 ``_internal/bin``；源码形态一律返回 None。"""
+    resources = tmp_path / "bundle"
+    (resources / "bin").mkdir(parents=True)
+    rg = resources / "bin" / "rg.exe"
+    rg.write_bytes(b"MZ")
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(resources), raising=False)
+
+    assert app_paths.bundled_binary("rg") == rg
+    assert app_paths.bundled_binary("rg.exe") == rg
+    assert app_paths.bundled_binary("missing") is None
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    assert app_paths.bundled_binary("rg") is None
+
+
 def test_frozen_without_local_appdata_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
     """异常环境（非 Windows、环境变量被裁剪）：回落相对默认值，**不凭空造**写不进去的目录。"""
     monkeypatch.setattr(sys, "frozen", True, raising=False)
@@ -91,3 +111,20 @@ def test_entry_point_writes_everything_into_the_data_dir_when_frozen(
     data_dir = tmp_path / "chaiai"
     assert (data_dir / "data" / "checkpoints.sqlite").is_file()
     assert (data_dir / "data" / "model_settings.sqlite").is_file()
+
+def test_frozen_mode_finds_the_bundled_skills(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """技能目录与 ``chaiai.exe`` 同级（2026-10-20）。
+
+    冻结形态的配置在数据目录，那里没有 config.yaml、也没有 skills；不把包内这份认出来，
+    界面上就永远"识别不到技能"（包里的目录存在，只是没有任何发现根指向它）。
+    """
+    exe_dir = tmp_path / "chaiai"
+    skills = exe_dir / "skills"
+    skills.mkdir(parents=True)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "chaiai.exe"), raising=False)
+
+    assert app_paths.bundled_skills_dir() == skills
+
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    assert app_paths.bundled_skills_dir() is None, "源码形态不引入第二套路径"

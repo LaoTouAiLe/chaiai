@@ -7,8 +7,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from local_agent.config import AppConfig, EmbeddingConfig
+from local_agent.config import (
+    AppConfig,
+    EmbeddingConfig,
+    WebAccessProvider,
+    clean_domain_list,
+)
 from local_agent.exceptions import ConnectionValidationError
+from local_agent.message_flags import DEFAULT_IMAGE_CONTEXT_TURNS
 from local_agent.model_settings.models import _validate_base_url, transport_of
 
 
@@ -25,10 +31,13 @@ class GeneralPreferences(_Preference):
 
 
 class ExecutionPreferences(_Preference):
-    max_tool_loops: int = Field(gt=0)
+    max_tool_loops: int | None = Field(default=None, gt=0)
     max_retries_per_step: int = Field(ge=0)
-    shell_timeout_seconds: int = Field(gt=0)
+    shell_timeout_seconds: int | None = Field(default=None, gt=0)
     shell_max_output_chars: int = Field(gt=0)
+    #: **安全删除**（2026-10-20）：`delete_file` 把目标移进回收站而不是直接抹掉。
+    #: 只管文件工具；`run_shell` 里的删除命令不受它管辖（那条路径无法可靠拦截）。
+    safe_delete: bool = True
 
 
 class RetrievalPreferences(_Preference):
@@ -72,6 +81,83 @@ class EmbeddingPreferences(EmbeddingConfig):
         return EmbeddingConfig.model_validate(self.model_dump(exclude={"allow_plaintext_http"}))
 
 
+class WebAccessPreferences(_Preference):
+    """联网检索的运行期偏好（"设置 → 联网检索"页签）。
+
+    只放**能安全回灌**的字段：``enabled`` 不在这里——它是**能力开关**的地盘（2026-10-14 起
+    `web` 是锁定能力，运行期由 `apply_capability_gates` 回灌，见 ``WebAccessConfig`` 的说明）；
+    ``tavily_api_key_env`` 与 ``user_agent`` 也不在这里：前者是旧配置的密钥**变量名**（密钥本身走
+    凭据存储，见 ``model_settings.web_search``），后者不是用户要调的旋钮。
+
+    上下界与 ``WebAccessConfig`` **逐项一致**：偏好值经 ``model_copy(update=...)`` 落到运行期配置，
+    那条路径不做二次校验，所以写在模型上的约束就是最后一道。
+    """
+
+    provider: WebAccessProvider = "auto"
+    max_results: int = Field(default=5, ge=1, le=20)
+    max_chars: int = Field(default=8_000, ge=500, le=100_000)
+    max_search_calls: int | None = Field(default=None, ge=1)
+    max_read_pages: int | None = Field(default=None, ge=1)
+    max_reads_per_page: int | None = Field(default=None, ge=1)
+    timeout_seconds: int = Field(default=15, gt=0, le=120)
+    domain_policy: Literal["allow", "allowlist"] = "allow"
+    denied_domains: tuple[str, ...] = ()
+    allowed_domains: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _clean_domains(self) -> WebAccessPreferences:
+        """与 ``WebAccessConfig`` 共用 :func:`clean_domain_list`：库里存的就是策略要比对的形式。"""
+        self.denied_domains = clean_domain_list(self.denied_domains, "denied_domains")
+        self.allowed_domains = clean_domain_list(self.allowed_domains, "allowed_domains")
+        return self
+
+
+class AttachmentsPreferences(_Preference):
+    """图片附件偏好（2026-10-20）。
+
+    - ``image_context_turns``：出站请求保留图片的**最近轮数**（含当前轮，1~10）。
+      1 = 只发当前轮的图，下一轮就换占位；值越大，历史图重发得越多（每图固定 1024 token）。
+    - ``backend``：``local``（本机文件，默认）或 ``oss``（S3 兼容对象存储，公开读）。
+    - ``oss_*``：选 ``oss`` 时必填端点、桶名与公开前缀。**密钥不在这里**——它走凭据存储
+      （`model_settings.attachments_oss`），偏好会随 Checkpoint 走，不能放密钥。
+    """
+
+    backend: Literal["local", "oss"] = "local"
+    image_context_turns: int = Field(default=DEFAULT_IMAGE_CONTEXT_TURNS, ge=1, le=10)
+    oss_endpoint: str = ""
+    oss_region: str = "auto"
+    oss_bucket: str = ""
+    oss_public_base_url: str = ""
+    oss_key_prefix: str = "chaiai/"
+    oss_path_style: bool = True
+
+    @model_validator(mode="after")
+    def _require_oss_settings(self) -> AttachmentsPreferences:
+        """选 ``oss`` 就把必填项一次性说清：不要出现"保存成功但发图才报错"。"""
+        if self.backend != "oss":
+            return self
+        missing = [
+            label
+            for label, value in (
+                ("端点", self.oss_endpoint),
+                ("桶名", self.oss_bucket),
+                ("公开访问前缀", self.oss_public_base_url),
+            )
+            if not str(value).strip()
+        ]
+        if missing:
+            raise ValueError(f"选择对象存储后，这些配置不能为空：{'、'.join(missing)}")
+        endpoint = self.oss_endpoint.strip().lower()
+        public = self.oss_public_base_url.strip().lower()
+        if not public.startswith("https://"):
+            raise ValueError("公开访问前缀必须是 https:// 地址（模型要从公网拉图）")
+        if not endpoint.startswith("https://") and not endpoint.startswith(
+            ("http://127.0.0.1", "http://localhost")
+        ):
+            raise ValueError("对象存储端点必须是 https://（本机调试可用 http://127.0.0.1）")
+        return self
+
+
 class RuntimePreferences(_Preference):
     execution: ExecutionPreferences
     retrieval: RetrievalPreferences
@@ -79,6 +165,8 @@ class RuntimePreferences(_Preference):
     # Missing fields in old settings/checkpoints keep the startup configuration.
     medium_term: MediumTermPreferences | None = None
     embedding: EmbeddingPreferences | None = None
+    web_access: WebAccessPreferences | None = None
+    attachments: AttachmentsPreferences | None = None
 
 
 class PreferenceValues(RuntimePreferences):
@@ -141,6 +229,7 @@ def initial_preferences(config: AppConfig) -> PreferenceValues:
             max_retries_per_step=config.agent.max_retries_per_step,
             shell_timeout_seconds=config.security.shell.default_timeout_seconds,
             shell_max_output_chars=config.security.shell.max_output_chars,
+            safe_delete=config.security.safe_delete,
         ),
         retrieval=RetrievalPreferences(**config.rag.model_dump(include={
             "enabled", "max_files", "max_results", "timeout_seconds", "context_lines",
@@ -160,6 +249,14 @@ def initial_preferences(config: AppConfig) -> PreferenceValues:
                 transport_of(config.embedding.base_url) == "plaintext-http"
             ),
         ),
+        web_access=WebAccessPreferences(
+            **config.web_access.model_dump(include={
+                "provider", "max_results", "max_chars", "max_search_calls", "max_read_pages",
+                "max_reads_per_page", "timeout_seconds", "domain_policy",
+                "denied_domains", "allowed_domains",
+            }),
+        ),
+        attachments=AttachmentsPreferences(),
     )
 
 
@@ -168,6 +265,8 @@ def complete_preferences(values: PreferenceValues, config: AppConfig) -> Prefere
     return values.model_copy(update={
         "medium_term": values.medium_term or defaults.medium_term,
         "embedding": values.embedding or defaults.embedding,
+        "web_access": values.web_access or defaults.web_access,
+        "attachments": values.attachments or defaults.attachments,
     })
 
 
@@ -190,12 +289,21 @@ def apply_runtime_preferences(config: AppConfig, values: RuntimePreferences) -> 
             "max_tool_loops": execution.max_tool_loops,
             "max_retries_per_step": execution.max_retries_per_step,
         }),
-        "security": config.security.model_copy(update={"shell": shell}),
+        "security": config.security.model_copy(update={
+            "shell": shell,
+            # 安全删除（2026-10-20）：保存后从下一次新任务生效（正在跑的那一轮保留当时的策略）。
+            "safe_delete": execution.safe_delete,
+        }),
         "rag": config.rag.model_copy(update=values.retrieval.model_dump()),
         "memory": config.memory.model_copy(update={
             "medium_term": medium,
             "long_term": config.memory.long_term.model_copy(update=values.memory.model_dump()),
         }),
+        # 联网检索：只覆盖设置页管的那几项，``enabled`` / ``tavily_api_key_env`` / ``user_agent``
+        # 仍取启动配置——``enabled`` 随后由能力开关回灌（``apply_capability_gates``）。
+        "web_access": config.web_access if values.web_access is None else (
+            config.web_access.model_copy(update=values.web_access.model_dump())
+        ),
     })
 
 

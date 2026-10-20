@@ -19,7 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final, Literal, cast
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi.responses import RedirectResponse
 
 from local_agent import directory_picker
 from local_agent import workspaces as workspaces_module
@@ -28,15 +29,19 @@ from local_agent.api.schemas import (
     PATH_MAX_CHARS,
     ApprovalDecisionRequest,
     ArrangeBranchRequest,
+    AttachmentUploadRequest,
     CancelTaskRequest,
+    CapabilitiesRequest,
     CreateSessionRequest,
     ErrorResponse,
     ExternalPathGrantRequest,
     HealthView,
     ModelConnectionRequest,
+    OssCredentialRequest,
+    OssCredentialView,
+    OssTestResult,
     PermissionsModeRequest,
     PickDirectoryView,
-    ProfileRequest,
     RecoveryRequest,
     RenameRequest,
     SelectDefaultConnectionRequest,
@@ -44,13 +49,17 @@ from local_agent.api.schemas import (
     SelectSessionModelRequest,
     SelectWorkspaceRequest,
     SessionModeRequest,
+    SkillRootRequest,
+    SkillToggleRequest,
     SubmitMessageRequest,
+    WebSearchKeyRequest,
 )
 from local_agent.api.security import is_allowed_origin
 from local_agent.application import errors as app_errors
 from local_agent.application.data_center_models import MemoryPageView, UsagePageView
 from local_agent.application.models import (
     SCHEMA_VERSION,
+    AttachmentView,
     CapabilitiesView,
     CommandResultView,
     ConversationMapView,
@@ -58,10 +67,12 @@ from local_agent.application.models import (
     PermissionsView,
     SessionSnapshot,
     SessionSummaryView,
+    SkillsView,
     TaskCenterView,
+    WebSearchKeyView,
     WorkspaceRef,
 )
-from local_agent.exceptions import SessionStoreError
+from local_agent.exceptions import AttachmentError, SessionStoreError
 from local_agent.model_settings import ConnectionDraft, SelectionRef
 from local_agent.model_settings.preferences import (
     MemoryProbeRequest,
@@ -119,9 +130,20 @@ _PERMISSION_WRITE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
     422: {"model": ErrorResponse, "description": "目录路径或档位没有通过校验"},
     503: {"model": ErrorResponse, "description": "没有可用的设置库，改动存不下来"},
 }
-#: 档位写接口（§16.6 档位切换）：与权限写同一口径——未知档位 422，没有设置库 503。
-_PROFILE_WRITE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
-    422: {"model": ErrorResponse, "description": "档位名不在可选集里"},
+#: 能力开关写接口（§16.1）：与权限写同一口径——未登记的能力名 422，没有设置库 503。
+_CAPABILITY_WRITE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
+    422: {"model": ErrorResponse, "description": "能力名不在闭集里"},
+    503: {"model": ErrorResponse, "description": "没有可用的设置库，改动存不下来"},
+}
+#: 联网检索凭据写接口：空白/超长密钥 422，没有凭据存储 503（不能复用权限那两条文案——
+#: 那里说的是"目录路径或档位"，照着显示会把用户引到错误的字段上）。
+_WEB_CREDENTIAL_WRITE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
+    422: {"model": ErrorResponse, "description": "密钥为空白或超出长度上限"},
+    503: {"model": ErrorResponse, "description": "没有可用的凭据存储，密钥存不下来"},
+}
+#: 技能写接口（技能管理页，2026-10-16）：名字不是当前发现的技能 422，没有设置库 503。
+_SKILL_WRITE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
+    422: {"model": ErrorResponse, "description": "没有发现这个技能（理由里列出当前可用的名字）"},
     503: {"model": ErrorResponse, "description": "没有可用的设置库，改动存不下来"},
 }
 
@@ -192,6 +214,8 @@ def _connection_draft(
         timeout_seconds=payload.timeout_seconds,
         retry_count=payload.retry_count,
         streaming=payload.streaming,
+        # 2026-10-16：逐连接声明"支持图片输入"（默认关了；勾错会让带图的请求每轮失败）。
+        supports_vision=payload.supports_vision,
         auth_mode=payload.auth_mode,
         allow_plaintext_http=payload.allow_plaintext_http,
     )
@@ -221,6 +245,67 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
             raise HTTPException(status_code=422, detail="开始时间必须早于结束时间")
         return service.get_usage_page(workspace_id=workspace_id, model=model, since=since,
                                       until=until, offset=offset, limit=limit)
+
+    @router.post("/sessions/{session_id}/attachments", response_model=AttachmentView,
+                 summary="上传一张图片（base64）", responses=_NOT_FOUND)
+    def upload_attachment(session_id: str, payload: AttachmentUploadRequest) -> AttachmentView:
+        """存一张用户上传的图片，返回**引用**。
+
+        **媒体类型由服务端按魔数判定**：客户端不声明、也不被信任（`报告.png` 完全可能是 HTML）。
+        单图有字节上限（超限拒绝而不是截断）；数量不设配额。格式不支持、超限或 base64 不合法时
+        返回 422，并说明怎么改。
+        """
+        try:
+            saved = service.save_attachment(session_id, payload.data_base64)
+        except AttachmentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return AttachmentView(**saved)
+
+    @router.get("/sessions/{session_id}/attachments", summary="取回一张已上传的图片",
+                responses=_NOT_FOUND)
+    def read_attachment(
+        session_id: str, attachment_id: str = Query(min_length=1, max_length=300)
+    ) -> Response:
+        """把图片字节原样返回（页面用它显示缩略图）。
+
+        引用是**相对路径**（含斜杠），所以走查询参数而不是路径参数——路径参数里的 `/` 会被当成
+        路由分隔符，`%2F` 也不保证被还原。
+        """
+        try:
+            result = service.read_attachment(session_id, attachment_id)
+        except AttachmentError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if isinstance(result, str):
+            # 对象存储引用：公开地址直接 302，服务端不代理字节（2026-10-20）。
+            return RedirectResponse(result, status_code=302)
+        data, media_type = result
+        return Response(content=data, media_type=media_type)
+
+    # ---- 对象存储凭据（2026-10-20）--------------------------------------------
+    # 与模型连接同一套口径：只报"有没有"，不回读；密钥只进设置库或进程内存。
+
+    @router.get("/attachments/oss/credential", response_model=OssCredentialView,
+                summary="对象存储密钥状态")
+    def get_oss_credential() -> OssCredentialView:
+        return OssCredentialView(**service.oss_credential_view())
+
+    @router.put("/attachments/oss/credential", response_model=OssCredentialView,
+                summary="保存对象存储密钥", responses={
+                    422: {"model": ErrorResponse, "description": "密钥不合法"},
+                    503: {"model": ErrorResponse, "description": "设置库不可用"},
+                })
+    def put_oss_credential(payload: OssCredentialRequest) -> OssCredentialView:
+        return OssCredentialView(**service.save_oss_credentials(payload.access_key, payload.secret_key))
+
+    @router.delete("/attachments/oss/credential", response_model=OssCredentialView,
+                   summary="删除对象存储密钥")
+    def delete_oss_credential() -> OssCredentialView:
+        return OssCredentialView(**service.clear_oss_credentials())
+
+    @router.post("/attachments/oss/test", response_model=OssTestResult,
+                 summary="测试对象存储（上传一张 1×1 测试图并检查公开读）")
+    def test_oss() -> OssTestResult:
+        return OssTestResult(**service.test_oss_upload())
 
     @router.get("/health", response_model=HealthView, summary="健康检查")
     def health() -> HealthView:
@@ -376,6 +461,8 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         """同步跑完这一轮，返回**稳定的命令结果引用**：结局不依赖 SSE（§15.3）。"""
         return service.submit_message(session_id, payload.text, payload.client_request_id,
                                       workflow=payload.workflow,
+                                      # 随消息交给模型的图片引用（2026-10-16）：默认空 ⇒ 不带图的老路径不变。
+                                      attachments=payload.attachments,
                                       parent_turn_id=payload.parent_turn_id,
                                       expected_branch_id=payload.expected_branch_id,
                                       expected_snapshot_id=payload.expected_snapshot_id)
@@ -524,30 +611,78 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         )
         return service.get_session_snapshot(session_id)
 
-    # ---- 能力状态（T56；§16.6）--------------------------------------------------
+    # ---- 能力开关（T56；§16.1、§16.6）------------------------------------------
 
-    @router.get("/capabilities", response_model=CapabilitiesView, summary="当前档位与能力状态")
+    @router.get("/capabilities", response_model=CapabilitiesView, summary="能力开关与能力状态")
     def capabilities() -> CapabilitiesView:
-        """当前 Profile 与每个能力的可用性、原因与下一步。
+        """能力开关表与每个能力的可用性、原因与下一步。
 
         **只讲能力不讲工具**（§16.6）：用户要判断的是"现在能不能联网、能不能提交"。答案每次现算，
-        因此改完配置、切完档位或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。
+        因此打开开关或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。
         """
         return service.capabilities_view()
 
     @router.put(
-        "/capabilities/profile",
+        "/capabilities",
         response_model=CapabilitiesView,
-        responses=_PROFILE_WRITE_RESPONSES,
-        summary="切换 Agent 档位",
+        responses=_CAPABILITY_WRITE_RESPONSES,
+        summary="改能力开关",
     )
-    def set_profile(payload: ProfileRequest) -> CapabilitiesView:
-        """保存当前档位：**保存即生效、作用于下一轮**（§16.6 档位切换）。
+    def set_capabilities(payload: CapabilitiesRequest) -> CapabilitiesView:
+        """打开/关闭能力开关：**保存即生效、作用于下一轮**（§16.1、§16.6）。
 
-        改完**不用重启**——运行上下文每次装配时现取档位。响应是保存后的完整视图（页面直接换上它，
-        不必再发一次读请求）。
+        改完**不用重启**——运行上下文每次装配时现取开关表，`config.yaml` 只是出厂默认。请求只带
+        **这次动过的那几项**；响应是保存后的完整视图（页面直接换上它，不必再发一次读请求）。
         """
-        return service.set_active_profile(payload.profile)
+        return service.set_capabilities(payload.changes)
+
+    # ---- 技能管理（技能管理页，2026-10-16；§16.5）------------------------------
+
+    @router.get("/skills", response_model=SkillsView, summary="技能清单与启用状态")
+    def skills() -> SkillsView:
+        """本机发现到的技能、来源层与启用状态（**每次现算**）。
+
+        只给名字、描述、来源与开关状态，不给技能目录的绝对路径；`diagnostics` 如实报告被跳过的条目
+        （格式不合规、越界等）——不说的话，用户只会看到"我的技能怎么不见了"。
+        """
+        return service.skills_view()
+
+    @router.put(
+        "/skills",
+        response_model=SkillsView,
+        responses=_SKILL_WRITE_RESPONSES,
+        summary="启用/禁用一个技能",
+    )
+    def set_skill(payload: SkillToggleRequest) -> SkillsView:
+        """启用或禁用一个技能：**保存即生效、作用于下一轮**（§16.5）。
+
+        禁用只影响"这个技能还能不能被用到"（模型清单里不再出现、正文也取不到），**不删除任何文件**；
+        技能是否被"发现"仍由发现根决定。响应是保存后的完整视图，页面直接换上它，不必再取一次。
+        """
+        return service.set_skill_enabled(payload.name, payload.enabled)
+
+    @router.post(
+        "/skills/roots",
+        response_model=SkillsView,
+        responses=_SKILL_WRITE_RESPONSES,
+        summary="添加一个技能发现根",
+    )
+    def add_skill_root(payload: SkillRootRequest) -> SkillsView:
+        """把一个**已存在的目录**加进发现根（2026-10-20）。
+
+        只引用、不复制文件：作者更新技能后下一轮就生效；移除只是不再扫描，不删任何东西。
+        """
+        return service.add_skill_root(payload.path)
+
+    @router.delete(
+        "/skills/roots",
+        response_model=SkillsView,
+        responses=_SKILL_WRITE_RESPONSES,
+        summary="移除一个自定义技能发现根",
+    )
+    def remove_skill_root(path: str = Query(min_length=1)) -> SkillsView:
+        """只允许移除**用户自己添加**的根；随包与个人级根按契约不可删。"""
+        return service.remove_skill_root(path)
 
     # ---- 权限（T38；§1.5）------------------------------------------------------
     # 这组接口只读写"工作区外路径"的档位与授权条目：档位存设置库（`config.yaml` 只是出厂默认），
@@ -572,8 +707,9 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     def set_permissions_mode(payload: PermissionsModeRequest) -> PermissionsView:
         """保存档位。改动**作用于下一轮**：正在跑或等待审批的那些运行已按当时的档位判定完。
 
-        `deny` / `whitelist` / `allow` 三档只影响"工作区外路径能不能碰、能怎么碰"，
-        四项硬约束不放宽。
+        `read-only` / `workspace-write` / `danger-full-access` 三档决定"能写到哪"：
+        只读档连工作区都不许写、命令以无写授权令牌运行；工作区外写一律只按逐条授权。
+        Windows 各档位均约束命令写入；可写档位允许工作区、专属临时目录及已授权目录。
         """
         return service.set_external_paths_mode(payload.mode)
 
@@ -584,7 +720,10 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         summary="新增外部路径授权",
     )
     def grant_external_path(payload: ExternalPathGrantRequest) -> PermissionsView:
-        """给一个工作区外目录授权（`read` 只放宽只读工具，`read_write` 还允许在其中新建/改文件）。
+        """为外部目录添加 `read_write` 写授权（覆盖其子目录）；只读档仍禁止写入。
+
+        三档均允许显式本机外部路径的读取、列目录与搜索，敏感目标除外。
+        `read` 保留旧记录兼容，不再扩大读取权限。写授权不代替覆盖、删除等逐次审批。
 
         同一个目标重复授权是**改写**（刷新访问级别），不是加两行；返回授权后的完整视图，
         让设置页直接渲染，不用再取一次。
@@ -600,12 +739,54 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     def revoke_external_path(
         path: str = Query(min_length=1, max_length=PATH_MAX_CHARS),
     ) -> PermissionsView:
-        """撤销一条授权；**不存在也算成功**（幂等），返回撤销后的完整视图。
+        """移除目录记录；撤销写授权不影响默认读取，移除旧 `read` 记录也不禁止读取。
+
+        **不存在也算成功**（幂等），返回撤销后的完整视图。
 
         路径走查询参数而不是请求体：它是这条记录的自然键（含层级分隔符），放 URL 里可以正常
         URL 编码；重复调用同一条不会产生第二种结果。
         """
         return service.revoke_external_path(path)
+
+    # ---- 联网检索的服务凭据（Tavily）--------------------------------------------
+    # 与模型连接的密钥同一条口径（§6.8）：**只报"有没有"，不回读**；密钥只进设置库或进程内存。
+    # 数值型偏好（条数上限、域名策略等）走 `/preferences`，这里只有密钥这一件事。
+
+    @router.get("/web-search/credential", response_model=WebSearchKeyView, summary="联网检索凭据状态")
+    def get_web_search_credential() -> WebSearchKeyView:
+        """当前有没有可用的检索服务凭据，以及它来自设置库还是旧环境变量。
+
+        返回值里**没有密钥**（连掩码都没有）：页面只需要知道"已配置 / 未配置"就能决定是提示录入
+        还是提示可以开始检索。
+        """
+        return service.web_search_key_view()
+
+    @router.put(
+        "/web-search/credential",
+        response_model=WebSearchKeyView,
+        responses=_WEB_CREDENTIAL_WRITE_RESPONSES,
+        summary="保存联网检索凭据",
+    )
+    def set_web_search_credential(payload: WebSearchKeyRequest) -> WebSearchKeyView:
+        """写入（覆盖）Tavily 密钥：**保存即生效**，下一轮检索就用它。
+
+        空白密钥被拒（422）："清空"用 DELETE 表达，两种意图不该共用一个入口。
+        """
+        return service.save_web_search_key(payload.api_key)
+
+    @router.delete(
+        "/web-search/credential",
+        response_model=WebSearchKeyView,
+        responses=_WEB_CREDENTIAL_WRITE_RESPONSES,
+        summary="删除联网检索凭据",
+    )
+    def delete_web_search_credential() -> WebSearchKeyView:
+        """删除已保存的密钥；**不存在也算成功**（幂等）。
+
+        删掉之后旧环境变量仍然有效——如实报告由返回的 ``source`` 承担，本条路径不假装
+        "删了就一定没有凭据了"。
+        """
+        return service.clear_web_search_key()
 
     @router.get("/preferences", response_model=PreferencesView, summary="应用偏好与配置概览")
     def get_preferences() -> PreferencesView:

@@ -5,7 +5,8 @@
 1. **映射不重不漏**：`JOB_EVENT_FOR_STATE` 覆盖状态闭集，五个类型都在正式事件全集里；
 2. **构造与解析**：`build_job_event` 的产物能被 `parse_event` 认回具体模型，信封规则（`task_id`
    非空、`run_id` 可空、`job_id` 存在）成立；
-3. **只在真迁移时发**：只改 `detail` 的同状态写入不发事件；一次内联执行恰好两次迁移。
+3. **只在真迁移时发**：一次正常的内联执行恰好两次迁移；异常路径多出的那次是
+   `running → needs_review`（2026-10-20 起它是真迁移，页面靠它把"正在执行"换成"需要人工核对"）。
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from local_agent.persistence import migrations
 from local_agent.persistence.job_store import (
     JOB_STATE_COMPLETED,
     JOB_STATE_FAILED,
+    JOB_STATE_NEEDS_REVIEW,
     JOB_STATE_QUEUED,
     JOB_STATE_RUNNING,
     JOB_STATE_WAITING_USER,
@@ -138,8 +140,12 @@ def test_listener_sees_one_notification_per_real_transition(tmp_path: Path) -> N
     ]
 
 
-def test_same_state_detail_update_emits_nothing(tmp_path: Path) -> None:
-    """异常后只写 `detail`、状态不变——那不是迁移，不该发事件。"""
+def test_exception_emits_a_real_transition_to_needs_review(tmp_path: Path) -> None:
+    """异常 → `needs_review` 是**真迁移**：不发事件，页面就永远不知道它已经停了。
+
+    2026-10-20 之前这里只写 `detail`、状态留 `running`；那样任务中心会一直显示"正在执行"，
+    这一轮改动让它成为一次真正的迁移。
+    """
     seen: list[str] = []
     _store, runtime = _runtime(tmp_path, lambda before, after: seen.append(after.state))
 
@@ -150,7 +156,7 @@ def test_same_state_detail_update_emits_nothing(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError):
         runtime.run_now(job, boom)
 
-    assert seen == [JOB_STATE_QUEUED, JOB_STATE_RUNNING]  # 没有第三个（running → running）
+    assert seen == [JOB_STATE_QUEUED, JOB_STATE_RUNNING, JOB_STATE_NEEDS_REVIEW]
 
 
 def test_waiting_lifecycle_emits_waiting_then_returns_to_running(tmp_path: Path) -> None:

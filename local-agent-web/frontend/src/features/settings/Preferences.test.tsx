@@ -10,15 +10,17 @@ import { PreferenceSection } from './PreferenceSection'
 import { PreferencesProvider } from './PreferencesProvider'
 import { GeneralContext, generalDefaults, preferencesKey } from './preferencesContext'
 
-const mock = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), test: vi.fn() }))
+const mock = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), test: vi.fn(), key: vi.fn(), saveKey: vi.fn(), clearKey: vi.fn() }))
 vi.mock('../../api/client', async original => ({
   ...await original<typeof import('../../api/client')>(), getPreferences: mock.get, savePreferences: mock.save, testMemoryPreferences: mock.test,
+  getWebSearchKey: mock.key, setWebSearchKey: mock.saveKey, clearWebSearchKey: mock.clearKey,
 }))
 function fixture(): PreferencesDto {
   const values = {
     general: { ...generalDefaults },
-    execution: { max_tool_loops: 20, max_retries_per_step: 2, shell_timeout_seconds: 60, shell_max_output_chars: 30000 },
+    execution: { max_tool_loops: 20, max_retries_per_step: 2, shell_timeout_seconds: 60, shell_max_output_chars: 30000, safe_delete: true },
     retrieval: { enabled: true, max_files: 2000, max_results: 8, timeout_seconds: 10, context_lines: 20 },
+    web_access: { provider: 'auto' as const, max_results: 5, max_chars: 8000, max_search_calls: 4, max_read_pages: 6, max_reads_per_page: 3, timeout_seconds: 15, domain_policy: 'allow' as const, denied_domains: [], allowed_domains: [] },
     memory: { enabled: true, confidence_threshold: .75, importance_threshold: .5, aging_enabled: true, forget_after_days: 180 },
     medium_term: { enabled: false, top_k: 8, min_score: .53, decay_half_life_days: 30 },
     embedding: { enabled: false, provider: 'onnx_local' as const, model: 'unit-test', cache_dir: 'E:/models', local_files_only: true, base_url: '', api_key_env: '', allow_plaintext_http: false },
@@ -31,9 +33,33 @@ function host(node: ReactNode, data = fixture()) {
   if (!mock.get.getMockImplementation()) mock.get.mockResolvedValue(data)
   return { ...render(<QueryClientProvider client={client}>{node}</QueryClientProvider>), client }
 }
-beforeEach(() => { mock.get.mockReset(); mock.save.mockReset(); mock.test.mockReset(); vi.unstubAllGlobals() })
+beforeEach(() => {
+  mock.get.mockReset(); mock.save.mockReset(); mock.test.mockReset(); vi.unstubAllGlobals()
+  mock.key.mockReset(); mock.saveKey.mockReset(); mock.clearKey.mockReset()
+  mock.key.mockResolvedValue({ configured: false, source: 'none', store: 'local', note: null })
+})
 
 describe('应用偏好', () => {
+  it.each([
+    ['execution', ['每轮工具循环上限', '命令超时（秒）'], { max_tool_loops: null, shell_timeout_seconds: null }],
+    ['web_access', ['每轮检索次数上限', '每轮读取地址数上限', '单页面读取次数上限'], { max_search_calls: null, max_read_pages: null, max_reads_per_page: null }],
+  ] as const)('saves blank %s budgets as unlimited and restores blank inputs', async (group, labels, patch) => {
+    const data = fixture()
+    mock.save.mockImplementation(async values => ({ ...data, values, version: 1 }))
+    host(<PreferenceSection group={group} />, data)
+    for (const label of labels) {
+      const input = screen.getByRole('spinbutton', { name: label }) as HTMLInputElement
+      fireEvent.change(input, { target: { value: '' } })
+      expect(input.checkValidity()).toBe(true)
+    }
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByRole('status')
+    expect(mock.save).toHaveBeenCalledWith({ ...data.values, [group]: { ...data.values[group], ...patch } }, 0)
+    for (const label of labels) {
+      expect((screen.getByRole('spinbutton', { name: label }) as HTMLInputElement).value).toBe('')
+    }
+  })
+
   it('shows pending local cache restart after save instead of claiming immediate task activation', async () => {
     const data = fixture()
     data.resources = { backend: 'chroma', path: 'data/chroma', collection: 'agent_memory', vector_available: true, vector_initialized: true, embedding_state: 'ready', embedding_detail: '具备条件', key_configured: false, restart_required: false }
@@ -176,6 +202,46 @@ describe('应用偏好', () => {
     host(<PreferenceSection group="memory" />, { ...fixture(), writable: false })
     expect(screen.getByRole('checkbox', { name: '启用长期记忆' })).toBeDisabled()
     expect(screen.getByRole('button', { name: '恢复初始值' })).toBeDisabled()
+  })
+
+  it('saves retrieval limits with domain lists as arrays and keeps the key on its own endpoint', async () => {
+    const data = fixture()
+    mock.save.mockImplementation(async values => ({ ...data, values, version: 1 }))
+    mock.saveKey.mockResolvedValue({ configured: true, source: 'settings', store: 'local', note: null })
+    mock.clearKey.mockResolvedValue({ configured: false, source: 'none', store: 'local', note: null })
+    host(<PreferenceSection group="web_access" />, data)
+    // 密钥块先如实说"未配置"：接口读到的就是它，页面不猜
+    await screen.findByText('未配置')
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: '检索结果条数上限' }), { target: { value: '9' } })
+    fireEvent.change(screen.getByRole('combobox', { name: '域名策略' }), { target: { value: 'allowlist' } })
+    fireEvent.change(screen.getByRole('textbox', { name: '拒绝的域名' }), { target: { value: 'bad.example.com, worse.example.com' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+    await screen.findByText('已保存，下一次新任务生效')
+    // 数组字段必须**拆成数组**再发：发字符串会被服务端按形状拒掉
+    expect(mock.save.mock.calls[0][0].web_access).toMatchObject({
+      max_results: 9,
+      domain_policy: 'allowlist',
+      denied_domains: ['bad.example.com', 'worse.example.com'],
+    })
+    expect(mock.save.mock.calls[0][1]).toBe(0)
+
+    fireEvent.change(screen.getByLabelText('Tavily API Key'), { target: { value: 'tvly-123' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存密钥' }))
+    await screen.findByText('已保存，下一次检索生效')
+    expect(mock.saveKey).toHaveBeenCalledWith('tvly-123')
+    expect(screen.getByText('已配置（设置在本地设置库）')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '删除已保存密钥' }))
+    await waitFor(() => expect(mock.clearKey).toHaveBeenCalledTimes(1))
+    await screen.findByText('未配置')
+  })
+
+  it('never offers to delete a key that comes from the environment', async () => {
+    mock.key.mockResolvedValue({ configured: true, source: 'environment', store: 'local', note: null })
+    host(<PreferenceSection group="web_access" />)
+    await screen.findByText('已配置（来自环境变量）')
+    // 删除按钮只在"设置库里有一条"时可用：来源是环境变量时按下去什么也不会变
+    expect(screen.getByRole('button', { name: '删除已保存密钥' })).toBeDisabled()
   })
 
   it('applies saved appearance immediately and follows system theme and motion changes', async () => {

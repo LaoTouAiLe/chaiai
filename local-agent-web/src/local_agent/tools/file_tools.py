@@ -1,8 +1,8 @@
-"""只读文件工具：``list_dir`` / ``read_file``（架构 §6.1、§6.2；开发文档 T05）。
+"""文件工具的参数、文本变换与结果展示；实际 I/O 由本轮统一文件后端承载。
 
 - 工具逻辑写成普通函数（``list_dir_entries`` / ``read_file_content``），便于直接测试；
   ``build_file_tools`` 再包一层 ``@tool``，通过闭包持有 :class:`SecurityPolicy`。
-- 所有路径都经策略校验：工作区边界 + 敏感文件拦截（架构 §6.1、§11.1）。
+- 后端共用 SecurityPolicy，执行前复核目录授权、档位、敏感/保护目标与人工批准。
 - 工具出错时**不吞异常**：由 ``tool_execution_node`` 统一捕获并回填给模型，
   这样错误既不会被隐藏，也不会中断整张图。
 """
@@ -11,16 +11,12 @@ from __future__ import annotations
 
 import codecs
 import hashlib
-import os
-import shutil
-import stat
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
 from langchain_core.tools import BaseTool, tool
 
-from local_agent.exceptions import SecurityError
+from local_agent.exceptions import FileOperationError, SecurityError
 from local_agent.security.approval import action_fingerprint
 from local_agent.security.diff_guard import (
     apply_patch,
@@ -29,13 +25,15 @@ from local_agent.security.diff_guard import (
     edit_input_mode,
     parse_patch,
 )
-from local_agent.security.path_guard import assert_not_protected_target, display_path, is_within
+from local_agent.security.path_guard import (
+    display_path,
+    is_within,
+)
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.result_types import (
     DeleteFileResult,
     DirEntry,
     EditFileResult,
-    EntryKind,
     ListDirResult,
     ReadFileResult,
     WriteFileResult,
@@ -59,7 +57,7 @@ def list_dir_entries(
     """列出目录项。
 
     Args:
-        path: 相对工作区根目录的路径或绝对路径；配置允许时可使用显式绝对的外部路径。
+        path: 相对工作区根目录的路径或绝对路径；三档均允许显式本机外部绝对路径。
         policy: 安全策略，负责边界与敏感文件判定。
         recursive: 是否递归列出子目录，最多 :data:`MAX_RECURSIVE_DEPTH` 层。
         include_hidden: 是否包含以点开头的隐藏项。
@@ -69,11 +67,10 @@ def list_dir_entries(
         目录项列表、总数与截断标记。
 
     Raises:
-        SecurityError: 路径越界、目标不是目录。
+        SecurityError: 路径越界或敏感路径。
+        FileOperationError: 目标不是目录或不存在。
     """
-    resolved = policy.resolve_path(path)
-    if not resolved.is_dir():
-        raise SecurityError(f"目标不是目录或不存在：{resolved.as_posix()}")
+    resolved = policy.files.directory(path)
 
     candidates: list[Path] = []
     depth_limited = False
@@ -85,13 +82,13 @@ def list_dir_entries(
         stack: list[tuple[Path, int]] = [(resolved, 0)]
         while stack and not truncated:
             current, depth = stack.pop()
-            raw, stream_stopped = _bounded_children(current, max_entries - len(candidates))
+            raw, stream_stopped = policy.files.children(current, max_entries - len(candidates))
             if stream_stopped:
                 truncated = True  # 目录里还有没读的条目：结果不完整，必须如实标注
             for child in sorted(raw):
                 if not include_hidden and child.name.startswith("."):
                     continue
-                if child.is_dir() and depth + 1 > MAX_RECURSIVE_DEPTH:
+                if policy.files.is_directory(child) and depth + 1 > MAX_RECURSIVE_DEPTH:
                     # 超深目录**本身**也不进结果，才与"超过 N 层的条目已省略"一致
                     depth_limited = True
                     continue
@@ -99,7 +96,7 @@ def list_dir_entries(
                 if len(candidates) >= max_entries:
                     truncated = True
                     break
-                if not child.is_dir():
+                if not policy.files.is_directory(child):
                     continue
                 # 目录符号链接 / Windows Junction 可能指向工作区外：**入栈前解析真实目标**，
                 # 只有仍位于本次列举的根目录内才继续。只看 ``is_symlink()`` 挡不住 Junction
@@ -112,7 +109,7 @@ def list_dir_entries(
                     continue
                 stack.append((child, depth + 1))
     else:
-        raw, stream_stopped = _bounded_children(resolved, max_entries)
+        raw, stream_stopped = policy.files.children(resolved, max_entries)
         candidates = [
             candidate
             for candidate in sorted(raw)
@@ -123,7 +120,7 @@ def list_dir_entries(
 
     total = len(candidates)
     entries = [
-        _dir_entry(candidate, resolved, policy.workspace_root)
+        _dir_entry(candidate, policy)
         for candidate in candidates[:max_entries]
     ]
 
@@ -153,92 +150,96 @@ def read_file_content(
     start_line: int | None = None,
     end_line: int | None = None,
     max_chars: int = 20000,
+    start_char: int | None = None,
+    expected_sha256: str | None = None,
+    encoding: str = "utf-8-sig",
 ) -> ReadFileResult:
-    """读取工作区内的文本文件。
+    """流式读取文本页；行区间和全文件字符位置互斥，字符续读支持超长单行。"""
+    from local_agent.tools.text_stream import BinaryTextError, text_parts
 
-    Args:
-        path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，
-            且不是敏感文件。
-        policy: 安全策略。
-        start_line: 起始行（1 基，含）；省略表示从头开始。
-        end_line: 结束行（1 基，含）；省略表示到文件末尾。
-        max_chars: 返回内容的最大字符数，超出时截断。
-
-    Returns:
-        文件内容、编码、Hash、行数与截断状态。
-
-    Raises:
-        SecurityError: 路径越界、命中敏感文件、目标不是文件。
-        ValueError: 行号参数非法。
-    """
+    if max_chars < 1:
+        raise ValueError("max_chars 必须为正数")
+    if start_line is not None and start_line < 1:
+        raise ValueError("start_line 必须从 1 开始")
+    if end_line is not None and end_line < (start_line or 1):
+        raise ValueError("end_line 不能小于 start_line")
+    if start_char is not None and (start_char < 0 or start_line is not None or end_line is not None):
+        raise ValueError("start_char 必须非负，且不能与行区间同时使用")
     resolved = policy.resolve_readable_file(path)
-    max_bytes = policy.workspace.max_file_size_bytes
-    data, file_sha256, size_limited = _read_prefix_and_sha256(resolved, max_bytes)
-
-    encoding: str | None = None
-    text = ""
+    before = policy.files.stat(resolved)
+    _, file_sha256, _ = policy.files.read_prefix_and_sha256(resolved, 0)
+    if expected_sha256 and expected_sha256.lower() != file_sha256:
+        raise FileOperationError("expected_sha256 与当前文件不一致：文件已变化，请重新读取")
+    chunks: list[str] = []
+    offset = 0
+    number = 1
+    line_count = 0
+    count = 0
+    first_line = 0
+    last_line = 0
+    actual_start = start_char or 0
+    partial: set[int] = set()
+    column = 0
+    first_partial = False
+    notes: list[str] = []
     is_binary = False
-    note_parts: list[str] = []
-
-    if b"\x00" in data[:4096]:
-        # 含 NUL 字节一律按二进制处理：这类内容即使能“解码成功”也不该注入 Prompt。
-        is_binary = True
-        note_parts.append("二进制文件，未返回内容")
-    else:
-        try:
-            text = data.decode("utf-8-sig")
-            encoding = "utf-8"
-        except UnicodeDecodeError:
-            note_parts.append("无法按 UTF-8 解码（未知编码），未返回内容")
-
-    line_count = len(text.splitlines())
-    selected = _select_lines(text, start_line=start_line, end_line=end_line)
-    first_line = max(1, int(start_line)) if start_line else 1
-    original_selected = selected
-    truncated = False
-    if len(selected) > max_chars:
-        selected = selected[:max_chars]
-        truncated = True
-        note_parts.append(f"内容已截断到 {max_chars} 字符")
-    if size_limited:
-        truncated = True
-        note_parts.append(f"文件超过 {max_bytes} 字节，只读取了前 {len(data)} 字节")
-
-    # 本次**实际返回**的行区间：让模型能直接算出下一次的 ``start_line``，而不是重猜或整篇重读
-    # （见 :class:`ReadFileResult` 的字段说明）。
-    returned = selected.splitlines()
-    last_line = first_line + len(returned) - 1 if returned else first_line - 1
-    partial_lines: list[int] = []
-    if selected and not selected.endswith(("\n", "\r")):
-        cut_in_line = (
-            len(original_selected) > max_chars
-            and original_selected[max_chars:max_chars + 1] not in ("\n", "\r")
-        )
-        if cut_in_line or (size_limited and last_line == line_count):
-            partial_lines = [last_line]
-    has_more = bool(partial_lines) or (bool(text) and last_line < line_count)
-    next_start_line: int | None = None
+    decoded = True
+    try:
+        for part, ended in text_parts(resolved, policy, encoding):
+            line_count = number
+            eligible = (start_char is not None or
+                        (number >= (start_line or 1) and (end_line is None or number <= end_line)))
+            begin = max(0, (start_char or 0) - offset) if start_char is not None else 0
+            if eligible and begin < len(part) and count < max_chars:
+                fragment = part[begin:begin + max_chars - count]
+                if not count:
+                    actual_start, first_line = offset + begin, number
+                    first_partial = bool(begin or column)
+                    if first_partial:
+                        partial.add(number)
+                chunks.append(fragment)
+                count += len(fragment)
+                last_line = number
+                cut = begin + len(fragment)
+                if not ended or (cut < len(part) and part[cut:cut + 1] not in ("\r", "\n")):
+                    partial.add(number)
+                elif number != first_line or not first_partial:
+                    partial.discard(number)
+            offset += len(part)
+            column = 0 if ended else column + len(part)
+            if ended:
+                number += 1
+    except BinaryTextError as exc:
+        is_binary, decoded = True, False
+        notes.append(str(exc))
+    except UnicodeError:
+        decoded = False
+        label = "UTF-8" if encoding == "utf-8-sig" else encoding
+        notes.append(f"无法按 {label} 解码（未知编码），未返回内容")
+    except (LookupError, TypeError) as exc:
+        raise ValueError(f"不支持的文本编码：{encoding}") from exc
+    after = policy.files.stat(resolved)
+    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+        raise FileOperationError("读取期间文件已变化，请重新读取")
+    if not decoded:
+        chunks, count, first_line, last_line, line_count, partial = [], 0, 0, 0, 0, set()
+    content = "".join(chunks)
+    next_char = actual_start + count
+    has_more = decoded and bool(content) and next_char < offset
+    truncated = has_more and count == max_chars
+    if truncated:
+        notes.append(f"内容已截断到 {max_chars} 字符")
     if has_more:
-        next_start_line = partial_lines[0] if partial_lines else last_line + 1
-        note_parts.append(
-            f"已返回第 {first_line}–{last_line} 行，共 {line_count} 行；"
-            f"需要后续内容请传 start_line={next_start_line}"
-        )
-
+        notes.append(f"后续内容传 start_char={next_char} 和 expected_sha256={file_sha256}；也可按行定点读取")
     return ReadFileResult(
         path=_display_path(resolved, policy.workspace_root),
-        encoding=encoding,
-        sha256=file_sha256,
-        line_count=line_count,
-        truncated=truncated,
-        is_binary=is_binary,
-        content=selected,
-        note="；".join(note_parts) if note_parts else None,
-        first_line=first_line,
-        last_line=max(last_line, 0),
-        has_more=has_more,
-        next_start_line=next_start_line,
-        partial_lines=partial_lines,
+        encoding=("utf-8" if encoding == "utf-8-sig" else encoding) if decoded else None,
+        sha256=file_sha256, line_count=line_count, content=content, is_binary=is_binary,
+        truncated=truncated, note="；".join(notes) if notes else None,
+        first_line=first_line, last_line=last_line, has_more=has_more,
+        next_start_line=(last_line if last_line in partial else last_line + 1) if has_more else None,
+        partial_lines=sorted(partial), start_char=actual_start,
+        next_start_char=next_char if has_more else None,
     )
 
 
@@ -252,6 +253,7 @@ def edit_file_content(
     replace_all: bool = False,
     expected_sha256: str | None = None,
     reason: str = "",
+    encoding: str = "utf-8-sig",
 ) -> EditFileResult:
     """修改工作区内已有文件：精确串替换（默认）或 unified diff（架构 §6.3）。
 
@@ -263,12 +265,12 @@ def edit_file_content(
 
     安全约束（全部在代码层强制）：
 
-    - 两种模式都**必须**提供与当前文件一致的 ``expected_sha256``，否则拒绝并提示重新读取；
+    - ``expected_sha256`` 可选，提供时核对版本；写入时仍检查并发修改；
     - 精确串替换：``old_text`` 必须精确匹配且默认只允许一处，多处匹配必须显式 ``replace_all``；
-      不接受用整份文件内容做替换；
+      支持整文件内容替换；
     - ``patch`` 模式：先解析（空 Patch、格式、计数、顺序、重叠），再按 `@@` 旧行号逐字校验
       上下文；任一不过即拒绝，**原文件一字不动**（架构 §6.3）；
-    - 改动行数超过 ``security.large_edit.max_changed_lines_without_approval`` 时按大范围修改拒绝；
+    - 工作区修改默认免审批；外部写入按目录授权执行；
     - 先写同目录临时文件再原子替换，写入后重新计算 Hash。
 
     Args:
@@ -278,14 +280,15 @@ def edit_file_content(
         new_text: 替换后的文本（精确替换模式）。
         patch: unified diff 文本（patch 模式，与 old_text/new_text 互斥）。
         replace_all: 是否替换全部匹配（仅精确替换模式）。
-        expected_sha256: 调用方读到的文件 Hash。
+        expected_sha256: 可选的文件版本 Hash。
         reason: 修改原因，写入审计结果。
 
     Returns:
         修改结果与 unified diff；patch 模式下 ``replaced_count`` 是应用的 hunk 数。
 
     Raises:
-        SecurityError: 任何安全校验不通过。
+        SecurityError: 路径、档位或审批校验不通过。
+        FileOperationError: 输入、匹配、内容格式或文件版本校验失败。
     """
     arguments = {
         "path": path,
@@ -299,25 +302,22 @@ def edit_file_content(
     resolved = policy.resolve_writable_file(path)
     decision = policy.classify_tool("edit_file", arguments)
     # 大范围修改属于强制审批动作：只有持有效人工批准（同一次调用 + 指纹一致）才执行
-    if not decision.allowed and not policy.is_granted(
-        action_fingerprint("edit_file", arguments, policy=policy)
-    ):
-        raise SecurityError(decision.reason)
+    granted = policy.is_granted(action_fingerprint("edit_file", arguments, policy=policy))
+    if not decision.allowed:
+        if decision.reason_kind == "input":
+            raise FileOperationError(decision.reason)
+        if not granted:
+            raise SecurityError(decision.reason)
     # 输入模式由安全判定与工具执行共用同一个函数（架构 §6.3），避免两处各写一套互斥规则。
     mode = edit_input_mode(old_text, new_text, patch)
 
-    data = resolved.read_bytes()
-    original = _decode_text(data)
+    data = policy.files.read_bytes(resolved)
+    original = _decode_text(data, encoding=encoding)
     current_sha256 = hashlib.sha256(data).hexdigest()
 
     expected = (expected_sha256 or "").strip().lower()
-    if not expected:
-        raise SecurityError(
-            "修改已有文件必须提供 expected_sha256：请先用 read_file 读取该文件，"
-            "并把返回的 sha256 原样带上"
-        )
-    if expected != current_sha256:
-        raise SecurityError(
+    if expected and expected != current_sha256:
+        raise FileOperationError(
             f"expected_sha256 与当前文件不一致（当前为 {current_sha256[:12]}…）："
             "文件已被改动，请重新读取后再修改"
         )
@@ -332,21 +332,17 @@ def edit_file_content(
         note = f"补丁模式：已应用 {replaced_count} 个 hunk（replaced_count 为 hunk 数）"
     else:
         if old_text == new_text:
-            raise SecurityError("old_text 与 new_text 相同，没有需要修改的内容")
+            raise FileOperationError("old_text 与 new_text 相同，没有需要修改的内容")
         # 架构 §6.3：不接受用整份文件内容做替换。单行文件例外——那一行本身就是最小的唯一锚点，
         # 否则会出现"文件只有一行就没法改"的怪现象。
-        if len(original.splitlines()) > 1 and old_text.rstrip("\n") == original.rstrip("\n"):
-            raise SecurityError(
-                "不接受用整份文件内容做替换：请给出更小的唯一片段（架构 §6.3）"
-            )
 
         occurrences = original.count(old_text)
         if occurrences == 0:
-            raise SecurityError(
+            raise FileOperationError(
                 "old_text 在文件中没有精确匹配：请核对空格、缩进与换行（Windows 文件可能是 CRLF）"
             )
         if occurrences > 1 and not replace_all:
-            raise SecurityError(
+            raise FileOperationError(
                 f"old_text 匹配到 {occurrences} 处：请提供更长的唯一片段，或显式设置 replace_all=true"
             )
 
@@ -359,14 +355,20 @@ def edit_file_content(
 
     diff = build_unified_diff(original, updated, path=resolved.name)
     if not diff.strip():
-        raise SecurityError("计算出的 diff 为空，没有可写入的改动")
+        raise FileOperationError("计算出的 diff 为空，没有可写入的改动")
 
     # ``utf-8-sig`` 解码会有意移除 BOM；编辑已有文件时必须把原来的编码标记写回去，
     # 否则一次普通文本替换会静默改变文件格式。
-    new_data = (codecs.BOM_UTF8 if data.startswith(codecs.BOM_UTF8) else b"") + updated.encode(
-        "utf-8"
-    )
-    _atomic_write(resolved, new_data)
+    output_encoding = "utf-8" if encoding == "utf-8-sig" and not data.startswith(codecs.BOM_UTF8) else encoding
+    new_data = updated.encode(output_encoding)
+    resolved = policy.files.replace_file("edit_file", arguments, new_data, expected_sha256=current_sha256)
+    # 改了就得记账（2026-10-15）：`security.large_edit` 现在按**本轮改过的不同文件数**判，
+    # 计数由这里产生。放在写盘**之后**——判定失败、指纹不符、内容没变的调用都不该计数，
+    # 否则"改三个文件"会因为几次失败尝试而提前触发批量审批。
+    policy.note_edited(resolved)
+    if decision.large_edit and granted:
+        # 这次执行靠的正是"大范围修改"那次批准：记住它，本轮后面的文件不再逐个问。
+        policy.note_large_edit_approved()
 
     return EditFileResult(
         path=_display_path(resolved, policy.workspace_root),
@@ -395,7 +397,7 @@ def write_file_content(
     审批动作，在 T10 接入审批前一律拒绝。
 
     Args:
-        path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，工作区外写入需要人工审批。
+        path: 相对路径以当前工作区为根；外部须显式本机绝对路径及目录写授权，工作区内覆盖无需审批，外部仍按授权和策略判定。
         policy: 安全策略。
         content: 文件内容。
         overwrite: 是否允许覆盖已有文件（本版本只用于给出更明确的拒绝原因）。
@@ -405,42 +407,42 @@ def write_file_content(
         创建结果与文件 Hash。
 
     Raises:
-        SecurityError: 任何安全校验不通过。
+        SecurityError: 路径、档位或审批校验不通过。
+        FileOperationError: 目标类型、文件状态或内容大小不满足要求。
     """
     arguments = {"path": path, "content": content, "overwrite": overwrite}
     # 先解析目标：越界、敏感文件与受保护目标在看审批之前失败闭合（架构 §1.5）
     resolved = policy.resolve_writable_path(path)
     decision = policy.classify_tool("write_file", arguments)
-    # 覆盖已有文件与工作区外写入都属于强制审批动作：只有持有效人工批准才执行
+    # 覆盖已有文件需要有效人工批准；目录写授权与只读档另由执行后端复核
     granted = policy.is_granted(action_fingerprint("write_file", arguments, policy=policy))
     if not decision.allowed and not granted:
         raise SecurityError(decision.reason)
-    overwriting = resolved.exists()
+    overwriting = policy.files.exists(resolved)
+    created: list[str] = []  # 覆盖路径不建目录，保持空列表（结果字段恒定，调用方不用分情况）
     if overwriting:
-        if resolved.is_dir():
-            raise SecurityError(f"目标是一个目录，不能用 write_file 写入：{resolved.as_posix()}")
+        if policy.files.is_directory(resolved):
+            raise FileOperationError(f"目标是一个目录，不能用 write_file 写入：{resolved.as_posix()}")
         if not overwrite:
-            raise SecurityError(
+            raise FileOperationError(
                 f"文件已存在：{resolved.as_posix()}。修改现有文件请用 edit_file"
                 "（精确串替换），不要整体覆盖"
             )
-        if not granted:
+        if not granted and not decision.allowed:
             raise SecurityError(
                 "覆盖已有文件需要人工审批（架构 §6.4）：未获批准，已拒绝覆盖"
             )
-    elif not resolved.parent.is_dir():
-        raise SecurityError(f"父目录不存在，未创建文件：{resolved.parent.as_posix()}")
 
     data = content.encode("utf-8")
     if len(data) > policy.workspace.max_file_size_bytes:
-        raise SecurityError(
+        raise FileOperationError(
             f"内容 {len(data)} 字节超过上限 {policy.workspace.max_file_size_bytes} 字节，已拒绝写入"
         )
 
     if overwriting:
-        _atomic_write(resolved, data)  # 覆盖是已批准的动作，用原子替换
+        resolved = policy.files.replace_file("write_file", arguments, data)
     else:
-        _create_new_file(resolved, data)  # 新建绝不覆盖：原子创建，已存在即失败
+        resolved, created = policy.files.create_file(arguments, data)
 
     return WriteFileResult(
         path=_display_path(resolved, policy.workspace_root),
@@ -448,6 +450,8 @@ def write_file_content(
         sha256=hashlib.sha256(data).hexdigest(),
         size_bytes=len(data),
         line_count=len(content.splitlines()),
+        created_directories=created,
+        note=f"顺带新建了 {len(created)} 个目录：{'、'.join(created)}" if created else None,
     )
 
 
@@ -477,59 +481,26 @@ def delete_file_target(
         raise SecurityError(policy.redact(decision.reason))
 
     fingerprint = action_fingerprint("delete_file", arguments, policy=policy)
-    if not policy.is_granted(fingerprint):
+    if not decision.allowed and not policy.is_granted(fingerprint):
         resolved_for_message = policy.resolve_path(path)
-        target = _describe_target(resolved_for_message, recursive)
+        target = _describe_target(resolved_for_message, recursive, policy)
         detail = f"；原因：{reason}" if reason else ""
         raise SecurityError(
             f"{decision.reason}。目标：{resolved_for_message.as_posix()}（{target}）{detail}"
         )
 
-    resolved = policy.resolve_path(path)
-    _assert_deletable(resolved, policy.workspace_root, recursive)
-    kind = "dir" if resolved.is_dir() else "file"
-    removed_files = 0
-    removed_dirs = 0
-    if kind == "dir":
-        removed_files = sum(1 for item in resolved.rglob("*") if item.is_file())
-        removed_dirs = sum(1 for item in resolved.rglob("*") if item.is_dir())
-        shutil.rmtree(resolved)
-    else:
-        removed_files = 1
-        resolved.unlink()
+    deleted = policy.files.delete(arguments)
 
     return DeleteFileResult(
-        path=_display_path(resolved, policy.workspace_root),
+        path=_display_path(deleted.path, policy.workspace_root),
         recursive=recursive,
-        kind=kind,
-        removed_files=removed_files,
-        removed_dirs=removed_dirs,
+        kind=deleted.kind,
+        removed_files=deleted.files,
+        removed_dirs=deleted.directories,
         reason=reason,
+        trashed=deleted.trashed,
+        trash_path=deleted.trash_path,
     )
-
-
-def _assert_deletable(path: Path, workspace_root: Path, recursive: bool) -> None:
-    """架构 §6.5、§1.5：工作区根、根/主目录/系统目录与 Git 目录禁止删除。
-
-    这里是**执行前**的复核：即使已经拿到人工批准，受保护目标也照样拒绝（架构 §1.5 的
-    "不可审批目标"），因此判定、指纹与执行三处都以同一个规范化路径为准。
-    """
-    if path == _normalized_root(workspace_root):
-        raise SecurityError("禁止删除工作区根目录")
-    if path.name == ".git" or ".git" in path.parts:
-        raise SecurityError("禁止删除 Git 目录")
-    assert_not_protected_target(path, verb="删除")
-    if not path.exists():
-        raise SecurityError(f"目标不存在：{path.as_posix()}")
-    if path.is_dir() and not recursive:
-        raise SecurityError("删除目录必须显式设置 recursive=true")
-
-
-def _normalized_root(workspace_root: Path) -> Path:
-    try:
-        return workspace_root.resolve()
-    except OSError:  # pragma: no cover - 极少数无法解析的路径
-        return workspace_root.absolute()
 
 
 def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
@@ -549,7 +520,7 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
         """列出目录项，返回名称、类型、大小与修改时间。
 
         Args:
-            path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径（工作区外操作需要人工审批）。
+            path: 相对路径以当前工作区为根；三档均允许显式本机外部绝对路径，无需读取授权或审批。
             recursive: 是否递归列出子目录，最多 5 层。
             include_hidden: 是否包含以点开头的隐藏项。
             max_entries: 最多返回多少条。
@@ -568,29 +539,28 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
         start_line: int | None = None,
         end_line: int | None = None,
         max_chars: int = 20000,
+        start_char: int | None = None,
+        expected_sha256: str | None = None,
+        encoding: str = "utf-8-sig",
     ) -> str:
-        """读取某个文本文件的内容，返回内容、编码、Hash、行数与**本次返回的行区间**。
-
-        返回里的 ``has_more`` / ``next_start_line`` 用来继续读：**读大文件时不要指望一次读完**，
-        看 ``has_more`` 为真就再用 ``start_line=next_start_line`` 读下一段，直到读完。一次读不完
-        不是失败，不要因此判定"证据被截断、任务没完成"。
+        """读取本机文本文件，返回内容、完整 Hash、行号与续读位置。
 
         Args:
-            path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径（工作区外操作需要人工审批），且不能是密钥文件。
-            start_line: 起始行（1 基，含）；省略表示从头开始。
-            end_line: 结束行（1 基，含）；省略表示到文件末尾。
-            max_chars: 返回内容的最大字符数，超出时截断。
-                **默认值 2026-09-30 从 50000 降到 20000**：工具结果会原样进历史并被后续每一轮
-                重发，一次 5 万字符的读取（约 1.2 万 token）就能吃掉整轮的工具步预算，进而触发
-                窗口省略、打掉前缀缓存——实测一次提问因此花掉 63.5 万未命中输入 token。
-                需要更多内容时**显式传更大的值**，或按 ``start_line``/``end_line`` 分两次读。
+            path: 工作区相对路径或本机外部绝对路径；敏感文件仍禁止读取。
+            start_line: 1 基起始行，含。
+            end_line: 1 基结束行，含。
+            max_chars: 本页字符预算，默认 20000，可按任务增加。
+            start_char: 全文件解码后 0 基字符位置，不能与行区间同传。
+                has_more 为真时，传 next_start_char 续读，超长单行也能推进。
+            expected_sha256: 续读传上页 sha256，文件变化会明确报错。
+            encoding: 默认 UTF-8（兼容 BOM），可显式传 gbk、utf-16 等文本编码。
+
+        大文件按流读取，不受写入大小预算限制。只读所需证据，无需通读无关内容。
         """
         return read_file_content(
-            path,
-            policy=policy,
-            start_line=start_line,
-            end_line=end_line,
-            max_chars=max_chars,
+            path, policy=policy, start_line=start_line, end_line=end_line,
+            max_chars=max_chars, start_char=start_char,
+            expected_sha256=expected_sha256, encoding=encoding,
         ).model_dump_json()
 
     @tool
@@ -602,6 +572,7 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
         replace_all: bool = False,
         expected_sha256: str | None = None,
         reason: str = "",
+        encoding: str = "utf-8-sig",
     ) -> str:
         """修改已有文件，返回变更行数与 unified diff。
 
@@ -611,13 +582,14 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
         2. unified diff（patch）：只给出 patch，old_text/new_text 留空。
 
         Args:
-            path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，工作区外修改需要人工审批，且不能是密钥文件。
+            path: 相对路径以当前工作区为根；外部须显式本机绝对路径及目录写授权，无需按修改数量审批，但不能是受保护或密钥文件。
             old_text: 要被替换的原文片段，必须与文件内容精确一致（含缩进与换行）；与 patch 互斥。
             new_text: 替换后的文本；与 patch 互斥。
             patch: unified diff 文本（`@@ -旧[,行数] +新[,行数] @@` 与 ` `/`-`/`+` 开头的行）。要求：hunk 按旧行号升序、上下文与删除行必须与当前文件逐字一致、文件头只能写文件名，不支持 Git 扩展头与 "\\ No newline at end of file"。
             replace_all: 是否替换全部匹配（仅精确替换模式）；默认要求 old_text 在文件中唯一。
-            expected_sha256: 先用 read_file 读取该文件得到的 sha256，必填。
+            expected_sha256: 可选；提供时核对文件版本，省略不要求先读取。
             reason: 修改原因。
+            encoding: 文本编码，默认UTF-8；可指定gbk或utf-16等文件实际编码。
         """
         return edit_file_content(
             path,
@@ -628,16 +600,20 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
             replace_all=replace_all,
             expected_sha256=expected_sha256,
             reason=reason,
+            encoding=encoding,
         ).model_dump_json()
 
     @tool
     def write_file(path: str, content: str, overwrite: bool = False, reason: str = "") -> str:
-        """创建新文件，返回文件 Hash 与大小；不能覆盖已有文件。
+        """创建文件或通过 overwrite=true 覆盖，返回文件 Hash 与大小。
+
+        **父目录不存在时自动创建**（含多级），并在结果里报告新建了哪些目录；
+        所以写 `site/index.html` 不需要先跑一条 `mkdir` 命令——直接用这个工具写即可。
 
         Args:
-            path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，工作区外写入需要人工审批。
+            path: 相对路径以当前工作区为根；外部须显式本机绝对路径及目录写授权，工作区内覆盖无需审批，外部仍按授权和策略判定。
             content: 文件内容。
-            overwrite: 是否覆盖已有文件；覆盖属于强制审批动作，本版本会被拒绝。
+            overwrite: 是否覆盖已有文件；工作区内无需审批，外部按目录授权和策略执行。
             reason: 创建原因。
         """
         return write_file_content(
@@ -646,10 +622,13 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
 
     @tool
     def delete_file(path: str, recursive: bool = False, reason: str = "") -> str:
-        """删除文件或目录；必须经过人工审批，未获批准时一律拒绝。
+        """删除文件或目录；工作区内无需审批，外部按目录授权和策略执行。
+
+        开启「安全删除」时目标会**移入回收站**（不是彻底删除），返回里 `trashed` 为 true、
+        `trash_path` 是它现在的位置——向用户说明"可以找回"，不要说成"已彻底删除"。
 
         Args:
-            path: 相对路径以当前工作区为根；配置允许外部路径时可使用显式绝对路径，工作区外删除需要人工审批。
+            path: 相对路径以当前工作区为根；外部须显式本机绝对路径及目录写授权，工作区内删除无需审批，外部仍按授权和策略判定。
             recursive: 是否递归删除目录（删除目录必须显式开启）。
             reason: 删除原因。
         """
@@ -660,130 +639,27 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
     return [list_dir, read_file, edit_file, write_file, delete_file]
 
 
-def _decode_text(data: bytes) -> str:
-    """把文件字节解码为文本；二进制或非 UTF-8 内容一律拒绝编辑。"""
-    if b"\x00" in data[:4096]:
-        raise SecurityError("目标文件是二进制内容，不支持编辑")
+def _decode_text(data: bytes, *, encoding: str = "utf-8-sig") -> str:
+    """按实际文本编码编辑；保留对非文本二进制输入的错误说明。"""
+    if b"\x00" in data and not encoding.lower().replace("_", "-").startswith(("utf-16", "utf-32")):
+        raise FileOperationError("目标是二进制内容，请使用合适的二进制工具")
     try:
-        return data.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise SecurityError("目标文件不是 UTF-8 文本（未知编码），不支持编辑") from exc
-
-
-def _read_prefix_and_sha256(path: Path, max_bytes: int) -> tuple[bytes, str, bool]:
-    """有界保留文件前缀，同时流式计算**整文件** Hash。
-
-    ``read_file`` 的正文受 ``max_file_size_bytes`` 限制，但返回的 ``sha256`` 会被
-    ``edit_file.expected_sha256`` 当成整文件版本号。只对前缀计算 Hash 会让被截断的文件永远
-    无法通过编辑前校验；这里流式扫完整文件，不把完整内容装进内存。
-    """
-    digest = hashlib.sha256()
-    prefix = bytearray()
-    total = 0
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-            total += len(chunk)
-            remaining = max_bytes - len(prefix)
-            if remaining > 0:
-                prefix.extend(chunk[:remaining])
-    return bytes(prefix), digest.hexdigest(), total > max_bytes
-
-
-def _atomic_write(path: Path, data: bytes) -> None:
-    """先写同目录临时文件再原子替换，并保留已有文件的权限位（架构 §6.3）。"""
-    original_mode = stat.S_IMODE(path.stat().st_mode)
-    handle_fd, temp_name = tempfile.mkstemp(
-        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(handle_fd, "wb") as handle:
-            handle.write(data)
-        os.chmod(temp_name, original_mode)
-        os.replace(temp_name, path)
-    except BaseException:
-        Path(temp_name).unlink(missing_ok=True)
-        raise
-
-
-def _create_new_file(path: Path, data: bytes) -> None:
-    """以 ``O_CREAT | O_EXCL`` 原子创建新文件：目标已存在时失败，**绝不覆盖**。
-
-    "先检查存在、再写入"存在时间窗：若另一进程在两步之间创建了同名文件，
-    普通写入会把它的内容覆盖掉，而这次写入并没有经过任何审批（架构 §6.4）。
-    ``O_EXCL`` 把"检查 + 创建"合成一个原子操作，从根上关掉这个时间窗。
-
-    Raises:
-        SecurityError: 目标已存在（含并发创建），或创建失败。
-    """
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    try:
-        handle_fd = os.open(path, flags, 0o644)
-    except FileExistsError as exc:
-        raise SecurityError(
-            f"文件已存在：{path.as_posix()}。写入过程中它被创建或改动过，已拒绝覆盖"
-            "（改现有文件请用 edit_file）"
-        ) from exc
-    except OSError as exc:
-        raise SecurityError(f"创建文件失败（{type(exc).__name__}）：{exc}") from exc
-    try:
-        with os.fdopen(handle_fd, "wb") as handle:
-            handle.write(data)
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
+        return data.decode(encoding)
+    except (UnicodeDecodeError, LookupError) as exc:
+        raise FileOperationError(f"无法按{encoding}解码，请指定文件实际encoding") from exc
 
 
 #: 删除目标"影响范围"的扫描上限：这是给用户看的有界摘要，不是精确清点。
 DELETE_IMPACT_SCAN_LIMIT = 500
 
 
-def _bounded_children(directory: Path, limit: int) -> tuple[list[Path], bool]:
-    """读取目录的前 ``limit + 1`` 个条目（**不排序**），返回 ``(条目, 是否还有未读条目)``。
-
-    不能直接 ``sorted(directory.iterdir())``：那会先把整个目录枚举并保存下来再裁剪，条目上限
-    只限制返回数量、挡不住超大目录（外部盘符、用户主目录）的卡顿与内存占用。这里只多读一项
-    用于判断"是否被截断"，随后只对这个小集合排序。
-    """
-    items: list[Path] = []
-    stopped = False
-    try:
-        stream = directory.iterdir()
-        for child in stream:
-            items.append(child)
-            if len(items) > limit:
-                stopped = True
-                break
-    except OSError:  # 不可读的目录按"空目录"处理，不影响其余结果
-        return items, stopped
-    return items, stopped
-
-
-def _describe_target(path: Path, recursive: bool) -> str:
+def _describe_target(path: Path, recursive: bool, policy: SecurityPolicy) -> str:
     """描述删除目标的影响范围（架构 §6.5 要求展示数量与范围，但有界）。
 
     目录只做**一次有上限**的扫描（:data:`DELETE_IMPACT_SCAN_LIMIT` 条就停并标"至少"）：这是给
     用户看的未批准/审批提示，不该为了精确数量遍历整棵目录树（大目录、主目录会卡住，T14C 复审）。
     """
-    if not path.exists():
-        return "目标不存在"
-    if path.is_file():
-        return f"文件，{path.stat().st_size} 字节"
-    if not recursive:
-        return "目录（未开启递归，不会删除）"
-    files = 0
-    directories = 0
-    for item in path.rglob("*"):
-        if item.is_dir():
-            directories += 1
-        elif item.is_file():
-            files += 1
-        if files + directories >= DELETE_IMPACT_SCAN_LIMIT:
-            return (
-                f"目录，至少含 {files} 个文件与 {directories} 个子目录"
-                "（已达扫描上限，影响范围为有界摘要；递归删除需要二次确认）"
-            )
-    return f"目录，含 {files} 个文件与 {directories} 个子目录（递归删除需要二次确认）"
+    return policy.files.describe_delete(path, recursive, DELETE_IMPACT_SCAN_LIMIT)
 
 
 def _select_lines(text: str, *, start_line: int | None, end_line: int | None) -> str:
@@ -801,29 +677,19 @@ def _select_lines(text: str, *, start_line: int | None, end_line: int | None) ->
     return "".join(lines[start_index:end_index])
 
 
-def _dir_entry(path: Path, root: Path, workspace_root: Path) -> DirEntry:
-    kind: EntryKind = "other"
-    if path.is_symlink():
-        kind = "symlink"
-    elif path.is_dir():
-        kind = "dir"
-    elif path.is_file():
-        kind = "file"
-
+def _dir_entry(path: Path, policy: SecurityPolicy) -> DirEntry:
+    kind, info = policy.files.entry(path)
     size: int | None = None
     modified: str | None = None
-    try:
-        stat = path.stat()
-        size = stat.st_size if path.is_file() else None
-        modified = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(
+    if info is not None:
+        size = info.st_size if kind == "file" else None
+        modified = datetime.fromtimestamp(info.st_mtime, tz=timezone.utc).isoformat(
             timespec="seconds"
         )
-    except OSError:  # pragma: no cover - 权限或竞态导致的读取失败
-        pass
 
     return DirEntry(
         name=path.name,
-        path=_display_path(path, workspace_root),
+        path=_display_path(path, policy.workspace_root),
         kind=kind,
         size_bytes=size,
         modified_at=modified,

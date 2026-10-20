@@ -10,7 +10,7 @@
 rank         根                                                默认
 ===========  ================================================  ==================
 100          `<workspace_root>/.agents/skills`（项目级）        **不读**（本轮不做）
-200          `SkillsConfig.user_dirs`（只接受绝对路径）          空
+200          `SkillsConfig.user_dirs`（绝对，或**已钉到 config.yaml 所在目录**的相对路径） 空
 300          `~/.agents/skills`                                读
 400          `~/.codex/skills`（跳过 `.system`）                读
 500          `~/.trae-cn/**`、`~/.kiro/skills`、`~/.workbuddy`   存在即读
@@ -26,8 +26,8 @@ rank         根                                                默认
 安全与口径（每条都对应契约里的措辞）：
 
 1. **只在发现根内读取**：候选路径解析**符号链接之后**仍须落在该根内，否则拒绝整条并记诊断。
-2. **名字必须是 kebab-case**，且**目录名 / 扁平文件名必须与 frontmatter 的 `name` 一致**——
-   不一致拒绝整条（避免"改 A 却加载 B"）。
+2. **名字必须是 kebab-case**（连字符写法，**允许大写**——厂商技能如 `TRAE-browseruse` 要能读进来），
+   且**目录名 / 扁平文件名必须与 frontmatter 的 `name` 一致**——不一致拒绝整条（避免"改 A 却加载 B"）。
 3. **一律按 UTF-8 读**：本机（GBK）按系统编码去解会把中文技能描述读成"看着像字、其实是错字"
    （与 §6.11 的 git 编码缺陷同一类）。
 4. **每轮开跑前重新发现，不装文件监视器**：代价是同一轮内新建的技能下一轮才可见。
@@ -46,8 +46,14 @@ import yaml
 from local_agent.config import SkillsConfig
 from local_agent.context.agents_loader import truncate_middle
 
-#: 技能名（也是它的寻址名）：kebab-case，与 §16.5 写死的正则一致。
-SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+#: 技能名（也是它的寻址名）：**kebab-case 连字符写法**，但**允许大写**。
+#:
+#: 2026-10-16 放宽字符集：厂商内置技能普遍是 `TRAE-browseruse` 这种"命名空间-功能"写法，
+#: 一律按小写收会让**整个厂商技能集**都读不进来——本机实测 `~/.trae-cn` 内置的 7 个技能
+#: （含浏览器使用、代码审查、调试器）全部被这条规则拒掉，而那个根在 `USER_ROOTS` 里写着"存在即读"，
+#: 等于"列了根却读不到东西"。放宽的只是字符集，**"名字必须与目录名/文件名逐字一致"不变**
+#: （那条防的是"改 A 却加载 B"，与大小写无关）。
+SKILL_NAME_PATTERN = re.compile(r"^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$")
 
 #: frontmatter 的**白名单**：其余键作为 opaque metadata 保留，不进领域模型（§16.5）。
 KNOWN_KEYS = frozenset(
@@ -92,6 +98,8 @@ TOOL_CAPABILITY_ALIASES: Mapping[str, str] = {
 USER_ROOTS: tuple[tuple[int, str, str], ...] = (
     (300, ".agents/skills", "个人级（.agents）"),
     (400, ".codex/skills", "个人级（Codex 兼容）"),
+    # 2026-10-20：Claude Code 的技能目录，很多人的技能装在这里；存在才读，不存在不报错。
+    (500, ".claude/skills", "个人级（Claude）"),
     (500, ".trae-cn/builtin/global/skills", "个人级（Trae 内置）"),
     (500, ".trae-cn/builtin_skills", "个人级（Trae 内置）"),
     (500, ".kiro/skills", "个人级（Kiro）"),
@@ -181,6 +189,26 @@ class SkillCatalog:
         return text, truncated
 
 
+def apply_skill_overrides(catalog: SkillCatalog, *, disabled: Iterable[str]) -> SkillCatalog:
+    """把**用户在设置里禁用的技能**从目录里摘掉（技能管理页，2026-10-16）。
+
+    这是"用户禁用"的**唯一判定点**：模型清单、`skill_load` 与设置页三处都走它。三处各写一遍的
+    结果必然是"清单里没有、`skill_load` 还能取到"这类错位——2026-10-09 已经踩过一次同型的坑。
+
+    与 frontmatter 的 ``disable-model-invocation`` 是**两件事**：那是技能**作者**的声明（不进模型清单），
+    这是**用户**的决定（对他而言这个技能不存在）。两者同时生效时取交集，判定顺序不影响结果。
+
+    保留 ``diagnostics``：被禁用的技能不该让"为什么某个技能读不进来"的诊断消失。
+    """
+    names = {str(name) for name in disabled}
+    if not names:
+        return catalog
+    kept = tuple(skill for skill in catalog.skills if skill.name not in names)
+    if len(kept) == len(catalog.skills):
+        return catalog
+    return SkillCatalog(skills=kept, diagnostics=catalog.diagnostics)
+
+
 def discover_skills(
     config: SkillsConfig,
     *,
@@ -210,7 +238,7 @@ def discover_skills(
     winners: dict[str, SkillSummary] = {}
     seen_paths: set[Path] = set()
 
-    for rank, root, source in _roots(config, home_dir):
+    for rank, root, source in _roots(config, home_dir, diagnostics):
         resolved_root = _resolved(root)
         if resolved_root is None or not resolved_root.is_dir():
             continue
@@ -355,9 +383,25 @@ def strip_frontmatter(text: str) -> str:
     return text  # 没有闭合的 `---`：按"没有 frontmatter"处理，正文照给
 
 
-def _roots(config: SkillsConfig, home_dir: Path) -> list[tuple[int, Path, str]]:
-    """按 rank 排好的发现根（不含本轮明确不读的那些）。"""
-    roots: list[tuple[int, Path, str]] = [(200, Path(value), "自定义根") for value in config.user_dirs]
+def _roots(
+    config: SkillsConfig, home_dir: Path, diagnostics: list[str]
+) -> list[tuple[int, Path, str]]:
+    """按 rank 排好的发现根（不含本轮明确不读的那些）。
+
+    **相对路径在这里跳过并记诊断**（2026-10-16）：`user_dirs` 现在允许相对写法，但它的解析属于
+    **入口**的职责（`container.resolve_skill_paths`，按 `config.yaml` 所在目录展开）。走到这里还是
+    相对的，说明有人绕过了入口——那时按进程 cwd 去拼会得到"在这台机器上碰巧能跑"的结果，
+    正是 2026-10-09 记忆库路径缺陷的形态。宁可留下一条看得见的诊断，也不静默按 cwd 解析。
+    """
+    roots: list[tuple[int, Path, str]] = []
+    for value in config.user_dirs:
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            diagnostics.append(
+                f"技能发现根是未展开的相对路径，已跳过：{value}（入口应已按 config.yaml 所在目录解析）"
+            )
+            continue
+        roots.append((200, candidate, "自定义根"))
     if config.include_user_skills:
         roots.extend((rank, home_dir / relative, source) for rank, relative, source in USER_ROOTS)
     return sorted(roots, key=lambda item: item[0])
@@ -416,7 +460,7 @@ def _parse_candidate(
     expected = path.parent.name if path.name == "SKILL.md" else path.stem
     if not SKILL_NAME_PATTERN.match(expected):
         diagnostics.append(
-            f"技能名不是 kebab-case（小写字母/数字/连字符），已拒绝：{display}（{source}）"
+            f"技能名不是 kebab-case（字母/数字/连字符，允许大写），已拒绝：{display}（{source}）"
         )
         return None
     if name != expected:

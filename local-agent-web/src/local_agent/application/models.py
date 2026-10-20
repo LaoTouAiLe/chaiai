@@ -100,6 +100,26 @@ class CapabilityCheckView(_Dto):
     result: CapabilityResult
 
 
+class AttachmentView(_Dto):
+    """一张已上传图片的**引用**（2026-10-16）。
+
+    `attachment_id` 是**引用**：本地后端是相对路径（`2026/10/16/<会话>/<内容哈希>.png`），
+    对象存储后端是**公开 URL**。取回内容都走
+    `GET /api/sessions/{id}/attachments?attachment_id=…`（对象存储会 302 到公开地址）。
+
+    `url` 只有对象存储后端才给（页面可以直接用它，不必再走一次接口）。
+
+    **没有文件名、没有磁盘路径、没有原始字节**：页面要的是"能显示、能引用"，不是一份文件管理器。
+    """
+
+    attachment_id: str = Field(min_length=1)
+    #: 服务端按**魔数**判定的类型（`image/png` / `image/jpeg` / `image/gif` / `image/webp`）。
+    media_type: str = Field(min_length=1)
+    byte_count: int = Field(gt=0)
+    #: 对象存储后端的公开地址；本地后端为 `None`（2026-10-20）。
+    url: str | None = None
+
+
 class ModelConnectionView(_Dto):
     """聊天模型连接的**读** DTO。
 
@@ -120,6 +140,9 @@ class ModelConnectionView(_Dto):
     timeout_seconds: int = Field(gt=0)
     retry_count: int = Field(ge=0)
     streaming: bool
+    #: 用户声明：这条连接**是否支持图片输入**（2026-10-16）。按**连接**而不是全局——一条不收图的
+    #: 连接不该连累另一条。默认 `False` = 失败闭合。
+    supports_vision: bool = False
     auth_mode: Literal["api_key", "none"]
     key_status: KeyStatus
     #: 不含明文的凭据引用；`None` 表示该连接不需要密钥或尚未绑定。
@@ -171,7 +194,7 @@ class ModelConnectionView(_Dto):
 # ---- 权限（T38；§1.5）------------------------------------------------------
 
 
-ExternalPathsMode = Literal["deny", "whitelist", "allow"]
+ExternalPathsMode = Literal["read-only", "workspace-write", "danger-full-access"]
 ExternalPathAccess = Literal["read", "read_write"]
 
 EXTERNAL_PATHS_MODES: Final[tuple[ExternalPathsMode, ...]] = get_args(ExternalPathsMode)
@@ -181,8 +204,8 @@ EXTERNAL_PATH_ACCESSES: Final[tuple[ExternalPathAccess, ...]] = get_args(Externa
 class ExternalPathGrantView(_Dto):
     """一条"工作区外路径"授权（T38）。
 
-    ``path`` 是**用户自己填进来的目录**，与"从机器上发现再泄露给页面"的私人路径不是一回事：
-    不回路径，用户就没法在这张列表上撤销授权。它已经规范化（统一大小写与分隔符、展开符号链接）。
+    ``path`` 完整显示，便于用户核对和撤销授权。
+    它已经规范化（统一大小写与分隔符、展开符号链接）。
     """
 
     path: str = Field(min_length=1)
@@ -195,7 +218,9 @@ class PermissionsView(_Dto):
     """「设置 → 权限」的读 DTO（T38）。
 
     ``mode`` 是当前生效档位（用户的选择优先）；``default_mode`` 是 ``config.yaml`` 的出厂默认，
-    用于说明"库里没有用户选择时按哪一档跑"。授权条目只在 ``whitelist`` 档生效。
+    用于说明"库里没有用户选择时按哪一档跑"。授权条目决定工作区外目标的访问级别
+    （``read-only`` 档把 ``read_write`` 降级为 ``read``）。**写侧沙箱不再是独立开关**：
+    各档位在 Windows 上均限制命令写入；可写档位仅授权工作区、专属临时目录与已授权目录。
     """
 
     mode: ExternalPathsMode
@@ -203,6 +228,29 @@ class PermissionsView(_Dto):
     grants: list[ExternalPathGrantView] = Field(default_factory=list)
     #: 没有可用设置库时为真：这时改档位与加授权都存不下，界面必须如实说明。
     store_unavailable: bool = False
+
+
+# ---- 联网检索密钥（T-联网设置）---------------------------------------------
+
+#: 凭据存储的对外状态：与 `SettingsView.credential_store.kind` 同一套取值（页面共用一种读法）。
+CredentialStoreState = Literal["local", "os", "memory", "unavailable"]
+
+
+class WebSearchKeyView(_Dto):
+    """联网检索的服务凭据（Tavily）状态。
+
+    **只回答"有没有"，不回读密钥**（§6.8 第 2 条）——与模型连接的密钥同一条口径。
+
+    三个字段回答三个不同的问题，不能合并：
+    ``configured`` = 现在能不能构造出检索请求；``source`` = 这份密钥**从哪来**
+    （``settings`` 设置库 / ``environment`` 旧环境变量 / ``none`` 都没有）；
+    ``store`` = 设置库那边**能不能存下来**（``memory`` 表示只在本进程内有效、重启后要重新录入）。
+    """
+
+    configured: bool = False
+    source: Literal["settings", "environment", "none"] = "none"
+    store: CredentialStoreState = "unavailable"
+    note: str | None = None
 
 
 # ---- 能力状态（v0.5 T56；契约 §16.6）--------------------------------------
@@ -223,24 +271,87 @@ class CapabilityStatusView(_Dto):
     detail: str = Field(min_length=1)
     #: 可照做提示；**不可用时必须有**（只灰掉不解释会让用户以为功能坏了）。
     hint: str | None = None
+    #: 不可关闭的基础能力（§16.1）：页面据此把开关画成"始终开启"，不给一个点不动的控件。
+    locked: bool = False
 
 
 class CapabilitiesView(_Dto):
-    """当前 Agent 档位与每个能力的状态（T56；§16.6）。
+    """能力开关表与每个能力的状态（T56；§16.1、§16.6）。
 
-    `profiles` 是**页面可选**的档位（服务端枚举：内置三档 + `profiles.custom`），`default_profile`
-    是 `config.yaml` 的出厂默认（`profile` 是**当前生效**那一个）——三者一起让页面既能画选择器，
-    也能说清"现在这一档是从哪儿来的"（§16.6 档位切换）。
+    `switches` 是**解析后的完整开关表**（出厂默认 + 用户改过的项），页面据此画每一项的开关状态；
+    `switchable` 是**服务端枚举**的可开关集（= 闭集减去不可关闭的两个），页面照它渲染、不自己拼一份。
+    两者一起让页面既能画开关，也能说清"这一项现在到底开没开"。
     """
 
-    profile: str = Field(min_length=1)
-    #: `config.yaml` 的出厂默认档位；用户切换过后 `profile` 与它不同。
-    default_profile: str = ""
-    #: 可选档位（固定顺序）。没有设置库时仍然给出，但 `store_unavailable` 为真、页面不提供切换。
-    profiles: list[str] = Field(default_factory=list)
-    #: 没有可用设置库：档位只能来自 `config.yaml`，写下去会被拒（503）。
+    #: 能力名 → 是否开启（闭集里每一项都有，含不可关闭的那两个）。
+    switches: dict[str, bool] = Field(default_factory=dict)
+    #: 可开关的能力（固定顺序）。没有设置库时仍然给出，但 `store_unavailable` 为真、页面不提供开关。
+    switchable: list[str] = Field(default_factory=list)
+    #: 没有可用设置库：开关只能来自 `config.yaml`，写下去会被拒（503）。
     store_unavailable: bool = False
     capabilities: list[CapabilityStatusView] = Field(default_factory=list)
+
+
+# ---- 技能（技能管理页，2026-10-16；§16.5）--------------------------------
+
+
+class SkillEntryView(_Dto):
+    """一个技能在设置页上的样子（技能管理页，2026-10-16；契约 §16.5）。
+
+    **不给技能目录的绝对路径**：技能常来自用户主目录（`~/.agents/skills`、`~/.codex/skills`…），
+    设置页没有"必须知道主目录结构"的理由；要排查"这个技能从哪来"，`source`（来源层）与
+    `diagnostics` 够用。三个布尔各答一件事：`enabled` 是**用户**的选择，
+    `model_invocable` / `user_invocable` 是**技能作者**在 frontmatter 里的声明。
+    """
+
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    #: 发现它的**来源层**展示名（例如"个人级"）——不是路径。
+    source: str = Field(min_length=1)
+    #: 用户是否允许使用它（技能管理页的开关；**默认可用**，库里只记被禁用的那些）。
+    enabled: bool = True
+    #: 作者声明：是否允许模型自己调用（`disable-model-invocation: true` 时为假，不进模型清单）。
+    model_invocable: bool = True
+    #: 作者声明：是否允许用户手动调用（`user-invocable`）。
+    user_invocable: bool = True
+    #: 技能声明的能力（由 `allowed-tools` 映射而来，**只能收窄本档能力**，§16.5）。
+    declared_capabilities: list[str] = Field(default_factory=list)
+
+
+class SkillRootView(_Dto):
+    """一个技能发现根（2026-10-20）。
+
+    页面用它回答"为什么某个技能没出现"：路径、来源层、这个根下发现了几个技能、能不能移除。
+    `removable` 只对**用户自己添加**的根为真——随包根与个人级根是产品/约定的一部分，不允许在此删除。
+    """
+
+    path: str = Field(min_length=1)
+    #: 来源层展示名（例如"随包技能"、"个人级（.agents）"、"自定义根"）。
+    source: str = Field(min_length=1)
+    #: 这个根下发现了几个技能（0 也要显示：用户据此判断路径是不是填错了）。
+    count: int = Field(default=0, ge=0)
+    #: 是否允许在这个页面移除（只有自定义根可以）。
+    removable: bool = False
+    #: 目录当前是否可读；不可读时页面提示"路径不存在或没有权限"，而不是静默当作没有技能。
+    readable: bool = True
+
+
+class SkillsView(_Dto):
+    """技能清单与启用状态（技能管理页，2026-10-16；契约 §16.5）。
+
+    ``enabled`` 是**总闸**（`skill` 能力开关）：它关着时技能对模型完全不可见，页面据此说明
+    "技能能力关着"。逐条开关与它**不是一回事**——总闸是"这个功能用不用"，逐条是"哪个技能可用"。
+    """
+
+    #: `skill` 能力当前是否开启（总闸）。关闭时下面仍列出技能，让用户先看清再决定。
+    enabled: bool = False
+    #: 没有可用设置库：逐条开关写不下去（503），页面必须如实说明。
+    store_unavailable: bool = False
+    skills: list[SkillEntryView] = Field(default_factory=list)
+    #: 当前在扫的发现根（2026-10-20）：随包 / 个人级 / 用户自己添加的，各自发现到几个技能。
+    roots: list[SkillRootView] = Field(default_factory=list)
+    #: 被发现过程跳过的条目说明（格式不合规、越界等）——不列出来，用户只会看到"技能不见了"。
+    diagnostics: list[str] = Field(default_factory=list)
 
 
 # ---- 计划 / 工具 / 审批 ----------------------------------------------------
@@ -264,7 +375,7 @@ class PlanView(_Dto):
 
 ToolStatus = Literal["pending", "running", "ok", "error", "denied", "unknown"]
 
-ToolOutcomeKind = Literal["read", "list", "search", "edit", "write", "delete", "shell"]
+ToolOutcomeKind = Literal["read", "list", "search", "edit", "write", "delete", "shell", "delegation"]
 
 FileDiffLineKind = Literal["context", "add", "del"]
 
@@ -312,6 +423,26 @@ class SearchMatchView(_Dto):
     text: str
 
 
+class DelegationChildView(_Dto):
+    """一次自主委派里**一个子 Agent**的结局（§18.7）。
+
+    字段取自参照实现（CodeBuddy 的任务面板：状态 / token / 工具调用次数），再加证据条数与失败原因。
+    用户要判断的是"这一路查到没有、花了多少"，而不是去读一段 JSON：把这些摆成一行行，卡片才说明问题。
+
+    **刻意不含"预留 token"**（2026-10-13 裁定）：它是 `_prepare` 切出来的**上限**，同一份配置下每一路
+    几乎一样，且长得像费用——摆在对话卡里必然被读成"这一路花了多少"（§15.7 要求预留与实际分开写）。
+    实际花费要看用量区；要做"每路实际用量"必须先把子任务的模型调用记录保留子标识（§18.7 的未做项）。
+    """
+
+    scope: str
+    status: Literal["completed", "failed"]
+    tool_calls: int = Field(default=0, ge=0)
+    model_calls: int = Field(default=0, ge=0)
+    evidence_count: int = Field(default=0, ge=0)
+    #: 未完成时的原因（已脱敏、已有界）；完成时为 `None`。
+    error: str | None = None
+
+
 class ToolOutcomeView(_Dto):
     """工具结果的**结构化、有界**展示分区（§15.8 工具行）。
 
@@ -345,6 +476,8 @@ class ToolOutcomeView(_Dto):
     stderr: str | None = None
     exit_code: int | None = None
     timed_out: bool | None = None
+    #: 一次自主委派的每个子任务结局（§18.7）；只有 `kind="delegation"` 会填。
+    children: list[DelegationChildView] = Field(default_factory=list)
     truncated: bool = False
 
 
@@ -357,6 +490,19 @@ class ToolEvidenceView(_Dto):
     evidence_type: str | None = Field(default=None, min_length=1, exclude=True)
     summary: str = Field(min_length=1)
     verified: bool
+
+
+class WebSourceView(_Dto):
+    """成功联网结果里的实际来源；不代表模型已读取搜索命中的正文。"""
+
+    title: str
+    url: str
+    kind: Literal["search", "read"]
+    retrieved_at: str | None = None
+    source_id: str = ""
+    cited: bool = False
+    published_at: str | None = None
+    provider: str | None = None
 
 
 class ToolUseView(_Dto):
@@ -382,6 +528,7 @@ class ToolUseView(_Dto):
     elapsed_ms: int | None = Field(default=None, ge=0)
     outcome: ToolOutcomeView | None = None
     evidence: ToolEvidenceView | None = None
+    web_sources: list[WebSourceView] = Field(default_factory=list)
 
     @field_validator("started_at", "finished_at")
     @classmethod
@@ -464,6 +611,11 @@ class UserMessageView(_Dto):
     kind: Literal["user"] = "user"
     message_id: str = Field(min_length=1)
     text: str
+    #: 这条消息带的图片**引用**（2026-10-16，相对路径 `2026/10/16/<会话>/<哈希>.png`）：
+    #: 页面拿它去 `GET /api/sessions/{id}/attachments?attachment_id=…` 取缩略图。
+    #: 只回引用——不回字节、不回磁盘路径（与 `AttachmentView` 同一条门槛）。
+    #: 空列表 = 这条消息没有图（也兼容所有旧 Checkpoint：那时没有 `user_attachment_refs`）。
+    attachments: list[str] = Field(default_factory=list)
     #: **可空**：Checkpoint 里的 LangChain 消息不携带时间戳，投影层不伪造时间（T28 实测）。
     #: 用量记录落地后（§15.6 的 `model_call_records`）可由调用记录补齐。
     created_at: datetime | None = None
@@ -606,7 +758,11 @@ class ModelCallRecordView(_Dto):
 
 #: 一轮的终态。``blocked``：本轮已结束，但目标未达成、在等用户补充信息（与 ``awaiting_approval``
 #: 并列的第二种"等待"——前者等用户做决定，后者等用户给信息）。
-TurnFinalState = Literal["running", "awaiting_approval", "blocked", "completed", "failed"]
+#: ``cancelled``（2026-10-13 追加）：用户停下来的那一轮。它是**终态**，且与 `failed` 必须分开——
+#: "被中止"不是"执行失败"（§17.4）。``running`` 之外的所有取值都是终态。
+TurnFinalState = Literal[
+    "running", "awaiting_approval", "blocked", "completed", "failed", "cancelled"
+]
 
 
 class TurnRecordView(_Dto):
@@ -647,12 +803,44 @@ class TurnRecordView(_Dto):
         return None if value is None else _require_timezone(value)
 
 
+class TraceEventView(_Dto):
+    """轨迹页的一条事件（2026-10-16；§15.6 的审计面）。
+
+    为什么要它：轨迹此前只有"工具调用表 + 每轮用量"，**看不到审批与压缩发生过什么**——
+    而这两件事恰恰是"为什么这一轮慢、上下文为什么变小、是谁批准的"的答案。数据本来就在
+    State 里（`tool_events` / `approval_history` / `compaction_events`），这里只做投影。
+
+    `kind` 是闭集；`label` 只放**已脱敏的一句展示文案**（工具名、审批结论/理由、压缩条数），
+    **不复制参数正文与文件内容**：审计要的是"发生过什么"，不是再来一份数据。
+    """
+
+    kind: Literal["tool", "approval", "compaction"]
+    event_id: str = Field(min_length=1)
+    run_id: str | None = None
+    #: 主时刻：工具 = 开始、审批 = **请求**、压缩 = 发生。
+    at: datetime | None = None
+    #: 结束时刻：工具 = 完成、审批 = **决定**（两者之差就是等待时长）；压缩没有结束时刻。
+    finished_at: datetime | None = None
+    label: str = Field(min_length=1)
+    #: 工具状态（`ok` / `denied` / `failed`…）或审批结论（`approved` / `denied`…）。
+    status: str | None = None
+    #: 审批等待毫秒（只有 `approval` 有）。
+    wait_ms: int | None = Field(default=None, ge=0)
+    #: 压缩折叠掉的消息条数与前后**估算** token（只有 `compaction` 有）。
+    folded_messages: int | None = Field(default=None, ge=0)
+    tokens_before: int | None = Field(default=None, ge=0)
+    tokens_after: int | None = Field(default=None, ge=0)
+
+
 class TurnUsageView(_Dto):
     """持久轮次与其消息锚点；供刷新后把统计放回对应轮次。"""
 
     user_message_id: str = Field(min_length=1)
     usage: TurnRecordView
     model_calls: list[ModelCallRecordView] = Field(default_factory=list)
+    #: 本轮的事件时间线（工具 / 审批 / 压缩，2026-10-16）：轨迹页按轮渲染，
+    #: 缺记录（旧 Checkpoint）时是空表——页面照旧工作，不编一条假事件。
+    events: list[TraceEventView] = Field(default_factory=list)
 
 
 # ---- 上下文快照（§15.7）---------------------------------------------------
@@ -694,6 +882,14 @@ class RuntimeContextSnapshotView(_Dto):
 ContextMeterScope = Literal["current", "previous", "unknown"]
 
 
+class CompressionView(_Dto):
+    """最新一次实际压缩；running 仅存在于进程内，完成/失败从 Checkpoint 恢复。"""
+
+    operation_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    state: Literal["running", "completed", "failed"]
+
+
 class ContextMeterView(_Dto):
     """圆形计量器的口径。
 
@@ -706,6 +902,7 @@ class ContextMeterView(_Dto):
     scope: ContextMeterScope = "unknown"
     #: 输出预留单列，不重复计入已用输入。
     completion_reserve_tokens: int | None = Field(default=None, ge=0)
+    compression: CompressionView | None = None
 
 
 # ---- 会话快照（§15.4 / §6.6）---------------------------------------------
@@ -715,7 +912,9 @@ SessionState = Literal["idle", "running", "awaiting_approval", "blocked", "compl
 
 #: 一轮最终结果的对外状态。``blocked``：本轮已结束、这条回答有效，但目标未达成（在等用户补充）。
 #: 它既不能冒充 ``completed``，也不该被当成 ``failed`` 丢掉——它带着一条真实生成的回答。
-FinalResultState = Literal["completed", "blocked", "failed"]
+#: ``cancelled``（2026-10-13 追加）：这一轮被用户停下来了。它**要带着已产出的部分回答发出去**
+#: （不是"还没有结果"），页面据此标「已停止」而不是"失败"（§17.4）。
+FinalResultState = Literal["completed", "blocked", "failed", "cancelled"]
 
 
 class FinalResultView(_Dto):
@@ -792,10 +991,10 @@ class SessionSnapshot(_Dto):
     model_selection: ModelSelectionView | None = None
     #: 本会话**下一轮**是否按增量流式展示最终回答（v0.8 T74，§19.4）。
     #:
-    #: 页面**只能**用这个字段判断"在不在流式"：拿"有没有增量"或"上一条消息完不完整"去推断，
-    #: 在刚连上、网络慢、回答极短时都会得出错误答案。它与那一轮实际生效的配置同源（连接模式取
-    #: 该会话选中的连接，旧配置模式取 `llm.streaming`），是**配置的只读投影**，不新增真源。
+    #: 输入区使用下一轮配置；运行中的活动提示使用下面的 current_answer_streaming。
     answer_streaming: bool = False
+    #: 当前未结束轮次的固定配置；没有活动轮次或历史版本无法读取时为 None，不猜下一轮配置。
+    current_answer_streaming: bool | None = None
     errors: list[ErrorView] = Field(default_factory=list)
     usage: TurnRecordView | None = None
     #: 本轮逐次模型调用明细（§15.6）：统计行的可展开部分用它，来源与 `usage` 同为 Checkpoint

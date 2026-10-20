@@ -7,7 +7,11 @@
   （`ApplicationService._guarded` 包起来的那次执行），不产生第二份图执行代码。
 - **任务索引只回答"任务在哪一步"**：业务状态真源仍是 Checkpoint，事件是它的单向投影（§17.1）。
 - **失败闭合**：执行中抛异常时**不得**把任务记成 ``failed``——副作用可能已经发生，记 ``failed``
-  等于声称"什么都没发生"（§15.2）。这时任务留在 ``running``，``detail`` 写明待核对，由 T61 收口。
+  等于声称"什么都没发生"（§15.2）。这时任务直接落 ``needs_review``（终态），``detail`` 写明待核对。
+  **2026-10-20 由"留在 running"改来**：原来只有进程重启时 T61 才会收口，运行期一旦抛异常，
+  任务中心就永远显示"正在执行"、那个会话也开不出新任务（实测卡了 28 分钟）。``needs_review``
+  本来就是为"可能已部分执行、证不了终态"设计的终态，页面也有对应展示，语义没有变化。
+  台账（``request_ledger``）仍保持"执行中"，必须由用户核对后显式结束——那是安全边界，不是页面状态。
 
 **单飞由谁承担**（§17.2）：``background=false`` 时由执行锁承担（一次提交在返回前就跑完，不存在
 排队中的任务）；``true`` 时锁不够用——任务可能还在 ``queued`` 而没有任何线程持有锁，所以由
@@ -81,10 +85,16 @@ LEGAL_TRANSITIONS: Mapping[str, frozenset[str]] = {
 
 #: 一次执行的命令结果 → 任务状态（架构 §17.2）。``awaiting_approval`` 停在 ``waiting_user``，
 #: 由审批恢复把它推回 ``running``，因此它不是终态。
+#:
+#: ``cancelled``（2026-10-13 追加）：这一轮在运行中被取消并已收敛（§17.4 的第三个动作），
+#: 于是**这一轮的结局**就是取消——即使这次提交本身不是从 `cancel_task` 进来的（例如取消发生在
+#: 图内部、或令牌在装配前就已触发）。落成 `cancelled` 而不是 `completed`/`failed`：前者会假装
+#: 任务做完了，后者会把"被中止"说成"执行失败"。
 _STATE_FOR_RESULT: Mapping[str, str] = {
     "completed": JOB_STATE_COMPLETED,
     "awaiting_approval": JOB_STATE_WAITING_USER,
     "failed": JOB_STATE_FAILED,
+    "cancelled": JOB_STATE_CANCELLED,
 }
 
 #: 任务状态 → 事件类型（架构 §17.3）。**每个状态恰好一个类型**：
@@ -101,8 +111,12 @@ JOB_EVENT_FOR_STATE: Mapping[str, str] = {
     JOB_STATE_NEEDS_REVIEW: "job_completed",
 }
 
-#: 执行异常时写进 ``detail`` 的说明（状态不变；§15.2 不允许声称"什么都没发生"）。
-UNRESOLVED_DETAIL = "执行中发生异常，副作用是否已经发生尚未核对（按 §15.2 由人工核对）"
+#: 执行异常时的说明。任务落 ``needs_review``：既不声称"什么都没发生"（§15.2），
+#: 也不再永远挂在"正在执行"上（2026-10-20）。
+UNRESOLVED_DETAIL = (
+    "执行中发生异常，副作用是否已经发生尚未核对（按 §15.2 由人工核对）。"
+    "任务已结束并标为需核对，不会自动重跑；核对后重新提交就是新任务。"
+)
 
 _WAIT_STEP_SECONDS = 0.01
 
@@ -310,7 +324,7 @@ class JobRuntime:
     def _execute(
         self, job: Job, work: Callable[[], CommandResultView], *, reraise: bool
     ) -> CommandResultView | None:
-        """跑一次执行并落任务状态。异常时的处置见模块 docstring（留在 ``running``）。"""
+        """跑一次执行并落任务状态。异常时收口到 ``needs_review``（见模块 docstring）。"""
         try:
             with self._state_lock:
                 current = self._store.get(job.job_id)
@@ -326,12 +340,12 @@ class JobRuntime:
             return result
         except Exception:
             try:
-                self._mark_unresolved(job.job_id)
+                self._mark_needs_review(job.job_id)
             except Exception:
                 logger.exception("后台任务 %s 异常后的核对说明写入失败", job.job_id)
             if reraise:
                 raise
-            logger.exception("后台任务 %s 执行异常；任务留在 running，等待人工核对", job.job_id)
+            logger.exception("后台任务 %s 执行异常；任务已标为需人工核对", job.job_id)
             return None
 
     def cancel(
@@ -372,12 +386,17 @@ class JobRuntime:
                 return
             self._advance(job_id, _STATE_FOR_RESULT[str(result.status)], run_id=result.run_id)
 
-    def _mark_unresolved(self, job_id: str) -> None:
-        """异常后把"待核对"写进 ``detail``，**状态不变**（不假装失败）。"""
+    def _mark_needs_review(self, job_id: str) -> None:
+        """异常后把任务收口到 ``needs_review``：**不写 failed**（副作用可能已经发生），
+        但必须是终态——否则页面会永远显示"正在执行"，会话也开不出新任务。"""
         with self._state_lock:
             job = self._store.get(job_id)
             if job is None or job.is_terminal:
                 return
+            if can_transition(job.state, JOB_STATE_NEEDS_REVIEW):
+                self._advance(job_id, JOB_STATE_NEEDS_REVIEW, detail=UNRESOLVED_DETAIL)
+                return
+            # 理论上到不了这里（执行前已推 running）；真到了也不猜状态，只补说明。
             self._advance(job_id, job.state, detail=UNRESOLVED_DETAIL)
 
     def _advance(

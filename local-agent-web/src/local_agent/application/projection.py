@@ -25,7 +25,7 @@ from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
@@ -36,7 +36,9 @@ from local_agent.application.models import (
     ApprovalState,
     ApprovalView,
     AssistantMessageView,
+    CompressionView,
     ContextMeterView,
+    DelegationChildView,
     ErrorMessageView,
     FileDiffHunkView,
     FileDiffLineView,
@@ -62,10 +64,12 @@ from local_agent.application.models import (
     ToolOutcomeView,
     ToolStatus,
     ToolUseView,
+    TraceEventView,
     TurnFinalState,
     TurnRecordView,
     TurnUsageView,
     UserMessageView,
+    WebSourceView,
     WorkflowChildView,
     WorkflowView,
     WorkspaceRef,
@@ -73,14 +77,20 @@ from local_agent.application.models import (
     context_usage_ratio,
 )
 from local_agent.config import redact_secrets
+from local_agent.context.web_citations import cited_source
 from local_agent.exceptions import WorkspaceBoundaryError
 from local_agent.graph.projection import message_id, project_messages
 from local_agent.graph.scope import tool_scope_key
+from local_agent.message_flags import is_tool_image_message
 from local_agent.security.path_guard import ExternalPathPolicy, resolve_target
+from local_agent.tools.web_identity import source_id
+from local_agent.tools.web_tools import WebAccessError, check_url
 
 #: 审批卡的目标归一与"是否工作区外"只用于**展示**，与访问授权无关：无论档位是什么，
 #: 审批卡都要能显示出完整目标。因此这里固定用最宽的档位做解析，判定权限不在这里。
-_DISPLAY_EXTERNAL_POLICY = ExternalPathPolicy(mode="allow")
+#: （2026-10-15 起最宽的一档叫 ``danger-full-access``；旧值 ``allow`` 不再被识别，
+#: 留在那里会让工作区外的目标解析不出来、审批卡显示不出完整路径。）
+_DISPLAY_EXTERNAL_POLICY = ExternalPathPolicy(mode="danger-full-access")
 
 #: 记忆召回失败的 stage（与 `graph.nodes.RECALL_MEMORY` 同值；这里不导入 nodes，
 #: 避免把整个 Graph 节点模块拖进投影层，一致性由 `tests/test_projection.py` 对照断言）。
@@ -90,6 +100,9 @@ STAGE_COMPRESSION: Final[str] = "compression_node"
 STAGE_MEMORY_WRITE: Final[str] = "memory_write_node"
 STAGE_TOOL_EXECUTION: Final[str] = "tool_execution"
 STAGE_SAFETY_GATE: Final[str] = "safety_gate"
+#: 安全门里"**环境不可用**"那一类（找不到可执行文件 / Shell 适配器）：与"策略拒绝"分开映射。
+#: 否则用户看到的是"被安全策略拦截"，而他实际要做的是换一条命令（2026-10-14 实测修正）。
+STAGE_TOOL_ENVIRONMENT: Final[str] = "tool_environment"
 STAGE_TOOL_START: Final[str] = "tool_start"
 STAGE_APPROVAL: Final[str] = "approval_interrupt"
 STAGE_SIDE_EFFECT_RECHECK: Final[str] = "side_effect_recheck"
@@ -130,6 +143,8 @@ _STAGE_ERRORS: Final[dict[str, tuple[str, ErrorCategory]]] = {
     # 被安全策略拒绝一律走 `safety_gate`（无论在安全门还是在工具内部捕获）：它不是"执行失败"，
     # 用户要改的是请求本身或路径，不是工具参数。
     STAGE_SAFETY_GATE: (app_errors.TOOL_CALL_BLOCKED, "security"),
+    # 环境不可用不是策略拒绝：换成"命令在当前环境不可用"，建议也随之改变。
+    STAGE_TOOL_ENVIRONMENT: (app_errors.TOOL_UNAVAILABLE, "tool"),
     STAGE_TOOL_START: (app_errors.TOOL_CALL_BLOCKED, "security"),
     STAGE_APPROVAL: (app_errors.APPROVAL_FLOW_FAILED, "approval"),
     STAGE_SIDE_EFFECT_RECHECK: (app_errors.SIDE_EFFECT_UNCONFIRMED, "recovery"),
@@ -174,6 +189,11 @@ _ERROR_TEXT: Final[dict[str, tuple[str, str]]] = {
         "工具调用被安全策略拦截",
         "调整请求本身或改为在工作区内操作；被拦截的调用没有执行。",
     ),
+    # 环境不可用：措辞与建议都必须指向"换命令/改写请求"——说成"改请求去合规"是误导（2026-10-14）。
+    app_errors.TOOL_UNAVAILABLE: (
+        "命令在当前环境不可用",
+        "这一轮没有执行：环境里找不到该命令（或它的 Shell 适配器）。换成等价的命令、或改写请求后重发。",
+    ),
     app_errors.APPROVAL_FLOW_FAILED: (
         "审批流程异常",
         "本轮未执行被审批的操作。重新发起请求并重新确认即可。",
@@ -204,32 +224,33 @@ _ERROR_TEXT: Final[dict[str, tuple[str, str]]] = {
     ),
 }
 
-#: 只隐藏私人目录；项目所在的其他盘符/系统路径不能一概变成不可核对的占位符。
-#: 空格属于路径的一部分，私人路径遇到空格时宁可多隐藏一段说明，也不能只隐藏前半截。
-_PRIVATE_PATH = re.compile(
-    r"(?:[A-Za-z]:[\\/](?:Users|Documents and Settings)[\\/]|/(?:home|Users)/)"
-    r"[^\"'，。；：、（）()\[\]\r\n]*"
-)
 #: 密钥**样式**（不只是已知密钥值）：即使调用方没把环境里的密钥传进来，这里也要抹掉，
 #: 否则 `ErrorView` 的 fail-closed 校验会让整份快照构造失败——那比少显示一段文字更糟。
 _KEY_LIKE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
-_HIDDEN_PATH = "[已隐藏的绝对路径]"
 _MASK = "***"
 
 _OPERATION_NAMES: Final[dict[str, str]] = {
     "list_dir": "查看目录", "read_file": "读取文件", "edit_file": "修改文件",
     "write_file": "写入文件", "delete_file": "删除文件", "run_shell": "运行命令",
+    "start_shell": "启动交互进程", "read_shell": "读取进程输出", "write_shell": "发送终端输入",
+    "stop_shell": "停止交互进程", "list_shell_sessions": "查看后台进程", "browser": "操作浏览器",
+    "download_file": "下载文件", "inspect_system": "查询本机状态",
     "grep": "搜索内容", "glob": "查找文件", "update_plan": "更新计划",
 }
-_ERROR_ABSOLUTE_PATH = re.compile(r"(?:[A-Za-z]:[\\/]|/(?:home|Users|tmp|var)/)[^\"'，。；：、（）()\[\]\r\n]*")
 
 
 def _public_error_text(text: str, secrets: Iterable[str]) -> str:
-    """Keep actionable failure reasons; raw operation names and machine paths stay local."""
+    """把失败原因洗成可以给用户看、且**可以用来核对**的文本。
+
+    两条规则：
+
+    1. 内部工具名换成用户看得懂的操作名（`read_file` → 读取文件）；
+    2. 密钥脱敏，所有路径原样保留，包括用户目录和带空格的绝对路径。
+    """
     public = sanitize_text(text, secrets)
     for name, label in _OPERATION_NAMES.items():
         public = re.sub(rf"(?<![\w]){name}(?![\w])", label, public)
-    return _ERROR_ABSOLUTE_PATH.sub(_HIDDEN_PATH, public)[:TOOL_DETAIL_STREAM_CHARS]
+    return public[:TOOL_DETAIL_STREAM_CHARS]
 
 #: 工具详情的展示上限（§15.8）：超长内容有界折叠，完整正文留在本地工具事件里，不进入页面。
 TOOL_DETAIL_TEXT_CHARS: Final[int] = 4000
@@ -242,17 +263,14 @@ TOOL_DIFF_LINES: Final[int] = 400
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
-def sanitize_text(
-    text: str, secrets: Iterable[str] = (), *, hide_private_paths: bool = True
-) -> str:
-    """展示文本的清洗：已知密钥值 → `***`，密钥样式串 → `***`，绝对私人路径 → 占位符。
+def sanitize_text(text: str, secrets: Iterable[str] = ()) -> str:
+    """展示文本仅脱敏已知密钥与密钥样式串；路径原样保留。
 
     节点侧的 `error_events` 文案是给内部看的，进入页面之前必须过这一层（§15.5、§15.8）。
     这里**不静默吞掉**别的内容，只做这两类替换，其余原样保留。
     """
     cleaned = redact_secrets(text, list(secrets))
-    cleaned = _KEY_LIKE.sub(_MASK, cleaned)
-    return _PRIVATE_PATH.sub(_HIDDEN_PATH, cleaned) if hide_private_paths else cleaned
+    return _KEY_LIKE.sub(_MASK, cleaned)
 
 
 REASONING_DISPLAY_LIMIT = 16_000
@@ -260,11 +278,7 @@ REASONING_DISPLAY_LIMIT = 16_000
 
 def safe_stream_boundary(text: str, boundary: int, secrets: Iterable[str] = ()) -> int:
     """分段不能切开待脱敏的完整值（密钥也可能包含空格等分隔符）。"""
-    spans = [(match.start(), match.end()) for pattern in (_KEY_LIKE, _PRIVATE_PATH)
-             for match in pattern.finditer(text)]
-    # 私人路径尚未遇到结束分隔符时，继续保留整个路径，不能先遮盖前缀再泄漏下一块的后缀。
-    spans.extend((match.start(), match.end() + 1) for match in _PRIVATE_PATH.finditer(text)
-                 if match.end() == len(text))
+    spans = [(match.start(), match.end()) for match in _KEY_LIKE.finditer(text)]
     for secret in secrets:
         if not secret:
             continue
@@ -325,7 +339,7 @@ def _display_arguments(arguments: Any, secrets: Iterable[str] = ()) -> dict[str,
     值一律转成字符串（嵌套结构直接转字符串），因此 DTO 结构上不可能携带任意对象；
     再统一过一遍 :func:`sanitize_text`：工具层脱敏过的是**已经执行过**的调用，而
     `pending_tool_calls` 与审批请求里的参数还没有经过工具层，那是原文。两者都要在
-    进入 DTO 之前抹掉密钥样式串与绝对路径（§15.8）。
+    进入 DTO 之前抹掉密钥样式串；路径完整保留，便于核对调用目标。
     """
     if not isinstance(arguments, Mapping):
         return {}
@@ -417,6 +431,14 @@ def project_messages_view(state: Mapping[str, Any], *, secrets: Iterable[str] = 
     """
     raw = state.get("messages")
     messages: list[AnyMessage] = list(raw) if isinstance(raw, list) else []
+    # 每条用户消息带了哪些图（2026-10-16）：图像字节在内容块里（`data:` URL ✗，没有引用 ✗），
+    # 所以引用另存了一份（State 的 `user_attachment_refs`，累积字段、落 Checkpoint）。按消息归组。
+    attachments_by_message: dict[str, list[str]] = {}
+    for ref in state.get("user_attachment_refs") or []:
+        message_key = str(_evt_field(ref, "message_id") or "")
+        attachment_id = str(_evt_field(ref, "attachment_id") or "")
+        if message_key and attachment_id:
+            attachments_by_message.setdefault(message_key, []).append(attachment_id)
     overrides = state.get("reply_overrides")
     projected = project_messages(messages, overrides if isinstance(overrides, Mapping) else {})
 
@@ -432,11 +454,17 @@ def project_messages_view(state: Mapping[str, Any], *, secrets: Iterable[str] = 
 
     for message in projected:
         if isinstance(message, HumanMessage):
+            if is_tool_image_message(message):
+                # 工具读到的图片被包成一条 user 消息（端点只允许 user 带图，2026-10-20）：
+                # 它不是用户发言，不能显示成"用户消息"；图片说明已在那条工具行里。
+                continue
             views.append(
                 UserMessageView(
                     message_id=message_id(message),
                     # 用户自己提交过的路径已在其浏览器中；回显时只隐藏密钥。
-                    text=sanitize_text(_text_of(message), secrets, hide_private_paths=False),
+                    text=sanitize_text(_text_of(message), secrets),
+                    # 这条消息带的图片引用（只回引用；页面自己按会话去取缩略图）。
+                    attachments=attachments_by_message.get(message_id(message), []),
                     created_at=None,
                 )
             )
@@ -501,7 +529,8 @@ def _text_of(message: AnyMessage) -> str:
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        # 多段内容（文本 + 附件块）只取文本段，附件与图片留给后续版本。
+        # 多段内容（文本 + 图像块）只取**文本段**：图像本身不在这里回给页面——那会把 MB 级的
+        # `data:` URL 塞进快照 ✗。图片的展示走 State 里的**引用**（`user_attachment_refs`）✔。
         parts = [part if isinstance(part, str) else str(part.get("text", "")) for part in content]
         return "".join(parts)
     return str(content)
@@ -562,28 +591,46 @@ def _optional_sanitized(value: Any, secrets: Iterable[str]) -> str | None:
     return sanitize_text(text, secrets) if text is not None else None
 
 
-def _tool_payload_queues(messages: Iterable[AnyMessage]) -> dict[str, deque[Mapping[str, Any]]]:
+def _tool_payload_queues(messages: Iterable[AnyMessage]) -> dict[str, deque[Mapping[str, Any] | None]]:
     """从 `ToolMessage` 的**全量**文本里解析工具返回的 JSON，按出现顺序排成队列。
 
     结构化详情必须从这里解析，不能从 `tool_results`：后者只存 2000 字符预览，JSON 可能因此
     被截断而解析不出来（与 `graph.nodes._tool_payloads` 同一判据）。用队列而不是字典——
     跨轮复用同一个调用 id 时按出现顺序逐条配对，先出现的轮次不会被后一轮顶掉。
     """
-    queues: dict[str, deque[Mapping[str, Any]]] = {}
+    queues: dict[str, deque[Mapping[str, Any] | None]] = {}
     for message in messages:
         if not isinstance(message, ToolMessage):
             continue
         try:
             parsed = json.loads(str(message.text))
         except (TypeError, ValueError):
-            continue
-        if isinstance(parsed, Mapping):
-            queues.setdefault(str(message.tool_call_id or ""), deque()).append(parsed)
+            parsed = None
+        # 失败和拒绝的纯文本也占一位，不能拿后一轮同 ID 的成功结果填进来。
+        queues.setdefault(str(message.tool_call_id or ""), deque()).append(
+            parsed if isinstance(parsed, Mapping) else None
+        )
+    return queues
+
+
+def _tool_answer_queues(messages: Iterable[AnyMessage]) -> dict[str, deque[str]]:
+    queues: dict[str, deque[str]] = {}
+    calls: list[str] = []
+    answer = ""
+    for message in [*messages, HumanMessage(content="")]:
+        if isinstance(message, HumanMessage):
+            for call in calls:
+                queues.setdefault(call, deque()).append(answer)
+            calls, answer = [], ""
+        elif isinstance(message, AIMessage) and not message.tool_calls:
+            answer = message.text
+        elif isinstance(message, ToolMessage):
+            calls.append(message.tool_call_id)
     return queues
 
 
 def _take_payload(
-    queues: dict[str, deque[Mapping[str, Any]]], tool_call_id: str
+    queues: dict[str, deque[Mapping[str, Any] | None]], tool_call_id: str
 ) -> Mapping[str, Any] | None:
     """取走该调用 id 的下一个载荷（与工具事件同序）；没有解析成功的载荷时为 `None`。"""
     queue = queues.get(tool_call_id)
@@ -824,6 +871,40 @@ def _tool_outcome(
             truncated=bool(payload.get("truncated")) or out_clipped or err_clipped,
         )
 
+    if tool_name == "delegate_research":
+        # 自主委派（§18.7）：把每个子 Agent 的结局摊成一行行，而不是让用户读一段 JSON。
+        # 字段与参照实现的任务面板对齐（状态 / 工具调用次数 / token 预留），另加证据条数与失败原因。
+        children: list[DelegationChildView] = []
+        for item in _mappings(payload.get("children")):
+            scope = _optional_sanitized(item.get("scope"), secrets)
+            if scope is None:
+                continue
+            child_error = sanitize_text(str(item.get("error") or ""), secrets)[:TOOL_DETAIL_TEXT_CHARS]
+            children.append(
+                DelegationChildView(
+                    scope=scope,
+                    status="completed" if item.get("status") == "completed" else "failed",
+                    tool_calls=_int_of(item.get("tool_calls")) or 0,
+                    model_calls=_int_of(item.get("model_calls")) or 0,
+                    evidence_count=_int_of(item.get("evidence_count")) or 0,
+                    error=child_error or None,
+                )
+            )
+        done = sum(1 for child in children if child.status == "completed")
+        summary = f"{len(children)} 个子任务 · {done} 个已完成"
+        if note:
+            summary = f"{summary} · {sanitize_text(note, secrets)[:120]}"
+        text, clipped = _bounded(
+            sanitize_text(str(payload.get("report") or ""), secrets), TOOL_DETAIL_TEXT_CHARS
+        )
+        return ToolOutcomeView(
+            kind="delegation",
+            summary=summary,
+            text=text or None,
+            children=children,
+            truncated=clipped or bool(payload.get("truncated")),
+        )
+
     return None
 
 
@@ -850,6 +931,35 @@ def _evidence_map(state: Mapping[str, Any], secrets: Iterable[str]) -> dict[str,
     return evidence
 
 
+def _web_sources(
+    tool_name: str, payload: Mapping[str, Any] | None, secrets: Iterable[str], answer: str = "",
+) -> list[WebSourceView]:
+    if payload is None or tool_name not in {"web_search", "web_fetch"}:
+        return []
+    kind: Literal["search", "read"] = "search" if tool_name == "web_search" else "read"
+    items = _mappings(payload.get("results")) if kind == "search" else [{
+        "title": payload.get("title"), "url": payload.get("final_url") or payload.get("url"),
+    }]
+    sources: list[WebSourceView] = []
+    for item in items[:20]:
+        raw_url = item.get("url")
+        if not isinstance(raw_url, str):
+            continue
+        try:
+            url = check_url(raw_url, resolve=False)
+        except (WebAccessError, ValueError):
+            continue
+        sources.append(WebSourceView(
+            title=sanitize_text(str(item.get("title") or url)[:300], secrets),
+            url=sanitize_text(url[:4000], secrets), kind=kind,
+            retrieved_at=_optional_str(payload.get("retrieved_at")),
+            source_id=source_id(url), cited=cited_source(source_id(url), url, answer),
+            published_at=_optional_sanitized(item.get("published_at"), secrets),
+            provider=_optional_sanitized(payload.get("provider"), secrets),
+        ))
+    return sources
+
+
 def project_tool_rows(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) -> list[tuple[str, ToolUseView]]:
     """工具行 + 它所属的轮次：`(run_id, 行)`，按 State 里的出现顺序。
 
@@ -867,6 +977,7 @@ def project_tool_rows(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) 
 
     raw_messages = state.get("messages")
     payloads = _tool_payload_queues(raw_messages if isinstance(raw_messages, list) else [])
+    answers = _tool_answer_queues(raw_messages if isinstance(raw_messages, list) else [])
     evidence = _evidence_map(state, secrets)
     current_run = current_run_id(state)
 
@@ -885,7 +996,12 @@ def project_tool_rows(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) 
             or _optional_str((result or {}).get("tool_name"))
             or ""
         )
-        outcome = _tool_outcome(tool_name, _take_payload(payloads, call_id), secrets)
+        payload = _take_payload(payloads, call_id)
+        answer_queue = answers.get(call_id)
+        answer_text = answer_queue.popleft() if answer_queue else ""
+        if tool_name == "task_control":
+            continue  # 内部收尾信号由回答及任务状态展示；原始审计仍保留。
+        outcome = _tool_outcome(tool_name, payload, secrets)
         verification = evidence.get(call_id) if run == current_run else None
         status = _tool_status(event, result)
         if status in {"pending", "running"} and _run_failed(state, run):
@@ -922,12 +1038,15 @@ def project_tool_rows(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) 
                 outcome=outcome,
                 # 证据没有轮次字段：只在本轮的行上贴，历史轮次的行保持为 `None`。
                 evidence=verification,
+                web_sources=_web_sources(tool_name, payload, secrets, answer_text) if status == "ok" else [],
             ),
         )
 
     # 待执行调用属于**当前轮**（这个字段每轮复位，不是累积字段）。
     run = current_run_id(state)
     for call in _mappings(state.get("pending_tool_calls")):
+        if call.get("name") == "task_control":
+            continue
         call_id = str(call.get("id") or "")
         if not call_id or tool_scope_key(run, call_id) in rows:
             continue
@@ -1141,7 +1260,7 @@ def _approval_target(
         )
     except WorkspaceBoundaryError:
         return None, False
-    # 审批卡必须能让用户核对完整目标；这里只抹密钥，不套用普通输出的路径隐藏规则。
+    # 审批卡必须能让用户核对完整目标；与普通输出一样只抹密钥。
     path = resolved.path.as_posix() if resolved.external else resolved.path.relative_to(workspace_root.resolve()).as_posix()
     target = _KEY_LIKE.sub(_MASK, redact_secrets(path, list(secrets)))
     return target, resolved.external
@@ -1375,6 +1494,110 @@ def project_usage(state: Mapping[str, Any], run_id: str | None = None) -> TurnRe
     )
 
 
+#: 审批结论的中文展示（2026-10-16）。
+#:
+#: **刻意不用客户端传来的 `reason` 当主文案**：那是自由文本，实测有客户端把
+#: `人工审批: approve` 这样的半角英文样板原样发上来（`service.resolve_approval` 只是转交，
+#: 不校验措辞），直接渲染就会漏进中文界面，而且它和 `decision` 说的是同一件事——
+#: 界面上就成了「审批 · 人工审批: approve · 等待 16.5s」，一行里说三遍。
+#: 可审计的事实是**结论 + 等待时长 + approval id**；客户端理由留在 State 与审批卡上，
+#: 轨迹不复制（将来真让用户填理由，再显式渲染它）。
+_APPROVAL_LABEL: dict[str, str] = {
+    "approve": "已批准",
+    "edit": "已修改参数后批准",
+    "reject": "已拒绝",
+}
+
+
+def _evt_field(item: object, name: str) -> object:
+    """取事件字段：State 里可能是 **dataclass**（节点写入，生产路径），也可能是 **dict**
+    （反序列化回来的 Checkpoint、以及测试里手工搭的 State）。只看 `getattr` 会在 dict 上
+    静默取到 `None`——于是"这一轮的工具事件全不见了"，而且不报错。
+    """
+    if isinstance(item, Mapping):
+        return item.get(name)
+    return getattr(item, name, None)
+
+
+def _evt_datetime(value: object) -> datetime | None:
+    """事件时刻：只认 datetime（Checkpoint 里可能是字符串或缺席）。"""
+    return value if isinstance(value, datetime) else None
+
+
+def _evt_int(value: Any) -> int | None:
+    """解析动态事件字段；缺失或不可转换返回 None，不能当作记成 0。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def project_trace_events(state: Mapping[str, Any], run_id: str) -> list[TraceEventView]:
+    """本轮的事件时间线（2026-10-16）：工具 / 审批 / 压缩，按**主时刻**排序。
+
+    三条来源都是 State 的累积字段（`tool_events` / `approval_history` / `compaction_events`），
+    写进 Checkpoint ⇒ **不新增存储**，重启后照旧读得到（这是审计面，不是即时提示）。
+
+    排序：按 `at`；**缺时刻的排在最后而不是被丢掉**——"发生过但没记到时刻"也是事实。
+    `label` 只带工具名/结论/条数这类已脱敏的一句，参数正文与文件内容一概不进。
+    """
+    events: list[TraceEventView] = []
+
+    for event in state.get("tool_events") or []:
+        if str(_evt_field(event, "run_id") or "") != run_id:
+            continue
+        name = str(_evt_field(event, "tool_name") or "工具")
+        events.append(
+            TraceEventView(
+                kind="tool",
+                event_id=str(_evt_field(event, "tool_call_id") or name),
+                run_id=run_id,
+                at=_evt_datetime(_evt_field(event, "started_at")),
+                finished_at=_evt_datetime(_evt_field(event, "finished_at")),
+                label=name,
+                status=str(_evt_field(event, "status") or "") or None,
+            )
+        )
+
+    for record in state.get("approval_history") or []:
+        if not isinstance(record, Mapping) or str(record.get("run_id", "")) != run_id:
+            continue
+        requested = _evt_datetime(record.get("requested_at"))
+        decided = _evt_datetime(record.get("created_at"))
+        decision = str(record.get("decision", "") or "")
+        events.append(
+            TraceEventView(
+                kind="approval",
+                event_id=str(record.get("approval_id", "") or decision or "approval"),
+                run_id=run_id,
+                at=requested,
+                finished_at=decided,
+                label=_APPROVAL_LABEL.get(decision, f"人工审批：{decision or '已决定'}"),
+                status=decision or None,
+                wait_ms=_elapsed_ms(requested, decided),
+            )
+        )
+
+    for record in state.get("compaction_events") or []:
+        if not isinstance(record, Mapping) or str(record.get("run_id", "")) != run_id:
+            continue
+        folded = _evt_int(record.get("folded_messages")) or 0
+        events.append(
+            TraceEventView(
+                kind="compaction",
+                event_id=str(record.get("operation_id", "") or "compaction"),
+                run_id=run_id,
+                at=_evt_datetime(record.get("at")),
+                label=f"上下文压缩：折叠 {folded} 条消息",
+                folded_messages=folded,
+                tokens_before=_evt_int(record.get("tokens_before")),
+                tokens_after=_evt_int(record.get("tokens_after")),
+            )
+        )
+
+    return sorted(events, key=lambda item: (item.at is None, item.at or _epoch()))
+
+
 def project_turn_usages(state: Mapping[str, Any]) -> list[TurnUsageView]:
     """只投影有稳定用户消息锚点的轮次；旧 Checkpoint 不猜轮次归属。"""
     turns = state.get("turn_records")
@@ -1391,6 +1614,8 @@ def project_turn_usages(state: Mapping[str, Any]) -> list[TurnUsageView]:
                 user_message_id=user_message_id,
                 usage=usage,
                 model_calls=project_model_calls(state, run_id),
+                # 本轮的事件时间线（工具/审批/压缩；2026-10-16）。
+                events=project_trace_events(state, run_id),
             ))
     return result
 
@@ -1451,9 +1676,9 @@ def _turn_record(state: Mapping[str, Any], run_id: str) -> Any:
 
 
 def _turn_final_state(turn: Any, state: Mapping[str, Any]) -> TurnFinalState:
-    """整轮状态优先取自持久记录（含 `awaiting_approval`），没有记录时回退到 `task_status`。"""
+    """整轮状态优先取自持久记录（含 `awaiting_approval`、`cancelled`），没有记录时回退到 `task_status`。"""
     value = getattr(turn, "final_state", None) if turn is not None else None
-    if value in ("running", "awaiting_approval", "blocked", "completed", "failed"):
+    if value in ("running", "awaiting_approval", "blocked", "completed", "failed", "cancelled"):
         return value
     return project_turn_state(state)
 
@@ -1528,11 +1753,20 @@ def project_context(state: Mapping[str, Any]) -> ContextMeterView:
     reserve = usage_map.get("completion_reserve_tokens")
     window = budget_map.get("context_window_tokens")
     known = isinstance(used, int) and isinstance(window, int) and window > 0
+    compression_map = _as_mapping(state.get("context_compression")) or {}
+    compression = None
+    if (compression_map.get("state") in {"running", "completed", "failed"}
+            and isinstance(compression_map.get("operation_id"), str)
+            and compression_map.get("operation_id")
+            and isinstance(compression_map.get("run_id"), str) and compression_map.get("run_id")):
+        compression = CompressionView.model_validate({key: compression_map[key]
+            for key in ("operation_id", "run_id", "state")})
     return ContextMeterView(
         used_tokens=int(used) if isinstance(used, int) else None,
         window_tokens=int(window) if isinstance(window, int) and window > 0 else None,
         scope=("current" if state.get("task_status") == "running" else "previous") if known else "unknown",
         completion_reserve_tokens=int(reserve) if isinstance(reserve, int) else None,
+        compression=compression,
     )
 
 
@@ -1600,10 +1834,11 @@ def _source_version_pairs(value: Any) -> list[tuple[str, str]]:
 
 
 def project_turn_state(state: Mapping[str, Any]) -> TurnFinalState:
-    """本轮状态。运行中/等待审批/等待用户/完成/失败由 `task_status` 与是否还有未确认调用共同决定。
+    """本轮状态。完成/失败/等待用户/**已取消**由 `task_status` 决定。
 
     ``blocked`` 与 ``running`` 必须分开：前者是**已结束**（在等用户补充），后者是**还在跑**。
     混成一个取值会让"等用户补充"的轮既发不出回答、也不发终态事件（复审实证，2026-09-28）。
+    ``cancelled`` 同样是**终态**，但**不做成失败**：它是用户自己停下来的（§17.4）。
     """
     task_status = str(state.get("task_status") or "")
     if task_status == "completed":
@@ -1612,6 +1847,8 @@ def project_turn_state(state: Mapping[str, Any]) -> TurnFinalState:
         return "failed"
     if task_status == "blocked":
         return "blocked"
+    if task_status == "cancelled":
+        return "cancelled"
     return "running"
 
 
@@ -1620,6 +1857,10 @@ def project_session_state(state: Mapping[str, Any], *, has_live_interrupt: bool)
 
     刻意不看 `final_response`：新一轮开始时上一轮的回答仍在 State 里，用"有没有回答"判断会把
     正在运行的一轮说成空闲。
+
+    **被取消的轮次回到 `idle`**（2026-10-13）：取消的意义正是"会话又能用了"。这一轮的结局由
+    `final_result.state = "cancelled"` 与终态事件表达，不占用会话状态——把它写成 `cancelled` 会让
+    侧栏与输入区卡在一个既不是"在跑"、也不是"能用"的状态上（§17.4 的"立刻可以发下一条"）。
     """
     if has_live_interrupt:
         return "awaiting_approval"
@@ -1630,6 +1871,8 @@ def project_session_state(state: Mapping[str, Any], *, has_live_interrupt: bool)
         return "failed"
     if task_status == "blocked":
         return "blocked"
+    if task_status == "cancelled":
+        return "idle"
     if task_status == "running" or current_run_id(state):
         return "running"
     return "idle"
@@ -1668,12 +1911,15 @@ def _final_result_state(value: TurnFinalState) -> FinalResultState:
     """轮次状态 → 最终结果状态。走到这里已经不可能是 ``running``。
 
     ``awaiting_approval`` 不会终结一轮（它由中断挂着），万一在这里出现按 ``failed`` 处理：
-    宁可说失败，也不冒充完成。
+    宁可说失败，也不冒充完成。``cancelled`` 原样透传：它也是终态，而且**要带着已产出的部分回答
+    发出去**（页面据此标「已停止」而不是"失败"，§17.4）。
     """
     if value == "completed":
         return "completed"
     if value == "blocked":
         return "blocked"
+    if value == "cancelled":
+        return "cancelled"
     return "failed"
 
 

@@ -18,6 +18,8 @@ from collections.abc import Mapping, Sequence
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 
+from local_agent.message_flags import is_tool_image_message
+
 __all__ = ["current_turn_ai_message", "message_id", "project_messages"]
 
 
@@ -38,6 +40,10 @@ def current_turn_ai_message(messages: Sequence[AnyMessage]) -> AIMessage | None:
     """
     for message in reversed(messages):
         if isinstance(message, HumanMessage):
+            # 工具读到的图片被包成 user 消息（端点只允许 user 带图）：它不是轮次边界，
+            # 否则本轮"有没有回答"会被它判成"没有"（2026-10-20）。
+            if is_tool_image_message(message):
+                continue
             return None
         if isinstance(message, AIMessage):
             return message

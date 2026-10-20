@@ -20,10 +20,13 @@ from langchain_core.language_models import BaseChatModel
 from local_agent import config as config_module
 from local_agent.application.jobs import JobRuntime
 from local_agent.application.service import ApplicationService
-from local_agent.capabilities import selectable_profiles
+from local_agent.attachments import AttachmentStore
+from local_agent.capabilities import switchable_capabilities
+from local_agent import app_paths
 from local_agent.config import AppConfig, ConfigError, LlmConfig
 from local_agent.graph import builder
 from local_agent.llm import factory
+from local_agent.model_settings.attachments_oss import OssKeyStore
 from local_agent.model_settings import (
     SettingsDatabase,
     import_legacy_llm,
@@ -60,6 +63,7 @@ class ApiRuntime:
 
     def close(self) -> None:
         """释放单实例锁并关闭数据库连接（测试与一次性脚本用；服务进程不需要调用）。"""
+        self.service.close_tool_sessions()
         if self.lock is not None:
             self.lock.release()
             self.lock = None
@@ -127,6 +131,33 @@ def resolve_memory_paths(config: AppConfig, base_dir: Path) -> AppConfig:
     return config.model_copy(update={"memory": resolved})
 
 
+def resolve_skill_paths(config: AppConfig, base_dir: Path) -> AppConfig:
+    """把 ``skills.user_dirs`` 里的**相对路径**钉到 ``base_dir`` 上（2026-10-16）。
+
+    为什么要有这一步：技能的**内容**是文件（`SKILL.md` + 资源目录），发布时只能随包走；而发现根原来
+    **只接受绝对路径**，于是"包里带技能"就退化成"让朋友手改配置写自己机器上的绝对路径"——正是 T40
+    "解压双击"那条路上最容易卡住的一步。
+
+    语义与 :func:`resolve_under` **逐字一致**（绝对路径照用、相对路径拼在基准目录上、不展开 ``~``）：
+    相对 = **相对 config.yaml 所在目录**，与进程当前目录无关——原来拒绝相对路径的理由（cwd 漂移）
+    在这里不成立。
+
+    与 :func:`resolve_memory_paths` 并列，同样在**三个入口**各调用一次（``open_runtime`` / ``cli`` /
+    ``web``），保证消费方（清单节点、技能工具、设置页）看到的是同一份路径。
+    """
+    skills = config.skills
+    values = [str(resolve_under(base_dir, value)) for value in skills.user_dirs]
+    # 包内技能目录（2026-10-20）：冻结形态的配置在 `%LOCALAPPDATA%/chaiai`，那里既没有 config.yaml
+    # 也没有 skills；包里的 `skills/` 就在 exe 同级。不追加这一条，界面上永远"识别不到技能"。
+    bundled = app_paths.bundled_skills_dir()
+    if bundled is not None and str(bundled) not in values:
+        values.append(str(bundled))
+    if not values:
+        return config
+    resolved = skills.model_copy(update={"user_dirs": values})
+    return config.model_copy(update={"skills": resolved})
+
+
 def open_runtime(
     app_config: AppConfig,
     *,
@@ -175,6 +206,8 @@ def open_runtime(
         workspace_root = resolve_under(base_dir, app_config.workspace.root)
         # 图内节点直接按配置里的路径开记忆库，所以在这里先钉到 base_dir 上（§8）。
         app_config = resolve_memory_paths(app_config, base_dir)
+        # 技能发现根里的相对路径同样钉到 base_dir（2026-10-16）：解压到哪个盘都能用。
+        app_config = resolve_skill_paths(app_config, base_dir)
         database = checkpoint_module.open_database(database_path, workspace_root=workspace_root)
         settings = _open_settings(app_config, base_dir=base_dir)
         service = ApplicationService(
@@ -190,8 +223,17 @@ def open_runtime(
             connections=None if settings is None else settings.connections,
             permissions=None if settings is None else settings.permissions,
             preferences=None if settings is None else settings.preferences,
-            # Agent 档位（§16.6）：与上面三个同源，都是设置库里的可调项；没有库时整组为 None。
-            profiles=None if settings is None else settings.profiles,
+            # 能力开关（§16.1）：与上面三个同源，都是设置库里的可调项；没有库时整组为 None。
+            capabilities=None if settings is None else settings.capabilities,
+            # 联网检索的服务凭据（Tavily）：与模型连接共用同一个凭据存储，没有库时只剩环境变量。
+            web_search=None if settings is None else settings.web_search,
+            # 技能的用户级禁用表（技能管理页，2026-10-16）：与能力开关同源，没有库时整组为 None。
+            skills=None if settings is None else settings.skills,
+            # 附件存储（2026-10-16）：内容落 `data/attachments/年/月/日/会话/`——与三个库同处、
+            # 同样按 `base_dir` 定位，换台机器解压到哪都能用。
+            attachments=AttachmentStore.under(base_dir),
+            # 对象存储密钥（2026-10-20）：与模型连接共用设置库里的凭据存储。
+            oss_keys=None if settings is None else OssKeyStore(settings.credentials),
             # 任务索引与**会话索引、Checkpoint 同库同连接**（§17.1）；worker 只在
             # `jobs.background=true` 时才起，默认路径与 v0.5 一致。
             jobs=JobRuntime(
@@ -245,9 +287,9 @@ def _open_settings(app_config: AppConfig, *, base_dir: Path) -> SettingsDatabase
             credentials=credentials,
             # config.yaml 里的档位只是**出厂默认**：库里没有用户选择时用它（T38）。
             default_external_paths_mode=app_config.workspace.external_paths.mode,
-            # Agent 档位同一条口径（§16.6）：出厂默认 + **服务端枚举**的可选集（内置三档 + 自定义）。
-            default_profile=app_config.profiles.active,
-            profile_names=selectable_profiles(app_config.profiles.custom),
+            # 能力开关同一条口径（§16.1）：config.yaml 解析出的出厂默认 + 服务端枚举的可开关集。
+            default_capabilities=app_config.capability_default_layer(),
+            switchable_capabilities=switchable_capabilities(),
         )
     except (sqlite3.Error, OSError):
         return None

@@ -44,6 +44,9 @@ APP_DIR_NAME: Final[str] = "chaiai"
 #: 前端产物在包内的相对位置（与 ``web.static_dir`` 默认值 ``frontend/dist`` 同一个含义）。
 STATIC_DIR_PARTS: Final[tuple[str, ...]] = ("frontend", "dist")
 
+#: 随包技能目录的名字（onedir 里与 ``chaiai.exe`` 同级）。
+SKILLS_DIR_NAME: Final[str] = "skills"
+
 
 def is_frozen() -> bool:
     """当前进程是否由打包产物启动（PyInstaller 会设置 ``sys.frozen``）。"""
@@ -93,6 +96,40 @@ def default_env_path() -> Path:
     """``--env`` 的默认值：与 :func:`default_config_path` 同一目录（旧密钥路径继续可用）。"""
     base = data_dir()
     return DEFAULT_ENV_PATH if base is None else base / DEFAULT_ENV_PATH
+
+
+def bundled_binary(name: str) -> Path | None:
+    """随包的**外部可执行文件**（如 ``rg.exe``）；源码形态或文件不存在时返回 ``None``。
+
+    为什么要有这一条：``shutil.which`` 只看 PATH，朋友的机器上通常没有 ripgrep，
+    于是代码检索一直走较慢的 Python 扫描。包里把 ``rg.exe`` 放在 ``_internal/bin/``，
+    这里负责把它变成"可见的绝对路径"，调用方仍按"包内优先、PATH 兜底"的顺序解析，
+    这样源码形态与装过 rg 的开发机行为不变。
+    """
+    base = resource_dir()
+    if base is None:
+        return None
+    filename = name if name.lower().endswith(".exe") else f"{name}.exe"
+    candidate = base / "bin" / filename
+    return candidate if candidate.is_file() else None
+
+
+def bundled_skills_dir() -> Path | None:
+    """随包的技能目录；源码形态或目录不存在时返回 ``None``（2026-10-20）。
+
+    为什么需要它：打包时技能被复制到 **exe 同级**的 ``skills/``，但冻结形态的配置文件在
+    ``%LOCALAPPDATA%/chaiai/config.yaml``——不存在的时侯程序走内置默认（``user_dirs`` 为空），
+    于是包里的技能**没有任何发现根指向它们**，界面上永远"识别不到技能"。
+
+    约定与前端产物一致：``None`` = "这件事不归我管"，调用方保持原有行为。
+
+    注意它**不在** ``_internal`` 里：技能含 ``SKILL.md`` 与脚本，用户要能直接打开看/改，
+    所以构建脚本把整个目录放在程序根（与 ``chaiai.exe`` 并排）。
+    """
+    if not is_frozen():
+        return None
+    candidate = Path(sys.executable).parent / SKILLS_DIR_NAME
+    return candidate if candidate.is_dir() else None
 
 
 def bundled_static_dir() -> Path | None:

@@ -3,15 +3,9 @@
 设计原则（架构 §1.3-4、§11.1）：危险动作在代码层拦截，不依赖 Prompt；
 未实现、未放行或需要审批而本版本没有审批能力的动作，一律失败闭合（deny）。
 
-放行清单：
-
-- ``list_dir`` / ``read_file``：只读，直接放行；
-- ``edit_file``：精确串替换或 unified diff（`patch`，架构 §6.3），改动行数在
-  ``security.large_edit`` 免审范围内时放行，超过上限视为大范围修改 → 需要审批
-  （T10 之前拒绝）；结构非法的 patch 直接硬拒绝，不进审批；
-- ``write_file``：只允许创建新文件；覆盖已有文件需要审批（T10 之前拒绝）；
-- ``run_shell``：只有命中 ``security.shell.whitelist`` 的命令免审批，其余需要审批；
-- ``delete_file``：始终需要审批（T10 之前拒绝）。
+工作区文件编辑、新建、覆盖、删除默认免审批；可选审批开关仍可配置。
+常规命令和外部 cwd 免审批，Windows 各档位均强制写边界；外部写入仍需目录授权。
+破坏性 Shell 分类（不含 taskkill）、退出沙箱与受保护目标保留对应策略。
 """
 
 from __future__ import annotations
@@ -20,7 +14,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from local_agent.cancellation import CancellationToken
 from local_agent.config import (
@@ -29,8 +23,10 @@ from local_agent.config import (
     WorkspaceConfig,
     redact_secrets,
 )
-from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
+from local_agent.exceptions import FileOperationError, SecurityError, WorkspaceBoundaryError
+from local_agent.security import win_sandbox
 from local_agent.security.diff_guard import count_changed_lines, edit_input_mode, parse_patch
+from local_agent.security.file_system import FileSystemSandbox
 from local_agent.security.path_guard import (
     ExternalPathPolicy,
     ResolvedTarget,
@@ -40,8 +36,8 @@ from local_agent.security.path_guard import (
     protected_target_reason,
     resolve_target,
 )
-from local_agent.security.process_guard import ProcessRegistry
-from local_agent.security.shell_guard import prepare_shell
+from local_agent.security.process_guard import ProcessRegistry, SandboxRequest
+from local_agent.security.shell_guard import describe_adapter, prepare_shell
 
 #: 只读工具。
 #:
@@ -66,11 +62,21 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
     # （脚本只作为文本资源；要执行得走 shell 能力与人工审批，见 §16.5）。
     "skill_list",
     "skill_load",
+    # 2026-10-13：自主委派（§18.7）。它自己不改工作区，派生出的子 Agent 也**只有只读能力**
+    # （`readonly_child_capabilities` 的收窄 + 子策略重建），所以与上面几项同级、不需要人工审批。
+    # 真正的闸门是页面上的「自主委派调查」开关（默认关，显式 opt-in）与 `workflows` 段的资源上限——
+    # 它是**花钱**的能力，不是改文件的能力，所以不套用写类的审批判定。
+    "delegate_research",
+    # 2026-10-16：看图（`view_image`）——读本机的一张图片交给模型看，不写盘、不改状态。
+    # 它只读，所以与 `read_file` 同级**不需要人工审批**；"能不能用"由 `image_read` 能力
+    # （取决于 `llm.supports_vision` 声明）与工具内部的失败闭合决定，不由审批决定。
+    "view_image",
+    "inspect_system",
 )
-CONTROL_TOOLS: tuple[str, ...] = ("update_plan",)
+CONTROL_TOOLS: tuple[str, ...] = ("update_plan", "task_control")
 
 #: 写入类工具（本版本只放行其中的安全子集）。
-WRITE_TOOLS: tuple[str, ...] = ("edit_file", "write_file")
+WRITE_TOOLS: tuple[str, ...] = ("edit_file", "write_file", "download_file")
 
 #: Shell 工具（按结构化白名单判定）。
 SHELL_TOOLS: tuple[str, ...] = ("run_shell",)
@@ -90,7 +96,21 @@ KNOWN_TOOLS: tuple[str, ...] = (
     + SHELL_TOOLS
     + ALWAYS_APPROVAL_TOOLS
     + GIT_WRITE_TOOLS
+    + ("start_shell", "read_shell", "write_shell", "stop_shell", "list_shell_sessions", "browser")
 )
+
+
+def _path_key(workspace_root: Path, path: str) -> str:
+    """文件计数的比较键：相对路径按工作区展开，再统一大小写与符号链接。
+
+    为什么要有这一步：判定时模型给的是**相对路径**（``site/index.html``），记账时执行侧给的是
+    **解析后的绝对路径**；两边直接比字符串永远不相等，于是"改过的文件"每次都算新文件、
+    免审额度形同虚设。用同一个键归一后，"同一轮改同一个文件"才是同一件事。
+    """
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = workspace_root / candidate
+    return os.path.normcase(os.path.realpath(str(candidate)))
 
 
 @dataclass(frozen=True)
@@ -100,6 +120,13 @@ class SafetyDecision:
     allowed: bool
     requires_approval: bool
     reason: str
+    #: 拒绝的**性质**：``policy`` = 安全策略不放行（要改请求，或走人工审批）；``environment`` = 当前
+    #: 环境里**根本起不来**（找不到可执行文件或 Shell 适配器）；``input`` = 文件参数或状态不符。
+    #: 上层据此分流（2026-10-14：`time /t` 曾被显示成"被安全策略拦截"）。
+    reason_kind: Literal["policy", "environment", "input"] = "policy"
+    #: 本次审批请求属于**大范围编辑**（本轮触及的文件数超上限）。执行侧据此在批准落地后记住
+    #: "本轮已批过一次批量修改"，后续文件不再逐个问（2026-10-15）。不是审批原因的工具不该看它。
+    large_edit: bool = False
 
 
 class SecurityPolicy:
@@ -115,10 +142,23 @@ class SecurityPolicy:
         external_policy: ExternalPathPolicy | None = None,
         cancellation: CancellationToken | None = None,
         allow_result_spill: bool = True,
+        session_scope: str | None = None,
+        #: 安全删除（2026-10-20）：开启时 `delete_file` 把目标**移进回收站**而不是抹掉。
+        #: 策略层默认关（直接构造策略的测试/CLI 保持旧行为）；生产由 `from_config` 按配置传入。
+        safe_delete: bool = False,
+        #: 回收站根目录；``None`` 由 :mod:`local_agent.trash` 按数据目录默认定位。
+        trash_root: Path | None = None,
     ) -> None:
         self.workspace_root = workspace_root
+        # 不同会话不共享终端或浏览器；CLI 未提供会话键时只在当前策略内复用。
+        from uuid import uuid4
+
+        self.session_scope = session_scope or uuid4().hex
         self.security = security
         self.workspace = workspace
+        #: 删除是否进回收站（2026-10-20）。见 `FileSystemSandbox.delete`。
+        self.safe_delete = bool(safe_delete)
+        self.trash_root = trash_root
         #: 本轮执行的取消信号（§17.4）：它让本方法成为"取消后不再启动工具调用"的**第二道门**。
         #: 缺省 `None` 表示这次运行不参与取消（CLI / 测试的轻量路径、以及 v0.5 之前的行为）。
         self.cancellation = cancellation
@@ -136,6 +176,14 @@ class SecurityPolicy:
         self._secret_values = secret_values
         #: 本次执行中被人工批准的动作指纹（一次性授权，执行完立即撤销）。
         self._granted: set[str] = set()
+        #: 本轮**已经改过内容**的文件（`edit_file` 判定用；`write_file` 新建不计——见 `_classify_edit`）。
+        #: 策略是每轮重建的，所以这个集合天然就是"本轮"的作用域，不需要另开状态通道。
+        self._edited_paths: set[str] = set()
+        #: 本轮是否已经为"大范围编辑"批准过一次：批准后本轮内后续文件不再逐个问（2026-10-15）。
+        self._large_edit_approved = False
+        #: 当前实例是否已物化过写授权（根上一条可继承 ACE，系统传播到整棵子树）。
+        self._sandbox_materialized = False
+        self.files = FileSystemSandbox(self)
 
     @classmethod
     def from_config(
@@ -154,7 +202,7 @@ class SecurityPolicy:
             app_config: 完整配置。
             workspace_root: 工作区根目录。
             environ: 环境变量映射，默认取 ``os.environ``。
-            external_policy: 外部路径档位与授权。界面上的档位可在设置库里被改，应用层解析后
+            external_policy: 权限档位与授权。界面上的档位可在设置库里被改，应用层解析后
                 从这里传进来；给 ``None`` 时取 ``config.yaml`` 的出厂默认。
             cancellation: 本轮执行的取消信号（§17.4）；``None`` 表示这次运行不参与取消。
 
@@ -169,6 +217,7 @@ class SecurityPolicy:
                 # `llm` 段可以为空（Web 初始设置模式），这里只做"把环境变量值纳入脱敏"的收集。
                 "" if app_config.llm is None else app_config.llm.api_key_env,
                 app_config.embedding.api_key_env,
+                app_config.web_access.tavily_api_key_env,
             )
             if name
         ]
@@ -183,7 +232,134 @@ class SecurityPolicy:
             external_policy=external_policy,
             cancellation=cancellation,
             allow_result_spill=allow_result_spill,
+            # 安全删除来自配置（默认开）：删除进回收站，可从数据目录找回。
+            safe_delete=app_config.security.safe_delete,
         )
+
+    # -------------------------------------------------------------- 写侧沙箱
+
+    def shell_sandbox_active(self) -> bool:
+        """写侧沙箱这一轮是否生效。**无副作用**：只回答"要不要沙箱"，不物化授权。
+
+        **2026-10-15 起它由档位决定，不再有独立开关**（用户裁定"那个写侧沙箱开关可以去掉了"）：
+
+        - ``read-only``：生效，但**不带任何写授权**——命令读得到、写不了（这是该档的实现手段）；
+        - ``workspace-write``：生效，可写范围 = 工作区 + 专属临时目录 + 「读写」授权目录；
+        - ``danger-full-access``：**不生效**——这一档的语义就是"不设 OS 边界"（对齐 codex 的
+          ``danger-full-access``）。
+
+        与 :meth:`shell_sandbox_request` 的分工：这个用于**判定**（例如回答"`escalate_sandbox`
+        这个请求有没有意义"），那个用于**执行**（会真的去授权目录）。判定阶段不能调后者——
+        它会给工作区与临时目录写 ACL，判一次写一次是不可接受的副作用。
+        """
+        # 非 Windows 没有 OS 级写边界：如实返回 False，由 `sandbox_boundary_note()` 说明。
+        return win_sandbox.is_supported()
+
+    def sandbox_boundary_note(self) -> str | None:
+        """这一轮"OS 级写边界到底有没有"，没有时给一句如实说明（给用户与模型看）。
+
+        为什么需要它（2026-10-15 用户裁定）：非 Windows 上不再失败闭合，改为**照常跑**。静默跑
+        掉就等于假装有边界——那是 dsh 移植笔记里点名的 fail-open 坑。所以改成"跑，但说清楚"。
+        """
+        if win_sandbox.is_supported():
+            return None
+        return (
+            "当前平台没有 OS 级写边界（写侧沙箱只在 Windows 上实现）："
+            "路径工具受档位策略限制；命令内部的文件访问不能由路径工具约束，不是内核强制"
+        )
+
+    def shell_sandbox_request(self, *, escalate: bool = False, cwd: Path | None = None) -> SandboxRequest | None:
+        """``run_shell`` 该不该在**写侧沙箱**里跑；不该就是 ``None``（默认行为）。
+
+        由档位派生（没有独立开关了）：
+
+        - ``read-only`` → **无写授权**的受限令牌：命令能跑、写不进去；
+        - ``workspace-write`` → 可写范围 = **工作区根 + 该工作区专用临时目录 + 用户授权的「读写」
+          目录**；每个根独立 SID，ACL 边界见 win_sandbox 模块说明。临时目录会把 ``TMP``/``TEMP``/
+          ``TMPDIR`` 指过去——很多命令要写临时文件，没有这一格它们会成片（如实）失败；
+        - ``danger-full-access`` → 与工作区可写相同的写边界，外部写入仍需目录授权；
+        - 非 Windows → ``None``（照常跑，由 :meth:`sandbox_boundary_note` 如实说明）。
+        根上一条可继承 ACE；新目录**立即继承可写**（2026-10-15 起，不再逐目录扫描）。
+
+        Args:
+            escalate: 本次请求**退出写侧沙箱**（escalation，2026-10-14）。为真时直接返回 ``None``
+                （这一条命令不进沙箱）。**审批不在这里**：调用方必须先拿到人工批准（指纹里含
+                ``escalate_sandbox=True``），执行侧 :func:`~local_agent.tools.shell_tools.run_shell_command`
+                还会再查一次批准——两处都必须有，缺一不可。
+
+        Raises:
+            SecurityError: 授权物化失败（可写根授权不了）。**这里仍然失败闭合**——边界说"工作区
+                可写"却给不出可写授权时，命令会在一个有边界的错觉下跑起来，比拒绝更糟。
+        """
+        if escalate:
+            # 只回答"这次要不要沙箱"；审批与"批准是否真的存在"由调用方与执行侧各自负责。
+            return None
+        mode = self.external_policy.mode
+        if not win_sandbox.is_supported():
+            return None
+        if cwd is not None and not is_within(cwd, self.workspace_root):
+            # 外部 cwd 免审批不等于可写；LUA 令牌需显式用户读 ACE 才能读取管理员所有的目录。
+            try:
+                win_sandbox.grant_read(str(cwd))
+            except (OSError, win_sandbox.SandboxUnavailable) as exc:
+                raise SecurityError(f"命令工作目录无法物化只读访问（{exc}）") from exc
+        if mode == "read-only":
+            # LUA 令牌不能依赖 OWNER RIGHTS。只补普通用户读 ACE，不带入任何可写 SID。
+            roots = [self.workspace_root, *(Path(path) for path in self.external_policy.grants)]
+            try:
+                for root in dict.fromkeys(roots):
+                    if root.is_dir():
+                        win_sandbox.grant_read(str(root))
+            except (OSError, win_sandbox.SandboxUnavailable) as exc:
+                raise SecurityError(f"只读沙箱：无法物化读授权（{exc}）") from exc
+            return SandboxRequest(writable_sids=())
+        temp_dir = win_sandbox.sandbox_temp_dir(self.workspace_root)
+        # **用户授权的「读写」目录也纳入可写范围**（2026-10-14，吸收 codex `--add-dir` 的做法）：
+        # 否则组合是自相矛盾的——档位说"这个目录你可以读写"，沙箱却把它挡在外面。
+        # 只收 `read_write`（只读授权本来就意味着"能读不能写"，沙箱不该替它放宽），
+        # 不存在与受保护的目标跳过。
+        writable_dirs = self._writable_grant_dirs()
+        directories = tuple(dict.fromkeys((str(self.workspace_root), str(temp_dir), *writable_dirs)))
+        # 每个可写根一个 SID：撤销或降为只读后，下一轮令牌不再携带该目录的 SID。
+        # 每进程每根扫描一次；新目录继承可写，扫描后新增的保护名目录要到下次进程启动才保护。
+        sids = tuple(win_sandbox.workspace_sid_text(directory) for directory in directories)
+        try:
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            reports = [win_sandbox.grant_write(directory, sid) for directory, sid in zip(directories, sids)]
+            # 包括其他授权根的 SID；缓存命中也复核，防止后续 ACL/授权变化让文件重新可写。
+            win_sandbox.verify_read_only_files(
+                tuple(path for report in reports for path in report.read_only_files), writable_sids=sids,
+            )
+        except (OSError, win_sandbox.SandboxUnavailable) as exc:
+            # 可写根授权或受保护子树拒绝项失败均阻止执行；普通子树枚举失败单独报告。
+            # 不把不完整的物化结果当作可用边界，失败后绝不裸跑。
+            raise SecurityError(f"写侧沙箱：无法物化写授权（{exc}）") from exc
+        self._sandbox_materialized = True
+        return SandboxRequest(
+            writable_sids=sids,
+            extra_env=(("TMP", str(temp_dir)), ("TEMP", str(temp_dir)), ("TMPDIR", str(temp_dir))),
+            # 跳过的目录随请求带走：这些目录的写权限与内部保护范围未完成核实。
+            skipped=tuple(item for report in reports for item in report.skipped),
+        )
+
+    def _writable_grant_dirs(self) -> tuple[str, ...]:
+        """「读写」授权里可以纳入沙箱可写范围的目录（不存在与受保护目标跳过）。
+
+        「只读」档直接返回空：那一档的语义是"哪儿都不许写"，授权条目只能给到只读
+        （旧值 ``deny`` 的守卫已随权限模型重构作废——`shell_sandbox_request` 在只读档更早
+        就返回了无写授权的请求，这里是第二道保险）。
+        """
+        result: list[str] = []
+        if self.external_policy.mode == "read-only":
+            return ()
+        for grant_path, access in self.external_policy.grants.items():
+            if access != "read_write":
+                continue
+            directory = Path(grant_path)
+            if not directory.is_dir() or protected_target_reason(directory):
+                continue
+            result.append(str(directory))
+        return tuple(result)
 
     # ------------------------------------------------------------------ 路径
 
@@ -191,6 +367,8 @@ class SecurityPolicy:
         """检索工具自己的第二道门：子策略不能借 save_full 写文件。"""
         if not self.allow_result_spill:
             raise SecurityError("当前策略禁止保存检索结果文件")
+        self.files.check_cancelled()
+        self.require_workspace_writable("保存检索结果文件")
 
     def resolve_target(self, path: str) -> ResolvedTarget:
         """解析路径并给出访问级别（目标可以不存在）。判定与执行共用这一个入口。
@@ -231,36 +409,59 @@ class SecurityPolicy:
         """解析只读文件路径，并拦下敏感文件。
 
         Raises:
-            SecurityError: 路径越界、命中敏感文件模式、或目标不是文件。
+            SecurityError: 路径越界或命中敏感文件模式。
+            FileOperationError: 目标不是文件或不存在。
         """
         resolved = self.resolve_path(path)
         self._reject_sensitive(resolved, verb="读取")
         if not resolved.is_file():
-            raise SecurityError(f"目标不是文件或不存在：{resolved.as_posix()}")
+            raise FileOperationError(f"目标不是文件或不存在：{resolved.as_posix()}")
         return resolved
+
+    def require_workspace_writable(self, verb: str) -> None:
+        """当前档位是否允许写工作区；``read-only`` 档下一律拒绝（2026-10-15）。
+
+        为什么放在**解析路径**这一层而不是只进判定：判定挡住的是模型直接发起的工具调用，
+        而写还有别的入口（执行侧复核、别的工具内部复用）。边界要落在"解析出一个可写目标"这件事上
+        ——codex 的 ``read-only`` 是只读挂载，语义就是"解析不出可写目标"。
+
+        Raises:
+            SecurityError: 当前是只读档。
+        """
+        if self.external_policy.allows_workspace_write():
+            return
+        raise SecurityError(
+            f"当前是「只读」档，不能{verb}：要改文件请先在「设置 → 权限」切到「工作区可写」"
+            "（这一步是产品设计上的边界，不是可以逐次批准的例外）"
+        )
 
     def resolve_writable_file(self, path: str) -> Path:
         """解析待修改的已有文件（架构 §6.3）。
 
         Raises:
-            SecurityError: 路径越界、命中敏感文件模式、或目标不是文件。
+            SecurityError: 路径越界、命中敏感文件模式或当前是只读档。
+            FileOperationError: 目标不是文件或不存在。
         """
-        resolved = self.resolve_path(path)
-        self._reject_sensitive(resolved, verb="修改")
-        self.require_side_effect_target(resolved)
+        resolved = self.resolve_writable_path(path, verb="修改")
         if not resolved.is_file():
-            raise SecurityError(f"目标文件不存在或不是普通文件：{resolved.as_posix()}")
+            raise FileOperationError(f"目标文件不存在或不是普通文件：{resolved.as_posix()}")
         return resolved
 
-    def resolve_writable_path(self, path: str) -> Path:
+    def resolve_writable_path(self, path: str, *, verb: str = "写入") -> Path:
         """解析写入目标路径；目标可以不存在（架构 §6.4）。
 
         Raises:
-            SecurityError: 路径越界或命中敏感文件模式。
+            SecurityError: 路径越界、命中敏感文件模式、或当前是只读档。
         """
-        resolved = self.resolve_path(path)
-        self._reject_sensitive(resolved, verb="写入")
+        target = self.resolve_target(path)
+        resolved = target.path
+        self._reject_sensitive(resolved, verb=verb)
         self.require_side_effect_target(resolved)
+        self.require_workspace_writable("写入文件")
+        if target.access == "read":
+            raise SecurityError(
+                "该路径当前只允许读，不能写入：请在「设置 → 权限」中把这个目录授权为「可读写」"
+            )
         return resolved
 
     # ------------------------------------------------------------------ 工具分类
@@ -283,13 +484,59 @@ class SecurityPolicy:
             )
         if tool_name in CONTROL_TOOLS:
             return SafetyDecision(allowed=True, requires_approval=False, reason="当前任务计划更新")
+        if tool_name in {"start_shell", "read_shell", "write_shell", "stop_shell", "list_shell_sessions", "browser"}:
+            if not self.allow_result_spill:
+                return SafetyDecision(False, False, "只读子任务不能创建或控制持久会话")
+            if tool_name in {"read_shell", "stop_shell", "list_shell_sessions"}:
+                return SafetyDecision(True, False, "读取或关闭当前会话拥有的进程")
+            if not self.external_policy.allows_workspace_write():
+                return SafetyDecision(False, False, "交互终端与浏览器需要工作区可写权限")
+            if tool_name == "start_shell":
+                return self._classify_shell(args)
+            if tool_name == "write_shell":
+                from local_agent.security.shell_guard import match_blocked_patterns
+
+                text = str(args.get("text") or "")
+                if self.security.require_approval.destructive_shell and match_blocked_patterns([], text, self.security.shell.blocked_patterns):
+                    return SafetyDecision(False, True, "终端输入含破坏性命令，需要人工批准")
+            if tool_name == "browser" and args.get("path"):
+                try:
+                    self.resolve_writable_path(str(args["path"]))
+                except SecurityError as exc:
+                    return SafetyDecision(False, False, str(exc))
+            return SafetyDecision(True, False, "当前会话的交互操作，文件输出仍按目录授权检查")
         if tool_name in READ_ONLY_TOOLS:
-            if tool_name in {"grep", "glob"} and args.get("save_full") and not self.allow_result_spill:
-                return SafetyDecision(False, False, "当前策略禁止保存检索结果文件")
+            if tool_name in {"grep", "glob"} and args.get("save_full"):
+                try:
+                    self.require_result_spill()
+                except SecurityError as exc:
+                    return SafetyDecision(False, False, str(exc))
             return SafetyDecision(allowed=True, requires_approval=False, reason="只读工具")
+        if not self.external_policy.allows_workspace_write() and tool_name in (
+            *WRITE_TOOLS,
+            *ALWAYS_APPROVAL_TOOLS,
+            *GIT_WRITE_TOOLS,
+        ):
+            # **只读档：写类工具一律拒绝**（2026-10-15）。放在这里而不是各工具的判定里，是为了
+            # 让"这个档位下不能写"只有一个出口——漏掉一个工具就是一条静默的写通道。
+            # 这不是"需要审批"，所以 `requires_approval=False`：没有批准能把它放行。
+            return SafetyDecision(
+                allowed=False,
+                requires_approval=False,
+                reason=(
+                    "当前是「只读」档，不能写文件：要改文件请先在「设置 → 权限」切到「工作区可写」"
+                ),
+            )
         if tool_name == "edit_file":
             return self._classify_edit(args)
         if tool_name == "write_file":
+            return self._classify_write(args)
+        if tool_name == "download_file":
+            if not self.allow_result_spill:
+                return SafetyDecision(False, False, "只读子任务不能下载文件到磁盘")
+            concern = self._external_side_effect_decision(str(args.get("path") or ""), verb="下载")
+            if concern is not None:
+                return concern
             return self._classify_write(args)
         if tool_name in SHELL_TOOLS:
             return self._classify_shell(args)
@@ -301,6 +548,8 @@ class SecurityPolicy:
             )
             if concern is not None:
                 return concern
+            if not self.is_external(self.resolve_path(str(args.get("path") or "."))) and not self.security.require_approval.delete_file:
+                return SafetyDecision(True, False, "删除工作区文件由模型执行，无需人工审批")
             return SafetyDecision(
                 allowed=False,
                 requires_approval=True,
@@ -319,7 +568,9 @@ class SecurityPolicy:
 
         - 受保护目标（根目录、主目录、Git 元数据、系统关键目录）→ **硬拒绝**，不可审批；
         - 越界且未被授权 → **硬拒绝**（失败闭合），提示指向「设置 → 权限」；
-        - 只有**只读**授权的外部目标 → 拒绝写操作，并说明该授权只覆盖读取；
+        - 外部目标**只允许读**（只有只读授权，或「放行」档下未逐条授权的目标）→ **拒绝写操作**
+          并说明写需要逐条授权。一律硬拒绝、不经审批：两家在工作区外写上的表现也是"直接失败"，
+          不是"问一次"（2026-10-14）；
         - **读写**授权的外部目标 → ``None``：视同工作区内，交给各工具自己的风险规则
           （四项硬约束仍然生效）；
         - 工作区内目标 → ``None``。
@@ -344,8 +595,10 @@ class SecurityPolicy:
                 allowed=False,
                 requires_approval=False,
                 reason=(
-                    f"该路径只有只读授权，不能{verb}：{target.path.as_posix()}。"
-                    "请在「设置 → 权限」中把该目录改为「可读写」，或改到工作区内操作"
+                    f"该路径当前只允许读（只读授权，或「放行」档仍未逐条授权），不能{verb}："
+                    f"{target.path.as_posix()}。"
+                    "写需要逐条授权：请在「设置 → 权限」中把这个目录授权为「可读写」，"
+                    "或改到工作区内操作"
                 ),
             )
         return None
@@ -362,11 +615,11 @@ class SecurityPolicy:
         listed = "、".join(paths) if paths else "未列出（必须显式给出）"
         message = str(args.get("message") or "").strip()
         return SafetyDecision(
-            allowed=False,
-            requires_approval=True,
+            allowed=True,
+            requires_approval=False,
             reason=(
                 f"提交到当前 Git 分支：路径 {listed}；提交信息「{message[:80]}」。"
-                "这改动仓库历史而不是单个文件，必须人工批准后才执行"
+                "提交由模型执行，无需人工审批"
             ),
         )
 
@@ -375,18 +628,18 @@ class SecurityPolicy:
         # diff_guard.edit_input_mode，不能两处各写一套互斥规则（架构 §6.3）。
         try:
             mode = edit_input_mode(args.get("old_text"), args.get("new_text"), args.get("patch"))
-        except SecurityError as exc:
-            return SafetyDecision(allowed=False, requires_approval=False, reason=str(exc))
+        except FileOperationError as exc:
+            return SafetyDecision(allowed=False, requires_approval=False, reason=str(exc), reason_kind="input")
         concern = self._external_side_effect_decision(str(args.get("path", "")), verb="修改")
         if concern is not None:
             return concern
         if mode == "patch":
             try:
                 plan = parse_patch(str(args.get("patch") or ""))
-            except SecurityError as exc:
+            except FileOperationError as exc:
                 # 结构非法的 patch 永远不可能被执行：硬拒绝，不推进审批——不能让用户为一个
                 # 必然失败的补丁点"批准"（架构 §6.3：空 Patch/错 hunk 直接拒绝）。
-                return SafetyDecision(allowed=False, requires_approval=False, reason=str(exc))
+                return SafetyDecision(allowed=False, requires_approval=False, reason=str(exc), reason_kind="input")
             changed_lines = plan.changed_lines
             what = f"unified diff（{len(plan.hunks)} 个 hunk）"
         else:
@@ -394,15 +647,36 @@ class SecurityPolicy:
                 str(args.get("old_text") or ""), str(args.get("new_text") or "")
             )
             what = "精确串替换"
-        limit = self.security.large_edit.max_changed_lines_without_approval
-        if changed_lines > limit:
+        limit = self.security.large_edit.max_files_without_approval
+        path = str(args.get("path") or "")
+        # **大范围编辑按"本轮触及的不同文件数"判**（2026-10-15）。
+        #
+        # 原来判的是"单次改动行数 > 200"，而已改动行数 = 新增 + 删除（`diff_guard.count_changed_lines`），
+        # 那个量级恰好是"重写一个函数"的常态：实证里它把正常重构变成了逐次弹卡，用户体感是
+        # "稍微多改点就被拦"。dsh 没有这类阈值——它的 `edit` 工具只校验参数合法性
+        # （`packages/fs/tool-fs/src/edit.ts`），覆盖前必须读（我们的等价物是 `expected_sha256`）。
+        #
+        # 只对 `edit_file` 计数：**新建文件不计**。"产出一组文件"（生成站点、脚手架）不该被这条拦住，
+        # 而"编辑"才对应四项硬约束里的"大范围编辑"。批准一次后本轮内不再问（见 `note_large_edit_approved`）。
+        #
+        # 记账与判定必须用**同一个 key**（`_path_key`）：模型传的是相对路径，执行侧记的是解析后的
+        # 绝对路径，直接比字符串会导致"改过的文件仍被当成新文件"——那样额度永远用不掉。
+        exceeds_batch = (
+            self.security.require_approval.large_batch_edit
+            and _path_key(self.workspace_root, path) not in self._edited_paths
+            and len(self._edited_paths) >= limit
+            and not self._large_edit_approved
+        )
+        if exceeds_batch:
             return SafetyDecision(
                 allowed=False,
                 requires_approval=True,
                 reason=(
-                    f"{what}，改动约 {changed_lines} 行，超过免审上限 {limit} 行，属于大范围修改，"
-                    "需要人工审批（T10）"
+                    f"{what}，本轮已经改过 {len(self._edited_paths)} 个文件，这次要改的是新文件"
+                    f"（{path or '未知路径'}），属于大范围修改：需要一次人工批准。"
+                    f"批准后本轮不再逐个询问（免审上限 {limit} 个文件，可在 security.large_edit 调整）"
                 ),
+                large_edit=True,
             )
         return SafetyDecision(
             allowed=True,
@@ -410,11 +684,29 @@ class SecurityPolicy:
             reason=f"{what}，改动 {changed_lines} 行，在免审范围内",
         )
 
+    def note_edited(self, path: Path) -> None:
+        """记下"本轮改过这个文件"（在 ``edit_file`` 真正改完之后调用）。
+
+        作用域就是本策略实例 = 本轮：新的一轮会重建策略，计数自然归零。
+        """
+        self._edited_paths.add(_path_key(self.workspace_root, str(path)))
+
+    def note_large_edit_approved(self) -> None:
+        """记下"本轮的大范围修改已获人工批准"：后续文件不再逐个弹卡。"""
+        self._large_edit_approved = True
+
+    def edited_file_count(self) -> int:
+        """本轮已经改过几个文件（诊断与测试用）。"""
+        return len(self._edited_paths)
+
     def _classify_write(self, args: Mapping[str, Any]) -> SafetyDecision:
         concern = self._external_side_effect_decision(str(args.get("path", "")), verb="写入")
         if concern is not None:
             return concern
-        if args.get("overwrite"):
+        if args.get("overwrite") and (
+            self.security.require_approval.overwrite_existing_file
+            or self.is_external(self.resolve_path(str(args.get("path") or ".")))
+        ):
             return SafetyDecision(
                 allowed=False,
                 requires_approval=True,
@@ -443,20 +735,85 @@ class SecurityPolicy:
             env_keys=env_keys,
             external_policy=self.external_policy,
         )
-        if plan.cwd is not None and self.is_external(plan.cwd):
-            # 工作区外 cwd 不受免审白名单影响：必须人工批准（架构 §1.5）
+        # 提权请求（escalation）要在**所有分支之前**定下来：它是一票否决式的参数有效性检查。
+        escalate = bool(args.get("escalate_sandbox"))
+        if escalate and not self.shell_sandbox_active():
+            # 没有沙箱就没有"退出沙箱"这回事：**拒绝**而不是静默忽略——静默忽略会让模型以为
+            # 自己拿到了更宽的执行环境（"写了却没生效"的另一种形态）。
+            return SafetyDecision(
+                allowed=False,
+                requires_approval=False,
+                reason=(
+                    "当前没有启用写侧沙箱，escalate_sandbox 没有意义：去掉这个参数重试"
+                    "（提权只在真的有写边界时才存在）"
+                ),
+            )
+        # **档位在这里决定"常规命令问不问"**（2026-10-14）：档位的设计意图本来就是"决定常规小改动
+        # 是否需要逐次询问"，但在此之前 Shell 审批完全没读过档位——于是"选了放行还什么都要问"。
+        mode = self.external_policy.mode
+        if plan.destructive and self.security.require_approval.destructive_shell and not plan.environment_unavailable:
+            # 四项硬约束之一：破坏性命令**任何档位**都要人工批准（"放行"也不例外）。
+            # 环境不可用的除外：那种命令**批准了也起不来**，走拒绝（别退回"点了批准然后启动失败"）。
+            return SafetyDecision(
+                allowed=False,
+                requires_approval=True,
+                reason=f"{plan.reason}；破坏性命令任何档位都需要人工批准（四项硬约束）",
+            )
+        if escalate and plan.executable_path and not plan.environment_unavailable:
+            # **运行中提权**（escalation，2026-10-14）：本次请求退出写侧沙箱 → 不管哪一档、
+            # 不管命令本身是否在白名单里，都要人工批准；批准只对**这一条**命令生效
+            # （指纹里含 `escalate_sandbox`）。对齐 codex 的 `RequireEscalated` 与 dsh 的 `escalate()`。
+            # 起不来的命令不进这条路：那会退化成"点了批准然后启动失败"。
             return SafetyDecision(
                 allowed=False,
                 requires_approval=True,
                 reason=(
-                    f"工作区外工作目录（{plan.cwd.as_posix()}）：{plan.reason}；"
-                    "必须人工审批"
+                    f"本次请求退出写侧沙箱（仅这一次，工作区外也可写）：{plan.reason}。"
+                    "任何档位都需要人工批准——批准后这一条命令不再受写边界约束"
                 ),
+            )
+        if plan.safe_read_only:
+            # 只读免审不能覆盖提权或工作区外 cwd 的审批要求。
+            return SafetyDecision(allowed=True, requires_approval=False, reason=plan.reason)
+        if (
+            self.external_policy.mode == "read-only"
+            and not win_sandbox.is_supported()
+            and plan.requires_approval
+        ):
+            # **只读档 + 没有 OS 沙箱的平台**：命令里一句重定向就能写盘，于是"只读"是句空话。
+            # 这种组合下常规命令仍逐条问——不是不信任命令，而是这句承诺必须由某样东西兜住
+            # （Windows 上由"无写授权的受限令牌"兜，其它平台只能靠人看一眼）。
+            return SafetyDecision(
+                allowed=False,
+                requires_approval=True,
+                reason=(
+                    f"只读档且当前平台没有 OS 级写边界：命令需要人工批准（{plan.reason}）"
+                ),
+            )
+        if plan.requires_approval:
+            # **常规命令不再逐条询问**（2026-10-15 权限模型重构，用户裁定）：
+            # 档位决定"写到哪"，沙箱/授权条目负责把边界落实，所以"命令本身要不要问"不再是
+            # 需要用户逐条回答的问题——workspace-write 档的语义就是"可以跑 powershell"。
+            #
+            # 放在前面那些判定**之后**，因此以下照旧要人工批准：
+            # 破坏性命令（`DESTRUCTIVE_PATTERNS`）、越是界（`escalate_sandbox`）、工作区外 cwd。
+            # 也**不动**硬拒绝（`plan.requires_approval=False` 的那类：非法命令结构、带路径的
+            # 可执行文件、环境里起不来的命令）——这里只免掉"审批"，不免掉"拒绝"。
+            # plan.reason 包含下层的旧审批结论；这里已免审，改由结构字段说明实际执行方式。
+            execution = (
+                describe_adapter(plan.executor) if plan.uses_shell_adapter
+                else "argv（按已解析的可执行文件路径与参数数组直接执行）"
+            )
+            return SafetyDecision(
+                allowed=True,
+                requires_approval=False,
+                reason=f"权限档位「{mode}」：常规命令免审批；执行方式：{execution}",
             )
         return SafetyDecision(
             allowed=plan.allowed,
             requires_approval=plan.requires_approval,
             reason=plan.reason,
+            reason_kind="environment" if plan.environment_unavailable else "policy",
         )
 
     # ------------------------------------------------------------------ 一次性授权

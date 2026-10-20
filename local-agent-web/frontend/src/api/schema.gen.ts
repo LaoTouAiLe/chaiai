@@ -4,6 +4,42 @@
  */
 
 export interface paths {
+    "/api/attachments/oss/credential": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 对象存储密钥状态 */
+        get: operations["get_oss_credential_api_attachments_oss_credential_get"];
+        /** 保存对象存储密钥 */
+        put: operations["put_oss_credential_api_attachments_oss_credential_put"];
+        post?: never;
+        /** 删除对象存储密钥 */
+        delete: operations["delete_oss_credential_api_attachments_oss_credential_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/attachments/oss/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 测试对象存储（上传一张 1×1 测试图并检查公开读） */
+        post: operations["test_oss_api_attachments_oss_test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/capabilities": {
         parameters: {
             query?: never;
@@ -12,37 +48,21 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * 当前档位与能力状态
-         * @description 当前 Profile 与每个能力的可用性、原因与下一步。
+         * 能力开关与能力状态
+         * @description 能力开关表与每个能力的可用性、原因与下一步。
          *
          *     **只讲能力不讲工具**（§16.6）：用户要判断的是"现在能不能联网、能不能提交"。答案每次现算，
-         *     因此改完配置、切完档位或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。
+         *     因此打开开关或装好依赖后刷新页面就能看到新结果，不会读到一份过期结论。
          */
         get: operations["capabilities_api_capabilities_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/capabilities/profile": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
         /**
-         * 切换 Agent 档位
-         * @description 保存当前档位：**保存即生效、作用于下一轮**（§16.6 档位切换）。
+         * 改能力开关
+         * @description 打开/关闭能力开关：**保存即生效、作用于下一轮**（§16.1、§16.6）。
          *
-         *     改完**不用重启**——运行上下文每次装配时现取档位。响应是保存后的完整视图（页面直接换上它，
-         *     不必再发一次读请求）。
+         *     改完**不用重启**——运行上下文每次装配时现取开关表，`config.yaml` 只是出厂默认。请求只带
+         *     **这次动过的那几项**；响应是保存后的完整视图（页面直接换上它，不必再发一次读请求）。
          */
-        put: operations["set_profile_api_capabilities_profile_put"];
+        put: operations["set_capabilities_api_capabilities_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -219,8 +239,9 @@ export interface paths {
          * 切换外部路径档位
          * @description 保存档位。改动**作用于下一轮**：正在跑或等待审批的那些运行已按当时的档位判定完。
          *
-         *     `deny` / `whitelist` / `allow` 三档只影响"工作区外路径能不能碰、能怎么碰"，
-         *     四项硬约束不放宽。
+         *     `read-only` / `workspace-write` / `danger-full-access` 三档决定"能写到哪"：
+         *     只读档连工作区都不许写、命令以无写授权令牌运行；工作区外写一律只按逐条授权。
+         *     Windows 各档位均约束命令写入；可写档位允许工作区、专属临时目录及已授权目录。
          */
         put: operations["set_permissions_mode_api_permissions_put"];
         post?: never;
@@ -241,7 +262,10 @@ export interface paths {
         put?: never;
         /**
          * 新增外部路径授权
-         * @description 给一个工作区外目录授权（`read` 只放宽只读工具，`read_write` 还允许在其中新建/改文件）。
+         * @description 为外部目录添加 `read_write` 写授权（覆盖其子目录）；只读档仍禁止写入。
+         *
+         *     三档均允许显式本机外部路径的读取、列目录与搜索，敏感目标除外。
+         *     `read` 保留旧记录兼容，不再扩大读取权限。写授权不代替覆盖、删除等逐次审批。
          *
          *     同一个目标重复授权是**改写**（刷新访问级别），不是加两行；返回授权后的完整视图，
          *     让设置页直接渲染，不用再取一次。
@@ -249,7 +273,9 @@ export interface paths {
         post: operations["grant_external_path_api_permissions_grants_post"];
         /**
          * 撤销外部路径授权
-         * @description 撤销一条授权；**不存在也算成功**（幂等），返回撤销后的完整视图。
+         * @description 移除目录记录；撤销写授权不影响默认读取，移除旧 `read` 记录也不禁止读取。
+         *
+         *     **不存在也算成功**（幂等），返回撤销后的完整视图。
          *
          *     路径走查询参数而不是请求体：它是这条记录的自然键（含层级分隔符），放 URL 里可以正常
          *     URL 编码；重复调用同一条不会产生第二种结果。
@@ -368,6 +394,37 @@ export interface paths {
         put?: never;
         /** Archive Session */
         post: operations["archive_session_api_sessions__session_id__archive_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/attachments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 取回一张已上传的图片
+         * @description 把图片字节原样返回（页面用它显示缩略图）。
+         *
+         *     引用是**相对路径**（含斜杠），所以走查询参数而不是路径参数——路径参数里的 `/` 会被当成
+         *     路由分隔符，`%2F` 也不保证被还原。
+         */
+        get: operations["read_attachment_api_sessions__session_id__attachments_get"];
+        put?: never;
+        /**
+         * 上传一张图片（base64）
+         * @description 存一张用户上传的图片，返回**引用**。
+         *
+         *     **媒体类型由服务端按魔数判定**：客户端不声明、也不被信任（`报告.png` 完全可能是 HTML）。
+         *     单图有字节上限（超限拒绝而不是截断）；数量不设配额。格式不支持、超限或 base64 不合法时
+         *     返回 422，并说明怎么改。
+         */
+        post: operations["upload_attachment_api_sessions__session_id__attachments_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -590,6 +647,62 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/skills": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 技能清单与启用状态
+         * @description 本机发现到的技能、来源层与启用状态（**每次现算**）。
+         *
+         *     只给名字、描述、来源与开关状态，不给技能目录的绝对路径；`diagnostics` 如实报告被跳过的条目
+         *     （格式不合规、越界等）——不说的话，用户只会看到"我的技能怎么不见了"。
+         */
+        get: operations["skills_api_skills_get"];
+        /**
+         * 启用/禁用一个技能
+         * @description 启用或禁用一个技能：**保存即生效、作用于下一轮**（§16.5）。
+         *
+         *     禁用只影响"这个技能还能不能被用到"（模型清单里不再出现、正文也取不到），**不删除任何文件**；
+         *     技能是否被"发现"仍由发现根决定。响应是保存后的完整视图，页面直接换上它，不必再取一次。
+         */
+        put: operations["set_skill_api_skills_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/skills/roots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 添加一个技能发现根
+         * @description 把一个**已存在的目录**加进发现根（2026-10-20）。
+         *
+         *     只引用、不复制文件：作者更新技能后下一轮就生效；移除只是不再扫描，不删任何东西。
+         */
+        post: operations["add_skill_root_api_skills_roots_post"];
+        /**
+         * 移除一个自定义技能发现根
+         * @description 只允许移除**用户自己添加**的根；随包与个人级根按契约不可删。
+         */
+        delete: operations["remove_skill_root_api_skills_roots_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/tasks": {
         parameters: {
             query?: never;
@@ -609,6 +722,42 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/web-search/credential": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 联网检索凭据状态
+         * @description 当前有没有可用的检索服务凭据，以及它来自设置库还是旧环境变量。
+         *
+         *     返回值里**没有密钥**（连掩码都没有）：页面只需要知道"已配置 / 未配置"就能决定是提示录入
+         *     还是提示可以开始检索。
+         */
+        get: operations["get_web_search_credential_api_web_search_credential_get"];
+        /**
+         * 保存联网检索凭据
+         * @description 写入（覆盖）Tavily 密钥：**保存即生效**，下一轮检索就用它。
+         *
+         *     空白密钥被拒（422）："清空"用 DELETE 表达，两种意图不该共用一个入口。
+         */
+        put: operations["set_web_search_credential_api_web_search_credential_put"];
+        post?: never;
+        /**
+         * 删除联网检索凭据
+         * @description 删除已保存的密钥；**不存在也算成功**（幂等）。
+         *
+         *     删掉之后旧环境变量仍然有效——如实报告由返回的 ``source`` 承担，本条路径不假装
+         *     "删了就一定没有凭据了"。
+         */
+        delete: operations["delete_web_search_credential_api_web_search_credential_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -912,6 +1061,95 @@ export interface components {
             text: string;
         };
         /**
+         * AttachmentUploadRequest
+         * @description 上传一张图片（2026-10-16）。
+         *
+         *     为什么是 **base64 的 JSON** 而不是 multipart：后者要给运行时（以及打包）多加一个
+         *     `python-multipart` 依赖，而 4 MB 上限下 base64 的 33% 开销无所谓；契约与生成类型也干净。
+         *
+         *     **没有 media_type 字段**是刻意的：客户端声明与扩展名一样不可信（`报告.png` 完全可能是 HTML），
+         *     媒体类型一律由服务端按**魔数**判定。
+         */
+        AttachmentUploadRequest: {
+            /** Data Base64 */
+            data_base64: string;
+        };
+        /**
+         * AttachmentView
+         * @description 一张已上传图片的**引用**（2026-10-16）。
+         *
+         *     `attachment_id` 是**引用**：本地后端是相对路径（`2026/10/16/<会话>/<内容哈希>.png`），
+         *     对象存储后端是**公开 URL**。取回内容都走
+         *     `GET /api/sessions/{id}/attachments?attachment_id=…`（对象存储会 302 到公开地址）。
+         *
+         *     `url` 只有对象存储后端才给（页面可以直接用它，不必再走一次接口）。
+         *
+         *     **没有文件名、没有磁盘路径、没有原始字节**：页面要的是"能显示、能引用"，不是一份文件管理器。
+         */
+        AttachmentView: {
+            /** Attachment Id */
+            attachment_id: string;
+            /** Byte Count */
+            byte_count: number;
+            /** Media Type */
+            media_type: string;
+            /** Url */
+            url?: string | null;
+        };
+        /**
+         * AttachmentsPreferences
+         * @description 图片附件偏好（2026-10-20）。
+         *
+         *     - ``image_context_turns``：出站请求保留图片的**最近轮数**（含当前轮，1~10）。
+         *       1 = 只发当前轮的图，下一轮就换占位；值越大，历史图重发得越多（每图固定 1024 token）。
+         *     - ``backend``：``local``（本机文件，默认）或 ``oss``（S3 兼容对象存储，公开读）。
+         *     - ``oss_*``：选 ``oss`` 时必填端点、桶名与公开前缀。**密钥不在这里**——它走凭据存储
+         *       （`model_settings.attachments_oss`），偏好会随 Checkpoint 走，不能放密钥。
+         */
+        AttachmentsPreferences: {
+            /**
+             * Backend
+             * @default local
+             * @enum {string}
+             */
+            backend: "local" | "oss";
+            /**
+             * Image Context Turns
+             * @default 2
+             */
+            image_context_turns: number;
+            /**
+             * Oss Bucket
+             * @default
+             */
+            oss_bucket: string;
+            /**
+             * Oss Endpoint
+             * @default
+             */
+            oss_endpoint: string;
+            /**
+             * Oss Key Prefix
+             * @default chaiai/
+             */
+            oss_key_prefix: string;
+            /**
+             * Oss Path Style
+             * @default true
+             */
+            oss_path_style: boolean;
+            /**
+             * Oss Public Base Url
+             * @default
+             */
+            oss_public_base_url: string;
+            /**
+             * Oss Region
+             * @default auto
+             */
+            oss_region: string;
+        };
+        /**
          * CancelTaskRequest
          * @description 取消当前会话在跑的任务（架构 §15.2、§17.4）。**幂等**：没有可取消的任务时是空操作。
          *
@@ -926,30 +1164,41 @@ export interface components {
             reason: string;
         };
         /**
-         * CapabilitiesView
-         * @description 当前 Agent 档位与每个能力的状态（T56；§16.6）。
+         * CapabilitiesRequest
+         * @description 改能力开关（§16.1、§16.6）。
          *
-         *     `profiles` 是**页面可选**的档位（服务端枚举：内置三档 + `profiles.custom`），`default_profile`
-         *     是 `config.yaml` 的出厂默认（`profile` 是**当前生效**那一个）——三者一起让页面既能画选择器，
-         *     也能说清"现在这一档是从哪儿来的"（§16.6 档位切换）。
+         *     只报告**这次动过的那几项**（合并式）：页面点一下开关就发一项，其余保持原样。取值是否合法由领域层
+         *     裁定（未登记的能力名给 422，理由里带上可开关集）——传输层不另立一套能力名，与
+         *     `PermissionsModeRequest` 同一条口径。
+         */
+        CapabilitiesRequest: {
+            /** Changes */
+            changes: {
+                [key: string]: boolean;
+            };
+        };
+        /**
+         * CapabilitiesView
+         * @description 能力开关表与每个能力的状态（T56；§16.1、§16.6）。
+         *
+         *     `switches` 是**解析后的完整开关表**（出厂默认 + 用户改过的项），页面据此画每一项的开关状态；
+         *     `switchable` 是**服务端枚举**的可开关集（= 闭集减去不可关闭的两个），页面照它渲染、不自己拼一份。
+         *     两者一起让页面既能画开关，也能说清"这一项现在到底开没开"。
          */
         CapabilitiesView: {
             /** Capabilities */
             capabilities?: components["schemas"]["CapabilityStatusView"][];
             /**
-             * Default Profile
-             * @default
-             */
-            default_profile: string;
-            /** Profile */
-            profile: string;
-            /** Profiles */
-            profiles?: string[];
-            /**
              * Store Unavailable
              * @default false
              */
             store_unavailable: boolean;
+            /** Switchable */
+            switchable?: string[];
+            /** Switches */
+            switches?: {
+                [key: string]: boolean;
+            };
         };
         /**
          * CapabilityCheckView
@@ -987,10 +1236,15 @@ export interface components {
             /** Label */
             label: string;
             /**
+             * Locked
+             * @default false
+             */
+            locked: boolean;
+            /**
              * Reason
              * @enum {string}
              */
-            reason: "available" | "profile" | "disabled" | "missing_dependency";
+            reason: "available" | "disabled" | "missing_dependency";
         };
         /**
          * ChildResearchTask
@@ -1074,6 +1328,21 @@ export interface components {
             status: "completed" | "awaiting_approval" | "failed" | "running" | "cancelled";
         };
         /**
+         * CompressionView
+         * @description 最新一次实际压缩；running 仅存在于进程内，完成/失败从 Checkpoint 恢复。
+         */
+        CompressionView: {
+            /** Operation Id */
+            operation_id: string;
+            /** Run Id */
+            run_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "running" | "completed" | "failed";
+        };
+        /**
          * ContextMeterView
          * @description 圆形计量器的口径。
          *
@@ -1083,6 +1352,7 @@ export interface components {
         ContextMeterView: {
             /** Completion Reserve Tokens */
             completion_reserve_tokens?: number | null;
+            compression?: components["schemas"]["CompressionView"] | null;
             /**
              * Scope
              * @default unknown
@@ -1180,6 +1450,43 @@ export interface components {
             name: "delegated_research";
             request: components["schemas"]["DelegatedResearchRequest"];
         };
+        /**
+         * DelegationChildView
+         * @description 一次自主委派里**一个子 Agent**的结局（§18.7）。
+         *
+         *     字段取自参照实现（CodeBuddy 的任务面板：状态 / token / 工具调用次数），再加证据条数与失败原因。
+         *     用户要判断的是"这一路查到没有、花了多少"，而不是去读一段 JSON：把这些摆成一行行，卡片才说明问题。
+         *
+         *     **刻意不含"预留 token"**（2026-10-13 裁定）：它是 `_prepare` 切出来的**上限**，同一份配置下每一路
+         *     几乎一样，且长得像费用——摆在对话卡里必然被读成"这一路花了多少"（§15.7 要求预留与实际分开写）。
+         *     实际花费要看用量区；要做"每路实际用量"必须先把子任务的模型调用记录保留子标识（§18.7 的未做项）。
+         */
+        DelegationChildView: {
+            /** Error */
+            error?: string | null;
+            /**
+             * Evidence Count
+             * @default 0
+             */
+            evidence_count: number;
+            /**
+             * Model Calls
+             * @default 0
+             */
+            model_calls: number;
+            /** Scope */
+            scope: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "completed" | "failed";
+            /**
+             * Tool Calls
+             * @default 0
+             */
+            tool_calls: number;
+        };
         /** EmbeddingPreferences */
         EmbeddingPreferences: {
             /**
@@ -1249,8 +1556,7 @@ export interface components {
          * ErrorView
          * @description 页面可见的错误 DTO。
          *
-         *     `message` / `hint` / `detail` 都是**已脱敏的展示文本**：供应商原文、密钥与绝对私人路径
-         *     不得进入这里（§15.5、§15.8）。原始异常只进本地日志。
+         *     展示文本中的密钥必须脱敏；绝对路径允许原样显示。原始异常不直接作为错误 DTO。
          */
         ErrorView: {
             /** Blocked Reason */
@@ -1294,11 +1600,16 @@ export interface components {
             /** Max Retries Per Step */
             max_retries_per_step: number;
             /** Max Tool Loops */
-            max_tool_loops: number;
+            max_tool_loops?: number | null;
+            /**
+             * Safe Delete
+             * @default true
+             */
+            safe_delete: boolean;
             /** Shell Max Output Chars */
             shell_max_output_chars: number;
             /** Shell Timeout Seconds */
-            shell_timeout_seconds: number;
+            shell_timeout_seconds?: number | null;
         };
         /**
          * ExternalPathGrantRequest
@@ -1321,8 +1632,8 @@ export interface components {
          * ExternalPathGrantView
          * @description 一条"工作区外路径"授权（T38）。
          *
-         *     ``path`` 是**用户自己填进来的目录**，与"从机器上发现再泄露给页面"的私人路径不是一回事：
-         *     不回路径，用户就没法在这张列表上撤销授权。它已经规范化（统一大小写与分隔符、展开符号链接）。
+         *     ``path`` 完整显示，便于用户核对和撤销授权。
+         *     它已经规范化（统一大小写与分隔符、展开符号链接）。
          */
         ExternalPathGrantView: {
             /**
@@ -1398,7 +1709,7 @@ export interface components {
              * State
              * @enum {string}
              */
-            state: "completed" | "blocked" | "failed";
+            state: "completed" | "blocked" | "failed" | "cancelled";
             /** Summary */
             summary: string;
         };
@@ -1454,7 +1765,7 @@ export interface components {
              * @default memory
              * @enum {string}
              */
-            credential_store: "os" | "memory";
+            credential_store: "os" | "local" | "memory";
             /** Model Configured */
             model_configured: boolean;
             /** Model Name */
@@ -2277,6 +2588,11 @@ export interface components {
              */
             streaming: boolean;
             /**
+             * Supports Vision
+             * @default false
+             */
+            supports_vision: boolean;
+            /**
              * Temperature
              * @default 0.2
              */
@@ -2344,6 +2660,11 @@ export interface components {
             status: "unverified" | "testing" | "verified" | "failed" | "unsupported";
             /** Streaming */
             streaming: boolean;
+            /**
+             * Supports Vision
+             * @default false
+             */
+            supports_vision: boolean;
             /** Temperature */
             temperature: number;
             /** Timeout Seconds */
@@ -2436,6 +2757,41 @@ export interface components {
             task_id: string;
         };
         /**
+         * OssCredentialRequest
+         * @description 对象存储的访问密钥（2026-10-20）。
+         *
+         *     形状只挡空值与超长；内容不做任何校验（与 Tavily 同一条口径）。写入即整体覆盖，
+         *     页面**不回读**：只回答"已配置 / 未配置"。
+         */
+        OssCredentialRequest: {
+            /** Access Key */
+            access_key: string;
+            /** Secret Key */
+            secret_key: string;
+        };
+        /**
+         * OssCredentialView
+         * @description 对象存储密钥状态：只报有没有，不回读任何一位密钥。
+         */
+        OssCredentialView: {
+            /** Configured */
+            configured: boolean;
+            /** Note */
+            note?: string | null;
+            /** Store */
+            store?: ("os" | "local" | "memory") | null;
+        };
+        /**
+         * OssTestResult
+         * @description 「测试对象存储」的结果：能否写入、公开地址能否访问。
+         */
+        OssTestResult: {
+            /** Detail */
+            detail: string;
+            /** Ok */
+            ok: boolean;
+        };
+        /**
          * PermissionsModeRequest
          * @description 切换"工作区外路径"档位（T38）。
          *
@@ -2447,28 +2803,30 @@ export interface components {
              * Mode
              * @enum {string}
              */
-            mode: "deny" | "whitelist" | "allow";
+            mode: "read-only" | "workspace-write" | "danger-full-access";
         };
         /**
          * PermissionsView
          * @description 「设置 → 权限」的读 DTO（T38）。
          *
          *     ``mode`` 是当前生效档位（用户的选择优先）；``default_mode`` 是 ``config.yaml`` 的出厂默认，
-         *     用于说明"库里没有用户选择时按哪一档跑"。授权条目只在 ``whitelist`` 档生效。
+         *     用于说明"库里没有用户选择时按哪一档跑"。授权条目决定工作区外目标的访问级别
+         *     （``read-only`` 档把 ``read_write`` 降级为 ``read``）。**写侧沙箱不再是独立开关**：
+         *     各档位在 Windows 上均限制命令写入；可写档位仅授权工作区、专属临时目录与已授权目录。
          */
         PermissionsView: {
             /**
              * Default Mode
              * @enum {string}
              */
-            default_mode: "deny" | "whitelist" | "allow";
+            default_mode: "read-only" | "workspace-write" | "danger-full-access";
             /** Grants */
             grants?: components["schemas"]["ExternalPathGrantView"][];
             /**
              * Mode
              * @enum {string}
              */
-            mode: "deny" | "whitelist" | "allow";
+            mode: "read-only" | "workspace-write" | "danger-full-access";
             /**
              * Store Unavailable
              * @default false
@@ -2545,12 +2903,14 @@ export interface components {
         };
         /** PreferenceValues */
         PreferenceValues: {
+            attachments?: components["schemas"]["AttachmentsPreferences"] | null;
             embedding?: components["schemas"]["EmbeddingPreferences"] | null;
             execution: components["schemas"]["ExecutionPreferences"];
             general?: components["schemas"]["GeneralPreferences"];
             medium_term?: components["schemas"]["MediumTermPreferences"] | null;
             memory: components["schemas"]["LongTermPreferences"];
             retrieval: components["schemas"]["RetrievalPreferences"];
+            web_access?: components["schemas"]["WebAccessPreferences"] | null;
         };
         /** PreferencesRequest */
         PreferencesRequest: {
@@ -2571,18 +2931,6 @@ export interface components {
             version: number;
             /** Writable */
             writable: boolean;
-        };
-        /**
-         * ProfileRequest
-         * @description 切换当前 Agent 档位（§16.6 档位切换）。
-         *
-         *     可选值由**服务端枚举**（内置三档 + `profiles.custom`）：这里只做形状校验（非空、长度），
-         *     **取值是否合法由领域层裁定**（未知档位给 422，理由里带上可选值）——传输层不另立一套档位名，
-         *     与 `PermissionsModeRequest` 同一条口径。
-         */
-        ProfileRequest: {
-            /** Profile */
-            profile: string;
         };
         /**
          * ReadonlyResearchRequest
@@ -2797,6 +3145,8 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Current Answer Streaming */
+            current_answer_streaming?: boolean | null;
             current_task?: components["schemas"]["TaskRef"] | null;
             /** Errors */
             errors?: components["schemas"]["ErrorView"][];
@@ -2916,6 +3266,117 @@ export interface components {
             updated_at: string;
             workspace: components["schemas"]["WorkspaceRef"];
         };
+        /**
+         * SkillEntryView
+         * @description 一个技能在设置页上的样子（技能管理页，2026-10-16；契约 §16.5）。
+         *
+         *     **不给技能目录的绝对路径**：技能常来自用户主目录（`~/.agents/skills`、`~/.codex/skills`…），
+         *     设置页没有"必须知道主目录结构"的理由；要排查"这个技能从哪来"，`source`（来源层）与
+         *     `diagnostics` 够用。三个布尔各答一件事：`enabled` 是**用户**的选择，
+         *     `model_invocable` / `user_invocable` 是**技能作者**在 frontmatter 里的声明。
+         */
+        SkillEntryView: {
+            /** Declared Capabilities */
+            declared_capabilities?: string[];
+            /** Description */
+            description: string;
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Model Invocable
+             * @default true
+             */
+            model_invocable: boolean;
+            /** Name */
+            name: string;
+            /** Source */
+            source: string;
+            /**
+             * User Invocable
+             * @default true
+             */
+            user_invocable: boolean;
+        };
+        /**
+         * SkillRootRequest
+         * @description 添加一个技能发现根（2026-10-20）。
+         *
+         *     只收**绝对路径**：相对路径的基准在冻结形态是数据目录、在源码形态是配置文件目录，
+         *     让用户在这里猜基准只会得到"路径明明对却什么都扫不到"。`~` 由页面展开后再提交。
+         */
+        SkillRootRequest: {
+            /** Path */
+            path: string;
+        };
+        /**
+         * SkillRootView
+         * @description 一个技能发现根（2026-10-20）。
+         *
+         *     页面用它回答"为什么某个技能没出现"：路径、来源层、这个根下发现了几个技能、能不能移除。
+         *     `removable` 只对**用户自己添加**的根为真——随包根与个人级根是产品/约定的一部分，不允许在此删除。
+         */
+        SkillRootView: {
+            /**
+             * Count
+             * @default 0
+             */
+            count: number;
+            /** Path */
+            path: string;
+            /**
+             * Readable
+             * @default true
+             */
+            readable: boolean;
+            /**
+             * Removable
+             * @default false
+             */
+            removable: boolean;
+            /** Source */
+            source: string;
+        };
+        /**
+         * SkillToggleRequest
+         * @description 启用/禁用一个技能（技能管理页，2026-10-16；§16.5）。
+         *
+         *     **一次一个**：界面就是一个开关，报一批既没有对应操作，也会让"哪个名字错了"变含混。
+         *     名字是否真有这个技能由领域层裁定（422，理由里带上当前可用的名字）。
+         */
+        SkillToggleRequest: {
+            /** Enabled */
+            enabled: boolean;
+            /** Name */
+            name: string;
+        };
+        /**
+         * SkillsView
+         * @description 技能清单与启用状态（技能管理页，2026-10-16；契约 §16.5）。
+         *
+         *     ``enabled`` 是**总闸**（`skill` 能力开关）：它关着时技能对模型完全不可见，页面据此说明
+         *     "技能能力关着"。逐条开关与它**不是一回事**——总闸是"这个功能用不用"，逐条是"哪个技能可用"。
+         */
+        SkillsView: {
+            /** Diagnostics */
+            diagnostics?: string[];
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /** Roots */
+            roots?: components["schemas"]["SkillRootView"][];
+            /** Skills */
+            skills?: components["schemas"]["SkillEntryView"][];
+            /**
+             * Store Unavailable
+             * @default false
+             */
+            store_unavailable: boolean;
+        };
         /** StepCompletedEvent */
         StepCompletedEvent: {
             /** Event Id */
@@ -2996,6 +3457,8 @@ export interface components {
          * @description 提交消息。`client_request_id` 是幂等键（§6.1），由前端生成并复用。
          */
         SubmitMessageRequest: {
+            /** Attachments */
+            attachments?: string[];
             /** Client Request Id */
             client_request_id: string;
             /** Expected Branch Id */
@@ -3004,7 +3467,10 @@ export interface components {
             expected_snapshot_id?: string | null;
             /** Parent Turn Id */
             parent_turn_id?: string | null;
-            /** Text */
+            /**
+             * Text
+             * @default
+             */
             text: string;
             /** Workflow */
             workflow?: (components["schemas"]["ReadonlyWorkflowRequest"] | components["schemas"]["CodeWorkflowRequest"] | components["schemas"]["DelegatedWorkflowRequest"]) | null;
@@ -3266,6 +3732,8 @@ export interface components {
          *     不能把一段任意文本当成已知工具的结构。
          */
         ToolOutcomeView: {
+            /** Children */
+            children?: components["schemas"]["DelegationChildView"][];
             diff?: components["schemas"]["FileDiffView"] | null;
             /** Exit Code */
             exit_code?: number | null;
@@ -3275,7 +3743,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "read" | "list" | "search" | "edit" | "write" | "delete" | "shell";
+            kind: "read" | "list" | "search" | "edit" | "write" | "delete" | "shell" | "delegation";
             /** Matches */
             matches?: components["schemas"]["SearchMatchView"][];
             /** Paths */
@@ -3415,6 +3883,46 @@ export interface components {
              * @default false
              */
             truncated: boolean;
+            /** Web Sources */
+            web_sources?: components["schemas"]["WebSourceView"][];
+        };
+        /**
+         * TraceEventView
+         * @description 轨迹页的一条事件（2026-10-16；§15.6 的审计面）。
+         *
+         *     为什么要它：轨迹此前只有"工具调用表 + 每轮用量"，**看不到审批与压缩发生过什么**——
+         *     而这两件事恰恰是"为什么这一轮慢、上下文为什么变小、是谁批准的"的答案。数据本来就在
+         *     State 里（`tool_events` / `approval_history` / `compaction_events`），这里只做投影。
+         *
+         *     `kind` 是闭集；`label` 只放**已脱敏的一句展示文案**（工具名、审批结论/理由、压缩条数），
+         *     **不复制参数正文与文件内容**：审计要的是"发生过什么"，不是再来一份数据。
+         */
+        TraceEventView: {
+            /** At */
+            at?: string | null;
+            /** Event Id */
+            event_id: string;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Folded Messages */
+            folded_messages?: number | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "tool" | "approval" | "compaction";
+            /** Label */
+            label: string;
+            /** Run Id */
+            run_id?: string | null;
+            /** Status */
+            status?: string | null;
+            /** Tokens After */
+            tokens_after?: number | null;
+            /** Tokens Before */
+            tokens_before?: number | null;
+            /** Wait Ms */
+            wait_ms?: number | null;
         };
         /**
          * TurnRecordView
@@ -3457,7 +3965,7 @@ export interface components {
              * Final State
              * @enum {string}
              */
-            final_state: "running" | "awaiting_approval" | "blocked" | "completed" | "failed";
+            final_state: "running" | "awaiting_approval" | "blocked" | "completed" | "failed" | "cancelled";
             /** Model Call Ids */
             model_call_ids?: string[];
             /** Model Elapsed Ms */
@@ -3488,6 +3996,8 @@ export interface components {
          * @description 持久轮次与其消息锚点；供刷新后把统计放回对应轮次。
          */
         TurnUsageView: {
+            /** Events */
+            events?: components["schemas"]["TraceEventView"][];
             /** Model Calls */
             model_calls?: components["schemas"]["ModelCallRecordView"][];
             usage: components["schemas"]["TurnRecordView"];
@@ -3580,6 +4090,8 @@ export interface components {
         };
         /** UserMessageView */
         UserMessageView: {
+            /** Attachments */
+            attachments?: string[];
             /** Created At */
             created_at?: string | null;
             /**
@@ -3604,6 +4116,137 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /**
+         * WebAccessPreferences
+         * @description 联网检索的运行期偏好（"设置 → 联网检索"页签）。
+         *
+         *     只放**能安全回灌**的字段：``enabled`` 不在这里——它是**能力开关**的地盘（2026-10-14 起
+         *     `web` 是锁定能力，运行期由 `apply_capability_gates` 回灌，见 ``WebAccessConfig`` 的说明）；
+         *     ``tavily_api_key_env`` 与 ``user_agent`` 也不在这里：前者是旧配置的密钥**变量名**（密钥本身走
+         *     凭据存储，见 ``model_settings.web_search``），后者不是用户要调的旋钮。
+         *
+         *     上下界与 ``WebAccessConfig`` **逐项一致**：偏好值经 ``model_copy(update=...)`` 落到运行期配置，
+         *     那条路径不做二次校验，所以写在模型上的约束就是最后一道。
+         */
+        WebAccessPreferences: {
+            /**
+             * Allowed Domains
+             * @default []
+             */
+            allowed_domains: string[];
+            /**
+             * Denied Domains
+             * @default []
+             */
+            denied_domains: string[];
+            /**
+             * Domain Policy
+             * @default allow
+             * @enum {string}
+             */
+            domain_policy: "allow" | "allowlist";
+            /**
+             * Max Chars
+             * @default 8000
+             */
+            max_chars: number;
+            /** Max Read Pages */
+            max_read_pages?: number | null;
+            /** Max Reads Per Page */
+            max_reads_per_page?: number | null;
+            /**
+             * Max Results
+             * @default 5
+             */
+            max_results: number;
+            /** Max Search Calls */
+            max_search_calls?: number | null;
+            /**
+             * Provider
+             * @default auto
+             * @enum {string}
+             */
+            provider: "auto" | "tavily" | "bing_html" | "duckduckgo_html";
+            /**
+             * Timeout Seconds
+             * @default 15
+             */
+            timeout_seconds: number;
+        };
+        /**
+         * WebSearchKeyRequest
+         * @description 录入 / 覆盖联网检索的服务凭据（Tavily）。
+         *
+         *     形状只挡空值：**内容不在这里做任何校验**（长度上限只是防"把整篇文档粘进来"），
+         *     密钥对不对只有发起一次真实检索才知道——那件事由用户自己决定何时做。
+         */
+        WebSearchKeyRequest: {
+            /** Api Key */
+            api_key: string;
+        };
+        /**
+         * WebSearchKeyView
+         * @description 联网检索的服务凭据（Tavily）状态。
+         *
+         *     **只回答"有没有"，不回读密钥**（§6.8 第 2 条）——与模型连接的密钥同一条口径。
+         *
+         *     三个字段回答三个不同的问题，不能合并：
+         *     ``configured`` = 现在能不能构造出检索请求；``source`` = 这份密钥**从哪来**
+         *     （``settings`` 设置库 / ``environment`` 旧环境变量 / ``none`` 都没有）；
+         *     ``store`` = 设置库那边**能不能存下来**（``memory`` 表示只在本进程内有效、重启后要重新录入）。
+         */
+        WebSearchKeyView: {
+            /**
+             * Configured
+             * @default false
+             */
+            configured: boolean;
+            /** Note */
+            note?: string | null;
+            /**
+             * Source
+             * @default none
+             * @enum {string}
+             */
+            source: "settings" | "environment" | "none";
+            /**
+             * Store
+             * @default unavailable
+             * @enum {string}
+             */
+            store: "local" | "os" | "memory" | "unavailable";
+        };
+        /**
+         * WebSourceView
+         * @description 成功联网结果里的实际来源；不代表模型已读取搜索命中的正文。
+         */
+        WebSourceView: {
+            /**
+             * Cited
+             * @default false
+             */
+            cited: boolean;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "search" | "read";
+            /** Provider */
+            provider?: string | null;
+            /** Published At */
+            published_at?: string | null;
+            /** Retrieved At */
+            retrieved_at?: string | null;
+            /**
+             * Source Id
+             * @default
+             */
+            source_id: string;
+            /** Title */
+            title: string;
+            /** Url */
+            url: string;
         };
         /** WorkflowChildView */
         WorkflowChildView: {
@@ -3670,6 +4313,108 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_oss_credential_api_attachments_oss_credential_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OssCredentialView"];
+                };
+            };
+        };
+    };
+    put_oss_credential_api_attachments_oss_credential_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OssCredentialRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OssCredentialView"];
+                };
+            };
+            /** @description 密钥不合法 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 设置库不可用 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_oss_credential_api_attachments_oss_credential_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OssCredentialView"];
+                };
+            };
+        };
+    };
+    test_oss_api_attachments_oss_test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OssTestResult"];
+                };
+            };
+        };
+    };
     capabilities_api_capabilities_get: {
         parameters: {
             query?: never;
@@ -3690,7 +4435,7 @@ export interface operations {
             };
         };
     };
-    set_profile_api_capabilities_profile_put: {
+    set_capabilities_api_capabilities_put: {
         parameters: {
             query?: never;
             header?: never;
@@ -3699,7 +4444,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["ProfileRequest"];
+                "application/json": components["schemas"]["CapabilitiesRequest"];
             };
         };
         responses: {
@@ -3712,7 +4457,7 @@ export interface operations {
                     "application/json": components["schemas"]["CapabilitiesView"];
                 };
             };
-            /** @description 档位名不在可选集里 */
+            /** @description 能力名不在闭集里 */
             422: {
                 headers: {
                     [name: string]: unknown;
@@ -4617,6 +5362,92 @@ export interface operations {
             };
         };
     };
+    read_attachment_api_sessions__session_id__attachments_get: {
+        parameters: {
+            query: {
+                attachment_id: string;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_attachment_api_sessions__session_id__attachments_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AttachmentUploadRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachmentView"];
+                };
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     arrange_branch_api_sessions__session_id__branches__branch_id__patch: {
         parameters: {
             query?: never;
@@ -5191,6 +6022,150 @@ export interface operations {
             };
         };
     };
+    skills_api_skills_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillsView"];
+                };
+            };
+        };
+    };
+    set_skill_api_skills_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillToggleRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillsView"];
+                };
+            };
+            /** @description 没有发现这个技能（理由里列出当前可用的名字） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    add_skill_root_api_skills_roots_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SkillRootRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillsView"];
+                };
+            };
+            /** @description 没有发现这个技能（理由里列出当前可用的名字） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    remove_skill_root_api_skills_roots_delete: {
+        parameters: {
+            query: {
+                path: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SkillsView"];
+                };
+            };
+            /** @description 没有发现这个技能（理由里列出当前可用的名字） */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
     list_tasks_api_tasks_get: {
         parameters: {
             query?: {
@@ -5220,6 +6195,106 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_web_search_credential_api_web_search_credential_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebSearchKeyView"];
+                };
+            };
+        };
+    };
+    set_web_search_credential_api_web_search_credential_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WebSearchKeyRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebSearchKeyView"];
+                };
+            };
+            /** @description 密钥为空白或超出长度上限 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的凭据存储，密钥存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_web_search_credential_api_web_search_credential_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebSearchKeyView"];
+                };
+            };
+            /** @description 密钥为空白或超出长度上限 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的凭据存储，密钥存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };

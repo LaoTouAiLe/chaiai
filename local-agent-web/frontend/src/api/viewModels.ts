@@ -20,6 +20,9 @@ import type {
   ModelMenuItemView,
   PermissionsView,
   SettingsView,
+  SkillEntryView,
+  SkillRootView,
+  SkillsView,
   TaskRowView,
   TaskState,
   TasksView,
@@ -29,6 +32,7 @@ import type {
   HealthDto,
   ModelConnectionDto,
   PermissionsDto,
+  SkillsDto,
   TasksDto,
 } from './client'
 
@@ -110,6 +114,8 @@ export function toConnectionView(
     // 契约目前不带"检测说明"文本：这里**不臆造**一句话，页面按能力分项自己措辞。
     statusDetail: null,
     capabilities: toCapabilities(dto),
+    // 用户声明的"支持图片输入"（2026-10-16）：与实测能力分列，页面各自表述。
+    supportsVision: dto.supports_vision ?? false,
     confirmDelete: options.confirmDelete ?? false,
     pendingApply: options.pendingApply ?? false,
   }
@@ -134,16 +140,17 @@ export function toPermissionsView(dto: PermissionsDto): PermissionsView {
 }
 
 /**
- * 「当前档位与能力状态」（v0.5 T56；§16.6）：DTO 说什么就是什么。
+ * 「能力开关与能力状态」（v0.5 T56；§16.1、§16.6）：DTO 说什么就是什么。
  *
- * `reason` 与 `capability` 都是稳定键，页面按 `reason` 分支说"下一步怎么做"；`hint` 原样带过去
- * ——不可用时服务端保证它有话，**页面不替后端编一句"为什么用不了"**（那正是这个面板要消灭的东西）。
+ * `switches` 是**解析后的完整开关表**（出厂默认 + 用户改过的项），页面据此画每一项的开关状态；
+ * `switchable` 是可开关集，页面照它渲染。`reason` 与 `capability` 都是稳定键，页面按 `reason`
+ * 分支说"下一步怎么做"；`hint` 原样带过去——不可用时服务端保证它有话，**页面不替后端编一句
+ * "为什么用不了"**（那正是这个面板要消灭的东西）。
  */
 export function toCapabilitiesView(dto: CapabilitiesDto): CapabilitiesView {
   return {
-    profile: dto.profile,
-    defaultProfile: dto.default_profile ?? '',
-    profiles: dto.profiles ?? [],
+    switches: dto.switches ?? {},
+    switchable: dto.switchable ?? [],
     storeUnavailable: dto.store_unavailable ?? false,
     capabilities: (dto.capabilities ?? []).map(
       (row): CapabilityStatusView => ({
@@ -153,8 +160,45 @@ export function toCapabilitiesView(dto: CapabilitiesDto): CapabilitiesView {
         reason: row.reason,
         detail: row.detail,
         hint: row.hint ?? null,
+        locked: row.locked ?? false,
       }),
     ),
+  }
+}
+
+/**
+ * 「技能」管理页（2026-10-16；§16.5）：DTO 说什么就是什么。
+ *
+ * `enabled` 是**总闸**（`skill` 能力开关），逐条 `enabled` 是**用户**的选择，`modelInvocable` /
+ * `userInvocable` 是**技能作者**的声明——三件事都在视图里，页面不许把它们合并成一句"这个技能开着"。
+ * `diagnostics` 原样带过去：被跳过的条目必须让用户看见（否则就是"我的技能怎么不见了"）。
+ */
+export function toSkillsView(dto: SkillsDto): SkillsView {
+  return {
+    enabled: dto.enabled ?? false,
+    storeUnavailable: dto.store_unavailable ?? false,
+    skills: (dto.skills ?? []).map(
+      (row): SkillEntryView => ({
+        name: row.name,
+        description: row.description,
+        source: row.source,
+        enabled: row.enabled ?? true,
+        modelInvocable: row.model_invocable ?? true,
+        userInvocable: row.user_invocable ?? true,
+        declaredCapabilities: row.declared_capabilities ?? [],
+      }),
+    ),
+    // 发现根（2026-10-20）：路径原样带回——这一页就是要让用户看清"在扫哪些目录"。
+    roots: (dto.roots ?? []).map(
+      (row): SkillRootView => ({
+        path: row.path,
+        source: row.source,
+        count: row.count ?? 0,
+        removable: row.removable ?? false,
+        readable: row.readable ?? true,
+      }),
+    ),
+    diagnostics: dto.diagnostics ?? [],
   }
 }
 

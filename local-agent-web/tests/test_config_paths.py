@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from local_agent.api.container import open_runtime, resolve_memory_paths
-from local_agent.config import load_config
+from local_agent.api.container import open_runtime, resolve_memory_paths, resolve_skill_paths
+from local_agent.config import SkillsConfig, load_config
 
 #: 一份刚好通过校验、且把三条记忆库路径都写成相对形式的配置。
 CONFIG_TEXT = """\
@@ -36,6 +36,31 @@ def _write_config(directory: Path) -> Path:
     path = directory / "config.yaml"
     path.write_text(CONFIG_TEXT, encoding="utf-8")
     return path
+
+
+def test_resolve_skill_paths_pins_relative_dirs_to_base_dir(tmp_path: Path) -> None:
+    """`skills.user_dirs` 的相对路径按 **base_dir** 展开（2026-10-16，与记忆库路径同一口径）。
+
+    这条是"**技能随包发布**"能成立的前提：包里那份配置写的是 `user_dirs: ["skills"]`，展开后才指向
+    **包所在目录**下的 `skills/`——换盘、换机器、换解压位置都不用改配置。
+    绝对路径**原样保留**（与 `resolve_under` 逐字一致），没写 `user_dirs` 时原样返回。
+    """
+    base = tmp_path / "unpacked"
+    keep = tmp_path / "keep-skills"
+    config = load_config(_write_config(base)).model_copy(
+        update={
+            "skills": SkillsConfig(
+                enabled=True, user_dirs=["skills", str(keep)]
+            )
+        }
+    )
+
+    resolved = resolve_skill_paths(config, base)
+
+    assert resolved.skills.user_dirs == [str(base / "skills"), str(keep)]
+    assert resolve_skill_paths(
+        config.model_copy(update={"skills": SkillsConfig()}), base
+    ).skills.user_dirs == []
 
 
 def test_load_config_keeps_relative_paths(tmp_path: Path) -> None:
@@ -107,3 +132,24 @@ def test_runtime_creates_databases_next_to_the_config_not_the_cwd(
         assert not (elsewhere / "data").exists()
     finally:
         runtime.close()
+
+def test_resolve_skill_paths_appends_the_bundled_skills_when_frozen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """冻结形态把**包内**的 `skills/` 追加成发现根（2026-10-20）。
+
+    包里的技能就在 exe 同级，但数据目录里既没有 config.yaml 也没有 skills；不追加这一条，
+    设置页与模型清单永远是空的（用户看到的就是"识别不到技能"）。
+    """
+    from local_agent import app_paths
+
+    bundled = tmp_path / "chaiai" / "skills"
+    bundled.mkdir(parents=True)
+    monkeypatch.setattr(app_paths, "bundled_skills_dir", lambda: bundled)
+    config = load_config(_write_config(tmp_path / "cfg")).model_copy(
+        update={"skills": SkillsConfig(enabled=True, user_dirs=[])}
+    )
+
+    resolved = resolve_skill_paths(config, tmp_path / "cfg")
+
+    assert resolved.skills.user_dirs == [str(bundled)]

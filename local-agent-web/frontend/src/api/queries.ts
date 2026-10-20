@@ -8,10 +8,12 @@ import { useRef } from 'react'
 
 import {
   ApiError,
+  cancelTask,
   setSessionMode,
   endInterruptedRequest,
   createSession,
   getCapabilities,
+  getSkills,
   getHealth,
   getTasks,
   getMemoryPage,
@@ -24,7 +26,10 @@ import {
   pickWorkspaceDirectory,
   resolveApproval,
   selectSessionModel,
-  setActiveProfile,
+  setCapabilities,
+  setSkillEnabled,
+  addSkillRoot,
+  removeSkillRoot,
   selectWorkspace,
   submitMessage,
 } from './client'
@@ -46,6 +51,7 @@ export const queryKeys = {
   snapshot: (sessionId: string) => ['snapshot', sessionId] as const,
   modelConnections: ['model-connections'] as const,
   capabilities: ['capabilities'] as const,
+  skills: ['skills'] as const,
   tasks: (workspaceId: string | null) => ['tasks', workspaceId] as const,
 }
 
@@ -69,36 +75,82 @@ export function useTasks(workspaceId: string | null) {
 }
 
 /**
- * 当前档位与能力状态（T56；§16.6）。
+ * 能力开关与能力状态（T56；§16.1）。
  *
  * 服务端每次现算，所以这里不设 `staleTime`：打开面板就会取一次最新的，
- * 用户改完配置再打开就能看到新结论（缓存一份过期答案比不显示更糟）。
+ * 用户改完开关再打开就能看到新结论（缓存一份过期答案比不显示更糟）。
  */
 export function useCapabilities() {
   return useQuery({ queryKey: queryKeys.capabilities, queryFn: getCapabilities })
 }
 
 /**
- * 切换当前档位（§16.6）：保存即生效、作用于下一轮。
+ * 改能力开关（§16.1）：保存即生效、作用于下一轮、不用重启。
  *
- * 成功就用服务端返回的**完整视图**替换缓存——档位一变，每个能力的可用性与"下一步"都跟着变，
+ * 成功就用服务端返回的**完整视图**替换缓存——开关一变，每个能力的可用性与"下一步"都跟着变，
  * 自己在前端推算那份列表就是第二套真相（与 `usePermissions.setMode` 同一条做法）。
  */
-export function useSetActiveProfile() {
+export function useSetCapabilities() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (profile: string) => setActiveProfile(profile),
+    mutationFn: (changes: Record<string, boolean>) => setCapabilities(changes),
     onSuccess: (view) => {
       queryClient.setQueryData(queryKeys.capabilities, view)
     },
   })
 }
 
-export function useHealth() {
-  return useQuery({ queryKey: queryKeys.health, queryFn: getHealth })
+/**
+ * 技能清单与启用状态（技能管理页，2026-10-16；§16.5）。
+ *
+ * 服务端每次现算（技能每轮重新发现），所以不设 `staleTime`：打开这一页就取一次最新的。
+ */
+export function useSkills() {
+  return useQuery({ queryKey: queryKeys.skills, queryFn: getSkills })
 }
 
-export function useWorkspaces() {
+/**
+ * 启用/禁用一个技能（§16.5）：保存即生效、作用于下一轮。
+ *
+ * 成功就用服务端返回的**完整视图**替换缓存（与 `useSetCapabilities` 同一条做法）——总闸、诊断与
+ * 每条技能的来源都跟着变，前端自己推算就是第二套真相。
+ */
+export function useSetSkill() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (change: { name: string; enabled: boolean }) =>
+      setSkillEnabled(change.name, change.enabled),
+    onSuccess: (view) => {
+      queryClient.setQueryData(queryKeys.skills, view)
+    },
+  })
+}
+
+/** 添加一个技能发现根（2026-10-20）：保存即生效、作用于下一轮。 */
+export function useAddSkillRoot() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (path: string) => addSkillRoot(path),
+    onSuccess: (view) => {
+      queryClient.setQueryData(queryKeys.skills, view)
+    },
+  })
+}
+
+/** 移除一个自定义发现根：不删文件，只是不再扫描。 */
+export function useRemoveSkillRoot() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (path: string) => removeSkillRoot(path),
+    onSuccess: (view) => {
+      queryClient.setQueryData(queryKeys.skills, view)
+    },
+  })
+}
+
+export function useHealth() {
+  return useQuery({ queryKey: queryKeys.health, queryFn: getHealth })
+}export function useWorkspaces() {
   return useQuery({ queryKey: queryKeys.workspaces, queryFn: listWorkspaces })
 }
 
@@ -202,6 +254,27 @@ export function useSetSessionMode() {
   })
 }
 
+/**
+ * 取消当前会话在跑的任务（§17.4）：**幂等**——没有可取消的任务时是空操作，返回当时的结局。
+ *
+ * 成功后**重取快照**而不是本地改状态：这一轮的终态（`cancelled`）、已产出的部分回答与任务索引
+ * 都由服务端说了算，页面自己推算一份就是第二套真相（与审批决定同一口径）。失败也重取——取消可能
+ * 刚好被别处抢先处理，那只能由服务端说清楚。
+ */
+export function useCancelTask() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ sessionId, reason = '' }: { sessionId: string; reason?: string }) =>
+      cancelTask(sessionId, reason),
+    onSuccess: (_result, request) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
+    },
+    onError: (_error, request) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
+    },
+  })
+}
+
 export function useEndInterruptedRequest() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -230,17 +303,23 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
   const pending = useRef(new Map<string, { id: string; signature: string; context: SubmissionContext }>())
 
   const mutation = useMutation({
-    mutationFn: async (request: { sessionId: string; text: string; context: SubmissionContext }) => {
+    mutationFn: async (request: { sessionId: string; text: string; context: SubmissionContext; attachments?: readonly string[] }) => {
       const existing = pending.current.get(request.sessionId)
       const text = request.text
-      const signature = JSON.stringify([text, request.context.parent_turn_id ?? null, request.context.expected_branch_id ?? null, request.context.workflow ?? null])
+      // 附件也进签名（2026-10-16）：与后端 `_digest` 同一条口径——"同一段文字、换一张图再发"
+      // 是两个不同的请求，不能被当成上一次的重放（那样图就永远发不出去）。
+      const attachments = [...(request.attachments ?? [])]
+      const signature = JSON.stringify([text, request.context.parent_turn_id ?? null, request.context.expected_branch_id ?? null, request.context.workflow ?? null, attachments])
       const same = existing?.signature === signature
       const requestId = same ? existing.id : newRequestId()
       const boundContext = same ? existing.context : request.context
       pending.current.set(request.sessionId, { id: requestId, signature, context: boundContext })
       let result
       try {
-        result = await submitMessage(request.sessionId, text, requestId, boundContext)
+        result = await submitMessage(request.sessionId, text, requestId, {
+          ...boundContext,
+          ...(attachments.length === 0 ? {} : { attachments }),
+        })
       } catch (error) {
         // 明确拒绝且没有执行时，刷新后可换观测版本；网络中断仍保留原请求的上下文与幂等键。
         if (error instanceof ApiError && error.code === 'CONVERSATION_CONFLICT') pending.current.delete(request.sessionId)
@@ -263,9 +342,13 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
   })
   const belongsHere = mutation.variables?.sessionId === sessionId
   return {
-    mutate: (text: string, options?: Parameters<typeof mutation.mutate>[1]) => {
+    // 带的附件是**引用**（`AttachmentView.attachment_id`），不是文件本身；字节已经在上传接口落盘了。
+    mutate: (
+      request: { text: string; attachments?: readonly string[] },
+      options?: Parameters<typeof mutation.mutate>[1],
+    ) => {
       if (sessionId === null) throw new Error('还没有打开会话')
-      mutation.mutate({ sessionId, text, context }, options)
+      mutation.mutate({ sessionId, text: request.text, context, attachments: request.attachments }, options)
     },
     isPending: belongsHere && mutation.isPending,
     isError: belongsHere && mutation.isError,

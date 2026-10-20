@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import sqlite3
 import uuid
@@ -23,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from local_agent.capabilities import CAPABILITY_TOOLS, resolve_switches
 from local_agent.exceptions import (
     ConnectionValidationError,
     ConnectionVersionConflict,
@@ -31,6 +34,7 @@ from local_agent.exceptions import (
 )
 from local_agent.model_settings.credentials import (
     CredentialStore,
+    DatabaseCredentialStore,
     credential_ref_for,
     is_credential_ref,
     secrets_from,
@@ -44,13 +48,17 @@ from local_agent.model_settings.models import (
     validate_draft,
 )
 from local_agent.model_settings.preferences import PreferenceStore
+from local_agent.model_settings.web_search import WebSearchKeyStore
 from local_agent.persistence import migrations
 from local_agent.security.path_guard import (
     ExternalPathPolicy,
     ExternalPathsMode,
     GrantAccess,
     normalize_grant_path,
+    normalize_mode,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 #: 选择的作用域：默认连接与会话级选择。
 SelectionScope = Literal["default", "session"]
@@ -65,8 +73,22 @@ META_LEGACY_IMPORT_AT = "legacy_import.imported_at"
 #: 外部路径**档位**在 ``settings_meta`` 里的键（T38）。授权条目另有专表。
 META_EXTERNAL_PATHS_MODE = "permissions.external_paths.mode"
 
-#: 当前 **Agent 档位**（Profile）在 ``settings_meta`` 里的键（§16.6 档位切换，2026-10-12）。
-META_AGENT_PROFILE = "agent.profile"
+#: **能力开关**在 ``settings_meta`` 里的键（§16.1、§16.6，2026-10-13）。
+#:
+#: 存的是**用户改过的那几项**（JSON 对象），不是完整开关表：出厂默认以后还会随版本演进，把整张表
+#: 冻在库里会让"新增能力默认关"这类改动对老用户失效。
+META_AGENT_CAPABILITIES = "agent.capabilities"
+
+#: **被用户禁用的技能名**在 ``settings_meta`` 里的键（技能管理页，2026-10-16；契约 §16.5）。
+#:
+#: 存"禁用了哪些"而不是"启用了哪些"：**新发现的技能默认可用**（用户把它放进发现根就是为了用），
+#: 而"默认可用"这条语义只能靠"只记例外"表达——反过来存会把"装了新技能却用不了"变成默认结果。
+#: 这与能力开关同一口径：库里只存用户动过的那几项。
+META_SKILL_DISABLED = "agent.skills.disabled"
+
+#: 用户额外添加的技能发现根（2026-10-20）：**绝对路径**数组，只记"加了哪些"。
+#: 扫描本身仍每轮现做——目录里新放的技能下一轮就可见，不把技能清单冻进库里。
+META_SKILL_ROOTS = "skills.extra_dirs"
 
 
 def now_iso() -> str:
@@ -127,10 +149,10 @@ class PermissionStore:
         self,
         connection: sqlite3.Connection,
         *,
-        default_mode: ExternalPathsMode = "whitelist",
+        default_mode: ExternalPathsMode = "workspace-write",
     ) -> None:
         self._connection = connection
-        self._default_mode = default_mode
+        self._default_mode = normalize_mode(default_mode)
 
     @property
     def default_mode(self) -> ExternalPathsMode:
@@ -144,6 +166,7 @@ class PermissionStore:
 
     def set_mode(self, mode: ExternalPathsMode) -> None:
         """保存档位（"保存即生效"；不要求先存在授权条目）。"""
+        mode = normalize_mode(mode)
         self._connection.execute(
             "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
@@ -216,61 +239,194 @@ class PermissionStore:
         ).fetchone()
         if row is None:
             return None
-        value = str(row[0])
-        # 库里存的是本进程写过的值；出现未知文本时按出厂默认处理，而不是让判定层拿到非法档位。
-        return cast(ExternalPathsMode, value) if value in ("deny", "whitelist", "allow") else None
+        value = str(row[0]).strip()
+        try:
+            # 旧值（deny / whitelist / allow）与三档走同一条归一：老库里存着旧值也要读得回来，
+            # 否则"用户改过档位"会被静默判成"没改过"，页面与判定一起退回出厂默认。
+            return normalize_mode(value)
+        except ValueError:
+            # 有记录但无法识别，不等于用户从未选择。默认可能是完全放行，不能因此扩权。
+            _LOGGER.warning("设置库的权限档位无效，已按 read-only 处理；请在权限设置中重新保存档位")
+            return "read-only"
 
 
 @dataclass
-class ProfileStore:
-    """当前 **Agent 档位**（Profile）的读写（§16.6 档位切换，2026-10-12）。
+class CapabilityStore:
+    """**能力开关**的读写（§16.1、§16.6）。
 
-    与外部路径档位（T38）**同一口径**：档位是 ``settings_meta`` 里的一行，**唯一真源在设置库**，
+    与外部路径档位（T38）**同一口径**：开关是 ``settings_meta`` 里的一行，**唯一真源在设置库**，
     ``config.yaml`` 只是出厂默认——用户改过之后，重启读到的仍是用户的选择（不会被配置文件覆盖）。
     "保存即生效、作用于下一轮"，不写回配置文件。
 
-    ``selectable`` 由**服务端**枚举（内置三档 + ``profiles.custom``），页面照它渲染：档位名与能力集合的
-    定义只在 ``capabilities.py`` 与配置里（§16.1），不在这里另立一套。
+    库里只存**改过的那几项**（JSON 对象），所以：新增能力时"默认关"对它依然生效；把某项删掉就等于
+    回到配置给的出厂默认。
+
+    ``switchable`` 由**服务端**枚举（= 闭集减去不可关闭的两个），页面照它渲染：能力名与工具归属的
+    定义只在 ``capabilities.py``（§6.9），不在这里另立一套。
     """
 
     _connection: sqlite3.Connection
-    _default_profile: str
-    _selectable: tuple[str, ...]
+    _defaults: Mapping[str, bool]
+    _switchable: tuple[str, ...]
 
     @property
-    def default_profile(self) -> str:
-        """``config.yaml`` 给的出厂默认档位；库里没有用户选择时用它。"""
-        return self._default_profile
+    def defaults(self) -> Mapping[str, bool]:
+        """``config.yaml`` 给的出厂默认开关表；库里没有用户选择时用它。"""
+        return self._defaults
 
     @property
-    def selectable(self) -> tuple[str, ...]:
-        """页面可选的全部档位（固定顺序）。"""
-        return self._selectable
+    def switchable(self) -> tuple[str, ...]:
+        """页面上可以开关的能力（固定顺序）；不可关闭的能力不在其中。"""
+        return self._switchable
 
-    def profile(self) -> str:
-        """当前生效档位：库里的用户选择优先，没有（或已不在可选集里）则回落到出厂默认。"""
-        stored = self._value()
-        return self._default_profile if stored is None else stored
+    def overrides(self) -> dict[str, bool]:
+        """用户改过的那几项（解析失败即当作"没改过"，与 `_mode_value` 同一条失败闭合）。"""
+        row = self._connection.execute(
+            "SELECT value FROM settings_meta WHERE key = ?", (META_AGENT_CAPABILITIES,)
+        ).fetchone()
+        if row is None:
+            return {}
+        try:
+            parsed = json.loads(str(row[0]))
+        except ValueError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {
+            str(name): bool(value)
+            for name, value in parsed.items()
+            if name in CAPABILITY_TOOLS and isinstance(value, bool)
+        }
 
-    def set_profile(self, profile: str) -> None:
-        """保存档位（调用方负责先校验取值合法）。"""
+    def switches(self) -> dict[str, bool]:
+        """当前生效的完整开关表：出厂默认 + 库里的用户选择（每一轮现取，不缓存）。"""
+        return resolve_switches(self._defaults, self.overrides())
+
+    def update_switches(self, changes: Mapping[str, bool]) -> dict[str, bool]:
+        """保存用户这次动过的开关项（**合并式**；调用方负责先校验名字与取值合法）。
+
+        合并而不是覆盖整张表：库里存的是"改过的那几项"，页面只报告它动过的那一项，其余保持原样。
+        读-改-写在同一把锁里完成（应用层用 ``_sqlite_access`` 包住），不会与另一次改动互相覆盖。
+
+        Args:
+            changes: 本次要固化的项。传空映射等于"什么都不改"。
+
+        Returns:
+            保存后的完整开关表（供本次响应直接回显，免一次往返）。
+        """
+        merged = self.overrides()
+        merged.update(
+            {
+                str(name): bool(value)
+                for name, value in changes.items()
+                if name in CAPABILITY_TOOLS
+            }
+        )
         self._connection.execute(
             "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            (META_AGENT_PROFILE, profile, now_iso()),
+            (META_AGENT_CAPABILITIES, json.dumps(merged, sort_keys=True), now_iso()),
         )
         self._connection.commit()
+        return resolve_switches(self._defaults, merged)
 
-    def _value(self) -> str | None:
+
+@dataclass
+class SkillStore:
+    """技能的用户级禁用表（技能管理页，2026-10-16；契约 §16.5）。
+
+    与能力开关**同一个文件、同一条口径**：`config.yaml` 与发现根决定"有哪些技能"，这里只回答
+    "哪些被用户关掉了"。所以它读起来是一条**例外表**，而不是一份技能清单——技能是每轮现扫盘发现的，
+    把它整份冻在库里，明天新装的技能就会"存在但不在表里"，然后被判成不可用。
+    """
+
+    _connection: sqlite3.Connection
+
+    def disabled(self) -> frozenset[str]:
+        """被禁用的技能名。
+
+        解析失败（坏 JSON、不是数组）一律当作"**没有禁用任何技能**"——与 `CapabilityStore.overrides`
+        同一条失败闭合：库里存的是例外表，读不出来时不该顺手把用户的技能全关掉。真正的可见性仍由
+        `skills.enabled` 与 `skill` 能力开关把关，这里不是最后一道边界。
+        """
         row = self._connection.execute(
-            "SELECT value FROM settings_meta WHERE key = ?", (META_AGENT_PROFILE,)
+            "SELECT value FROM settings_meta WHERE key = ?", (META_SKILL_DISABLED,)
         ).fetchone()
         if row is None:
-            return None
-        value = str(row[0])
-        # 自定义档位被从配置里删掉之后，库里那个名字就不该继续生效（与 `_mode_value` 同一条失败闭合）：
-        # 回落到出厂默认，而不是让运行期去解析一个不存在的档位。
-        return value if value in self._selectable else None
+            return frozenset()
+        try:
+            parsed = json.loads(str(row[0]))
+        except ValueError:
+            return frozenset()
+        if not isinstance(parsed, list):
+            return frozenset()
+        return frozenset(str(name) for name in parsed if isinstance(name, str) and name)
+
+    def update(self, changes: Mapping[str, bool]) -> frozenset[str]:
+        """按"名字 → 是否启用"保存（**合并式**），返回保存后的完整禁用集。
+
+        Args:
+            changes: 本次动过的那几项。``False`` 进禁用集，``True`` 从禁用集移除。
+                名字是否真有这个技能由**调用方**校验（它才拿得到当前目录）。
+        """
+        current = set(self.disabled())
+        for name, enabled in changes.items():
+            if enabled:
+                current.discard(str(name))
+            else:
+                current.add(str(name))
+        self._connection.execute(
+            "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            # 排序后写：同一组禁用得到同一份字节，便于比对与审计。
+            (META_SKILL_DISABLED, json.dumps(sorted(current)), now_iso()),
+        )
+        self._connection.commit()
+        return frozenset(current)
+
+    # ---- 额外发现根（2026-10-20）--------------------------------------------
+
+    def extra_roots(self) -> list[str]:
+        """用户自己添加的技能发现根（绝对路径，按添加顺序）。
+
+        与"禁用表"同一口径：库里只存**用户动过的那些**，读不出来（坏 JSON、非数组）就当作
+        "没有额外根"——不因为一条坏记录把扫描范围清空或乱扫。
+        """
+        row = self._connection.execute(
+            "SELECT value FROM settings_meta WHERE key = ?", (META_SKILL_ROOTS,)
+        ).fetchone()
+        if row is None:
+            return []
+        try:
+            parsed = json.loads(str(row[0]))
+        except ValueError:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [str(item) for item in parsed if isinstance(item, str) and Path(item).is_absolute()]
+
+    def add_root(self, path: str) -> list[str]:
+        """追加一个发现根（去重），返回保存后的完整列表。"""
+        roots = self.extra_roots()
+        value = str(Path(path))
+        if value not in roots:
+            roots.append(value)
+            self._save_roots(roots)
+        return roots
+
+    def remove_root(self, path: str) -> list[str]:
+        """移除一个发现根（幂等），返回保存后的完整列表。"""
+        roots = [item for item in self.extra_roots() if item != str(Path(path))]
+        self._save_roots(roots)
+        return roots
+
+    def _save_roots(self, roots: list[str]) -> None:
+        self._connection.execute(
+            "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (META_SKILL_ROOTS, json.dumps(roots), now_iso()),
+        )
+        self._connection.commit()
 
 
 def _grant_access(value: Any) -> GrantAccess:
@@ -286,7 +442,13 @@ class SettingsDatabase:
     connections: ConnectionStore
     permissions: PermissionStore
     preferences: PreferenceStore
-    profiles: ProfileStore
+    capabilities: CapabilityStore
+    #: 联网检索的密钥（Tavily）。与连接共用一个凭据存储，但引用固定、不按版本滚动。
+    web_search: WebSearchKeyStore
+    #: 技能的用户级禁用表（技能管理页，2026-10-16）。
+    skills: SkillStore
+    #: 打开时用的凭据存储（2026-10-20）：对象存储密钥与模型连接共用这一份。
+    credentials: Any = None
 
 
 def _connect(path: Path) -> sqlite3.Connection:
@@ -301,9 +463,9 @@ def open_settings_database(
     path: Path,
     *,
     credentials: CredentialStore | None = None,
-    default_external_paths_mode: ExternalPathsMode = "whitelist",
-    default_profile: str = "",
-    profile_names: Sequence[str] = (),
+    default_external_paths_mode: ExternalPathsMode = "workspace-write",
+    default_capabilities: Mapping[str, bool] | None = None,
+    switchable_capabilities: Sequence[str] = (),
 ) -> SettingsDatabase:
     """打开（必要时创建）设置库并升到当前结构版本。
 
@@ -312,22 +474,36 @@ def open_settings_database(
         credentials: 密钥存储；给 ``None`` 时读写密钥的操作会被拒绝（只读设置仍可用）。
         default_external_paths_mode: ``config.yaml`` 里的外部路径档位，作为**出厂默认**：
             库里没有用户选择时用它，用户改过档位后以库里的为准（T38）。
-        default_profile: ``config.yaml`` 里的 ``profiles.active``，同类出厂默认（§16.6）。
-        profile_names: 页面可选的档位名（内置 + 自定义），由调用方从配置枚举后传进来。
+        default_capabilities: ``config.yaml`` 解析出的**出厂默认开关表**（``AppConfig.capability_default_layer``），
+            同类出厂默认（§16.1）。省略时用内置默认（``CAPABILITY_DEFAULTS``）。
+        switchable_capabilities: 页面上可以开关的能力（= 闭集减去不可关闭的两个），由调用方枚举后传进来。
 
     Raises:
         sqlite3.Error: 库无法打开或结构变更失败。
     """
     connection = _connect(path)
     migrations.apply_settings_migrations(connection)
+    # 落库的密钥存储要先拿到连接（它把密钥写在 settings_meta 里，与连接、能力开关同一个文件）。
+    # 装配顺序是"先建存储、后开库"，所以这里回填一次；别的实现（内存）没有这个动作。
+    if isinstance(credentials, DatabaseCredentialStore):
+        credentials.bind(connection)
     return SettingsDatabase(
         connection=connection,
         connections=ConnectionStore(connection, credentials=credentials),
-        permissions=PermissionStore(connection, default_mode=default_external_paths_mode),
-        preferences=PreferenceStore(connection),
-        profiles=ProfileStore(
-            connection, _default_profile=default_profile, _selectable=tuple(profile_names)
+        permissions=PermissionStore(
+            connection,
+            default_mode=default_external_paths_mode,
         ),
+        preferences=PreferenceStore(connection),
+        capabilities=CapabilityStore(
+            connection,
+            _defaults=resolve_switches({} if default_capabilities is None else default_capabilities),
+            _switchable=tuple(switchable_capabilities),
+        ),
+        web_search=WebSearchKeyStore(credentials),
+        skills=SkillStore(connection),
+        # 对象存储密钥与模型连接共用同一份凭据存储（2026-10-20）。
+        credentials=credentials,
     )
 
 
@@ -467,6 +643,8 @@ class ConnectionStore:
             base_url=draft.base_url,
             model=draft.model,
             context_window_tokens=draft.context_window_tokens,
+            # 用户勾选的"支持图片输入"（2026-10-16）：跟着**这条连接**走，不跟着 config.yaml 走。
+            supports_vision=draft.supports_vision,
             max_tokens=draft.max_tokens,
             temperature=draft.temperature,
             timeout_seconds=draft.timeout_seconds,
@@ -513,6 +691,8 @@ class ConnectionStore:
             base_url=draft.base_url,
             model=draft.model,
             context_window_tokens=draft.context_window_tokens,
+            # 用户勾选的"支持图片输入"（2026-10-16）：跟着**这条连接**走，不跟着 config.yaml 走。
+            supports_vision=draft.supports_vision,
             max_tokens=draft.max_tokens,
             temperature=draft.temperature,
             timeout_seconds=draft.timeout_seconds,
@@ -747,8 +927,9 @@ class ConnectionStore:
             " connection_id, display_name, provider, base_url, model, context_window_tokens, max_tokens,"
             " temperature, timeout_seconds, retry_count, streaming, auth_mode, api_key_env, credential_ref,"
             " allow_plaintext_http, enabled, capability_chat, capability_tools, capability_streaming,"
-            " capability_checked_at, capability_message, config_version, created_at, updated_at"
-            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " capability_checked_at, capability_message, config_version, created_at, updated_at,"
+            " supports_vision"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(connection_id) DO UPDATE SET"
             " display_name = excluded.display_name, provider = excluded.provider, base_url = excluded.base_url,"
             " model = excluded.model, context_window_tokens = excluded.context_window_tokens,"
@@ -760,7 +941,8 @@ class ConnectionStore:
             " capability_streaming = excluded.capability_streaming,"
             " capability_checked_at = excluded.capability_checked_at,"
             " capability_message = excluded.capability_message, config_version = excluded.config_version,"
-            " updated_at = excluded.updated_at",
+            " updated_at = excluded.updated_at,"
+            " supports_vision = excluded.supports_vision",
             (
                 connection.connection_id,
                 connection.display_name,
@@ -788,6 +970,8 @@ class ConnectionStore:
                 connection.config_version,
                 now,
                 now,
+                # 用户声明的"支持图像输入"（2026-10-16）：与实测报告分开存。
+                int(connection.supports_vision),
             ),
         )
 
@@ -796,7 +980,8 @@ class ConnectionStore:
             "INSERT OR REPLACE INTO model_connection_versions ("
             " connection_id, config_version, display_name, provider, base_url, model, context_window_tokens,"
             " max_tokens, temperature, timeout_seconds, retry_count, streaming, auth_mode, credential_ref,"
-            " api_key_env, recorded_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " api_key_env, recorded_at, supports_vision)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 connection.connection_id,
                 connection.config_version,
@@ -814,6 +999,8 @@ class ConnectionStore:
                 connection.credential_ref,
                 connection.api_key_env,
                 recorded_at,
+                # 版本快照也要带它：等待审批的运行恢复时读的是**这一版**（§6.8）。
+                int(connection.supports_vision),
             ),
         )
 
@@ -927,6 +1114,8 @@ class ConnectionStore:
             timeout_seconds=int(row["timeout_seconds"]),
             retry_count=int(row["retry_count"]),
             streaming=bool(row["streaming"]),
+            # 老库/历史版本行可能没有这一列：按"没声明"处理（失败闭合），不假设支持。
+            supports_vision=bool(row["supports_vision"]) if "supports_vision" in keys else False,
             auth_mode=auth_mode,
             credential_ref=credential_ref,
             config_version=int(row["config_version"]),

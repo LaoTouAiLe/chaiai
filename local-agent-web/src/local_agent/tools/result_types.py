@@ -63,6 +63,8 @@ class ReadFileResult(BaseModel):
     next_start_line: int | None = None
     #: 实际返回的不完整行，续读必须从该行开始而不能跳过。
     partial_lines: list[int] = Field(default_factory=list)
+    start_char: int = 0
+    next_start_char: int | None = None
 
 
 #: ``grep`` 的输出模式：正文命中 / 只列文件名 / 只给计数。
@@ -100,6 +102,10 @@ class GrepResult(BaseModel):
     hits: list[GrepFileHits] = Field(default_factory=list)
     total_matches: int = 0
     files_scanned: int = 0
+    has_more: bool = False
+    next_cursor: str | None = None
+    skipped_files: dict[str, int] = Field(default_factory=dict)
+    limited_lines: int = 0
     truncated: bool = False
     note: str | None = None
 
@@ -111,6 +117,8 @@ class GlobResult(BaseModel):
     path: str = "."
     files: list[str] = Field(default_factory=list)
     total_files: int = 0
+    has_more: bool = False
+    next_cursor: str | None = None
     truncated: bool = False
     note: str | None = None
 
@@ -122,6 +130,9 @@ class WebSearchHit(BaseModel):
     url: str
     #: 来源站点（URL 的 host）；让用户能一眼看出这条来自哪里。
     source: str
+    snippet: str = ""
+    source_id: str = ""
+    published_at: str | None = None
 
 
 class WebSearchResult(BaseModel):
@@ -131,6 +142,9 @@ class WebSearchResult(BaseModel):
     results: list[WebSearchHit] = Field(default_factory=list)
     truncated: bool = False
     note: str | None = None
+    retrieved_at: str | None = None
+    provider: str | None = None
+    executed_query: str | None = None
 
 
 class WebFetchResult(BaseModel):
@@ -146,6 +160,14 @@ class WebFetchResult(BaseModel):
     text: str = ""
     truncated: bool = False
     note: str | None = None
+    retrieved_at: str | None = None
+    source_id: str = ""
+    total_chars: int = 0
+    start_char: int = 0
+    next_start_char: int | None = None
+    content_version: str = ""
+    json_structure: str | None = None
+    selected_by_query: bool = False
 
 
 class EditFileResult(BaseModel):
@@ -175,6 +197,9 @@ class WriteFileResult(BaseModel):
     size_bytes: int = 0
     line_count: int = 0
     note: str | None = None
+    #: 本次**顺带新建**的父目录（工作区相对路径，由外到内）。空列表 = 父目录本来就存在。
+    #: 为什么报出来：创建目录是这次调用新产生的副作用，用户与模型都该能核对（§15.8 的口径）。
+    created_directories: list[str] = Field(default_factory=list)
 
 
 class ShellResult(BaseModel):
@@ -203,6 +228,11 @@ class DeleteFileResult(BaseModel):
     removed_files: int = 0
     removed_dirs: int = 0
     reason: str = ""
+    #: 是否移进了回收站（2026-10-20，设置里的「安全删除」开启时）。为 `True` 时目标仍在磁盘上，
+    #: 只是换了位置——模型据此告诉用户"可以找回"，而不是宣称"已彻底删除"。
+    trashed: bool = False
+    #: 回收站里的新位置（绝对路径）；没有进回收站时为 `None`。
+    trash_path: str | None = None
 
 
 class ToolResultRecord(TypedDict):

@@ -24,18 +24,22 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import logging
+import sqlite3
 import threading
 from collections import Counter, deque
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Final, Literal, TypeVar, cast
+from urllib.parse import urlsplit
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -61,7 +65,9 @@ from local_agent.application.models import (
     CapabilityCheckView,
     CapabilityStatusView,
     CommandResultView,
+    CompressionView,
     ConversationMapView,
+    CredentialStoreState,
     ExternalPathAccess,
     ExternalPathGrantView,
     ExternalPathsMode,
@@ -71,8 +77,12 @@ from local_agent.application.models import (
     PermissionsView,
     SessionSnapshot,
     SessionSummaryView,
+    SkillEntryView,
+    SkillRootView,
+    SkillsView,
     TaskCenterView,
     TaskView,
+    WebSearchKeyView,
     WorkspaceRef,
 )
 from local_agent.application.recovery import (
@@ -82,12 +92,25 @@ from local_agent.application.recovery import (
     child_completion_proven,
     classify_interrupted_job,
 )
+from local_agent.application.tool_stream import ToolStream
+from local_agent.attachments import AttachmentStore, LoadedAttachment
+from local_agent.model_settings.attachments_oss import OssKeyStore
+from local_agent.oss_storage import OssStorageError
 from local_agent.cancellation import DEFAULT_CANCEL_REASON, CancellationToken
-from local_agent.capabilities import capability_status, selectable_profiles
-from local_agent.config import LlmConfig, RunConfig, WorkflowsConfig
+from local_agent.capabilities import (
+    capability_status,
+    resolve_switches,
+    switchable_capabilities,
+    unknown_switch_names,
+)
+from local_agent.config import LlmConfig, RunConfig, WorkflowsConfig, apply_capability_gates
+from local_agent.context.compression_progress import CompressionProgress, use_compression_listener
+from local_agent.context.skills_loader import SkillCatalog, discover_skills
 from local_agent.exceptions import (
+    AttachmentError,
     ConnectionValidationError,
     ConnectionVersionConflict,
+    CredentialStoreError,
     JobStoreError,
     ModelSettingsError,
     SelectionConflict,
@@ -98,17 +121,19 @@ from local_agent.llm import factory as llm_factory
 from local_agent.llm.models import ModelCapabilities
 from local_agent.llm.stream_context import use_sink
 from local_agent.llm.usage_recording import ModelCallRecorder, endpoint_fingerprint
+from local_agent.message_flags import DEFAULT_IMAGE_CONTEXT_TURNS
 from local_agent.model_settings import (
     PLACEHOLDER_API_KEY,
     CapabilityReport,
+    CapabilityStore,
     ConnectionDraft,
     ConnectionStore,
     ModelBinding,
     ModelConnection,
     PermissionStore,
-    ProfileStore,
     Selection,
     SelectionRef,
+    SkillStore,
     memory_settings,
 )
 from local_agent.model_settings import probe as connection_probe
@@ -126,6 +151,7 @@ from local_agent.model_settings.preferences import (
     complete_preferences,
     initial_preferences,
 )
+from local_agent.model_settings.web_search import WebSearchKeyStore
 from local_agent.persistence.conversation_store import ConversationTurn
 from local_agent.persistence.job_store import (
     JOB_STATE_CANCELLED,
@@ -145,10 +171,11 @@ from local_agent.persistence.request_ledger import (
     LedgerEntry,
     RequestLedger,
 )
-from local_agent.persistence.session_store import Session, SessionStore
+from local_agent.persistence.session_store import DEFAULT_TITLE, Session, SessionStore
 from local_agent.scope import SCOPE_WORKSPACE, scope_key_for
 from local_agent.security.path_guard import ExternalPathPolicy, protected_target_reason
 from local_agent.tools.git_tools import git_availability
+from local_agent.tools.progress import use_tool_listener
 from local_agent.workflow_contracts import WorkflowRequest
 
 #: 任务的终态（`TASK_TERMINAL_STATUSES`）、重启后的任务判定与它的纯函数都在
@@ -202,6 +229,10 @@ class _RunEnv:
     #: 本轮用量录音机（§15.6）。与 `app_config` 同时定好：录音机里的连接/窗口信息必须来自
     #: **这次真正在用的**那份配置，不能读"当前设置"——等待审批的运行不该被中途换掉的设置影响。
     usage_recorder: ModelCallRecorder | None = None
+    #: 这次运行要交给模型的图片（2026-10-16）：提交时按引用从 `data/attachments/` 读成字节，
+    #: 挂在环境上而不是塞进 payload——payload 会成为初始 State 并写进 Checkpoint，
+    #: 图像字节没有理由在里面存第二份（第一份已经在用户消息的内容块里）。
+    attachments: tuple[LoadedAttachment, ...] = ()
 
 
 class EventSubscription:
@@ -349,8 +380,8 @@ class EventBus:
 class _StreamingAnswerSink:
     """模型消息的临时增量；完整消息仍由节点提交到 Checkpoint。
 
-    增量按安全分隔符成段推出，并保留最长已知密钥的重叠后缀：密钥、`sk-` 样式与绝对路径
-    即使跨模型 chunk 也不会从 SSE 原样漏出。无分隔符的长串延至结束才显示，安全优先。
+    增量按安全分隔符成段推出，并保留最长已知密钥的重叠后缀：密钥与 `sk-` 样式即使跨模型
+    chunk 也不会从 SSE 原样漏出；路径原样展示。无分隔符的长串延至结束才显示。
     """
 
     _BREAKS = frozenset(" \t\r\n，。；：、（）()[]")
@@ -527,11 +558,21 @@ class ApplicationService:
         connections: ConnectionStore | None = None,
         permissions: PermissionStore | None = None,
         preferences: PreferenceStore | None = None,
-        profiles: ProfileStore | None = None,
+        capabilities: CapabilityStore | None = None,
+        web_search: WebSearchKeyStore | None = None,
+        skills: SkillStore | None = None,
+        #: 用户上传的图片附件（2026-10-16）。``None`` = 没接线（测试与 CLI 的轻量路径）：
+        #: 那时上传接口如实回 503，而不是把图存到某个说不清的地方。
+        attachments: AttachmentStore | None = None,
+        #: 对象存储的访问密钥（2026-10-20）：与模型连接共用同一套凭据存储。
+        oss_keys: OssKeyStore | None = None,
         model_factory: Callable[[LlmConfig, str], Any] | None = None,
         jobs: JobRuntime | None = None,
     ) -> None:
         self._graph = graph
+        from uuid import uuid4
+
+        self._tool_namespace = uuid4().hex
         self._app_config = app_config
         self._model_adapter = model_adapter
         #: 模型连接设置（§6.8）。``None`` = 没有可用设置库：按 ``app_config.llm`` + 注入的适配器运行，
@@ -541,9 +582,19 @@ class ApplicationService:
         #: ``config.yaml`` 的出厂默认（``external_policy()`` 返回 ``None`` 由下层兜底）。
         self._permissions = permissions
         self._preferences = preferences
-        #: 当前 Agent 档位（§16.6 档位切换）。与上面三项同库同生命周期：没有设置库时退回
-        #: ``config.yaml`` 的 ``profiles.active``，页面据此不提供切换（写下去是 503）。
-        self._profiles = profiles
+        #: 能力开关（§16.1、§16.6）。与上面三项同库同生命周期：没有设置库时退回
+        #: ``config.yaml`` 解析出的出厂默认，页面据此不提供开关（写下去是 503）。
+        self._capabilities = capabilities
+        #: 联网检索的服务凭据（Tavily；与模型连接共用凭据存储）。``None`` = 没有设置库：那时只有
+        #: 旧环境变量 ``web_access.tavily_api_key_env`` 能提供密钥，页面不提供录入框。
+        self._web_search = web_search
+        #: 技能的用户级禁用表（技能管理页，2026-10-16）。与能力开关同库同生命周期：没有设置库时
+        #: 视为"没有禁用任何一项"、页面不提供开关（写下去是 503）。
+        self._skills = skills
+        #: 附件存储（2026-10-16）：内容在 `data/attachments/年/月/日/会话/`，消息里只放引用。
+        self._attachments = attachments
+        #: 对象存储凭据（2026-10-20）：只在 `attachments.backend=oss` 时使用。
+        self._oss_keys = oss_keys
         #: 按连接构造客户端的可调用对象；测试注入确定性假模型走同一条路径。
         self._build_model = model_factory or llm_factory.build_chat_model
         self._workspace_root = Path(workspace_root)
@@ -560,6 +611,8 @@ class ApplicationService:
         self._locks: dict[str, threading.Lock] = {}
         self._locks_guard = threading.Lock()
         self._streams: dict[str, _StreamingAnswerSink] = {}
+        self._tool_streams: dict[str, ToolStream] = {}
+        self._compressions: dict[str, CompressionProgress] = {}
         self._catalog_lock = threading.RLock()
         #: 后台任务运行时与任务索引（§17.2）。``None`` 表示**未装配任务索引**（只有不经过
         #: `api.container.open_runtime` 的单元测试会这样）：此时提交路径与 v0.5 完全一致，
@@ -849,6 +902,7 @@ class ApplicationService:
             values = request.values.model_copy(update={
                 "medium_term": request.values.medium_term or previous.medium_term,
                 "embedding": request.values.embedding or previous.embedding,
+                "web_access": request.values.web_access or previous.web_access,
             })
             try:
                 config = apply_runtime_preferences(self._app_config, values)
@@ -970,21 +1024,28 @@ class ApplicationService:
         启动那次收不到"用户刚在页面上录入的密钥"；而那种密钥一旦被供应商或工具回显到诊断文案里，
         就会跟着进入快照、SSE 与错误提示。保存/轮换后立刻并入，且只增不减（旧密钥可能还出现在历史文本里）。
         """
-        if self._connections is None:
-            return
-        values = self._sqlite_access(self._connections.secret_values)
-        self._secrets = tuple(sorted(set(self._secrets) | set(values)))
+        values: set[str] = set()
+        if self._connections is not None:
+            values.update(self._sqlite_access(self._connections.secret_values))
+        # 联网检索的服务凭据同样要脱敏：录入后它可能立刻出现在检索诊断或工具输出里。
+        if self._web_search is not None:
+            secret = self._sqlite_access(self._web_search.stored)
+            if secret:
+                values.add(secret)
+        self._secrets = tuple(sorted(set(self._secrets) | values))
 
     def credential_store_state(self) -> tuple[str, str | None]:
-        """密钥存储的持久性与降级原因：``("os", None)`` 或 ``("memory", 说明)``。
+        """密钥存储的持久性与降级原因：``("local", None)`` / ``("os", None)`` 或 ``("memory", 说明)``。
 
+        2026-10-13：默认后端从系统凭据存储改为**本地设置库**（§6.8），所以正常状态是 ``local``；
+        ``os`` 作为历史值保留在 DTO 里（v1.0 之前默认，现在没有代码路径产出它）。
         没有任何可用设置库时按"没有持久凭据方案"处理——那种情况下也确实没有。
         """
         if self._connections is None:
             return "memory", None
         kind = self._connections.credential_kind
-        if kind == "os":
-            return "os", None
+        if kind in {"local", "os"}:
+            return kind, None
         note = self._connections.credential_note
         return "memory", note
 
@@ -1078,16 +1139,25 @@ class ApplicationService:
                 return self._snapshot(session, view)  # 重复点击不会再修改检查点。
             if current_id != expected_snapshot_id:
                 raise conversation.conflict(session_id, "会话状态已改变，请刷新后重新核对。")
-            state_run = proj.current_run_id(view.values) or None
+            # 判定与写回都按**真源**来（§20.5）：游标可能落后于线程最新检查点，
+            # 写在过期祖先上会把人工决定连同唯一审批来源一起丢掉（见 `_closing_anchor`）。
+            anchor, anchor_config = self._closing_anchor(session, view)
+            state_run = proj.current_run_id(anchor.values) or None
             ref = None
             if entry["run_id"] is not None:
-                if entry["run_id"] != state_run:
+                # 台账绑了 run，但**状态里一个 run 都没记**：说明那个 run 的检查点从没落盘
+                # （v0.9 T81 实证：库满时连第一份检查点都写不进去）。"没有记录"不等于"另一轮"——
+                # 这里放行，否则这条请求**永远**无法收口（收口被这一句挡住，重试被 `executing`
+                # 挡住，`_recover` 又要 run 匹配），会话就再也提交不了任何东西。
+                # 记了别的 run 才拒绝：那才是"不能结束其他轮次"。
+                if state_run is not None and entry["run_id"] != state_run:
                     raise conversation.conflict(session_id, "请求与当前轮次不一致，不能结束其他轮次。")
-                if view.values.get("task_status") in TASK_TERMINAL_STATUSES and not view.has_live_interrupt:
+                if (anchor.values.get("task_status") in TASK_TERMINAL_STATUSES
+                        and not anchor.has_live_interrupt):
                     self._recover(session, entry=entry, operation=entry["operation"])
                     return self._snapshot(session, view)
-                builder.close_interrupted_turn(self._graph, self._conversation_config(session),
-                                               view.values, request_id)
+                builder.close_interrupted_turn(self._graph, anchor_config,
+                                               anchor.values, request_id)
                 conversation.sync(self, session)
                 view = self._read(session)
                 ref = view.checkpoint_id
@@ -1227,7 +1297,7 @@ class ApplicationService:
             ) from exc
         except ConnectionValidationError as exc:
             # 领域校验消息面向用户（例如"窗口必须大于输出上限"），但仍然过一遍脱敏：
-            # 校验消息里不该出现密钥或路径，脱敏是最后一道网（§15.8）。
+            # 校验消息中的路径完整保留，密钥仍须脱敏（§15.8）。
             raise app_errors.model_settings_invalid(
                 detail=config_module.redact_secrets(str(exc), self._secrets), occurred_at=_now()
             ) from exc
@@ -1407,26 +1477,23 @@ class ApplicationService:
     # ---- 能力状态（T56；§16.6）---------------------------------------------
 
     def capabilities_view(self) -> CapabilitiesView:
-        """当前档位与每个能力的可用性（**每次现算**，不缓存；架构 §16.6）。
+        """能力开关与每一项的可用性（**每次现算**，不缓存；架构 §16.1、§16.6）。
 
-        为什么不缓存：答案取决于**当前档位**（用户刚在面板里切过）、配置开关与**这台机器上装没装 git**，
+        为什么不缓存：答案取决于**当前开关**（用户刚在面板里改过）、配置与**这台机器上装没装 git**，
         三者都可能在运行期变化。缓存一个旧答案比不显示更糟——那会让人以为"改了没用"。
 
-        对外只有**能力名与解释**，没有工具名（§15.8 的字段门槛）。`profiles` 是**服务端枚举**的可选集
-        （内置三档 + 自定义），页面照它渲染，不自己拼一份（§16.6 档位切换）。
+        对外只有**能力名与解释**，没有工具名（§15.8 的字段门槛）。`switchable` 是**服务端枚举**的
+        可开关集，页面照它渲染、不自己拼一份；`switches` 是解析后的完整开关表，页面据此画开关状态。
         """
-        config = self._app_config
+        from local_agent.tools.browser_tools import browser_availability
+
+        browser_available, browser_hint = browser_availability()
         probe = git_availability()
-        store = self._profiles
-        # 档位取**当前生效**那一个（设置库优先、config 只是出厂默认），与运行期 `_context` 同源：
-        # 面板显示的能力集合必须和"下一次提交真正绑给模型的那份"是同一个。
-        profile = self.active_profile()
+        switches = self.capability_switches()
+        store = self._capabilities
         return CapabilitiesView(
-            profile=profile,
-            default_profile=config.profiles.active,
-            profiles=list(store.selectable) if store is not None else list(
-                selectable_profiles(config.profiles.custom)
-            ),
+            switches=switches,
+            switchable=list(store.switchable if store is not None else switchable_capabilities()),
             store_unavailable=store is None,
             capabilities=[
                 CapabilityStatusView(
@@ -1436,45 +1503,130 @@ class ApplicationService:
                     reason=status.reason,
                     detail=status.detail,
                     hint=status.hint,
+                    locked=status.locked,
                 )
                 for status in capability_status(
-                    config.profiles.model_copy(update={"active": profile}).capabilities(),
-                    web_access_enabled=config.web_access.enabled,
-                    git_access_enabled=config.git.enabled,
-                    git_available=probe.available,
-                    git_hint=probe.hint,
-                    skills_enabled=config.skills.enabled,
+                    switches, git_available=probe.available, git_hint=probe.hint,
+                    browser_available=browser_available, browser_hint=browser_hint,
                 )
             ],
         )
 
-    def active_profile(self) -> str:
-        """当前生效档位（§16.6 档位切换）：**设置库优先、``config.yaml`` 只是出厂默认**。
+    def capability_switches(self) -> dict[str, bool]:
+        """当前生效的完整开关表（§16.1）：**设置库优先、``config.yaml`` 只是出厂默认**。
 
-        与外部路径档位（T38）同一口径：**每一轮现取、不缓存**——用户刚在面板里切完，下一次运行
-        就该按新档位绑定工具；没有设置库时退回 ``profiles.active``。
+        与运行期 `_context` 同源：面板显示的能力集合必须和"下一次提交真正绑给模型的那份"是同一个。
+        与外部路径档位（T38）同一口径：**每一轮现取、不缓存**——用户刚在面板里改完，下一次运行就该
+        按新开关绑定工具；没有设置库时退回出厂默认。
         """
-        store = self._profiles
+        store = self._capabilities
         if store is None:
-            return self._app_config.profiles.active
-        return self._sqlite_access(store.profile)
+            return resolve_switches(self._app_config.capability_default_layer())
+        return self._sqlite_access(store.switches)
 
-    def set_active_profile(self, profile: str) -> CapabilitiesView:
-        """保存当前档位（"保存即生效、作用于下一轮"），返回保存后的完整视图。
+    def set_capabilities(self, changes: dict[str, bool]) -> CapabilitiesView:
+        """保存用户改过的开关项（**合并式**；"保存即生效、作用于下一轮"），返回保存后的完整视图。
+
+        合并而不是覆盖整张表：库里存的是"改过的那几项"，页面只报告它动过的那一项，其余保持原样。
 
         Raises:
-            ApplicationError: 档位名不在可选集里（``MODEL_SETTINGS_INVALID``），或没有可用设置库
+            ApplicationError: 出现未登记的能力名（``MODEL_SETTINGS_INVALID``），或没有可用设置库
                 （``SETTINGS_STORE_UNAVAILABLE``）。
         """
-        store = self._require_profiles()
-        if profile not in store.selectable:
-            # 取值与领域层同源：可选集由服务端枚举，页面打错名字得到 422，而不是静默保存成别的档位。
+        store = self._require_capabilities()
+        unknown = unknown_switch_names(changes)
+        if unknown:
+            # 取值与领域层同源：可开关集由服务端枚举，页面打错名字得到 422，而不是静默存进去。
             raise app_errors.model_settings_invalid(
-                detail=f"未知档位：{profile}。可选值：{'、'.join(store.selectable)}。",
+                detail=f"未登记的能力：{'、'.join(unknown)}。"
+                f"可开关的能力：{'、'.join(store.switchable)}。",
                 occurred_at=_now(),
             )
-        self._sqlite_access(partial(store.set_profile, profile))
+        self._sqlite_access(partial(store.update_switches, changes))
+        from local_agent.tools.runtime_sessions import RESOURCES
+
+        disabled = {name for name in ("terminal", "page_control") if changes.get(name) is False}
+        if changes.get("shell") is False:
+            disabled.add("terminal")
+        RESOURCES.close_capabilities(self._tool_namespace, disabled)
         return self.capabilities_view()
+
+    # ---- 联网检索的服务凭据（Tavily）----------------------------------------
+    # 数值型偏好（条数上限、域名策略…）走 `RuntimePreferences.web_access`；这里只管**密钥**一件事。
+    # 密钥与模型连接同一条口径（§6.8）：只进设置库或进程内存，读取接口只报"有没有"。
+
+    def web_search_key_view(self) -> WebSearchKeyView:
+        """当前凭据状态：有没有、从哪来、能不能存在设置库里。
+
+        没有设置库时**不报错**：返回 ``configured=false`` 且 ``store="unavailable"``——页面要能
+        打开这一页并如实说明"这里录入也存不下来"，而不是整页打不开。
+        """
+        env_name = self._app_config.web_access.tavily_api_key_env
+        if self._web_search is None:
+            # 没有设置库 = 没有凭据存储：只剩旧环境变量这条路（取值规则仍走同一个实现，不另写一份）。
+            return WebSearchKeyView(
+                configured=bool(WebSearchKeyStore().resolve(env_name=env_name)),
+                source="environment" if WebSearchKeyStore().resolve(env_name=env_name) else "none",
+                store="unavailable",
+                note="设置库不可用：密钥只能来自环境变量，页面无法保存。",
+            )
+        stored = self._sqlite_access(self._web_search.stored)
+        if stored:
+            return WebSearchKeyView(
+                configured=True, source="settings", store=self._key_store_kind(), note=self._key_store_note()
+            )
+        present = bool(WebSearchKeyStore().resolve(env_name=env_name))
+        return WebSearchKeyView(
+            configured=present, source="environment" if present else "none",
+            store=self._key_store_kind(), note=self._key_store_note(),
+        )
+
+    def save_web_search_key(self, api_key: str) -> WebSearchKeyView:
+        """写入（覆盖）Tavily 密钥，返回保存后的状态视图。
+
+        Raises:
+            ApplicationError: 没有可用的凭据存储（``SETTINGS_STORE_UNAVAILABLE``），
+                或密钥为空白/超长（``MODEL_SETTINGS_INVALID``）。
+        """
+        store = self._require_web_search()
+        try:
+            self._sqlite_access(partial(store.set, api_key))
+        except CredentialStoreError as exc:
+            raise app_errors.model_settings_invalid(detail=str(exc), occurred_at=_now()) from exc
+        # 刚录入的密钥必须立刻进入脱敏集合：它可能立刻出现在检索诊断或工具输出里。
+        self._refresh_secrets()
+        return self.web_search_key_view()
+
+    def clear_web_search_key(self) -> WebSearchKeyView:
+        """删除已保存的密钥（幂等），返回删除后的状态视图。"""
+        store = self._require_web_search()
+        self._sqlite_access(store.clear)
+        return self.web_search_key_view()
+
+    def web_search_api_key(self) -> str | None:
+        """装配运行期工具用的密钥明文：**不进任何 DTO、日志或异常消息**。
+
+        取值顺序与模型连接一致：凭据存储 → 旧环境变量。没有设置库时只看环境变量。
+        """
+        env_name = self._app_config.web_access.tavily_api_key_env
+        if self._web_search is None:
+            return WebSearchKeyStore().resolve(env_name=env_name)
+        return self._sqlite_access(partial(self._web_search.resolve, env_name=env_name))
+
+    def _key_store_kind(self) -> CredentialStoreState:
+        if self._web_search is None:
+            return "unavailable"
+        return self._web_search.store_kind or "unavailable"
+
+    def _key_store_note(self) -> str | None:
+        return None if self._web_search is None else self._web_search.store_note
+
+    def _require_web_search(self) -> WebSearchKeyStore:
+        if self._web_search is None:
+            raise app_errors.settings_store_unavailable(
+                detail="没有可用的设置库", occurred_at=_now()
+            )
+        return self._web_search
 
     # ---- 权限（T38；§1.5）---------------------------------------------------
 
@@ -1482,13 +1634,18 @@ class ApplicationService:
         """当前档位与授权条目（"设置 → 权限"的读）。没有设置库时用出厂默认并如实标注。"""
         default_mode = self._app_config.workspace.external_paths.mode
         if self._permissions is None:
+            # 没有设置库：档位取 `config.yaml`，但**判定与有库时共用同一套**——
+            # 两条路各写一遍，迟早出现"页面说的和实际判定的不一样"。
             return PermissionsView(
-                mode=default_mode, default_mode=default_mode, grants=[], store_unavailable=True
+                mode=default_mode,
+                default_mode=default_mode,
+                grants=[],
+                store_unavailable=True,
             )
         store = self._permissions
 
         def read() -> PermissionsView:
-            # 档位与授权条目必须在一把锁里读完：两次读之间用户可能刚好改过档位。
+            # 档位与授权条目必须在一把锁里读完：两次读之间用户可能刚好改过其中一项。
             return PermissionsView(
                 mode=store.mode(),
                 default_mode=store.default_mode,
@@ -1512,6 +1669,7 @@ class ApplicationService:
             ApplicationError: 没有可用设置库（``SETTINGS_STORE_UNAVAILABLE``）。
         """
         self._require_permissions().set_mode(mode)
+        self.close_tool_sessions()
         return self.permissions()
 
     def grant_external_path(
@@ -1536,13 +1694,232 @@ class ApplicationService:
             )
         store = self._require_permissions()
         self._sqlite_access(partial(store.grant, target, access))
+        self.close_tool_sessions()
         return self.permissions()
 
     def revoke_external_path(self, path: str) -> PermissionsView:
         """撤销一条授权；不存在也算成功（幂等），返回撤销后的完整视图。"""
         store = self._require_permissions()
         self._sqlite_access(partial(store.revoke, path))
+        self.close_tool_sessions()
         return self.permissions()
+
+    def close_tool_sessions(self) -> None:
+        """服务退出或目录权限变化时收走旧令牌与浏览器配置会话。"""
+        from local_agent.tools.runtime_sessions import RESOURCES
+
+        RESOURCES.close_namespace(self._tool_namespace)
+
+    # ---- 技能管理（技能管理页，2026-10-16；§16.5）---------------------------
+
+    def skills_view(self) -> SkillsView:
+        """本机发现到的技能与它们的启用状态（**每次现算**，不缓存；契约 §16.5）。
+
+        为什么不缓存：技能是"在发现根里现扫出来的"——用户刚放进去一个、或在别处删掉一个，下一次
+        打开这一页就该看到真实结果。它与模型清单、`skill_load` **同源**：同一组发现根 + 同一份禁用表。
+
+        页面只给**名字、一句描述、来源层与开关状态**，不给技能目录的绝对路径：技能来源常在用户主
+        目录下，设置页没有"必须知道主目录结构"的理由（§15.8 的字段门槛）。
+        """
+        catalog = self._skill_catalog()
+        disabled = self._disabled_skills()
+        return SkillsView(
+            enabled=bool(self.capability_switches().get("skill")),
+            store_unavailable=self._skills is None,
+            roots=self._skill_roots_view(catalog),
+            skills=[
+                SkillEntryView(
+                    name=skill.name,
+                    description=skill.description,
+                    source=skill.source,
+                    enabled=skill.name not in disabled,
+                    model_invocable=skill.model_invocable,
+                    user_invocable=skill.user_invocable,
+                    declared_capabilities=list(skill.declared_capabilities),
+                )
+                for skill in catalog.skills
+            ],
+            diagnostics=list(catalog.diagnostics),
+        )
+
+    def set_skill_enabled(self, name: str, enabled: bool) -> SkillsView:
+        """启用/禁用一个技能（**保存即生效、作用于下一轮**），返回保存后的完整视图。
+
+        禁用**不删除任何文件**：只让这个技能对模型不可用（清单里不出现、正文也取不到）。它是不是
+        仍被"发现"由发现根决定，与这个开关无关——这也是为什么页面上仍要列出被禁用的技能。
+
+        Raises:
+            ApplicationError: 名字不在当前发现的技能里（``MODEL_SETTINGS_INVALID``，理由带上可选项），
+                或没有可用设置库（``SETTINGS_STORE_UNAVAILABLE``）。
+        """
+        store = self._require_skills()
+        known = [skill.name for skill in self._skill_catalog().skills]
+        if name not in known:
+            # 与能力开关同一条口径：名字错了就 422 并列出可选项，不静默存进去（存进去等于永久的幽灵开关）。
+            raise app_errors.model_settings_invalid(
+                detail=(
+                    f"没有发现名为 {name} 的技能。"
+                    + (f"当前可用的是：{'、'.join(known)}。" if known else "当前没有发现任何技能。")
+                ),
+                occurred_at=_now(),
+            )
+        self._sqlite_access(partial(store.update, {name: enabled}))
+        return self.skills_view()
+
+    def _skill_catalog(self) -> SkillCatalog:
+        """按当前配置发现一次技能（页面与运行期**同一组发现根**）。
+
+        工作区根取**进程当前目录**：项目级发现根本轮不读（§16.5），所以这里没有"该用哪个工作区"
+        的问题——不为了凑一个参数去挑一个工作区，那会给人"这一页跟工作区有关"的错觉。
+
+        ``enabled`` 取**能力开关的当前值**（2026-10-20）：打包形态没有 config.yaml，启动配置里
+        `skills.enabled` 是出厂默认 False；若这里只读启动配置，用户在「设置 → 能力」里把技能打开后，
+        这一页仍然空着——看起来就是"识别不到技能"。运行期同理由 `apply_capability_gates` 回灌，
+        两处必须同源。
+        """
+        config = self._app_config.skills
+        enabled = bool(self.capability_switches().get("skill"))
+        if enabled != config.enabled:
+            config = config.model_copy(update={"enabled": enabled})
+        # 用户自己添加的根（2026-10-20）：每轮现取，保存即生效、作用于下一轮。
+        extra = [root for root in self._skill_extra_roots() if root not in config.user_dirs]
+        if extra:
+            config = config.model_copy(update={"user_dirs": [*config.user_dirs, *extra]})
+        return discover_skills(config, workspace_root=Path.cwd(), current_cwd=Path.cwd())
+
+    def _skill_extra_roots(self) -> list[str]:
+        """用户在技能页添加的发现根（没有设置库时为空）。"""
+        store = self._skills
+        if store is None:
+            return []
+        return self._sqlite_access(store.extra_roots)
+
+    def _skill_roots_view(self, catalog: SkillCatalog) -> list[SkillRootView]:
+        """把"当前在扫哪些目录"投影成页面 DTO（2026-10-20）。
+
+        顺序：随包 → 个人级 → 自定义。`count` 按**实际发现**统计，所以"路径存在但一个技能都没有"
+        也会显示 0——那正是用户判断"路径填错没有"的依据。
+        """
+        from local_agent import app_paths
+        from local_agent.context.skills_loader import USER_ROOTS
+
+        counts: dict[str, int] = {}
+        for skill in catalog.skills:
+            key = str(skill.root)
+            counts[key] = counts.get(key, 0) + 1
+
+        def count_of(path: Path) -> int:
+            try:
+                return counts.get(str(path.resolve()), 0)
+            except OSError:
+                return 0
+
+        entries: list[SkillRootView] = []
+        bundled = app_paths.bundled_skills_dir()
+        if bundled is not None:
+            entries.append(SkillRootView(
+                path=str(bundled), source="随包技能", count=count_of(bundled),
+            ))
+        home = Path.home()
+        if self._app_config.skills.include_user_skills:
+            for _rank, relative, source in USER_ROOTS:
+                candidate = home / relative
+                if not candidate.is_dir():
+                    continue
+                entries.append(SkillRootView(
+                    path=str(candidate), source=source, count=count_of(candidate),
+                ))
+        for root in self._skill_extra_roots():
+            candidate = Path(root)
+            entries.append(SkillRootView(
+                path=str(candidate),
+                source="自定义根",
+                count=count_of(candidate),
+                removable=True,
+                readable=candidate.is_dir(),
+            ))
+        return entries
+
+    def add_skill_root(self, path: str) -> SkillsView:
+        """把一个已存在的目录加进发现根（**只引用、不复制**，2026-10-20）。"""
+        store = self._require_skills()
+        text = str(path or "").strip()
+        if not text:
+            raise app_errors.model_settings_invalid(
+                detail="请填写要添加的技能目录（绝对路径）。", occurred_at=_now()
+            )
+        candidate = Path(text)
+        if not candidate.is_absolute():
+            raise app_errors.model_settings_invalid(
+                detail=(
+                    "技能发现根必须是**绝对路径**（例如 C:\\Users\\你\\下载\\skills）："
+                    "相对路径的基准在不同形态下不一样，没法可靠解析。"
+                ),
+                occurred_at=_now(),
+            )
+        if not candidate.is_dir():
+            raise app_errors.model_settings_invalid(
+                detail=f"这个目录不存在或不是目录：{candidate.as_posix()}", occurred_at=_now()
+            )
+        resolved = candidate.resolve()
+        known = set()
+        from local_agent import app_paths
+        from local_agent.context.skills_loader import USER_ROOTS
+
+        bundled = app_paths.bundled_skills_dir()
+        if bundled is not None:
+            known.add(str(bundled.resolve()))
+        if self._app_config.skills.include_user_skills:
+            known.update(str((Path.home() / relative).resolve()) for _r, relative, _s in USER_ROOTS)
+        if str(resolved) in known:
+            raise app_errors.model_settings_invalid(
+                detail="这个目录已经在默认发现根里了，不需要重复添加。", occurred_at=_now()
+            )
+        self._sqlite_access(partial(store.add_root, str(resolved)))
+        return self.skills_view()
+
+    def remove_skill_root(self, path: str) -> SkillsView:
+        """移除一个**用户自己添加**的根（不删任何文件，只是不再扫描）。"""
+        store = self._require_skills()
+        resolved = str(Path(str(path or "").strip()).resolve())
+        if resolved not in self._skill_extra_roots():
+            raise app_errors.model_settings_invalid(
+                detail="只能移除自己添加的发现根；随包与个人级根不支持在这里删除。",
+                occurred_at=_now(),
+            )
+        self._sqlite_access(partial(store.remove_root, resolved))
+        return self.skills_view()
+
+    def _disabled_skills(self) -> frozenset[str]:
+        """用户在设置里禁用的技能名（没有设置库时视为"没有禁用任何一项"）。"""
+        store = self._skills
+        if store is None:
+            return frozenset()
+        return self._sqlite_access(store.disabled)
+
+    def _image_context_turns(self) -> int:
+        """设置里的「图片上下文轮数」（每轮现取：保存即生效，作用于下一轮）。
+
+        没有设置库、或旧库里没有这一项时用出厂默认。越界值在模型层就被拒（1~10），
+        这里再夹一次只是防止手工改库把请求撑爆。
+        """
+        if self._preferences is None:
+            return DEFAULT_IMAGE_CONTEXT_TURNS
+        saved = self._sqlite_access(self._preferences.read)
+        if saved is None:
+            return DEFAULT_IMAGE_CONTEXT_TURNS
+        _, values = saved
+        attachments = getattr(values, "attachments", None)
+        if attachments is None:
+            return DEFAULT_IMAGE_CONTEXT_TURNS
+        return max(1, min(10, int(attachments.image_context_turns)))
+
+    def _require_skills(self) -> SkillStore:
+        if self._skills is None:
+            raise app_errors.settings_store_unavailable(
+                detail="设置库没有打开", occurred_at=_now()
+            )
+        return self._skills
 
     def _require_permissions(self) -> PermissionStore:
         if self._permissions is None:
@@ -1551,12 +1928,12 @@ class ApplicationService:
             )
         return self._permissions
 
-    def _require_profiles(self) -> ProfileStore:
-        if self._profiles is None:
+    def _require_capabilities(self) -> CapabilityStore:
+        if self._capabilities is None:
             raise app_errors.settings_store_unavailable(
                 detail="设置库没有打开", occurred_at=_now()
             )
-        return self._profiles
+        return self._capabilities
 
     def _require_store(self) -> ConnectionStore:
         if self._connections is None:
@@ -1596,6 +1973,8 @@ class ApplicationService:
             timeout_seconds=connection.timeout_seconds,
             retry_count=connection.retry_count,
             streaming=connection.streaming,
+            # 逐连接的"支持图片输入"（2026-10-16）：页面上要回显这个勾选。
+            supports_vision=connection.supports_vision,
             auth_mode=connection.auth_mode,
             key_status=self._key_status(connection),
             credential_ref=connection.credential_ref,
@@ -1627,13 +2006,221 @@ class ApplicationService:
 
     # ---- 执行状态修改（共用同一互斥边界）------------------------------------
 
+    def _require_attachments(self) -> Any:
+        """附件存储没接线时如实说清（与 `_require_credentials` 同一条做法）。"""
+        if self._attachments is None:
+            raise AttachmentError("这个运行没有启用附件存储：请用带数据目录的宿主（本机应用/CLI）。")
+        return self._attachments
+
+    def _attachments_preferences(self) -> Any:
+        """图片附件偏好（没有设置库时用出厂默认）。"""
+        from local_agent.model_settings.preferences import AttachmentsPreferences
+
+        if self._preferences is None:
+            return AttachmentsPreferences()
+        saved = self._sqlite_access(self._preferences.read)
+        if saved is None:
+            return AttachmentsPreferences()
+        _, values = saved
+        return getattr(values, "attachments", None) or AttachmentsPreferences()
+
+    def _upload_backend(self) -> Any:
+        """当前生效的上传后端：本地文件，或 S3 兼容对象存储。
+
+        **不在两者之间静默回退**：选了对象存储但配置或密钥不全时明确报错——否则用户会以为
+        图在对象存储里，实际还在本机（之后换机器就"图丢了"）。
+        """
+        prefs = self._attachments_preferences()
+        if str(getattr(prefs, "backend", "local")) != "oss":
+            return self._require_attachments()
+        keys = None if self._oss_keys is None else self._oss_keys.read()
+        if not keys:
+            raise app_errors.model_settings_invalid(
+                detail="对象存储已启用，但访问密钥还没保存：请到「设置 → 图片与附件」填入 Access Key / Secret Key。",
+                occurred_at=_now(),
+            )
+        from local_agent.attachment_oss import OssAttachmentStore
+        from local_agent.oss_storage import OssConfig, S3ObjectStore
+
+        config = OssConfig(
+            endpoint=str(getattr(prefs, "oss_endpoint", "") or "").strip(),
+            bucket=str(getattr(prefs, "oss_bucket", "") or "").strip(),
+            region=str(getattr(prefs, "oss_region", "") or "auto").strip() or "auto",
+            public_base_url=str(getattr(prefs, "oss_public_base_url", "") or "").strip(),
+            key_prefix=str(getattr(prefs, "oss_key_prefix", "") or ""),
+            path_style=bool(getattr(prefs, "oss_path_style", True)),
+        )
+        return OssAttachmentStore(config=config, store=S3ObjectStore(config, *keys))
+
+    def save_attachment(self, session_id: str, data_base64: str) -> dict[str, Any]:
+        """存一张用户上传的图片（2026-10-16）：返回引用，**媒体类型由服务端按魔数判定**。
+
+        为什么不让客户端声明媒体类型：它和扩展名一样不可信（`报告.png` 完全可能是 HTML）。
+        单图有字节/像素上限（超限拒绝而不是截断）；解码失败和格式不支持由 :class:`AttachmentError`
+        说明白，路由把它翻成 422 的可执行提示。
+        """
+        store = self._upload_backend()
+        self._session_or_raise(session_id)
+        try:
+            # `validate=True`：不是严格 base64 就当场拒绝，别让它变成"存进去一坨坏数据"。
+            data = base64.b64decode(data_base64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise AttachmentError(f"上传内容不是合法的 base64：{exc}") from exc
+        try:
+            saved = store.save(session_id, data)
+        except OssStorageError as exc:
+            raise AttachmentError(str(exc)) from exc
+        return {
+            "attachment_id": saved.attachment_id,
+            "media_type": saved.media_type,
+            "byte_count": saved.byte_count,
+            "url": getattr(saved, "url", None),
+        }
+
+    def read_attachment(self, session_id: str, attachment_id: str) -> tuple[bytes, str] | str:
+        """读回一张已上传的图片（给页面显示缩略图用）。
+
+        - 本地后端：返回 ``(字节, 媒体类型)``；
+        - 对象存储后端：引用本身就是公开 URL，**直接返回那个字符串**，路由把它 302 过去
+          （服务端不代理字节：多一跳只会更慢，也把外网流量引进本机）。
+        """
+        self._session_or_raise(session_id)
+        ident = str(attachment_id)
+        if ident.lower().startswith(("http://", "https://")):
+            return ident
+        store = self._require_attachments()
+        blob = store.read(session_id, ident)
+        return blob.data, blob.media_type
+
+    # ---- 对象存储（2026-10-20）--------------------------------------------
+
+    def oss_credential_view(self) -> dict[str, Any]:
+        """对象存储密钥状态：**只报有没有**，不回读任何一位密钥。"""
+        store = self._oss_keys
+        return {
+            "configured": bool(store is not None and store.configured()),
+            "store": None if store is None else store.store_kind,
+            "note": None if store is None else store.store_note,
+        }
+
+    def save_oss_credentials(self, access_key: str, secret_key: str) -> dict[str, Any]:
+        """保存 Access Key / Secret Key（与模型连接同一套凭据存储）。"""
+        if self._oss_keys is None:
+            raise app_errors.settings_store_unavailable(
+                detail="设置库没有打开：对象存储密钥无法保存", occurred_at=_now()
+            )
+        try:
+            self._sqlite_access(partial(self._oss_keys.set, access_key, secret_key))
+        except CredentialStoreError as exc:
+            raise app_errors.model_settings_invalid(detail=str(exc), occurred_at=_now()) from exc
+        # 刚录入的密钥必须立刻进入脱敏集合：它可能出现在诊断输出里。
+        self._refresh_secrets()
+        return self.oss_credential_view()
+
+    def clear_oss_credentials(self) -> dict[str, Any]:
+        """删除已保存的对象存储密钥（幂等）。"""
+        if self._oss_keys is not None:
+            self._sqlite_access(self._oss_keys.clear)
+        return self.oss_credential_view()
+
+    def test_oss_upload(self) -> dict[str, Any]:
+        """上传一张 1×1 测试图并 HEAD 它的公开地址，验证"能写、且公网能读"。
+
+        不保存任何用户数据；失败时把**实际原因**说清（配置、密钥、桶策略分别对应不同改法）。
+        """
+        from uuid import uuid4
+
+        from local_agent.attachment_oss import PROBE_PNG, OssAttachmentStore
+        from local_agent.oss_storage import OssConfig, S3ObjectStore
+
+        prefs = self._attachments_preferences()
+        if str(getattr(prefs, "backend", "local")) != "oss":
+            return {"ok": False, "detail": "当前存储后端是本地：先把「存储后端」切成对象存储再测试。"}
+        keys = None if self._oss_keys is None else self._oss_keys.read()
+        if not keys:
+            return {"ok": False, "detail": "还没有保存 Access Key / Secret Key。"}
+        config = OssConfig(
+            endpoint=str(getattr(prefs, "oss_endpoint", "") or "").strip(),
+            bucket=str(getattr(prefs, "oss_bucket", "") or "").strip(),
+            region=str(getattr(prefs, "oss_region", "") or "auto").strip() or "auto",
+            public_base_url=str(getattr(prefs, "oss_public_base_url", "") or "").strip(),
+            key_prefix=str(getattr(prefs, "oss_key_prefix", "") or ""),
+            path_style=bool(getattr(prefs, "oss_path_style", True)),
+        )
+        store = S3ObjectStore(config, *keys)
+        try:
+            saved = OssAttachmentStore(config=config, store=store).save(
+                f"probe-{uuid4().hex[:12]}", PROBE_PNG
+            )
+            status = store.probe(saved.url or "")
+        except (AttachmentError, OssStorageError) as exc:
+            return {"ok": False, "detail": str(exc)}
+        if status == 200:
+            return {"ok": True, "detail": "上传成功，公开地址可以访问（HTTP 200）。"}
+        return {
+            "ok": False,
+            "detail": (
+                f"上传成功，但公开地址返回 HTTP {status}："
+                "检查 public_base_url 是否正确，以及桶是否允许公开读。"
+            ),
+        }
+
+    def _load_attachments(self, session: Session, env: _RunEnv, ids: Sequence[str]) -> _RunEnv:
+        """把随消息提交的**附件引用**读成字节，挂到这次运行的环境上（2026-10-16）。
+
+        三件事放在同一处，因为它们必须一起成立：
+
+        ① **失败闭合**：这条连接没声明支持图片输入就拒绝**这次提交**——不能让模型收到一张它看不见的
+           图（白花上下文，还会让它"以为自己看过了"，那比没有图更糟）；
+        ② **引用只认本会话**：`AttachmentStore.read` 强校验形状与会话前缀，跨会话/越界/不存在的引用都拒；
+        ③ **空列表绝不碰磁盘**：不带图是默认路径，它必须零开销、逐字节不变。
+        """
+        if not ids:
+            return env
+        if not env.app_config.llm.supports_vision:
+            raise app_errors.model_settings_invalid(
+                detail=(
+                    "这条模型连接没有声明支持图片输入，所以这次没有把图片发出去："
+                    "请在「设置 → 模型连接」里勾上「支持图片输入」，或去掉图片再发一次。"
+                ),
+                occurred_at=_now(),
+            )
+        store = self._require_attachments()
+        loaded: list[LoadedAttachment] = []
+        for attachment_id in ids:
+            ident = str(attachment_id)
+            if ident.lower().startswith(("http://", "https://")):
+                # 对象存储后端（2026-10-20）：引用本身就是公开 URL。**不下载字节**——
+                # State 里存 URL，出站请求直接把它交给模型。
+                loaded.append(
+                    LoadedAttachment(
+                        attachment_id=ident,
+                        media_type=_media_type_from_url(ident),
+                        data=b"",
+                        url=ident,
+                    )
+                )
+                continue
+            # 字节与**引用**一起带上（2026-10-16）：引用要单独累积进 State，页面靠它把缩略图
+            # 挂回那条消息（内容块里只有 `data:` URL ✗，没有引用 ✗）。
+            blob = store.read(session.session_id, ident)
+            loaded.append(
+                LoadedAttachment(
+                    attachment_id=ident, media_type=blob.media_type, data=blob.data
+                )
+            )
+        return replace(env, attachments=tuple(loaded))
+
     def submit_message(self, session_id: str, text: str, client_request_id: str, *,
+                       attachments: Sequence[str] = (),
                        workflow: WorkflowRequest | Mapping[str, Any] | None = None,
                        parent_turn_id: str | None = None,
                        expected_branch_id: str | None = None,
                        expected_snapshot_id: str | None = None) -> CommandResultView:
         """提交一条用户消息。"""
-        digest = _digest(OPERATION_SUBMIT, session_id, text)
+        # 附件引用**必须进摘要**（2026-10-16）：否则"同一段文字、换一张图再发"会被判成同一次请求，
+        # 幂等键把第二次提交直接当成重放，图就永远发不出去。
+        digest = _digest(OPERATION_SUBMIT, session_id, text, *attachments)
         selected = (None if workflow is None else
                     TypeAdapter(WorkflowRequest).validate_python(workflow).model_dump(mode="json"))
         if selected is not None:
@@ -1674,12 +2261,22 @@ class ApplicationService:
                     raise conversation.conflict(session_id, "会话已经新增内容，本次提问尚未执行。")
             parents.append(conversation.submission_parent(
                 self, session, parent_turn_id, expected_branch_id))
-            prepared.append(self._run_env(session, self._resolve_binding(session)))
+            # 附件在**预检**里读：连接不支持图片输入时，这里就把这次提交拦下（不留一条"执行中"台账）。
+            prepared.append(
+                self._load_attachments(
+                    session, self._run_env(session, self._resolve_binding(session)), attachments
+                )
+            )
             # 预检失败不得清掉上一轮的取消意图。
             self._reset_cancellation(session_id)
 
         def run() -> CommandResultView:
+            nonlocal session
             env = prepared[0]
+            if session.title == DEFAULT_TITLE and self._read(session).checkpoint_id is None:
+                session = self._sqlite_access(
+                    partial(self._sessions.touch, session_id, title_hint=text)
+                )
             conversation.start_path(self, session, parents[0])
             payload: dict[str, Any] = {
                 "user_input": text,
@@ -2053,7 +2650,11 @@ class ApplicationService:
             if env.usage_recorder is not None:
                 env.usage_recorder.bind_run(resumed_run)
             bound = True
-        with self._live_stream(session.session_id, sink):
+        with self._live_stream(
+            session.session_id, sink, output_limit=env.app_config.security.shell.max_output_chars,
+        ), use_compression_listener(
+            partial(self._compression_started, session)
+        ):
             source = payload if isinstance(payload, Mapping) else self._read(session).values
             selection = source.get("workflow_request")
             limits = source.get("workflow_limits")
@@ -2090,15 +2691,31 @@ class ApplicationService:
         conversation.sync(self, session)
 
     @contextmanager
-    def _live_stream(self, session_id: str, sink: _StreamingAnswerSink) -> Iterator[None]:
+    def _live_stream(
+        self, session_id: str, sink: _StreamingAnswerSink, *, output_limit: int = 30_000,
+    ) -> Iterator[None]:
+        tool_stream = ToolStream(session_id, partial(self._bus.publish, session_id), self._secrets,
+                                 limit=output_limit)
         with self._locks_guard:
             self._streams[session_id] = sink
+            self._tool_streams[session_id] = tool_stream
         try:
-            with use_sink(sink):
+            with use_sink(sink), use_tool_listener(tool_stream.notify):
                 yield
         finally:
             with self._locks_guard:
                 self._streams.pop(session_id, None)
+                self._tool_streams.pop(session_id, None)
+                self._compressions.pop(session_id, None)
+
+    def _compression_started(self, session: Session, progress: CompressionProgress) -> None:
+        """正在压缩是实时展示，不提前宣告成功，也不修改历史检查点。"""
+        view = self._read(session)
+        if proj.current_run_id(view.values) != progress["run_id"]:
+            return
+        with self._locks_guard:
+            self._compressions[session.session_id] = progress.copy()
+        self._bus.publish(session.session_id, [self._snapshot_event(session, view)])
 
     def _sqlite_access(self, action: Callable[[], _T]) -> _T:
         """在 **Checkpointer 的锁**里访问共享 SQLite 连接上的业务数据。
@@ -2243,12 +2860,41 @@ class ApplicationService:
             snapshot = self._graph.get_state(config, subgraphs=True)
         return self._view_of(snapshot)
 
+    def _thread_config(self, session: Session) -> RunnableConfig:
+        """只按线程取**最新**检查点的配置（不带分支游标）。"""
+        return {"configurable": {"thread_id": session.thread_id}}
+
     def _conversation_config(self, session: Session) -> RunnableConfig:
         branch = self._sqlite_access(lambda: self._conversations.active(session.session_id))
         config: RunnableConfig = {"configurable": {"thread_id": session.thread_id}}
         if branch is not None and branch.checkpoint_id is not None:
             config["configurable"]["checkpoint_id"] = branch.checkpoint_id
         return config
+
+    def _closing_anchor(self, session: Session, view: _ThreadView) -> tuple[_ThreadView, RunnableConfig]:
+        """核对收口要写在**哪一份状态**上：(状态, 写入配置)（v0.9 T81 实证，§20.5）。
+
+        为什么不能直接用活动分支游标：游标由 `conversation.sync` 推进，而它在崩溃路径上
+        可能还没推进（或推进发生在"恢复之后"的检查点落盘之前），于是游标**落后于线程的
+        最新检查点**。实证（2026-10-12，T81）：崩溃恰好发生在"人工决定已落盘、游标仍指
+        恢复之前那一份"时，`close_interrupted_turn` 会写在过期祖先上——那份状态里
+        `approval_history` 还是空的，收口又清掉 `pending_approval`，于是**唯一的审批来源
+        没了**：用户看不到"未完整记录"的核对卡（会话只剩一条模糊的"本轮执行已中断"）。
+
+        这里的判据只放宽到"同一个 run"：执行中/待核对期间会话**不能切换分支**
+        （`select_branch` 会拒绝），所以同一 run 内线程最新状态一定属于本轮；不同 run
+        一律退回分支游标，绝不用别的轮次的状态收口（`end_interrupted_request` 随后
+        还有一道 `run_id` 一致性检查兜底）。
+        """
+        latest = self._checkpoint_view(self._thread_config(session))
+        state_run = proj.current_run_id(latest.values)
+        if (
+            latest.checkpoint_id != view.checkpoint_id
+            and state_run
+            and state_run == proj.current_run_id(view.values)
+        ):
+            return latest, self._thread_config(session)
+        return view, self._conversation_config(session)
 
     def get_conversation_map(self, session_id: str, query: str = "") -> ConversationMapView:
         return conversation.map_view(self, self._session_or_raise(session_id), query)
@@ -2357,23 +3003,29 @@ class ApplicationService:
             limits = WorkflowsConfig.model_validate(workflow_limits)
             limits.enabled = limits.enabled and config.workflows.enabled
             config = config.model_copy(update={"workflows": limits})
-        # 档位**每一轮现取**（§16.6 档位切换）：用户刚在能力面板里切完，下一次运行就该按新档位绑定
-        # 工具与能力。少了这一步，"页面里能调档位"就只是改显示——真正决定绑哪些工具的是下面
-        # `build_runtime_context` 里的 `profiles.active` / `profiles.capabilities()`（§16.1）。
-        config = config.model_copy(
-            update={"profiles": config.profiles.model_copy(update={"active": self.active_profile()})}
-        )
+        # 能力开关**每一轮现取**（§16.1）：用户刚在能力面板里改完，下一次运行就该按新开关绑定工具与
+        # 能力。少了这一步，"页面里能开关"就只是改显示——真正决定绑哪些工具的是
+        # `build_runtime_context` 里的 `agent_switches`（§16.1）。
+        agent_switches = self.capability_switches()
         choices: dict[str, dict[str, Any]] = (
             {} if selected is None else {selected.name: selected.request.model_dump(mode="json")})
         return builder.build_runtime_context(
             app_config=config,
             model_adapter=env.model,
             workspace_root=Path(session.workspace_root),
+            session_scope=f"{self._tool_namespace}:{session.session_id}",
             provider_name=env.provider_name,
             model_capabilities=env.capabilities,
             # 档位与授权**每一轮现取**（"保存即生效、作用于下一轮"，T29A 口径）：用户刚在
             # 「设置 → 权限」里改完，下一次运行就该按新档位判定。
             external_policy=self.external_paths_policy(),
+            # 能力开关同样每一轮现取（§16.1）：决定"这次绑哪些工具给模型"的就是它。
+            agent_switches=agent_switches,
+            # 用户禁用的技能同样每一轮现取（技能管理页，2026-10-16）：清单与技能工具都照它过滤。
+            disabled_skills=self._disabled_skills(),
+            # 联网检索的服务凭据（Tavily）也在装配这一轮时现取：刚在设置页录入的密钥，下一轮
+            # 检索就该用它。**明文只走这条内存通道**，不进快照、DTO 与日志（§6.8 第 2 条）。
+            web_search_api_key=self.web_search_api_key(),
             # 录音机挂在上下文上：节点的用量装饰器从 `RuntimeContext` 取它（§15.6）。
             usage_recorder=env.usage_recorder,
             # 取消令牌进两道门（§17.4）：安全 / 审批门与能力可见性门都读它。
@@ -2384,6 +3036,17 @@ class ApplicationService:
             readonly_research=choices.get("readonly_research"),
             code_change=choices.get("code_change"),
             delegated_research=choices.get("delegated_research"),
+            # 随消息提交的图片（2026-10-16）：入口节点把它们写成消息里的**引用**。
+            # 从 `env` 取而不是多一个参数：附件本来就是这个**运行环境**的一部分（`_load_attachments`
+            # 在预检里读好挂上去的），调用点因此一处都不用改。
+            user_attachments=env.attachments,
+            # 附件存储（2026-10-20）：出站前把引用物化成 data URL 时按会话读回字节。
+            # 不传也没有附件：那时上传附件的引用读不到，会退化成占位文本。
+            attachments=self._attachments,
+            # 会话 id 必须单独给：`session_scope` 带命名空间前缀，过不了附件引用校验。
+            attachment_session=session.session_id,
+            # 图片上下文轮数每轮现取（保存即生效、作用于下一轮，与能力开关同一口径）。
+            image_context_turns=self._image_context_turns(),
         )
 
     def external_paths_policy(self) -> ExternalPathPolicy | None:
@@ -2435,6 +3098,19 @@ class ApplicationService:
                 initial_preferences(self._app_config).model_dump(exclude={"general"})
             ))
         app_config = apply_runtime_preferences(self._app_config, preference_binding.values)
+        # 联网/ Git / 技能三道 config 总闸回灌自**能力开关**（2026-10-14 修订，见 `apply_capability_gates`）：
+        # 这两处原本各有一把开关，不一致时会出现"工具对模型可见、执行时却被拒"（实证：面板 web=true，
+        # 工具报 web_access.enabled=false）。两处分支（旧配置与设置库连接）共用这一行。
+        app_config = apply_capability_gates(app_config, self.capability_switches())
+        # 用户添加的技能发现根（2026-10-20）：与能力开关同一处回灌，保证模型清单、`skill_load`、
+        # 设置页三处看到的是同一组根。
+        extra_roots = self._skill_extra_roots()
+        if extra_roots:
+            merged_roots = list(app_config.skills.user_dirs)
+            merged_roots.extend(root for root in extra_roots if root not in merged_roots)
+            app_config = app_config.model_copy(update={
+                "skills": app_config.skills.model_copy(update={"user_dirs": merged_roots}),
+            })
         if binding is None:
             if self._app_config.llm is None:
                 # 既没有设置库、也没有 llm 段：这台机器上确实没有任何可用的模型来源。
@@ -2600,6 +3276,21 @@ class ApplicationService:
                 lock.release()
         with self._locks_guard:
             sink = self._streams.get(session.session_id)
+            compression = self._compressions.get(session.session_id)
+            tool_stream = self._tool_streams.get(session.session_id)
+        if tool_stream is not None:
+            snapshot = tool_stream.merge(snapshot)
+        recorded = snapshot.context.compression
+        if (compression is not None and snapshot.current_task is not None
+                and snapshot.session_state == "running"
+                and compression["run_id"] == snapshot.current_task.run_id
+                and (recorded is None or recorded.operation_id != compression["operation_id"])):
+            snapshot = snapshot.model_copy(update={"context": snapshot.context.model_copy(update={
+                "compression": CompressionView(operation_id=compression["operation_id"],
+                    run_id=compression["run_id"], state=compression["state"]),
+                "used_tokens": compression["used_tokens"], "window_tokens": compression["window_tokens"],
+                "completion_reserve_tokens": compression["completion_reserve_tokens"], "scope": "current",
+            })})
         if sink is not None and snapshot.current_task is not None and snapshot.session_state == "running":
             tail = sink.partial_view(snapshot.current_task.run_id)
             if tail is not None and not any(message.message_id == tail.message_id for message in snapshot.messages):
@@ -2626,6 +3317,8 @@ class ApplicationService:
         )
         branch = self._sqlite_access(lambda: self._conversations.active(session.session_id))
         changes: dict[str, Any] = {"mode": "chat" if session.mode == "chat" else "agent"}
+        if snapshot.current_task is not None and snapshot.session_state in {"running", "awaiting_approval"}:
+            changes["current_answer_streaming"] = self._current_answer_streaming(view.values)
         if branch is not None:
             changes.update(branch_id=branch.branch_id, branch_title=branch.title)
         return snapshot.model_copy(update=changes)
@@ -2650,6 +3343,24 @@ class ApplicationService:
             connection_id=selection.connection_id,
             config_version=str(selection.config_version),
         )
+
+    def _current_answer_streaming(self, values: Mapping[str, Any]) -> bool | None:
+        """只读当前轮固定历史版本，不读取凭据，也不使用下一轮选择。"""
+        if values.get("model_binding") is None:
+            return self._app_config.llm.streaming if self._app_config.llm is not None else None
+        store = self._connections
+        if store is None:
+            return None
+        try:
+            binding = binding_from_state(values)
+            if binding is None:
+                return None
+            connection = self._sqlite_access(
+                partial(store.version, binding["connection_id"], binding["config_version"])
+            )
+            return None if connection is None else bool(connection.streaming)
+        except (ModelSettingsError, sqlite3.Error, TypeError, ValueError):
+            return None
 
     def _session_answer_streaming(self, session: Session) -> bool:
         """本会话**下一轮**是否会按增量流式展示最终回答（§19.4）。
@@ -2684,6 +3395,8 @@ class ApplicationService:
         identity = snapshot.snapshot_id
         if snapshot.workflow is not None:
             identity = _digest(identity, snapshot.workflow.model_dump_json())
+        if snapshot.context.compression is not None:
+            identity = _digest(identity, snapshot.context.compression.model_dump_json())
         return SessionSnapshotEvent(
             event_id=event_id_for("session_snapshot", identity),
             session_id=session.session_id,
@@ -2794,6 +3507,14 @@ class ApplicationService:
             # 所以这一份快照是完整可用的。
             announced.boundary_snapshot = True
             events.append(self._snapshot_event(session, view))
+
+        compression = snapshot.context.compression
+        if compression is not None and compression.run_id == run_id:
+            signature = compression.model_dump_json()
+            if signature != announced.compression:
+                announced.compression = signature
+                if not events:
+                    events.append(self._snapshot_event(session, view))
 
         if snapshot.workflow is not None:
             signature = snapshot.workflow.model_dump_json()
@@ -3034,6 +3755,7 @@ class _AnnouncedFacts:
     #: 之间唯一的权威数据来源（见 `_turn_events`）。
     boundary_snapshot: bool = False
     workflow: str | None = None
+    compression: str | None = None
     #: 工具作用域 → 已广播到的状态（`pending`/`running`/`ok`…）。
     tools: dict[str, str] = field(default_factory=dict)
     #: 已广播过的模型调用 id（§15.6 的三条事件一次发完，按 id 去重；重试是新 id，不会互相吞掉）。
@@ -3160,12 +3882,20 @@ def _seconds_since(instant: str, now: datetime) -> float:
 
 
 def _status_from_snapshot(snapshot: SessionSnapshot) -> CommandStatus:
-    """命令结局由**那一份快照**的会话状态决定：挂起 → 等待审批，失败 → 失败，其余完成。"""
+    """命令结局由**那一份快照**的会话状态决定：挂起 → 等待审批，失败 → 失败，其余完成。
+
+    **被取消的一轮看 `final_result.state`**（2026-10-13）：取消后会话状态就回到 `idle`（用户要的正是
+    "又能用了"），所以只看会话状态会把"你自己停的"报成 `completed`——提交那条命令的响应必须如实
+    说是 `cancelled`（§17.4）。
+    """
     state = snapshot.session_state
     if state == "awaiting_approval":
         return "awaiting_approval"
     if state == "failed":
         return "failed"
+    final = snapshot.final_result
+    if final is not None and final.state == "cancelled":
+        return "cancelled"
     return "completed"
 
 
@@ -3197,6 +3927,22 @@ def _digest(*parts: str) -> str:
     """规范化参数摘要：同样的参数必须得到同样的摘要（幂等判定的基础）。"""
     material = "\x1f".join(parts)
     return hashlib.sha256(material.encode()).hexdigest()
+
+
+def _media_type_from_url(url: str) -> str:
+    """按 URL 路径后缀推断媒体类型（对象存储引用的展示用）。
+
+    只用于 State 里的 `media_type` 字段与页面提示；服务端**不再解码那张图的字节**
+    （对象存储引用会原样交给模型）。
+    """
+    suffix = PurePosixPath(urlsplit(url).path).suffix.lower()
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }.get(suffix, "image/jpeg")
 
 
 def _now() -> datetime:

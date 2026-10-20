@@ -1,6 +1,6 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   approvalExpiredScenario,
   approvalScenario,
@@ -97,6 +97,14 @@ describe('Composer takeover', () => {
 })
 
 describe('Composer input state', () => {
+  it.each(['running', 'completed', 'failed'] as const)('says nothing about compression: %s', (compression) => {
+    // 2026-10-16：压缩提示搬进了**对话流**（`features/conversation/CompressionRow`）——它是流程的一步，
+    // 与 Think、工具行同级；挂在输入框上方会让人以为那是"输入状态"。输入区因此不再声称任何压缩状态。
+    renderComposer({ ...shellScenario, context: { ...shellScenario.context, compression } })
+    expect(screen.queryByText('正在压缩…')).not.toBeInTheDocument()
+    expect(screen.queryByText('上下文已自动压缩')).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '给智能体发消息' })).toBeEnabled()
+  })
   it('disables the input and states why when no workspace is selected', () => {
     renderComposer(emptyNoWorkspaceScenario)
     const input = screen.getByRole('textbox', { name: '给智能体发消息' })
@@ -126,5 +134,81 @@ describe('Composer input state', () => {
     expect(screen.getByRole('textbox', { name: '给智能体发消息' })).toBeEnabled()
     expect(screen.getByRole('button', { name: '发送消息' })).toBeInTheDocument()
     expect(screen.queryByText(/任务进行中/)).not.toBeInTheDocument()
+  })
+})
+
+describe('Composer 图片（2026-10-16）', () => {
+  /** 真接线（带 `actions`）的渲染：只测与图片有关的那条路。 */
+  function renderWired(
+    onSend: (ids: readonly string[]) => boolean,
+    onAttachFile: (file: File) => Promise<{ id: string; previewUrl: string }>,
+  ) {
+    return render(
+      <Composer
+        session={shellScenario.session}
+        plan={shellScenario.plan}
+        meter={shellScenario.context}
+        takeover={shellScenario.takeover}
+        modelMenu={shellScenario.modelMenu}
+        state={shellScenario.composer}
+        actions={{ draft: '', onDraftChange: () => {}, onSend, canSend: false, onAttachFile }}
+      />,
+    )
+  }
+
+  it('queues a pasted image and sends its reference even with an empty draft', async () => {
+    // 用户实拍过的那两个坑一起钉住：① 输入区**没有粘贴入口**（粘不进去 ✗）；
+    // ② 只贴图不打字就发不出去（`canSend` 只管"草稿非空" ✗）。
+    const sent: (readonly string[])[] = []
+    const attach = vi.fn(async () => ({
+      id: '2026/10/16/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb.png',
+      previewUrl: 'blob:preview',
+    }))
+    const { container } = renderWired((ids) => {
+      sent.push(ids)
+      return true
+    }, attach)
+
+    const box = screen.getByRole('textbox', { name: '给智能体发消息' })
+    const file = new File([new Uint8Array([1, 2, 3])], 'green.png', { type: 'image/png' })
+    fireEvent.paste(box, { clipboardData: { files: [file] } })
+
+    await waitFor(() => expect(attach).toHaveBeenCalledWith(file))
+    // 待发缩略图出现（可移除）。
+    await waitFor(() => expect(container.querySelector('img[src="blob:preview"]')).not.toBeNull())
+    expect(screen.queryByRole('button', { name: '移除图片 green.png' })).toBeInTheDocument()
+
+    // 草稿为空也能发（只发图）——提交出去的是**引用**，不是文件本身。
+    const send = screen.getByRole('button', { name: '发送消息' })
+    expect(send).toBeEnabled()
+    fireEvent.click(send)
+    expect(sent).toEqual([['2026/10/16/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbb.png']])
+  })
+
+  it('keeps the plain-text paste untouched when the clipboard has no image', () => {
+    // 只在**真有图**时拦默认行为：否则连正常粘贴文字都会被吃掉。
+    const attach = vi.fn(async () => ({ id: 'x', previewUrl: 'blob:x' }))
+    renderWired(() => true, attach)
+
+    const box = screen.getByRole('textbox', { name: '给智能体发消息' })
+    fireEvent.paste(box, { clipboardData: { files: [] } })
+    expect(attach).not.toHaveBeenCalled()
+  })
+
+  it('keeps queued images when the submit is refused (2026-10-20)', async () => {
+    // 实测缺陷：一轮进行中 / 提交在飞时回车，`onSend` 静默拒绝，但图片已被清空——
+    // 用户看到"问题没发出去、文字还在、图片没了"。队列只有在对方**接受**后才清。
+    const attach = vi.fn(async () => ({ id: 'kept', previewUrl: 'blob:kept' }))
+    const onSend = vi.fn((_ids: readonly string[]) => false)
+    const { container } = renderWired(onSend, attach)
+
+    const box = screen.getByRole('textbox', { name: '给智能体发消息' })
+    const file = new File([new Uint8Array([1, 2, 3])], 'keep.png', { type: 'image/png' })
+    fireEvent.paste(box, { clipboardData: { files: [file] } })
+    await waitFor(() => expect(container.querySelector('img[src="blob:kept"]')).not.toBeNull())
+
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+    expect(onSend).toHaveBeenCalledTimes(1)
+    expect(container.querySelector('img[src="blob:kept"]')).not.toBeNull()
   })
 })

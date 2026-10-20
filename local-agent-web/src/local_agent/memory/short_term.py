@@ -40,6 +40,7 @@ from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemM
 
 from local_agent.context.token_budget import estimate_messages_tokens
 from local_agent.memory.tool_output import project_file_tool_output
+from local_agent.message_flags import is_tool_image_message
 
 #: 压力阶段的头部字符预算；沿用已有配置口径，不以首次出站裁剪换缓存比例。
 TOOL_RESULT_HEAD_CHARS = 3072
@@ -167,8 +168,15 @@ def select_prompt_window(
 
 
 def turn_starts(messages: Sequence[AnyMessage]) -> list[int]:
-    """各轮次的起始下标；序列开头若不是人类消息，则 0 也算一个起始。"""
-    starts = [index for index, message in enumerate(messages) if isinstance(message, HumanMessage)]
+    """各轮次的起始下标；序列开头若不是人类消息，则 0 也算一个起始。
+
+    "工具读到的图片"那条 user 消息**不算轮次起点**（2026-10-20）：它在语义上属于上一条工具
+    结果，算成一轮会让压缩的"保留最近 N 轮"多留半轮。
+    """
+    starts = [
+        index for index, message in enumerate(messages)
+        if isinstance(message, HumanMessage) and not is_tool_image_message(message)
+    ]
     if starts and starts[0] != 0:
         starts.insert(0, 0)
     elif not starts:

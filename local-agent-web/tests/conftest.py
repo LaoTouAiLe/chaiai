@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import Callable
@@ -27,6 +28,12 @@ from local_agent.reflection.reflector import MEMORY_INTENT_MARKER, PLAN_DRAFT_MA
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.fixture(autouse=True)
+def isolate_search_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+    """离线回归不因开发机配置了搜索密钥而意外调用真实收费接口。"""
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+
 def build_legacy_graph(*args: Any, **kwargs: Any) -> Any:
     """构造旧运行的恢复回归图，保留旧判官/自动推进契约断言。"""
     from unittest.mock import patch
@@ -35,8 +42,16 @@ def build_legacy_graph(*args: Any, **kwargs: Any) -> Any:
 
     original = builder.prepare_context_node
 
-    def legacy_prepare(state):  # type: ignore[no-untyped-def]
-        return {**original(state), "agent_loop_version": 0}
+    # 入口节点现在要 runtime（2026-10-16：它从运行期上下文取这次提交的图片）。图节点是按
+    # **参数注解**注入 runtime 的，所以这个包装器必须照写注解，否则 LangGraph 不注入、调用直接少参。
+    from langgraph.runtime import Runtime
+
+    from local_agent.graph.state import RuntimeContext
+
+    def legacy_prepare(state: Any, runtime: Runtime[RuntimeContext]) -> Any:
+        if isinstance(runtime.context.model_adapter, RoutingFakeModel):
+            runtime.context.model_adapter.explicit_task_control = False
+        return {**original(state, runtime), "agent_loop_version": 0}
 
     with patch.object(builder, "prepare_context_node", legacy_prepare):
         return builder.build_chat_graph(*args, **kwargs)
@@ -49,8 +64,16 @@ def legacy_loop(monkeypatch):  # type: ignore[no-untyped-def]
 
     original = builder.prepare_context_node
 
-    def legacy_prepare(state):  # type: ignore[no-untyped-def]
-        return {**original(state), "agent_loop_version": 0}
+    # 入口节点现在要 runtime（2026-10-16：它从运行期上下文取这次提交的图片）。图节点是按
+    # **参数注解**注入 runtime 的，所以这个包装器必须照写注解，否则 LangGraph 不注入、调用直接少参。
+    from langgraph.runtime import Runtime
+
+    from local_agent.graph.state import RuntimeContext
+
+    def legacy_prepare(state: Any, runtime: Runtime[RuntimeContext]) -> Any:
+        if isinstance(runtime.context.model_adapter, RoutingFakeModel):
+            runtime.context.model_adapter.explicit_task_control = False
+        return {**original(state, runtime), "agent_loop_version": 0}
 
     monkeypatch.setattr(builder, "prepare_context_node", legacy_prepare)
 
@@ -73,6 +96,7 @@ class RoutingFakeModel(GenericFakeChatModel):
     fail_bind_tools: bool = False
     summary: str = "会话摘要（假模型）"
     fail_summary: bool = False
+    summary_delay_seconds: float = 0.0
     #: T17 反思结论的默认值：`goal_achieved=True` 只能配 `finish`（否则会被机械 guard 归一），
     #: 因此默认给"已完成、结束"——finish 会触发一次不绑定工具的最终回答合成，模型第二调用
     #: 返回 `reply`，既有断言（final_response == reply、task_status == completed）继续成立。
@@ -117,6 +141,9 @@ class RoutingFakeModel(GenericFakeChatModel):
     structured_prompts: list[str] = Field(default_factory=list)
     bound_tools: list[str] = Field(default_factory=list)
     decision_calls: int = 0
+    explicit_task_control: bool = True
+    task_control_action: str = "complete"
+    decision_tool_batches: list[list[dict[str, Any]]] = Field(default_factory=list)
 
     def bind_tools(self, tools, **kwargs: Any):  # type: ignore[no-untyped-def]
         """记录被绑定的工具名并返回自身（真实模型会返回绑定后的 Runnable）。"""
@@ -191,6 +218,8 @@ class RoutingFakeModel(GenericFakeChatModel):
             return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
         if SUMMARIZE_INSTRUCTION in text:  # T16：摘要请求（与路由分类/回答分开）
+            if self.summary_delay_seconds > 0:
+                time.sleep(self.summary_delay_seconds)
             if self.fail_summary:
                 raise RuntimeError("摘要调用失败（测试故意触发）")
             return ChatResult(
@@ -257,14 +286,37 @@ class RoutingFakeModel(GenericFakeChatModel):
                     )
                 ]
             )
+        if self.decision_calls <= len(self.decision_tool_batches):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(
+                content="", tool_calls=self.decision_tool_batches[self.decision_calls - 1],
+                additional_kwargs=provider_fields,
+            ))])
         if self.tool_calls and (self.repeated_tool_calls or self.decision_calls == 1):
             message = AIMessage(content="", tool_calls=self._materialize_calls(), additional_kwargs=provider_fields)
             return ChatResult(generations=[ChatGeneration(message=message)])
-        return ChatResult(generations=[ChatGeneration(message=AIMessage(
-            content=self.response_by_input.get(latest_user, self.reply), additional_kwargs=provider_fields,
-        ))])
+        answer = self.response_by_input.get(latest_user, self.reply)
+        if (self.explicit_task_control and "task_control" in self.bound_tools
+                and "不要调用任何工具" not in text and "不要再次发起工具调用" not in text):
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="", tool_calls=[{
+                "name": "task_control", "id": f"finish-{self.decision_calls}",
+                "args": {"action": self.task_control_action, "message": answer},
+            }], additional_kwargs=provider_fields))])
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=answer, additional_kwargs=provider_fields))])
 
     def _stream(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[no-untyped-def]
+        for chunk in self._stream_chunks(messages, stop, run_manager, **kwargs):
+            if self.stream_delay_seconds > 0:
+                time.sleep(self.stream_delay_seconds)
+            yield chunk
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[no-untyped-def]
+        # 使用可取消等待，避免把 time.sleep 放到传输事件循环中。
+        for chunk in self._stream_chunks(messages, stop, run_manager, **kwargs):
+            if self.stream_delay_seconds > 0:
+                await asyncio.sleep(self.stream_delay_seconds)
+            yield chunk
+
+    def _stream_chunks(self, messages, stop=None, run_manager=None, **kwargs):  # type: ignore[no-untyped-def]
         """按 ``_generate`` 的同一套脚本产出**增量块**（真实模型是 token 级，这里按块）。
 
         有了它，``llm.streaming=true`` 的路径在测试里也是确定性的：块的内容拼起来必须等于
@@ -281,8 +333,6 @@ class RoutingFakeModel(GenericFakeChatModel):
         provider_fields = dict(message.additional_kwargs)
         reasoning = provider_fields.pop("reasoning_content", "")
         for piece in _split_chunks(reasoning, self.stream_chunks):
-            if self.stream_delay_seconds > 0:
-                time.sleep(self.stream_delay_seconds)
             yield ChatGenerationChunk(message=AIMessageChunk(content="", additional_kwargs={"reasoning_content": piece}))
         if message.tool_calls:
             yield ChatGenerationChunk(message=AIMessageChunk(
@@ -293,8 +343,6 @@ class RoutingFakeModel(GenericFakeChatModel):
         for index, piece in enumerate(_split_chunks(str(message.content), self.stream_chunks)):
             if self.fail_stream_after_chunks is not None and index >= self.fail_stream_after_chunks:
                 raise RuntimeError("流式中途失败（测试故意触发）")
-            if self.stream_delay_seconds > 0:
-                time.sleep(self.stream_delay_seconds)
             # `_stream` 的契约是产出 `ChatGenerationChunk`（langchain-core 会解包 .message）
             yield ChatGenerationChunk(
                 message=AIMessageChunk(
@@ -351,6 +399,8 @@ def app_config(monkeypatch: pytest.MonkeyPatch) -> AppConfig:
     拒绝——那是产品行为没错，但会让"注入假模型"的用例莫名其妙地失败。
     """
     base = load_config(PROJECT_ROOT / "config.yaml.example")
+    # 脚本测试的有界兜底；产品默认None另由自主策略专项覆盖。
+    base.agent.max_tool_loops = 20
     monkeypatch.setenv(base.llm.api_key_env, "sk-test-secret")
     return base.model_copy(
         update={
@@ -359,6 +409,10 @@ def app_config(monkeypatch: pytest.MonkeyPatch) -> AppConfig:
                     "long_term": base.memory.long_term.model_copy(update={"enabled": False}),
                     "compression": base.memory.compression.model_copy(update={"enabled": False}),
                 }
-            )
+            ),
+            # 安全删除（2026-10-20）在单测里**默认关**：开着时删除会移进回收站，
+            # 而默认回收站根是真实数据目录——测试不该往用户目录里丢东西。
+            # 这条能力由 `test_trash.py` / `test_file_system_sandbox.py` 显式开启来覆盖。
+            "security": base.security.model_copy(update={"safe_delete": False}),
         }
     )

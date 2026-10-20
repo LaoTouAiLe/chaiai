@@ -128,7 +128,31 @@ export type ToolCardView =
     kind: 'todo'
     items: readonly { text: string; status: 'completed' | 'in_progress' | 'pending' }[]
   }
+  | {
+    kind: 'delegation'
+    /** 每个子 Agent 的结局（§18.7）：状态、工具次数、token 预留、证据条数与失败原因。 */
+    children: readonly DelegationChildView[]
+    /** 父图核对过的原文报告（带真实文件行号）；未完成时里面是原因说明。 */
+    report: string
+    truncated: boolean
+  }
   | { kind: 'generic'; headline: string; detail: string }
+
+/**
+ * 一次自主委派里一个子 Agent 的结局（v1.0 §18.7）。
+ *
+ * 字段借用参照实现的任务面板（成员 / 状态 / 工具调用次数 / 证据条数）。
+ * **刻意不含"预留 token"**（2026-10-13 裁定）：那是切出来的上限、同一份配置下每路几乎一样，
+ * 摆在对话卡里只会被读成"这一路花了多少"。实际花费看用量区（§15.7 要求预留与实际分开写）。
+ */
+export interface DelegationChildView {
+  scope: string
+  status: 'completed' | 'failed'
+  toolCalls: number
+  modelCalls: number
+  evidenceCount: number
+  error: string | null
+}
 
 /**
  * Mechanical check produced by the reflection layer for one tool call.
@@ -141,6 +165,17 @@ export interface ToolEvidenceView {
   /** Safe, already-redacted one-line summary. */
   summary: string
   verified: boolean
+}
+
+export interface WebSourceView {
+  title: string
+  url: string
+  kind: 'search' | 'read'
+  retrievedAt?: string | null
+  sourceId?: string
+  cited?: boolean
+  publishedAt?: string | null
+  provider?: string | null
 }
 
 export interface ToolRowView {
@@ -180,6 +215,7 @@ export interface ToolRowView {
   /** Local wall-clock labels; empty when the contract has no parsable timestamp. */
   startedLabel?: string
   finishedLabel?: string
+  webSources?: readonly WebSourceView[]
 }
 
 export type ErrorCategory =
@@ -255,6 +291,16 @@ export interface TurnStatsView {
   estimated: boolean
   /** One entry per model call in this turn, for the expanded breakdown. */
   calls: readonly ModelCallView[]
+  /**
+   * 上下文占用（2026-10-16 补）：`context_used_tokens` / `context_window_tokens`。
+   *
+   * 拿不到时是 `null`——轨迹页因此显示"未知"，不会画一个假的占用率。**注意这不是"曲线"**：
+   * 曲线要逐轮采样，契约里没有那个数据。
+   */
+  contextUsedTokens?: number | null
+  contextWindowTokens?: number | null
+  /** 这一轮的终态（`completed` / `blocked` / `cancelled` / `failed`…；§15.6）。 */
+  finalState?: string | null
 }
 
 export interface ModelCallView {
@@ -272,6 +318,52 @@ export interface ModelCallView {
    * page then prints 未知 rather than inventing a hash.
    */
   schemaFingerprint?: string | null
+  /**
+   * 逐次调用的**缓存账目与推理 token、首字延迟**（2026-10-16 从轨迹页的需求补上）。
+   *
+   * 契约里本来就有（`ModelCallRecordView.actual_cache_read_tokens` / `actual_cache_write_tokens` /
+   * `actual_reasoning_tokens` / `time_to_first_token_ms`），只是视图模型没搬——于是轨迹页只能看到
+   * 笼统的输入/输出 token，"这次调用吃掉了多少前缀缓存"完全看不见。
+   *
+   * 与全仓同一条口径：**供应商没上报就是 `null` / 空串**，页面写"未上报"，绝不写 0。
+   * 可选的另一个原因：原型 fixture 早于这几个字段，给它编数字会变成"看起来像实测"。
+   */
+  cacheReadTokens?: number | null
+  cacheWriteTokens?: number | null
+  reasoningTokens?: number | null
+  /** 首字延迟（已格式化，如 `1.2s`）；空串 = 未知。 */
+  firstTokenLabel?: string
+  /**
+   * 原始时刻（ISO 字符串，2026-10-16）：时间轴按它们画 span——首字把一段调用切成
+   * "等首字"与"解码"两截（TTFT 拆分）。缺失是空串：页面就不画那一段，不拿别的时刻凑。
+   */
+  startedAt?: string
+  firstTokenAt?: string
+  finishedAt?: string
+}
+
+/**
+ * 轨迹里的一条事件（2026-10-16；契约的 `TraceEventView`）。
+ *
+ * `kind` 是闭集：**工具 / 审批 / 压缩**。它们此前在轨迹里完全看不见——而"为什么这一轮慢、
+ * 上下文为什么变小、是谁批准的"答案正在这里。时刻是 ISO 字符串（可能缺失），格式化是页面的事。
+ */
+export interface TraceEventView {
+  kind: 'tool' | 'approval' | 'compaction'
+  id: string
+  /** 主时刻：工具=开始、审批=请求、压缩=发生；缺失为空串。 */
+  at: string
+  /** 结束时刻：工具=完成、审批=决定；缺失为空串。 */
+  finishedAt: string
+  label: string
+  /** 工具状态（`ok`/`denied`/`failed`）或审批结论（`approved`/`denied`）；契约没给是 null。 */
+  status: string | null
+  /** 审批等待毫秒：由契约的"请求→决定"给，不是页面自己减出来的。 */
+  waitMs: number | null
+  /** 压缩折叠掉的消息条数与前后**估算** token。 */
+  foldedMessages: number | null
+  tokensBefore: number | null
+  tokensAfter: number | null
 }
 
 /**
@@ -312,9 +404,44 @@ export interface TraceRowView {
  * tool call to the model call that produced it**; the inspector's Schema section
  * therefore lists them per session and says so instead of guessing an attribution.
  */
+/**
+ * 轨迹页的一轮（2026-10-16 新增）。
+ *
+ * 为什么要有它：轨迹原来是一张**没有轮次边界**的平铺表，于是"这一轮花了多少、缓存命不命中、
+ * 上下文用掉多少"在轨迹里根本答不出来——而那些数**契约里早就有**（`TurnRecordView`）。
+ * 分组锚点用契约的 `turn_usages[].user_message_id`（`mapTurnStats` 已经这么做了，与对话页同一份）。
+ */
+export interface TraceTurnView {
+  /** 轮次键：该轮**最后一条消息**的 id（与 `mapTurnStats` 的 `afterMessageId` 一致）。 */
+  id: string
+  /** 第几轮（1 基，仅用于显示）。 */
+  index: number
+  /** 该轮的提问（截断；空串 = 契约没给）。 */
+  prompt: string
+  /**
+   * 该轮的用量聚合；`null` = **契约没有这一轮的记录**（旧 Checkpoint 或原型 fixture）
+   * ——页面显示"未知"，不显示一行 0。
+   */
+  stats: TurnStatsView | null
+  /** 这一轮里的工具行（顺序即时间线顺序）。 */
+  rows: readonly TraceRowView[]
+  /**
+   * 这一轮的事件时间线（工具 / 审批 / 压缩，2026-10-16）。
+   *
+   * 与 `rows` 的分工：`rows` 是"工具调用表"（点开看参数与结果），`events` 是**发生顺序的流水**
+   * ——它是唯一的顺序真源（审批与压缩在消息流里根本没有对应的行）。为空 = 契约没有这一轮的记录
+   * （旧 Checkpoint），页面就不画，不编。
+   */
+  events: readonly TraceEventView[]
+}
+
 export interface TraceView {
   rows: readonly TraceRowView[]
   calls: readonly ModelCallView[]
+  /**
+   * 按轮次分组（2026-10-16）。**为空时页面回落到平铺表**——原型 fixture 与旧快照因此照常工作。
+   */
+  turns: readonly TraceTurnView[]
 }
 
 export interface SessionSummaryView {
@@ -339,6 +466,7 @@ export interface ContextMeterView {
   windowTokens: number | null
   /** Whether the numbers describe the in-flight request or the previous one. */
   scope: 'current' | 'previous' | 'unknown'
+  compression?: 'running' | 'completed' | 'failed' | null
 }
 
 /**
@@ -411,14 +539,21 @@ export interface ModelConnectionView {
   /** Short factual line about the last check; never raw provider output. */
   statusDetail: string | null
   capabilities: readonly CapabilityView[]
+  /**
+   * 用户声明：这条连接**支持图片输入**（2026-10-16）。
+   *
+   * 与 `capabilities`（实测报告）分开：收不收图只能靠发图试，"测不出来"与"不支持"是两回事。
+   * 可选以兼容原型夹具——缺省视为"没声明"，页面就不显示这一条。
+   */
+  supportsVision?: boolean
   /** The card is asking the user to confirm deactivation. */
   confirmDelete: boolean
   /** Editing produced a new version that only applies to the next request. */
   pendingApply: boolean
 }
 
-/** 工作区外路径档位；与契约同源（`deny` / `whitelist` / `allow`）。 */
-export type ExternalPathsMode = 'deny' | 'whitelist' | 'allow'
+/** 权限档位；与契约同源（2026-10-15 换成"能写到哪"的三档）。 */
+export type ExternalPathsMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
 /** 一条授权给出的访问级别；"不给访问"用撤销表达，不另立一个级别。 */
 export type ExternalPathAccess = 'read' | 'read_write'
@@ -434,7 +569,8 @@ export interface ExternalPathGrantView {
  *
  * `defaultMode` 是 `config.yaml` 的出厂默认，用来解释"库里没有用户选择时按哪一档跑"；
  * `storeUnavailable` 为真时必须如实说明"这里改了也存不下来"，而不是让页面看起来保存成功。
- * 授权条目只在 `whitelist` 档生效——`deny` 档一条也不读。
+ * 授权条目决定工作区外目标的访问级别（`read-only` 档把 `read_write` 降级为 `read`）；
+ * 写侧沙箱由档位派生，不再有独立开关，因此这里没有沙箱字段。
  */
 export interface PermissionsView {
   mode: ExternalPathsMode
@@ -444,12 +580,15 @@ export interface PermissionsView {
 }
 
 /**
- * 能力不可用的原因（v0.5 T56；契约 §16.6）。
+ * 能力不可用的原因（v0.5 T56；契约 §16.1、§16.6）。
  *
- * 后端给的是**闭集**，页面不许自造第五种：`profile` = 当前档位没声明（换档即可）、
- * `disabled` = 配置开关关着、`missing_dependency` = 这台机器缺东西（例如没装 git）。
+ * 后端给的是**闭集**，页面不许自造第四种：`disabled` = 开关关着（用户自己打开即可）、
+ * `missing_dependency` = 这台机器缺东西（例如没装 git）。
+ *
+ * 2026-10-13：档位退出运行期绑定，原先的 `profile`（"换个档位再试"）随之删除——页面上已经没有
+ * 换档这个动作，留着它只会渲染出一句做不到的建议。
  */
-export type CapabilityReason = 'available' | 'profile' | 'disabled' | 'missing_dependency'
+export type CapabilityReason = 'available' | 'disabled' | 'missing_dependency'
 
 /**
  * 一条能力状态。
@@ -465,19 +604,74 @@ export interface CapabilityStatusView {
   reason: CapabilityReason
   detail: string
   hint: string | null
+  /** 不可关闭的基础能力：页面把它画成"始终开启"，而不是给一个点不动的控件。 */
+  locked: boolean
 }
 
-/** 当前档位与每个能力的可用性；列表每次由服务端现算（取决于配置与本机环境）。 */
+/** 能力开关表与每一项的可用性；每次由服务端现算（取决于开关与本机环境）。 */
 export interface CapabilitiesView {
-  /** 当前 Agent 档位名（`coder` / `researcher` / `reviewer`，或自定义名）。 */
-  profile: string
-  /** `config.yaml` 的出厂默认档位；用户切换过后与 `profile` 不同。 */
-  defaultProfile: string
-  /** **可选**档位（服务端枚举，固定顺序）。页面照它渲染，不自己拼一份（§16.6）。 */
-  profiles: readonly string[]
-  /** 没有可用设置库：档位只能来自 `config.yaml`，此时**不提供**切换。 */
+  /** 能力名 → 是否开启（闭集里每一项都有，含不可关闭的那两个）。 */
+  switches: Readonly<Record<string, boolean>>
+  /** **可开关**的能力（服务端枚举，固定顺序）。页面照它渲染，不自己拼一份（§16.1）。 */
+  switchable: readonly string[]
+  /** 没有可用设置库：开关只能来自 `config.yaml`，此时**不提供**开关。 */
   storeUnavailable: boolean
   capabilities: readonly CapabilityStatusView[]
+}
+
+/**
+ * 一个技能在管理页上的样子（技能管理页，2026-10-16；契约 §16.5）。
+ *
+ * **没有技能目录的绝对路径**：技能常在用户主目录下，管理页不需要知道主目录结构。
+ * 三个布尔各答一件事：`enabled` 是**用户**的选择，`modelInvocable` / `userInvocable` 是
+ * **技能作者**在 frontmatter 里的声明。
+ */
+export interface SkillEntryView {
+  name: string
+  description: string
+  /** 发现它的**来源层**展示名（例如"个人级"）——不是路径。 */
+  source: string
+  /** 用户是否允许使用它（库里只记被禁用的那些，新技能默认可用）。 */
+  enabled: boolean
+  /** 作者声明：是否允许模型自己调用（`disable-model-invocation: true` 时为假）。 */
+  modelInvocable: boolean
+  /** 作者声明：是否允许用户手动调用。 */
+  userInvocable: boolean
+  /** 技能声明的能力（由 `allowed-tools` 映射而来，**只能收窄**本档能力）。 */
+  declaredCapabilities: readonly string[]
+}
+
+/**
+ * 技能清单与启用状态（技能管理页，2026-10-16；契约 §16.5）。
+ *
+ * `enabled` 是**总闸**（`skill` 能力开关）：它关着时技能对模型完全不可见；逐条开关与它是两件事——
+ * 总闸是"这个功能用不用"，逐条是"哪个技能可用"。`diagnostics` 是被发现过程跳过的条目说明，
+ * 必须原样展示：不说的话用户只会看到"我的技能怎么不见了"。
+ */
+/**
+ * 一个技能发现根（2026-10-20）。
+ *
+ * 页面用四件事回答"为什么某个技能没出现"：路径、来源层、这个根下发现了几个、能不能移除。
+ * `removable` 只对**用户自己添加**的根为真——随包根与个人级根不允许在这里删。
+ */
+export interface SkillRootView {
+  path: string
+  /** 来源层展示名（例如"随包技能"、"个人级（.agents）"、"自定义根"）。 */
+  source: string
+  /** 这个根下发现了几个技能（0 也显示：用户据此判断路径填错没有）。 */
+  count: number
+  removable: boolean
+  /** 目录当前是否可读；不可读时提示"路径不存在或没有权限"。 */
+  readable: boolean
+}
+
+export interface SkillsView {
+  enabled: boolean
+  storeUnavailable: boolean
+  skills: readonly SkillEntryView[]
+  /** 当前在扫的发现根（随包 / 个人级 / 自定义）。 */
+  roots: readonly SkillRootView[]
+  diagnostics: readonly string[]
 }
 
 /**
@@ -557,8 +751,26 @@ export interface ModelMenuView {
   followsDefault?: boolean
 }
 
+/**
+ * 一次上下文压缩在对话流里的一行（2026-10-16）。
+ *
+ * 位置：它是**流程的一部分**，与 Think、工具行同级——所以渲染在消息流里，而不是挂在输入框那圈
+ * chrome 上（用户实拍："他不应该出现在对话框的上方"）。数据来自两处，边界很清楚：
+ * - `running`（正在压缩）：只有**进程内**状态有，放流尾；
+ * - 已完成的那次：来自那一轮的 `events` 里的 compaction 记录（落 Checkpoint、刷新可读）。
+ */
+export interface CompressionRowView {
+  running: boolean
+  /** 折叠掉的消息条数（完成时才有；运行中是 `null`）。 */
+  foldedMessages: number | null
+  /** 压缩前/后的**估算**输入 token（完成时才有）。 */
+  tokensBefore: number | null
+  tokensAfter: number | null
+}
+
 export type MessageView =
-  | { kind: 'user'; id: string; text: string; at: string }
+  | { kind: 'compression'; id: string; compression: CompressionRowView }
+  | { kind: 'user'; id: string; text: string; at: string; attachments?: readonly string[] }
   | { kind: 'assistant'; id: string; text: string; at: string; reasoning?: string;
       reasoningTruncated?: boolean; streaming?: boolean; reasoningRunning?: boolean }
   | { kind: 'tool'; id: string; tool: ToolRowView }

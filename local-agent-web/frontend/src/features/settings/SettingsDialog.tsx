@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
 import { Check, Close, Cross } from '../../components/icons'
@@ -8,6 +8,7 @@ import type {
   ModelConnectionView,
   SettingsView,
 } from '../../fixtures/types'
+import { ScrollToBottom } from './ScrollToBottom'
 import { PermissionSection } from './PermissionSection'
 import type { PermissionActions } from './PermissionSection'
 import styles from './SettingsDialog.module.css'
@@ -43,19 +44,39 @@ interface SettingsDialogProps {
   extraSections?: Partial<Record<SettingsSection, ReactNode>>
 }
 
-export type SettingsSection = 'models' | 'permissions' | 'general' | 'execution' | 'retrieval' | 'memory' | 'medium_term' | 'embedding' | 'advanced'
+export type SettingsSection = 'models' | 'permissions' | 'skills' | 'capabilities' | 'general' | 'execution' | 'retrieval' | 'web_access' | 'attachments' | 'memory' | 'medium_term' | 'embedding' | 'advanced'
 
-/** 原型保留连接/权限；真实宿主注入七组应用设置。 */
+/** 原型保留连接/权限；真实宿主注入应用设置各组。 */
 const SECTIONS: readonly { id: SettingsSection; label: string }[] = [
   { id: 'models', label: '模型连接' },
   { id: 'permissions', label: '权限' },
+  // 技能管理（2026-10-16）：与「权限」同类——都是"带开关的管理列表"，所以排在它后面；
+  // 标签只在真宿主注入了内容时才出现（见下面的可见性过滤）。
+  { id: 'skills', label: '技能' },
+  // 能力（2026-10-19）：原来是从顶栏打开的独立面板，现在也放进设置（顶栏入口保留）。
+  { id: 'capabilities', label: '能力' },
   { id: 'general', label: '通用与外观' },
   { id: 'execution', label: '任务执行' },
   { id: 'retrieval', label: '自动代码检索' },
+  { id: 'web_access', label: '联网检索' },
+  { id: 'attachments', label: '图片与附件' },
   { id: 'memory', label: '长期记忆' },
   { id: 'medium_term', label: '中期记忆' },
   { id: 'embedding', label: '向量库与 Embedding' },
   { id: 'advanced', label: '高级配置' },
+]
+
+/**
+ * 左侧导航的分组（2026-10-19 版式调整）：11 个分区平铺在横向页签里会折成两三排，
+ * 分组后每组 1–3 项，纵向排列，当前分区在任何窗口高度下都可见。
+ * 分组只影响呈现顺序，`id` 与分区标签不变（测试与深链仍按标签找 tab）。
+ */
+const SECTION_GROUPS: readonly { label: string; ids: readonly SettingsSection[] }[] = [
+  { label: '模型与权限', ids: ['models', 'skills', 'capabilities', 'permissions'] },
+  { label: '任务与工具', ids: ['execution', 'retrieval', 'web_access', 'attachments'] },
+  { label: '记忆', ids: ['memory', 'medium_term', 'embedding'] },
+  // 分组标题只做归类；`通用与外观` 与只读的 `高级配置` 都是"改页面本身怎么跑"，同放一组。
+  { label: '通用', ids: ['general', 'advanced'] },
 ]
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -257,6 +278,22 @@ export function SettingsDialog({
   extraSections,
 }: SettingsDialogProps) {
   const [section, setSection] = useState<SettingsSection>('models')
+  const panesRef = useRef<HTMLDivElement | null>(null)
+  // 切换分区时回到顶部：上一分区滚到底再切过去，新分区会从半截开始。
+  useEffect(() => {
+    if (panesRef.current !== null) panesRef.current.scrollTop = 0
+  }, [section])
+
+  const visibleSections = SECTIONS.filter(
+    item => item.id === 'models' || item.id === 'permissions' || extraSections?.[item.id] !== undefined,
+  )
+  const groups = SECTION_GROUPS
+    .map(group => ({
+      label: group.label,
+      items: visibleSections.filter(item => group.ids.includes(item.id)),
+    }))
+    .filter(group => group.items.length > 0)
+
   const empty = settings.connections.length === 0
   return (
     <div className={styles.overlay}>
@@ -277,23 +314,31 @@ export function SettingsDialog({
         </header>
 
         <div className={styles.body}>
-          <div className={styles.tabs} role="tablist" aria-label="设置分区">
-            {SECTIONS.filter(item => item.id === 'models' || item.id === 'permissions' || extraSections?.[item.id] !== undefined).map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                role="tab"
-                id={`settings-tab-${item.id}`}
-                aria-selected={section === item.id}
-                aria-controls={`settings-panel-${item.id}`}
-                className={`${styles.tab} ${section === item.id ? styles.tabSelected : ''}`}
-                onClick={() => setSection(item.id)}
-              >
-                {item.label}
-              </button>
+          {/* 左侧分组导航：分组标签只是标题，不参与 tab 语义（`role="presentation"`）。 */}
+          <nav className={styles.nav} role="tablist" aria-label="设置分区">
+            {groups.map(group => (
+              <div key={group.label} className={styles.navGroup} role="presentation">
+                <p className={styles.navLabel} role="presentation">{group.label}</p>
+                {group.items.map(item => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="tab"
+                    id={`settings-tab-${item.id}`}
+                    aria-selected={section === item.id}
+                    aria-controls={`settings-panel-${item.id}`}
+                    className={`${styles.tab} ${section === item.id ? styles.tabSelected : ''}`}
+                    onClick={() => setSection(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
             ))}
-          </div>
+          </nav>
 
+          <div className={styles.paneWrap}>
+          <div className={styles.panes} ref={panesRef}>
           {Object.entries(extraSections ?? {}).map(([id, content]) => (
             <div key={id} hidden={section !== id} role="tabpanel" id={`settings-panel-${id}`} aria-labelledby={`settings-tab-${id}`}>
               {content}
@@ -359,6 +404,10 @@ export function SettingsDialog({
               )}
             </div>
           ) : null}
+          </div>
+          {/* 内容没到底时才出现的"滑到最底"箭头；不干预各分区自己的滚动逻辑。 */}
+          <ScrollToBottom paneRef={panesRef} resetKey={section} />
+          </div>
         </div>
       </div>
     </div>

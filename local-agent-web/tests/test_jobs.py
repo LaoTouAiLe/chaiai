@@ -227,7 +227,11 @@ def test_close_stops_the_workers(tmp_path: Path) -> None:
 # ---- 4. 失败闭合 -----------------------------------------------------------
 
 
-def test_exception_keeps_the_task_running_and_does_not_fake_failure(tmp_path: Path) -> None:
+def test_exception_marks_needs_review_and_does_not_fake_failure(tmp_path: Path) -> None:
+    """异常 → ``needs_review``（终态）：既不写 failed，也不留在 running。
+
+    2026-10-20 改：原来留 running，只有进程重启时 T61 才收口，运行期就永远显示"正在执行"。
+    """
     store, runtime = _runtime(tmp_path, background=False)
 
     def boom() -> CommandResultView:
@@ -238,8 +242,8 @@ def test_exception_keeps_the_task_running_and_does_not_fake_failure(tmp_path: Pa
         runtime.run_now(job, boom)
 
     stored = store.get(job.job_id)
-    assert stored.state == JOB_STATE_RUNNING, "记 failed 等于声称什么都没发生（§15.2）"
-    assert not stored.is_terminal and stored.finished_at is None
+    assert stored.state == JOB_STATE_NEEDS_REVIEW, "记 failed 等于声称什么都没发生（§15.2）"
+    assert stored.is_terminal and stored.finished_at is not None
     assert stored.detail == UNRESOLVED_DETAIL
 
 

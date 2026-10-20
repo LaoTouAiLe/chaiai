@@ -13,21 +13,31 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, TypeVar, cast
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from local_agent.capabilities import (
+    CAPABILITY_TOOLS,
     DEFAULT_PROFILE,
     PROFILES,
+    as_switch_layer,
     capability_names,
     duplicated_capabilities,
     profile_names,
     resolve_capabilities,
     unknown_capabilities,
 )
+from local_agent.security.path_guard import ExternalPathsMode, normalize_mode
 
 DEFAULT_CONFIG_PATH = Path("config.yaml")
 DEFAULT_ENV_PATH = Path(".env")
@@ -68,6 +78,14 @@ class LlmConfig(_StrictModel):
     #: ② 原注释说"两个调用点"，实际是**三个**（两个"最终回答" + 主循环的工具决策流式）。
     #: 口径与呈现见 §19.4：本开关不改变业务结果，只决定有没有增量。
     streaming: bool = False
+    #: 这条连接**是否支持图像输入**（2026-10-16；`view_image` 与 `image_read` 能力的闸门）。
+    #:
+    #: 为什么是**声明**而不是探测：视觉能力只能靠"发一张图看它收不收"来测，那要花一次真实调用，
+    #: 且各家对不支持的返回形态不一；仓库里既有的能力探测（`probe_capabilities`）只覆盖构造层。
+    #: 因此这里由用户声明，**默认 false = 失败闭合**：只有声明为真，`image_read` 才进有效能力集、
+    #: `view_image` 才绑给模型，运行环境段也才会写"图像输入：可用"。
+    #: 按连接分别声明（而不是整个 `llm` 段一处）属于后续增量：连接记录里目前没有这一位。
+    supports_vision: bool = False
 
     @model_validator(mode="after")
     def _window_must_exceed_output_reserve(self) -> LlmConfig:
@@ -174,20 +192,31 @@ class EmbeddingConfig(_StrictModel):
 
 
 class ExternalPathsConfig(_StrictModel):
-    """工作区外路径的**出厂默认档位**（T38；架构 §1.5）。
+    """**权限档位**的出厂默认（架构 §1.5）。
 
-    界面上的档位存在设置库里（"保存即生效、作用于下一轮"），这里只是新安装与旧配置的起点：
+    界面上的档位存在设置库里（"保存即生效、作用于下一轮"），这里只是新安装与旧配置的起点。
+    **2026-10-15 起换成"边界"语义的三档**（对齐 codex / dsh，用户裁定）：
 
-    - ``deny``：拒绝一切工作区外目标；
-    - ``whitelist``：只放行「设置 → 权限」里逐条添加的授权目录。**默认值**——空白名单等价于
-      ``deny``，因此出厂默认拒绝一切外部路径，分发出去的实例开箱安全；
-    - ``allow``：放行显式绝对路径的外部目标（``~``、相对路径逃逸与 Windows 盘符相对路径仍被
-      拒绝），删除/覆盖/破坏性 Shell/大范围编辑四类敏感操作照旧必须人工批准。
+    三档均允许读取显式绝对路径的本机外部目标，敏感文件仍由读取策略拦截。
 
-    档位只决定"常规小改动是否需要逐次询问"，不放宽任何硬约束。
+    - ``read-only``：**工作区只读**——写类工具一律拒绝；命令在 Windows 上经"无写授权"的受限
+      令牌运行。想只看不改时用这一档；
+    - ``workspace-write``：**出货默认**。工作区可写；外部读取不需目录授权，外部写入只允许
+      「设置 → 权限」里添加的可写目录；
+    - ``danger-full-access``：工作区可写，工作区外**一律可读**，写仍只按逐条授权。
+
+    旧值 ``deny``/``whitelist``/``allow`` 仍被接受并归一（见
+    :data:`~local_agent.security.path_guard.LEGACY_MODES`）：设置库里存着旧值，硬拒绝会让老用户
+    开不了机。
     """
 
-    mode: Literal["deny", "whitelist", "allow"] = "whitelist"
+    mode: ExternalPathsMode = "workspace-write"
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _normalize(cls, value: object) -> object:
+        """旧值归一在**一处**（:func:`normalize_mode`），配置与设置库共用同一条。"""
+        return normalize_mode(str(value)) if isinstance(value, str) else value
 
 
 class WorkspaceConfig(_StrictModel):
@@ -195,13 +224,13 @@ class WorkspaceConfig(_StrictModel):
 
     ``root`` 只是启动默认值：T14C 起网页可以选择工作区并随会话保存，每个会话只绑定一个
     工作区。外部访问由 ``external_paths.mode``（T38）控制；``allow_external_paths`` 是 T14C 的
-    旧键，保留为快捷方式（``true`` 等价 ``mode: allow``），现有配置文件不因 T38 失效。
+    旧键，保留为快捷方式（``true`` 等价 ``mode: danger-full-access``），现有配置文件不因 T38 失效。
     无论哪一档，``~``、相对路径逃逸与 Windows 盘符相对路径仍被拒绝，外部副作用按分级判定，
     根目录/主目录/系统目录/ Git 元数据即使用户批准也不执行。
     """
 
     root: str = "."
-    #: 旧键（T14C）：``true`` 等价 ``external_paths.mode: allow``。只作快捷方式，不再单独生效。
+    #: 旧键（T14C）：``true`` 等价 ``external_paths.mode: danger-full-access``。只作快捷方式，不再单独生效。
     allow_external_paths: bool = False
     external_paths: ExternalPathsConfig = Field(default_factory=ExternalPathsConfig)
     max_file_size_bytes: int = Field(default=2_000_000, gt=0)
@@ -215,20 +244,20 @@ class WorkspaceConfig(_StrictModel):
         ``_provider_conflicts`` 已经为同类问题定过口径："显式出现**且有值**、且会给出不同结果"
         才拦。这里沿用同一口径：
 
-        - 旧键 ``allow_external_paths: true`` + 新键显式写了非 ``allow`` 的档位 → 报错（谁生效说不清）；
-        - 只有旧键为 ``true`` → 归一为 ``mode: allow``，配置照常启动；
+        - 旧键 ``allow_external_paths: true`` + 新键显式写了非 ``danger-full-access`` 的档位 → 报错；
+        - 只有旧键为 ``true`` → 归一为 ``mode: danger-full-access``，配置照常启动；
         - 其余情况新键优先，旧键保持默认。
         """
         if not self.allow_external_paths:
             return self
-        if "external_paths" in self.model_fields_set and self.external_paths.mode != "allow":
+        if "external_paths" in self.model_fields_set and self.external_paths.mode != "danger-full-access":
             raise ValueError(
                 "workspace.allow_external_paths 与 workspace.external_paths.mode 语义冲突："
-                "旧键 true 等价 mode: allow。请二选一——删除旧键只留 "
+                "旧键 true 等价 mode: danger-full-access。请二选一——删除旧键只留 "
                 f"external_paths.mode: {self.external_paths.mode}，"
-                "或把档位也改成 allow"
+                "或把档位也改成 danger-full-access"
             )
-        self.external_paths = ExternalPathsConfig(mode="allow")
+        self.external_paths = ExternalPathsConfig(mode="danger-full-access")
         return self
 
 
@@ -378,27 +407,29 @@ class MemoryConfig(_StrictModel):
 
 
 class RequireApprovalConfig(_StrictModel):
-    """代码层强制审批项（开发文档 §8.1：四项必须始终为 true）。"""
+    """可配置审批项；工作区文件操作默认免审批。"""
 
-    delete_file: bool = True
+    delete_file: bool = False
     destructive_shell: bool = True
-    large_batch_edit: bool = True
-    overwrite_existing_file: bool = True
-
-    @model_validator(mode="after")
-    def _must_all_be_enabled(self) -> RequireApprovalConfig:
-        disabled = [name for name in type(self).model_fields if not getattr(self, name)]
-        if disabled:
-            raise ValueError(
-                "以下审批项不能关闭（属于代码层强制拦截，不由配置放开）：" + "、".join(disabled)
-            )
-        return self
-
+    large_batch_edit: bool = False
+    overwrite_existing_file: bool = False
 
 class LargeEditConfig(_StrictModel):
-    """大范围编辑进入审批的阈值。"""
+    """大范围编辑进入审批的阈值。
+
+    **生效的判定是"本轮改过的不同文件数"**（2026-10-15 改）：超过 ``max_files_without_approval``
+    之后再改**新文件**，要一次人工批准；批准后本轮内不再逐个问。只统计 ``edit_file``
+    （新建文件不计——"产出一组文件"不该被这条拦）。作用域就是一轮：策略每轮重建，计数归零。
+
+    为什么不再按行数判：``max_changed_lines_without_approval`` 用的量是"新增 + 删除行数"
+    （``diff_guard.count_changed_lines``），默认 200 恰好落在"重写一个函数"的常态上，实证里它把
+    正常重构变成了逐次弹卡。dsh 的 ``edit`` 工具根本没有行数阈值
+    （``packages/fs/tool-fs/src/edit.ts`` 只校验参数合法性）。
+    """
 
     max_files_without_approval: int = Field(default=3, ge=0)
+    #: **已不参与判定**（2026-10-15）。字段保留只为旧 ``config.yaml`` 不报错
+    #: （``_StrictModel`` 拒绝未知键），改它不会改变任何行为——不要再把它当旋钮用。
     max_changed_lines_without_approval: int = Field(default=200, ge=0)
 
 
@@ -408,9 +439,25 @@ class ShellWhitelistEntry(_StrictModel):
     platform: list[str] = Field(default_factory=list)
     executable: str = Field(min_length=1)
     args: list[str] = Field(default_factory=list)
-    match: Literal["exact"] = "exact"
+    #: 参数匹配方式：``exact``（默认，最保守）= 参数必须**完全一致**；
+    #: ``prefix`` = 条目参数是实际参数的**前缀**，允许后面跟任意参数。
+    #:
+    #: ``prefix`` 只适合"参数怎么变都不改变副作用范围"的命令（``npm run build``、``git status``）；
+    #: 反过来，解释器类（``python`` / ``node`` / ``sh``）**不要**用 ``prefix``——对它们来说
+    #: `-c "…"` 这种后续参数就是"任意代码"，一条 prefix 条目等于把任意代码放行。
+    #: 所以 ``prefix`` **至少要给一个参数**（空参数前缀 = 放行整个可执行文件），由下面的校验器强制。
+    match: Literal["exact", "prefix"] = "exact"
     #: 限定该条目只在指定的工作目录（相对 workspace.root）下免审；None 表示不限目录。
     cwd: str | None = None
+
+    @model_validator(mode="after")
+    def _prefix_needs_at_least_one_argument(self) -> ShellWhitelistEntry:
+        if self.match == "prefix" and not self.args:
+            raise ValueError(
+                "match=prefix 至少要写一个参数：空参数的前缀匹配会把该可执行文件的一切调用"
+                "都放行（例如 `python -c \"...\"` 就是任意代码）"
+            )
+        return self
 
 
 #: ``security.shell.default_timeout_seconds`` 的**出厂默认值**。
@@ -428,10 +475,30 @@ class ShellSecurityConfig(_StrictModel):
     #: （Windows→cmd.exe、POSIX→/bin/sh）；``cmd`` / ``pwsh`` / ``sh`` 显式指定 Shell 语法
     #: 命令交给哪个适配器执行（架构 §6.6）。
     executor: Literal["argv_preferred", "cmd", "pwsh", "sh"] = "argv_preferred"
-    default_timeout_seconds: int = Field(default=DEFAULT_SHELL_TIMEOUT_SECONDS, gt=0)
+    default_timeout_seconds: int | None = Field(default=None, gt=0)
+    #: 单条命令的**超时上限**（秒）；``None`` = **不设上限**（2026-10-16）。
+    #:
+    #: 为什么默认不设：这个上限原来是 ``default_timeout_seconds`` **自己**（默认 60 秒），于是
+    #: "省略时用多少"与"最多允许多少"挤在一个键里。后果是模型想把慢命令跑完（冷启动浏览器、
+    #: 装依赖、真实构建）得先猜这个数，猜大了直接被拒——用户的原话是"完全就是限制 agent 能力"，
+    #: 而且那次拒绝还被渲染成"被安全策略拦截"（参数越界 ≠ 安全边界）。
+    #:
+    #: 兜底不在这一层：任务总时长由 ``jobs.max_task_seconds`` 管（**配置了才生效**，见 §17.4），
+    #: 单条命令随时可取消，超时终止按进程树收干净。需要收紧的部署把这一项配成数字即可。
+    max_timeout_seconds: int | None = Field(default=None, gt=0)
     max_output_chars: int = Field(default=30_000, gt=0)
+    #: **已不参与放行判定**（2026-10-15 权限模型重构）：命令的审批现在只由"破坏性 / 提权 /
+    #: 工作区外 cwd"三件事触发，档位与沙箱负责边界。字段保留只为旧 `config.yaml` 不报错；
+    #: `prepare_shell` 仍会算它（命令分类、审计文案用），但改它不会让某条命令变得要审批或免审批。
     whitelist: list[ShellWhitelistEntry] = Field(default_factory=list)
     blocked_patterns: list[str] = Field(default_factory=list)
+    #: **已不参与判定**（2026-10-15 权限模型重构）：写侧沙箱不再是独立开关，由权限档位派生
+    #: ——``read-only`` / ``workspace-write`` 两档生效，``danger-full-access`` 不套沙箱。
+    #: 字段保留只为旧 ``config.yaml`` 不报错（``extra=forbid``），改它不会改变任何行为。
+    #: 生效时的边界（可写根 = 工作区 + 专属临时目录 + 显式读写授权目录；受保护子树不授权；
+    #: 新目录立即继承可写；读侧/网络不隔离）见 ``security/win_sandbox.py``。
+    #: 非 Windows **照常运行**，只是没有 OS 级写边界（不再失败闭合）。
+    sandbox: bool = False
 
 
 class SecretsConfig(_StrictModel):
@@ -448,6 +515,10 @@ class SecurityConfig(_StrictModel):
     large_edit: LargeEditConfig = Field(default_factory=LargeEditConfig)
     shell: ShellSecurityConfig = Field(default_factory=ShellSecurityConfig)
     secrets: SecretsConfig = Field(default_factory=SecretsConfig)
+    #: **安全删除**（2026-10-20）：开启时 `delete_file` 把目标移进回收站（数据目录下的 `trash/`），
+    #: 而不是直接抹掉。默认**开**——"删错了还能找回"应当是不用特意去开的默认状态；
+    #: 关掉则恢复旧的立即删除。作用范围只有文件工具，`run_shell` 里的删除命令不受它管辖。
+    safe_delete: bool = True
 
 
 class RagConfig(_StrictModel):
@@ -492,15 +563,11 @@ class RagConfig(_StrictModel):
 class AgentConfig(_StrictModel):
     """Agent 循环与证据要求。"""
 
-    #: 工具循环上限（架构 §11.5 的全局兜底）。
-    #:
-    #: 2026-09-30 由 ``20`` 提到 ``60``：20 步实测**不够做完一个跨文件任务**——一个"梳理架构"的
-    #: 请求在 14 次 list_dir 之后就用尽了预算，被 :data:`~local_agent.graph.routers.LOOP_LIMIT_REPLY`
-    #: 硬停在 1/5 步，用户看到的是"任务没做完就断了"。同类实现（DSH）主循环甚至没有步数硬上限，
-    #: 靠工具超时、重复调用提醒与目标轮次来收敛。60 仍是有界兜底，配合空转保护与步级重试上限。
-    max_tool_loops: int = Field(default=60, gt=0)
+    #: 默认不设决策次数上限；仅用户显式填写数字时按该预算执行。
+    max_tool_loops: int | None = Field(default=None, gt=0)
     max_retries_per_step: int = Field(default=2, ge=0)
-    require_evidence_for_completion: bool = True
+    #: 旧配置兼容字段；自主循环由主模型决定结束，不执行程序完成度校验。
+    require_evidence_for_completion: bool = False
 
 
 class WebConfig(_StrictModel):
@@ -519,7 +586,13 @@ class WebConfig(_StrictModel):
         default_factory=lambda: ["http://127.0.0.1:5173", "http://localhost:5173"]
     )
     #: 请求体上限（字节）。超限返回 413，不进入业务逻辑。
-    max_body_bytes: int = Field(default=1_000_000, gt=0)
+    #:
+    #: 2026-10-16 从 1 MB 抬到 8 MB：聊天里上传图片走的是 **base64 的 JSON**（见
+    #: `api.routes.upload_attachment`），4 MB 的图编码后约 5.3 MB，1 MB 这道闸门会把任何图片上传
+    #: 直接挡成 413——而且那条提示与"图片太大"毫无关系，用户根本看不出是这个原因。
+    #: 抬高的代价很小：服务默认只绑**回环**（`web.host`），单用户本机服务，这道闸门的作用是
+    #: "别把巨型正文读进内存"，不是 DoS 防线。
+    max_body_bytes: int = Field(default=8_000_000, gt=0)
     #: 前端构建产物目录（相对配置文件所在目录，或绝对路径）；不存在时只提供 API。
     static_dir: str = "frontend/dist"
     #: SSE 心跳间隔与空闲上限：死连接不能一直占着订阅（§15.3）。
@@ -567,32 +640,85 @@ class ModelSettingsConfig(_StrictModel):
     credential_store: Literal["auto", "memory"] = "auto"
 
 
-#: 外部内容访问（v0.5 T53）的 provider 闭集：**只有免密钥的 HTML 检索**。
+#: 外部内容访问的 provider 闭集：结构化 API 与 HTML 兼容检索。
 #:
-#: 默认 `bing_html` 来自 2026-10-08 的本机实测：`html.duckduckgo.com` 被 DNS 污染到 Meta 的地址段并
-#: 连接超时，而 `www.bing.com/search` 0.5 秒返回。这是**环境事实**，换网络后应重新测量（架构 §16.3）。
-WebAccessProvider = Literal["bing_html", "duckduckgo_html"]
+#: auto 根据 Tavily 凭据是否存在选后端；无凭据使用 Bing HTML 兼容搜索。显式指定后端时不静默切换。
+WebAccessProvider = Literal["auto", "tavily", "bing_html", "duckduckgo_html"]
+
+
+def clean_domain_list(values: tuple[str, ...], field: str) -> tuple[str, ...]:
+    """域名只写主机名：去空白、转小写、去掉前导点；带协议/路径/端口一律拒绝（不猜用户意图）。
+
+    归一的意义在**比较处**：策略按主机名逐段后缀匹配（``a.example.com`` 属于 ``example.com``），
+    大小写与结尾点不同会让同一个域名走出不同判定（与 §20.2 "判定要看系统真正打开的目标"同一口径）。
+
+    放在模块级：``WebAccessConfig``（运行期配置）与 ``WebAccessPreferences``（设置库里的偏好）
+    必须共用同一套规则——两处各写一份，"设置页里存下的域名"与"策略实际比较的域名"迟早会漂移。
+    """
+
+    result: list[str] = []
+    for item in values:
+        host = str(item).strip().lower().lstrip(".")
+        if not host or "/" in host or ":" in host or " " in host:
+            raise ValueError(
+                f"{field} 只写主机名（例如 example.com），不带协议、路径、端口或空格"
+            )
+        result.append(host)
+    return tuple(dict.fromkeys(result))
 
 
 class WebAccessConfig(_StrictModel):
     """外部网络访问（v0.5 T53；契约 §16.3、工具定义 §6.10）。
 
-    **默认关闭**：本机 Agent 一旦能联网，攻击面就从"用户自己的文件"扩到"互联网"，打开这个开关应当是
-    用户的显式决定（与 `web.allow_non_loopback` 同一口径）。关闭时 `web` 能力的工具**完全不可见**，
-    行为与 v0.4 一致。
+    **默认开启**（2026-10-14 修订；原文是"默认关闭、显式 opt-in"）。联网是本机 Agent 的主流能力，
+    "这一次要不要联网"应当由模型按任务判断，而不是让用户先去面板里把总闸拉起来。旧口径的实际后果
+    已经实证：面板开关与这里的布尔**各说一套**——用户在「能力」面板打开 `web`（工具因此对模型可见），
+    工具执行时却按这里的 `enabled=False` 拒绝，页面于是显示"联网检索被策略挡住了"（2026-10-14，
+    会话 `af822c1db538` 的 bilibili 那一轮）。两道闸门从此**只剩一道**：能力开关是唯一真源，
+    运行期由 `service` 把它回灌到这里（见 `ApplicationService._with_effective_gates`）。
+
+    安全底座不靠这道闸门，而靠三件事（都在，且各有测试）：SSRF 边界（解析出的**每个**地址都查、
+    每次跟随重定向**前后**都校验）、外部内容一律按**不可信数据**处理（不得据此授权、不自动进入记忆）、
+    结果有界并**如实说明**截断。
 
     段名是 `web_access` 而不是 `web`：``web`` 已经是**本机 HTTP 服务**的配置段（§15.3），把"改监听端口"
     和"允许联网"混在一起看，早晚会有人以为自己只改了端口。
+
+    **2026-10-14 再进一步**：``web`` 已是**锁定能力**（常态开启、不进可开关集），因此这里的布尔
+    **完全退出决策链**——它只剩"运行期由 `service` 回灌"这一个身份，键留着是为了旧配置能原样加载。
+    写 ``false`` 不会再关掉联网：那种"写了却没生效"的静默不一致比"关不掉"更坏，所以这条口径必须明说。
+    若哪天要恢复"能关"，改法是**同时**放开 ``capabilities.LOCKED_CAPABILITIES`` 与
+    ``AppConfig.capability_default_layer`` 里那一行，两处必须一起动。
     """
 
-    enabled: bool = False
-    provider: WebAccessProvider = "bing_html"
+    enabled: bool = True
+    provider: WebAccessProvider = "auto"
+    tavily_api_key_env: str = Field(default="TAVILY_API_KEY", min_length=1)
+    max_search_calls: int | None = Field(default=None, ge=1)
+    max_read_pages: int | None = Field(default=None, ge=1)
+    max_reads_per_page: int | None = Field(default=None, ge=1)
     timeout_seconds: int = Field(default=15, gt=0, le=120)
     max_results: int = Field(default=5, ge=1, le=20)
     #: 单次抓取的正文上限（字符）：超过即截断，并在结果 ``note`` 里写明。
     max_chars: int = Field(default=8_000, ge=500, le=100_000)
     #: 请求头里的 User-Agent。不伪装成浏览器：被对方按 UA 拒绝时，如实失败比假装成 Chrome 更诚实。
     user_agent: str = "chaiai/0.5 (local agent)"
+    #: 域名策略（2026-10-14，联网常态化的配套）。``allow`` = 除 `denied_domains` 外一律放行——这是主流
+    #: 做法：检索必然遇到未知域名，"默认拦"会让联网寸步难行，所以默认放行、但每次访问都在结果里留下
+    #: 可核对的地址与状态；``allowlist`` = 只放行 `allowed_domains` 及其子域（保守档，自建部署用）。
+    #: 两档都**不放松** SSRF 边界：本机、内网、链路本地与云元数据地址永远拒绝。
+    domain_policy: Literal["allow", "allowlist"] = "allow"
+    #: 永远拒绝的域名（含其子域）。
+    denied_domains: tuple[str, ...] = ()
+    #: ``domain_policy="allowlist"`` 时唯一放行的域名（含其子域）。
+    allowed_domains: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _clean_domains(self) -> WebAccessConfig:
+        """两个域名清单按 :func:`clean_domain_list` 归一。"""
+        self.denied_domains = clean_domain_list(self.denied_domains, "denied_domains")
+        self.allowed_domains = clean_domain_list(self.allowed_domains, "allowed_domains")
+        return self
 
 
 class GitConfig(_StrictModel):
@@ -617,8 +743,11 @@ class SkillsConfig(_StrictModel):
 
     **默认关闭**：关闭时 `skill` 能力完全不可见（提示里没有清单、工具不绑给模型），行为与 v0.4 一致。
 
-    ``user_dirs`` **只接受绝对路径**：`~` 不展开（与 §8 一致，`~` 属于"相对路径逃逸"），写相对路径在
-    启动时失败并说明——相对路径会随进程当前目录漂移，那正是 2026-10-09 修过的记忆库路径缺陷的成因。
+    ``user_dirs`` 接受**绝对路径或相对路径**（2026-10-16 放宽）：相对路径按 **``config.yaml`` 所在
+    目录**展开（与记忆库路径同一条口径，见 ``container.resolve_skill_paths``），因此与进程当前目录无关
+    ——"相对路径会随 cwd 漂移"这条原来的拒绝理由不再成立。放宽的目的只有一个：**技能要能随包发布**，
+    包里的配置写 ``user_dirs: ["skills"]``，解压到哪个盘都能用。
+    `~` 仍然**拒绝**（§8：`~` 属于"相对路径逃逸"，不展开）。
 
     「个人级默认根」在这里**不出现**：它们是代码里的常量表（§16.5 的 rank 表），`include_user_skills`
     只控制"读不读那一组"。市场缓存目录（本机实测一处 295 个技能）**默认不读**，要读就写进 `user_dirs`。
@@ -627,7 +756,7 @@ class SkillsConfig(_StrictModel):
     enabled: bool = False
     #: 是否读取默认的个人级根（`~/.agents/skills` 等，见 §16.5 的 rank 表）。
     include_user_skills: bool = True
-    #: 追加的发现根：**只接受绝对路径**；要读市场缓存目录就写在这里。
+    #: 追加的发现根：**绝对路径**照用；**相对路径**按 `config.yaml` 所在目录展开（随包发布用）。
     user_dirs: list[str] = Field(default_factory=list)
     #: 单个技能正文上限（字符）：超过即截断，并在结果 ``note`` 里写明原文长度。
     max_skill_chars: int = Field(default=20_000, ge=500, le=500_000)
@@ -635,12 +764,21 @@ class SkillsConfig(_StrictModel):
     max_list_chars: int = Field(default=8_000, ge=200, le=100_000)
 
     @model_validator(mode="after")
-    def _user_dirs_must_be_absolute(self) -> SkillsConfig:
+    def _user_dirs_are_portable(self) -> SkillsConfig:
+        """相对路径允许（相对 `config.yaml` 所在目录），但 `~` 与空项仍然拒绝。
+
+        空项要拒：它会解析成"配置文件所在目录自己"，于是把整个仓库当成发现根扫一遍——
+        那不是用户想表达的意思。`~` 要拒：`resolve_under` 不展开它（§8），放过去会得到一个
+        名为 `~` 的目录，静默地什么都没发现。
+        """
         for value in self.user_dirs:
-            if not Path(value).is_absolute():
+            text = str(value).strip()
+            if not text:
+                raise ValueError("skills.user_dirs 里有空项（§16.5）：删掉它或写成目录名")
+            if text.startswith("~"):
                 raise ValueError(
-                    "skills.user_dirs 只接受绝对路径（`~` 不展开，§16.5）："
-                    f"{value!r}。相对路径会随进程当前目录漂移，请写成绝对路径"
+                    "skills.user_dirs 不接受 `~`（§16.5：`~` 属于相对路径逃逸，不展开）："
+                    f"{value!r}。请写成绝对路径，或写成相对 `config.yaml` 所在的目录名"
                 )
         return self
 
@@ -723,16 +861,16 @@ class WorkflowsConfig(_StrictModel):
     """确定性工作流的实际资源上限（v0.7 T65/T66，架构 §18.2）。"""
 
     enabled: bool = False
-    max_tool_calls: int = Field(default=16, ge=1, le=64)
-    max_steps: int = Field(default=32, ge=1, le=128)
-    max_source_files: int = Field(default=8, ge=1, le=32)
-    max_evidence_chars: int = Field(default=16000, ge=1, le=64000)
-    max_report_chars: int = Field(default=20000, ge=1, le=64000)
-    max_model_tokens: int = Field(default=16000, ge=1, le=128000)
-    max_model_output_tokens: int = Field(default=2048, ge=1, le=16000)
-    max_children: int = Field(default=3, ge=1, le=3)
-    max_concurrency: int = Field(default=2, ge=1, le=2)
-    child_timeout_seconds: int = Field(default=30, ge=1, le=120)
+    max_tool_calls: int = Field(default=256, ge=1)
+    max_steps: int = Field(default=512, ge=1)
+    max_source_files: int = Field(default=128, ge=1)
+    max_evidence_chars: int = Field(default=256_000, ge=1)
+    max_report_chars: int = Field(default=256_000, ge=1)
+    max_model_tokens: int = Field(default=1_048_576, ge=1)
+    max_model_output_tokens: int = Field(default=16_384, ge=1)
+    max_children: int = Field(default=8, ge=1)
+    max_concurrency: int = Field(default=4, ge=1)
+    child_timeout_seconds: int = Field(default=900, ge=1)
 
 
 class AppConfig(_StrictModel):
@@ -757,6 +895,32 @@ class AppConfig(_StrictModel):
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     jobs: JobsConfig = Field(default_factory=JobsConfig)
     workflows: WorkflowsConfig = Field(default_factory=WorkflowsConfig)
+
+    def capability_default_layer(self) -> dict[str, bool]:
+        """**出厂默认开关表**（架构 §16.1）：用户没在页面改过开关时生效的那一组。
+
+        两个来源合起来，顺序照 :data:`~local_agent.capabilities.CAPABILITY_TOOLS`：
+
+        - 五个基础能力取自 ``profiles.active`` 的声明（``coder`` 全开，``reviewer`` 只有只读）；
+        - ``git_read`` / ``git_write`` / ``skill`` 取**各自段的 ``enabled`` 且档位也声明了它**——
+          与 v0.5 的"档位 ∩ 配置开关"**逐项等价**，所以在一份什么都没改的配置上，行为与升级前一致；
+        - ``web`` **恒定取真**（2026-10-14 起联网常态化，见 :data:`~local_agent.capabilities.LOCKED_CAPABILITIES`）。
+
+        Returns:
+            能力名 → 布尔；顺序与闭集一致。**不可关闭能力的强制置真不在这里**，它在
+            :func:`~local_agent.capabilities.resolve_switches` 的最后一道，避免两个地方各写一次。
+        """
+        declared = as_switch_layer(resolve_capabilities(self.profiles.active, self.profiles.custom))
+        layer = dict(declared)
+        # 联网是**常态化能力**（2026-10-14）：出厂默认一律为真，既不取决于档位声明，也不取决于
+        # `web_access.enabled`——`resolve_switches` 最后还会强制置真，这里写真话是为了让这张
+        # "出厂默认表"本身不再自相矛盾（否则它写着 false、实际跑着 true）。
+        layer["web"] = True
+        git_on = declared["git_read"] and self.git.enabled
+        layer["git_read"] = git_on
+        layer["git_write"] = git_on
+        layer["skill"] = declared["skill"] and self.skills.enabled
+        return {name: layer[name] for name in CAPABILITY_TOOLS}
 
     def as_run_config(self) -> RunConfig:
         """收窄成运行期配置；``llm`` 缺省时抛可执行的 `ConfigError`。
@@ -806,6 +970,20 @@ class RunConfig(AppConfig):
     """
 
     llm: LlmConfig
+
+
+_ConfigT = TypeVar("_ConfigT", bound=AppConfig)
+
+
+def apply_capability_gates(app_config: _ConfigT, switches: Mapping[str, bool]) -> _ConfigT:
+    """所有运行入口共用能力开关的生效值，保留其余网络/安全配置。"""
+    return app_config.model_copy(update={
+        "web_access": app_config.web_access.model_copy(update={"enabled": bool(switches.get("web"))}),
+        "git": app_config.git.model_copy(update={
+            "enabled": bool(switches.get("git_read") or switches.get("git_write")),
+        }),
+        "skills": app_config.skills.model_copy(update={"enabled": bool(switches.get("skill"))}),
+    })
 
 
 def load_dotenv_file(env_path: Path = DEFAULT_ENV_PATH) -> bool:
