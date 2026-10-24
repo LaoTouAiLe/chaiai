@@ -11,7 +11,7 @@
    发现逻辑全在 :mod:`local_agent.context.skills_loader`，本模块不自己拼路径。
 2. **每次调用重新发现、重新读盘**：正文**不缓存**——技能改了要立刻生效；名字与当前清单不再匹配时
    按"已不可用"如实报告，**不返回上一份内容**。
-3. **技能里的脚本只作为资源**：本模块从不执行它们；要执行必须走 `shell` 能力与人工审批。
+3. **技能里的脚本只作为资源**：本模块从不执行它们；执行脚本走 `shell` 能力及当前权限策略。
 4. **不枚举技能目录**：只报"存在哪些资源目录"（`references/` / `scripts/` / `assets/`），不给文件清单——
    清单越界既费上下文，又容易让人以为资源都能直接读（它们在**工作区之外**时读文件工具打不开）。
 
@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from langchain_core.tools import BaseTool
@@ -30,6 +31,7 @@ from pydantic import BaseModel, Field
 from local_agent.config import SkillsConfig
 from local_agent.context.skills_loader import (
     SkillCatalog,
+    apply_skill_overrides,
     discover_skills,
     load_resource_text,
     load_skill_body,
@@ -40,8 +42,9 @@ RESOURCE_DIRS: tuple[str, ...] = ("references", "scripts", "assets")
 
 #: 清单为空时的说明：说清"为什么没有"，而不是给一个空数组让人猜。
 _EMPTY_NOTE = (
-    "当前没有发现任何技能：可能是开关关着（skills.enabled）、配置的发现根不存在，"
-    "或那些目录里没有合法的技能（每个技能需要一个 SKILL.md，且 frontmatter 的 name 要与目录名一致）。"
+    "当前没有发现任何技能：可能是开关关着（skills.enabled）、配置的发现根不存在、"
+    "那些目录里没有合法的技能（每个技能需要一个 SKILL.md，且 frontmatter 的 name 要与目录名一致），"
+    "或者把它们都在「设置 → 技能」里禁用了。"
 )
 
 _LIST_DOC = (
@@ -91,6 +94,9 @@ def build_skill_tools(
     workspace_root: Path | None = None,
     current_cwd: Path | None = None,
     home: Path | None = None,
+    #: 用户在设置里禁用的技能名（技能管理页，2026-10-16）。与模型清单共用同一个判定点
+    #: （`skills_loader.apply_skill_overrides`）——两处各写一遍必然出现"清单里没有、这里还能取到"。
+    disabled_skills: Iterable[str] = (),
 ) -> list[BaseTool]:
     """构造两个技能工具。
 
@@ -102,12 +108,17 @@ def build_skill_tools(
         workspace_root: 工作区根（本轮只用于**将来**的项目级发现，见 §16.5）。
         current_cwd: 当前工作目录（同上）。
         home: 用户主目录；默认 :func:`Path.home`（测试注入用）。
+        disabled_skills: 用户在设置里禁用的技能名；被禁用的技能不出现在清单里，
+            也取不到正文（原因如实说明是"被用户在设置里禁用"，不是"没有这个技能"）。
     """
     root = Path.cwd() if workspace_root is None else workspace_root
+    #: 归一成 frozenset 一次：判定发生在**每次调用**（技能每轮重新发现），这里不做任何缓存。
+    disabled = frozenset(str(name) for name in disabled_skills)
 
     def _catalog() -> SkillCatalog:
-        return discover_skills(
-            config, workspace_root=root, current_cwd=current_cwd, home=home
+        return apply_skill_overrides(
+            discover_skills(config, workspace_root=root, current_cwd=current_cwd, home=home),
+            disabled=disabled,
         )
 
     @langchain_tool("skill_list", description=_LIST_DOC)
@@ -132,6 +143,16 @@ def build_skill_tools(
     def skill_load(name: str, resource: str | None = None) -> str:
         """取一个技能的正文，或它目录内的一个资源文件。"""
         catalog = _catalog()
+        if name in disabled:
+            # 判定顺序刻意如此：被用户禁用的技能在目录里**已经不存在**，先答"为什么没有"才准确
+            # （否则会得到"没有名为 X 的技能"，让人以为技能没被识别到）。
+            return SkillLoadResult(
+                name=name,
+                note=(
+                    f"技能 {name} 已被用户在设置里禁用（「设置 → 技能」），当前不加载它的正文。"
+                    "需要时请让用户在设置页重新启用它。"
+                ),
+            ).model_dump_json()
         skill = catalog.get(name)
         if skill is None:
             return SkillLoadResult(name=name, note=_missing_note(name, catalog)).model_dump_json()
@@ -146,7 +167,7 @@ def build_skill_tools(
                     name=skill.name, resource=resource.strip(), note=problem
                 ).model_dump_json()
             resource_notes = [
-                "资源只作为**文本**给出，本工具不会执行它（要执行必须走命令执行能力与人工审批）。"
+                "资源只作为**文本**给出，本工具不会执行它（执行脚本走命令执行能力及当前权限策略）。"
             ]
             if truncated:
                 resource_notes.append(

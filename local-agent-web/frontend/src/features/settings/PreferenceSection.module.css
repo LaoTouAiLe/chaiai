@@ -1,20 +1,364 @@
-.section { font-size: var(--law-text-md); }
-.section h3 { font-size: var(--law-text-md); font-weight: 600; }
-.note { color: var(--law-text-secondary); font-size: var(--law-text-xs); line-height: 1.7; margin: 8px 0 18px; }
-.fields { border: 0; padding: 0; margin: 0; }
-.field { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 16px 0; border-bottom: 1px solid var(--law-border-l1); }
-.field strong { display: block; font-weight: 500; }
-.field small { display: block; color: var(--law-text-secondary); font-size: var(--law-text-xs); line-height: 1.7; margin-top: 4px; max-width: 380px; }
-.field select, .field input:not([type='checkbox']) { width: 180px; max-width: 100%; min-width: 0; flex: 0 0 180px; height: 34px; border: 1px solid var(--law-border-l2); border-radius: 8px; padding: 4px 8px; background: var(--law-bg-layer-1); color: var(--law-text-primary); font: inherit; }
-.field input[type='checkbox'] { width: 18px; height: 18px; accent-color: var(--law-text-primary); }
-.actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 24px; }
-.actions button, .error button { font-size: var(--law-text-sm); padding: 7px 14px; border: 1px solid var(--law-border-l2); border-radius: 8px; }
-.actions .primary { background: var(--law-button-primary-fill); color: var(--law-text-on-brand); }
-.actions button:disabled { opacity: .45; cursor: default; }
-.saved { color: var(--law-state-success); margin-top: 16px; }
-.error { color: var(--law-state-error); margin-top: 16px; }
-.overview { margin-top: 24px; }
-.overview div { display: flex; justify-content: space-between; gap: 20px; padding: 12px 0; border-bottom: 1px solid var(--law-border-l1); }
-.overview dt { color: var(--law-text-secondary); }
-.overview dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
-@media (max-width: 600px) { .field { align-items: flex-start; flex-wrap: wrap; gap: 10px; } .field select, .field input:not([type='checkbox']) { flex-basis: 160px; } }
+/* 设置分区的内容版式（2026-10-19 调整）：
+   标题 + 一句话说明 → 设置项卡片 → 底部固定的操作栏。
+   改动只涉及排版：字段、文案、保存逻辑都在 `PreferenceSection.tsx` 里保持原样。 */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-lg);
+  padding-bottom: var(--law-space-3xl);
+  font-size: var(--law-text-md);
+}
+
+.head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xxs);
+}
+
+/* 标题左、动作右（目前只有「高级配置概览」的导出按钮用）。 */
+.headRow {
+  flex-direction: row;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--law-space-xl);
+}
+
+.exportButton {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 var(--law-space-xl);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-md);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.exportButton:hover {
+  background: var(--law-button-ghost-hover);
+}
+
+.section h3,
+.section h4,
+.title {
+  margin: 0;
+  color: var(--law-text-primary);
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  font-weight: var(--law-weight-semibold);
+}
+
+.section h4 {
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.note {
+  margin: 0;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-md);
+}
+
+/* ---- 设置项卡片 -------------------------------------------------------- */
+
+.fields {
+  min-width: 0;
+  margin: 0;
+  padding: 0 var(--law-space-xl);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+}
+
+.field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--law-space-xl);
+  padding: var(--law-space-lg) 0;
+  border-bottom: 1px solid var(--law-border-l1);
+}
+
+.field:last-child {
+  border-bottom: 0;
+}
+
+.fieldText {
+  min-width: 0;
+}
+
+.field strong {
+  display: block;
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  font-weight: var(--law-weight-medium);
+}
+
+.field small {
+  display: block;
+  margin-top: var(--law-space-xxs);
+  max-width: 420px;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-md);
+}
+
+.control {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.field select,
+.field input:not([type='checkbox']) {
+  width: 200px;
+  max-width: 100%;
+  height: 32px;
+  min-width: 0;
+  padding: 0 var(--law-space-md);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-md);
+  background: var(--law-bg-layer-1);
+  color: var(--law-text-primary);
+  font: inherit;
+  font-size: var(--law-text-sm);
+}
+
+/* 域名清单、路径这类长文本需要更宽的输入框；数字与下拉保持紧凑。 */
+.controlWide select,
+.controlWide input:not([type='checkbox']) {
+  width: 300px;
+}
+
+.field input[type='password'] {
+  width: 300px;
+}
+
+/* 域名清单、路径、端点、模型名这类长值，右列 300px 读不全也改不全：
+   改成"说明在上、输入框铺满整行"（照 hermes 的 wide 行）。 */
+.fieldWide {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.fieldWide .control {
+  justify-content: flex-start;
+}
+
+.fieldWide select,
+.fieldWide input:not([type='checkbox']) {
+  width: 100%;
+}
+
+/* 已配置的凭据格：只读但可点。灰底 + 字距让它一眼区别于普通输入框。
+   选择器要压过 `.field input` 的底色。 */
+.field input.maskedInput {
+  cursor: pointer;
+  background: var(--law-surface-selector);
+  color: var(--law-text-secondary);
+  letter-spacing: 0.12em;
+}
+
+.field select:disabled,
+.field input:disabled {
+  color: var(--law-text-tertiary);
+}
+
+/* ---- 开关（布尔项；语义仍是 checkbox，只换外观）------------------------ */
+
+.switch {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.switch input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switchTrack {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--law-surface-selector);
+  transition: background 0.15s ease;
+}
+
+.switchTrack::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--law-bg-layer-1);
+  box-shadow: var(--law-shadow-lv1);
+  transition: transform 0.15s ease;
+}
+
+.switch input:checked + .switchTrack {
+  background: var(--law-button-primary-fill);
+}
+
+.switch input:checked + .switchTrack::after {
+  transform: translateX(16px);
+}
+
+.switch input:focus-visible + .switchTrack {
+  outline: 2px solid var(--law-button-primary-fill);
+  outline-offset: 2px;
+}
+
+.switch input:disabled {
+  cursor: default;
+}
+
+.switch input:disabled + .switchTrack {
+  opacity: 0.45;
+}
+
+/* ---- 操作栏（吸底）----------------------------------------------------- */
+
+.actionBar {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-md);
+  margin-top: var(--law-space-md);
+  padding: var(--law-space-lg) 0 var(--law-space-2xl);
+  border-top: 1px solid var(--law-border-l1);
+  background: var(--law-bg-layer-1);
+}
+
+.feedback:empty {
+  display: none;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--law-space-md);
+}
+
+.actionBar .actions {
+  justify-content: flex-end;
+}
+
+.actions button,
+.error button {
+  padding: 6px 14px;
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-md);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.actions button:hover:not(:disabled) {
+  background: var(--law-button-ghost-hover);
+}
+
+.actions .primary {
+  border-color: transparent;
+  background: var(--law-button-primary-fill);
+  color: var(--law-text-on-brand);
+}
+
+.actions .primary:hover:not(:disabled) {
+  background: var(--law-button-primary-hover);
+}
+
+.actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.saved {
+  margin: 0;
+  color: var(--law-state-success);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.error {
+  margin: 0;
+  color: var(--law-state-error);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+/* ---- 只读信息表（向量库、高级配置、凭据状态）--------------------------- */
+
+.overview {
+  margin: 0;
+  padding: 0 var(--law-space-xl);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+}
+
+.overview div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--law-space-xl);
+  padding: var(--law-space-md) 0;
+  border-bottom: 1px solid var(--law-border-l1);
+}
+
+.overview div:last-child {
+  border-bottom: 0;
+}
+
+.overview dt {
+  flex: 0 0 auto;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.overview dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--law-text-primary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 600px) {
+  .field {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: flex-start;
+    gap: var(--law-space-md);
+  }
+
+  .control {
+    justify-content: flex-start;
+  }
+
+  .controlWide select,
+  .controlWide input:not([type='checkbox']),
+  .field select,
+  .field input:not([type='checkbox']) {
+    width: 100%;
+  }
+
+  .actionBar .actions {
+    justify-content: flex-start;
+  }
+}

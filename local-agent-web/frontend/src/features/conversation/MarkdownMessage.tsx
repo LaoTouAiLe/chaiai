@@ -68,10 +68,35 @@ export function IconCopyButton({ text, className }: { text: string; className?: 
   )
 }
 
+/**
+ * 代码块的语言名（2026-10-21）：`react-markdown` 把语言放在 `<code class="language-python">`
+ * 上，而 `pre` 本身不带。取不到就是 `null`（页面显示 `Plain Text`）。
+ */
+function languageOf(node: ReactNode): string | null {
+  if (node === null || node === undefined || typeof node === 'boolean') return null
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = languageOf(child)
+      if (found !== null) return found
+    }
+    return null
+  }
+  if (typeof node === 'object' && node !== null && 'props' in node) {
+    const props = (node as { props?: { className?: string; children?: ReactNode } }).props
+    const matched = /language-([\w+#.-]+)/.exec(props?.className ?? '')
+    if (matched !== null) return matched[1] ?? null
+    return languageOf(props?.children)
+  }
+  return null
+}
+
 function CodeBlock({ children }: ComponentPropsWithoutRef<'pre'>) {
+  // 语言标签**只做展示**：本期没有"切换高亮语言"的能力，所以不给它做成下拉（做成就得能改）。
+  const language = languageOf(children)
   return (
     <div className={styles.block}>
       <div className={styles.bar}>
+        <span className={styles.language}>{language ?? 'Plain Text'}</span>
         <CopyButton text={textOf(children)} label="复制代码" />
       </div>
       <pre className={styles.pre}>

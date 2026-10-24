@@ -24,7 +24,7 @@ $env:CHAIAI_OUT_DIR = "build/packaging/out-20261008"
 1. **前置检查**：PyInstaller 可用、前端产物存在。缺任何一项都给出**可照做**的命令后以 1 退出，
    不产出半成品包——"朋友的包打开是空白页"比"构建失败"难诊断得多。
 2. **调用 spec**（``scripts/chaiai.spec``）：只读资源进包、可写数据不进包的口径写在那个文件里；
-   打包完成后把 ``packaging/使用说明.txt`` 复制到包顶层（见 :func:`_copy_notes`）。
+   打包完成后把 ``../packaging/使用说明.txt`` 复制到包顶层（见 :func:`_copy_notes`）。
 3. **DLL 依赖补齐与自包含校验**（见 :func:`_repair_and_verify_dlls`）：打包器依赖分析在 conda
    环境里会漏收第三方 DLL，**2026-10-08 的试用包就漏了 OpenSSL**（`libssl-3-x64.dll` /
    `libcrypto-3-x64.dll`），只有恰好装过它们的机器才能启动。这里按事实分类补齐，并把"缺了什么"
@@ -73,11 +73,44 @@ WORK_PATH: Final[Path] = DIST_PATH / "_work"
 PACKAGE_DIR: Final[Path] = DIST_PATH / "chaiai"
 #: 面向朋友的说明：源文件在仓库里，构建后复制到包**顶层**（不走 spec 的 datas，那会藏进
 #: ``_internal``，朋友在解压目录里根本看不见）。
-NOTES_SOURCE: Final[Path] = PROJECT_ROOT / "packaging" / "使用说明.txt"
+NOTES_SOURCE: Final[Path] = PROJECT_ROOT.parent / "packaging" / "使用说明.txt"
 NOTES_NAME: Final[str] = "使用说明.txt"
+#: 随包发布的**技能**（2026-10-16）：技能的**内容是文件**，只能随包走；"哪个技能可用"是用户的
+#: 选择，存在设置库里（`agent.skills.disabled` 例外表），不在这里复制。
+#: 包里那份示例配置写的是相对路径 `user_dirs: ["skills"]`，指向的就是下面复制出去的这个目录。
+#: 技能源的**唯一**位置（2026-10-20 去重）：仓库根的 ``skills/``，与应用平级。
+#: 原先 ``packaging/skills`` 与它逐字节重复，改一处忘另一处就会漂移，因此删掉副本、
+#: 构建时从根复制。路径向上走一层是刻意的：技能属于"这个产品"，不属于打包脚本。
+SKILLS_SOURCE: Final[Path] = PROJECT_ROOT.parent / "skills"
+SKILLS_NAME: Final[str] = "skills"
+#: 随包的外部可执行文件（2026-10-19：ripgrep）。**必须放 _internal/bin**：
+#: 运行期由 `app_paths.bundled_binary()` 按 `_MEIPASS/bin/<name>.exe` 查找，
+#: 放顶层会被当成"用户可见工具"却找不到。许可证文件随二进制一起复制。
+BIN_SOURCE: Final[Path] = PROJECT_ROOT.parent / "packaging" / "bin"
+BIN_NAME: Final[str] = "bin"
 
 #: 本脚本自己写进包里的文件；它们不参与扫描，也不进清单（否则清单会包含自己，反复变化）。
 GENERATED_FILES: Final[frozenset[str]] = frozenset({"MANIFEST.txt", "BUILD_INFO.txt"})
+
+def _local_layout_patterns() -> tuple[bytes, ...]:
+    """构建机上"**不该进包**的本地布局路径"，按构建机**现算**（2026-10-16）。
+
+    为什么不再写死：原来这里列的是**开发机上的具体路径**（形如 `X:\\某个目录`，共四条）。
+    那些字面量换一台机器构建时**既不会命中、也帮不上忙**，还把开发机的目录结构带进了仓库
+    （朋友拿到源码第一眼就看见开发机的盘符长什么样）。现在只算两条**任何机器上都成立**的：
+    "同级检出目录"（``PROJECT_ROOT.parent``，同机其它项目住在那儿）与"项目根自身"。
+    用户主目录另走 :data:`WARN_PATTERNS`——理由见那里的注释。
+    """
+    patterns: list[bytes] = []
+    for candidate in (PROJECT_ROOT.parent, PROJECT_ROOT):
+        text = str(candidate)
+        # 跳过盘根/根目录：形如 `<盘>:\` 的前缀会匹配一切，等于把自检关掉。
+        if len(text) <= 3:
+            continue
+        patterns.append(re.escape(text.encode()))
+        patterns.append(re.escape(candidate.as_posix().encode()))
+    return tuple(patterns)
+
 
 #: 命中即**构建失败**：密钥形态、真实数据，以及同一台机器上其它项目的路径。
 #:
@@ -91,10 +124,7 @@ FORBIDDEN_PATTERNS: Final[tuple[re.Pattern[bytes], ...]] = tuple(
         rb"DEEPSEEK_API_KEY=",
         rb"hs_err_pid",
         rb"hf-cache",
-        rb"D:\\ideaTest2",
-        rb"E:\\openclaw",
-        rb"E:\\pylianxi\\codex",
-        rb"E:\\pylianxi\\OpenManus",
+        *_local_layout_patterns(),
     )
 )
 
@@ -103,18 +133,23 @@ FORBIDDEN_PATTERNS: Final[tuple[re.Pattern[bytes], ...]] = tuple(
 #: ——打包器把模块路径规范化了。保留这条规则是为了防回归：换打包器版本、或将来有代码直接读
 #: 源码路径时，它能第一时间报出来，也保证在任何机器上构建都能自检。
 #:
-#: 刻意**不**匹配泛化的 ``C:\\Users\\``：实测它在 33 个 .pyd/.dll 里命中，那是 CPython/conda
-#: 上游构建机留下的路径，与本项目无关，只会把真正的泄漏淹掉。
+#: 刻意**不**匹配泛化的"系统用户目录前缀"（形如 ``<盘>:\\Users\\``）：实测它在 33 个 .pyd/.dll 里
+#: 命中，那是 CPython/conda 上游构建机留下的路径，与本项目无关，只会把真正的泄漏淹掉。
 WARN_PATTERNS: Final[tuple[re.Pattern[bytes], ...]] = tuple(
     re.compile(pattern)
     for pattern in (
         re.escape(str(PROJECT_ROOT).encode()),
         re.escape(PROJECT_ROOT.as_posix().encode()),
+        # 用户主目录（2026-10-16 起现算）：它进包等于把"这台机器上有个叫某名字的用户"一起发出去。
+        # 只警告不硬失败——CPython/conda 的上游二进制里可能残留**构建机**的主目录前缀，
+        # 当硬失败会误杀（与上面"刻意不匹配泛化的系统用户目录前缀"同一类误报）。
+        re.escape(str(Path.home()).encode()),
+        re.escape(Path.home().as_posix().encode()),
     )
 )
 
 #: 这些文件名本身就算"真实数据进包"，不参与内容扫描。
-FORBIDDEN_NAMES: Final[frozenset[str]] = frozenset({"config.yaml", ".env", "debug.log"})
+FORBIDDEN_NAMES: Final[frozenset[str]] = frozenset({"config.yaml", "mcp.json", ".env", "debug.log"})
 FORBIDDEN_SUFFIXES: Final[frozenset[str]] = frozenset({".sqlite", ".sqlite3", ".db"})
 
 #: 逐块扫描的块大小与重叠：重叠必须不小于最长模式，避免模式跨块边界漏检。
@@ -178,6 +213,8 @@ def _run_pyinstaller() -> None:
     if not (PACKAGE_DIR / "chaiai.exe").is_file():
         raise SystemExit(f"打包结束但没找到 {_display(PACKAGE_DIR / 'chaiai.exe')}，请检查 spec")
     _copy_notes()
+    _copy_skills()
+    _copy_binaries()
 
 
 def _copy_notes() -> None:
@@ -192,6 +229,54 @@ def _copy_notes() -> None:
     if not text.startswith(codecs.BOM_UTF8):
         text = codecs.BOM_UTF8 + text
     (PACKAGE_DIR / NOTES_NAME).write_bytes(text)
+
+
+def _copy_skills() -> None:
+    """把技能目录复制到包**顶层**（与使用说明同一位置与理由）。
+
+    为什么放顶层而不是 `_internal`：这些是**给模型读的工作手册**，使用者要能打开看、能自己往里加
+    一条技能——藏在 `_internal` 里等于告诉他"别动"。源目录缺失或为空时**构建失败**：那说明
+    "包里该带技能"这件事没人维护了，静默发一个不带技能的包更糟。
+    """
+    if not SKILLS_SOURCE.is_dir():
+        raise SystemExit(f"缺少技能源目录：{_display(SKILLS_SOURCE)}")
+    copied = 0
+    for path in sorted(SKILLS_SOURCE.rglob("*")):
+        if not path.is_file():
+            continue
+        target = PACKAGE_DIR / SKILLS_NAME / path.relative_to(SKILLS_SOURCE)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.read_bytes())
+        copied += 1
+    if copied == 0:
+        raise SystemExit(f"技能源目录是空的：{_display(SKILLS_SOURCE)}")
+
+
+def _copy_binaries() -> None:
+    """把随包二进制（``../packaging/bin``）复制到 ``_internal/bin``。
+
+    为什么不是顶层：运行期由 ``app_paths.bundled_binary()`` 按 ``_MEIPASS/bin/<name>.exe``
+    解析，而 onedir 形态的 ``_MEIPASS`` 就是 ``_internal``。放错位置的表现很隐蔽——
+    程序能启动，只是代码检索永远走慢路径。
+
+    源目录或 rg 缺失时**构建失败**：这个包的"检索不退化"依赖它，静默发一个不带它的包
+    等于把一条已验证的行为降级成"看运气"。
+    """
+    if not BIN_SOURCE.is_dir():
+        raise SystemExit(f"缺少随包二进制目录：{_display(BIN_SOURCE)}")
+    if not (BIN_SOURCE / "rg.exe").is_file():
+        raise SystemExit(f"缺少 {_display(BIN_SOURCE / 'rg.exe')}；代码检索会退化为扫描")
+    target_root = PACKAGE_DIR / "_internal" / BIN_NAME
+    copied = 0
+    for path in sorted(BIN_SOURCE.rglob("*")):
+        if not path.is_file():
+            continue
+        target = target_root / path.relative_to(BIN_SOURCE)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(path.read_bytes())
+        copied += 1
+    if copied == 0:
+        raise SystemExit(f"随包二进制目录是空的：{_display(BIN_SOURCE)}")
 
 
 def _imported_dlls(path: Path) -> list[str]:
@@ -237,6 +322,11 @@ def _dll_source_dirs() -> list[Path]:
         root = Path(entry)
         candidates.append(root)
         candidates.extend(sorted(root.glob("*.libs")))
+        # pywin32 把运行库放在自己的子目录 `pywin32_system32/`（pywintypesXX.dll / pythoncomXX.dll）：
+        # 既不符合 `*.libs` 的命名，也不在 site-packages 根上，所以上面两种匹配都抓不到它。
+        # 2026-10-23 实测：打包分析会把 `win32/win32api.pyd` 这类扩展收进来，缺了这两个 DLL 时
+        # 自包含校验直接判失败（包在干净机器上会 import 崩，而本机因 PATH 里有 pywin32 看不出来）。
+        candidates.append(root / "pywin32_system32")
     return [path for path in dict.fromkeys(candidates) if path.is_dir()]
 
 
@@ -335,7 +425,8 @@ def _scan_package() -> tuple[list[str], list[str]]:
     warned: list[str] = []
     for path in _iter_files(PACKAGE_DIR):
         relative = path.relative_to(PACKAGE_DIR).as_posix()
-        if path.name.lower() in FORBIDDEN_NAMES:
+        if (path.name.lower() in FORBIDDEN_NAMES
+                or (path.name.lower().startswith("mcp.json.") and path.suffix.lower() == ".tmp")):
             forbidden.append(f"{relative}（真实配置/日志不该进包）")
             continue
         if path.suffix.lower() in FORBIDDEN_SUFFIXES:
@@ -458,11 +549,18 @@ def main(argv: list[str] | None = None) -> int:
             print(f"没有可扫描的产物：{_display(PACKAGE_DIR)} 不存在", file=sys.stderr)
             return 1
     else:
+        from local_agent.security.win_ipc import verify_bundle
+
+        verify_bundle(check_sources=True)
         if args.frontend:
             _build_frontend()
         _require_frontend_dist()
         _run_pyinstaller()
         _repair_and_verify_dlls()
+
+    from local_agent.security.win_ipc import verify_bundle
+
+    verify_bundle(PACKAGE_DIR / "_internal/local_agent/native/windows/bin")
 
     forbidden, warned = _scan_package()
     count, total = _write_manifest()

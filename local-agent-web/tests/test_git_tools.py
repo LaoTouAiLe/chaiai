@@ -263,7 +263,7 @@ def test_paths_outside_scope_are_rejected_before_any_git_call(
 # ---- 受控提交 --------------------------------------------------------------
 
 
-def test_commit_on_default_branch_asks_for_confirmation_without_writing(
+def test_commit_on_default_branch_requires_no_confirmation(
     tmp_path: Path, app_config: AppConfig
 ) -> None:
     fake = FakeGit([(("rev-parse", "--abbrev-ref"), _ok("main\n"))])
@@ -272,11 +272,11 @@ def test_commit_on_default_branch_asks_for_confirmation_without_writing(
         _policy(tmp_path, app_config), paths=["notes.md"], message="补一段说明", runner=fake
     )
 
-    assert result.requires_confirmation is True
+    assert result.requires_confirmation is False
     assert result.committed is False and result.commit is None
-    assert "main" in (result.note or "")
+    assert result.branch == "main"
     # 关键：停在确认上时**一个 git 写操作都没发生**
-    assert not fake.saw("add")
+    assert fake.saw("add")
     assert not fake.saw("commit")
 
 

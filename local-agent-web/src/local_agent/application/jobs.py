@@ -348,6 +348,20 @@ class JobRuntime:
             logger.exception("后台任务 %s 执行异常；任务已标为需人工核对", job.job_id)
             return None
 
+    def close_review(self, job_id: str, *, outcome: str,
+                     detail: str | None = None) -> Job:
+        """人工核对结案（§17.1 唯一例外）：`needs_review → completed | cancelled`。
+
+        **不走 `_advance`**：那条路的终点是 `store.update_state`，而它明文拒绝终态改写。
+        这里直接落到 `store.close_review`——例外只开在那一处，别的路径照旧不能改结局。
+        """
+        with self._state_lock:
+            job = self._store.close_review(job_id, outcome=outcome, detail=detail)
+            notify = self._on_transition
+        if notify is not None:
+            notify(None, job)
+        return job
+
     def cancel(
         self,
         job_id: str,

@@ -714,6 +714,10 @@ def _tool_outcome(
     """
     if payload is None:
         return None
+    if tool_name == "search_files":
+        # 合并入口（2026-10-22）：按载荷里的 mode 还原成原来的两种形态，复用既有渲染，
+        # 不新造一种卡片——否则前端要同时维护三套搜索结果的展示。
+        tool_name = "glob" if str(payload.get("mode") or "") == "files" else "grep"
     path = _optional_sanitized(payload.get("path"), secrets)
     note = _optional_str(payload.get("note"))
 
@@ -828,11 +832,19 @@ def _tool_outcome(
         reason = _optional_str(payload.get("reason"))
         if reason:
             summary = f"{summary} · {reason}"
+        # 写入也要给结构化 diff（2026-10-21）：新建文件时整份内容就是新增行；
+        # 没有它，对话里这张卡只有字节数，"看变更"无从点起。
+        diff_text = str(payload.get("diff") or "")
+        text, clipped = _bounded(sanitize_text(diff_text, secrets), TOOL_DETAIL_TEXT_CHARS)
+        diff, diff_truncated = _parse_unified_diff(diff_text, path=path, secrets=secrets)
         return ToolOutcomeView(
             kind="write",
             target=path,
             summary=sanitize_text(summary, secrets),
+            text=text or None,
+            diff=diff,
             total=lines,
+            truncated=clipped or diff_truncated,
         )
 
     if tool_name == "delete_file":
@@ -848,7 +860,9 @@ def _tool_outcome(
             summary=sanitize_text(summary, secrets),
         )
 
-    if tool_name == "run_shell":
+    # `execute_code` 与 `run_shell` 共用同一张终端卡（2026-10-22）：它本质也是"跑一段东西"，
+    # 退出码/输出/超时/后台的展示口径完全一致，没必要再造一种卡片。
+    if tool_name in {"run_shell", "execute_code"}:
         exit_code = _int_of(payload.get("exit_code"))
         timed_out = bool(payload.get("timed_out"))
         stdout, out_clipped = _bounded(
@@ -868,6 +882,8 @@ def _tool_outcome(
             stderr=stderr or None,
             exit_code=exit_code,
             timed_out=timed_out,
+            # 转后台（2026-10-21）：工具结果里 `status=running` 表示进程还活着，只是这一轮不等了。
+            background=str(payload.get("status") or "") == "running",
             truncated=bool(payload.get("truncated")) or out_clipped or err_clipped,
         )
 

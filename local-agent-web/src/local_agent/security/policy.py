@@ -1,4 +1,4 @@
-"""安全策略服务：路径、敏感文件与工具放行的统一入口（架构 §6、§11.1）。
+﻿"""安全策略服务：路径、敏感文件与工具放行的统一入口（架构 §6、§11.1）。
 
 设计原则（架构 §1.3-4、§11.1）：危险动作在代码层拦截，不依赖 Prompt；
 未实现、未放行或需要审批而本版本没有审批能力的动作，一律失败闭合（deny）。
@@ -10,13 +10,20 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+if TYPE_CHECKING:
+    # 只在类型检查期导入：shell_guard 依赖本模块，顶层导入会成环。
+    from local_agent.security.shell_guard import ShellPlan
 
 from local_agent.cancellation import CancellationToken
+from local_agent.capabilities import EXTERNAL_TOOL_PREFIX
 from local_agent.config import (
     AppConfig,
     SecurityConfig,
@@ -25,6 +32,7 @@ from local_agent.config import (
 )
 from local_agent.exceptions import FileOperationError, SecurityError, WorkspaceBoundaryError
 from local_agent.security import win_sandbox
+from local_agent.security.command_registry import CommandRegistry
 from local_agent.security.diff_guard import count_changed_lines, edit_input_mode, parse_patch
 from local_agent.security.file_system import FileSystemSandbox
 from local_agent.security.path_guard import (
@@ -51,6 +59,8 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
     "read_file",
     "grep",
     "glob",
+    # 合并入口（2026-10-22）：一次调用可"按内容搜"或"按名字找"，只读，归同一组工具。
+    "search_files",
     "web_search",
     "web_fetch",
     # v0.5 T54：Git 只读三件套——只报告状态与差异，不写盘、不改索引，不需要人工审批。
@@ -72,6 +82,10 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
     # （取决于 `llm.supports_vision` 声明）与工具内部的失败闭合决定，不由审批决定。
     "view_image",
     "inspect_system",
+    # 2026-10-20：MCP 的**检索工具**是只读的——它只查本机已经拿到的目录，不发外部请求、
+    # 不改任何状态，所以与上面几项同级、不需要审批。注意它**不是**外部工具：外部工具名是
+    # `mcp__<server>__<tool>`（双下划线），由下面的 `mcp__` 前缀分支处理（一律审批）。
+    "mcp_tool_search",
 )
 CONTROL_TOOLS: tuple[str, ...] = ("update_plan", "task_control")
 
@@ -129,6 +143,45 @@ class SafetyDecision:
     large_edit: bool = False
 
 
+class FileChangeRecorder(Protocol):
+    """文件变更账本的写入口（实现在 ``persistence/file_changes.py``）。
+
+    策略层只持有这个最小协议：``security`` 不该依赖 ``persistence``，而账本又必须知道
+    "哪个文件在什么时候被谁改了多少行"。应用层每轮把一个实现了它的对象挂上来即可。
+    """
+
+    def capture(self, resolved: Path) -> None:
+        """在写盘**之前**留一份原文（同一路径只留第一次）。"""
+
+    def record(
+        self,
+        *,
+        tool: str,
+        resolved: Path,
+        kind: Literal["create", "modify", "delete"],
+        additions: int = 0,
+        deletions: int = 0,
+        before_sha256: str | None = None,
+        after_sha256: str | None = None,
+    ) -> None:
+        """记录一次已完成的文件写操作。"""
+
+
+#: 可豁免的「单目标删除」形态（2026-10-23，§6.6）：删除动词 + 可选标志 + 恰好一个目标。
+#: 只用于**放行判断**；执行永远用原 argv，绝不经过这里。
+_SINGLE_DELETE_SHAPE = re.compile(
+    r"""^(?:del|erase|rm|rd|rmdir)(?:\s+/[A-Za-z]+)*\s+(?:"([^"]+)"|'([^']+)'|(\S+))$""",
+    re.IGNORECASE,
+)
+
+#: 硬拦截词（2026-10-23）：出现即不豁免，保留原审批。对齐 hermes 的 hardline 清单。
+_HARDLINE_WORDS: tuple[str, ...] = (
+    "format", "mkfs", "diskpart", "vssadmin", "clear-disk", "cipher",
+    "shutdown", "reboot", "icacls", "chmod", "chown",
+    "taskkill", "stop-process", "/dev/sd",
+)
+
+
 class SecurityPolicy:
     """工作区级的路径与工具策略。"""
 
@@ -143,11 +196,9 @@ class SecurityPolicy:
         cancellation: CancellationToken | None = None,
         allow_result_spill: bool = True,
         session_scope: str | None = None,
-        #: 安全删除（2026-10-20）：开启时 `delete_file` 把目标**移进回收站**而不是抹掉。
+        #: 安全删除（2026-10-20）：开启时 `delete_file` 把目标**移进系统回收站**而不是抹掉。
         #: 策略层默认关（直接构造策略的测试/CLI 保持旧行为）；生产由 `from_config` 按配置传入。
         safe_delete: bool = False,
-        #: 回收站根目录；``None`` 由 :mod:`local_agent.trash` 按数据目录默认定位。
-        trash_root: Path | None = None,
     ) -> None:
         self.workspace_root = workspace_root
         # 不同会话不共享终端或浏览器；CLI 未提供会话键时只在当前策略内复用。
@@ -156,14 +207,33 @@ class SecurityPolicy:
         self.session_scope = session_scope or uuid4().hex
         self.security = security
         self.workspace = workspace
-        #: 删除是否进回收站（2026-10-20）。见 `FileSystemSandbox.delete`。
+        #: 删除是否进**系统回收站**（2026-10-20）。见 `FileSystemSandbox.delete`。
         self.safe_delete = bool(safe_delete)
-        self.trash_root = trash_root
         #: 本轮执行的取消信号（§17.4）：它让本方法成为"取消后不再启动工具调用"的**第二道门**。
         #: 缺省 `None` 表示这次运行不参与取消（CLI / 测试的轻量路径、以及 v0.5 之前的行为）。
         self.cancellation = cancellation
         #: T67 子策略禁止只读检索工具的显式落盘；不是模型可变参数或用户配置。
         self.allow_result_spill = allow_result_spill
+        #: `read_file` 的轮级去重表（2026-10-22）：`(路径, sha, 范围, max_chars, 编码) -> 上次结果的
+        #: 行区间/续读位置`。同一轮里重复读同一段、且文件没变时不再返回原文——模型重复读同一段
+        #: 是常见空转，一次就是一次模型往返。策略每轮新建，所以天然只在轮内生效；文件一变 sha
+        #: 就不同，不会命中。
+        self.read_cache: dict[tuple, tuple[int, int, bool, int | None, int | None, int]] = {}
+        #: 验证类命令的轮内结果缓存（2026-10-22）：同命令 + 文件未变 → 直接回上次结果。
+        #: 只缓存"跑测试/类型检查"这类**无副作用**命令；key 带 ``file_change_version``，
+        #: 一旦有写盘就整体失效（改了代码还拿旧测试结果，比不缓存更糟）。
+        self.command_cache: dict[tuple[str, str, int], str] = {}
+        self.file_change_version = 0
+        #: 同一文件连续编辑失败次数（2026-10-22，抄 hermes 的 patch 失败计数）：
+        #: 到第 3 次时错误信息升级为"不要再改写法重试，换策略"，而不是让模型无限微调锚点。
+        self.edit_failures: dict[str, int] = {}
+        #: 本轮工具结果的字符预算（2026-10-22，对齐 hermes 的 turn budget 20 万字符）。
+        #: 只统计**进入模型上下文**的文本（图像块不算）：`read_file` 的上限提到 10 万字符后，
+        #: 一轮里几次大读取就可能把上下文推到压缩阈值。这里只记账并置标记，**不截断、不落盘**
+        #: ——落盘是下一步，先有计数才谈得上"什么时候算超"。
+        self.result_budget_chars = 200_000
+        self.result_budget_used = 0
+        self.result_budget_exceeded = False
         #: 本轮在跑的子进程登记表（§17.4 第二片）：取消时按**进程树**终止（Windows `taskkill /F /T`、
         #: POSIX `killpg`）。它与令牌绑定，因此"取消"与"已启动进程的终止"是同一次动作的两半。
         self.processes = ProcessRegistry(cancellation)
@@ -183,7 +253,52 @@ class SecurityPolicy:
         self._large_edit_approved = False
         #: 当前实例是否已物化过写授权（根上一条可继承 ACE，系统传播到整棵子树）。
         self._sandbox_materialized = False
+        #: 文件变更账本（2026-10-21）：由应用层每轮注入，``None`` = 不记账（CLI / 测试）。
+        #: 它是**可观测性设施**，不是安全门：记账失败只写日志，绝不阻断写盘。
+        self.file_change_recorder: FileChangeRecorder | None = None
+        #: 命令级后台运行表（2026-10-21）：用户点"转后台"后由它接管进程与输出。
+        #: 与 `processes` 同一生命周期——取消/归档时一并按进程树终止，不留孤儿。
+        self.commands = CommandRegistry(processes=self.processes)
         self.files = FileSystemSandbox(self)
+
+    # ---- 文件变更账本（只做转发，实现见 persistence/file_changes.py） ----------
+
+    def capture_file_baseline(self, resolved: Path) -> None:
+        """写盘前留一份原文；没有接线或失败都不影响写盘。"""
+        recorder = self.file_change_recorder
+        if recorder is None:
+            return
+
+        try:
+            recorder.capture(resolved)
+        except Exception:
+            logging.getLogger(__name__).warning("记录文件基线失败：%s", resolved, exc_info=True)
+
+    def note_file_change(
+        self,
+        *,
+        tool: str,
+        resolved: Path,
+        kind: Literal["create", "modify", "delete"],
+        additions: int = 0,
+        deletions: int = 0,
+        before_sha256: str | None = None,
+        after_sha256: str | None = None,
+    ) -> None:
+        """记一次已完成的文件写操作；同样吞掉账本异常。"""
+        # 缓存失效与账本是否接线无关：文件变了就必须让旧的验证结果作废。
+        self.file_change_version += 1
+        recorder = self.file_change_recorder
+        if recorder is None:
+            return
+
+        try:
+            recorder.record(
+                tool=tool, resolved=resolved, kind=kind, additions=additions,
+                deletions=deletions, before_sha256=before_sha256, after_sha256=after_sha256,
+            )
+        except Exception:
+            logging.getLogger(__name__).warning("记录文件变更失败：%s", resolved, exc_info=True)
 
     @classmethod
     def from_config(
@@ -363,6 +478,18 @@ class SecurityPolicy:
 
     # ------------------------------------------------------------------ 路径
 
+    def note_tool_result(self, chars: int) -> None:
+        """累计一条工具结果进入上下文的字符数（2026-10-22）。
+
+        只记账与置标记，**不在这里截断**：截断/落盘要带上"怎么取回全文"的说明，
+        属于结果处理层；策略层只回答"这一轮用了多少、超没超"。
+        """
+        if chars <= 0:
+            return
+        self.result_budget_used += chars
+        if self.result_budget_used >= self.result_budget_chars:
+            self.result_budget_exceeded = True
+
     def require_result_spill(self) -> None:
         """检索工具自己的第二道门：子策略不能借 save_full 写文件。"""
         if not self.allow_result_spill:
@@ -446,6 +573,47 @@ class SecurityPolicy:
         if not resolved.is_file():
             raise FileOperationError(f"目标文件不存在或不是普通文件：{resolved.as_posix()}")
         return resolved
+
+    def _is_benign_workspace_delete(self, plan: ShellPlan) -> bool:
+        """工作区内、单目标、非递归的删除 → 与 `delete_file` 同口径免审（§6.6，2026-10-23）。
+
+        放宽的动因：放宽前「命令删工作区单文件要审批、`delete_file` 删同一文件却免审」两套规则
+        并存，模型据系统提示「工作区删除免审批」推断，回答里断言「没有出现审批卡」——与事实相反。
+
+        **任何不确定都按"要审批"处理**：递归标志、通配符、命令串联、多目标、工作区外路径、
+        硬拦截词、解析不出单一命令，一个都不豁免。宁可多问一次，不可放宽边界。
+        """
+        parts = [str(part) for part in plan.argv if str(part).strip()]
+        if not parts:
+            return False
+        # Windows 内建命令经适配器执行时，整条命令是最后一个 argv 元素
+        # （`cmd.exe /d /s /c del /q x`）——cmd 自己的 `/s` 不是递归标志，只能看这一段。
+        command = parts[-1]
+        if any(char in command for char in "|&;<>$`\n"):
+            return False
+        lowered = command.lower()
+        if any(word in lowered for word in _HARDLINE_WORDS):
+            return False
+        match = _SINGLE_DELETE_SHAPE.match(command)
+        if match is None:
+            return False
+        target = next((group for group in match.groups() if group), "")
+        if not target or any(char in target for char in "*?$"):
+            return False
+        # `del /s`、`rm -r` 是递归：一律审批
+        if any(flag in lowered.split() for flag in ("/s", "-r", "-rf", "--recursive")):
+            return False
+        base = plan.cwd
+        if base is None:
+            return False
+        candidate = Path(target)
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        try:
+            self.resolve_writable_path(str(candidate), verb="删除")
+        except (SecurityError, OSError, ValueError):
+            return False
+        return True
 
     def resolve_writable_path(self, path: str, *, verb: str = "写入") -> Path:
         """解析写入目标路径；目标可以不存在（架构 §6.4）。
@@ -538,6 +706,8 @@ class SecurityPolicy:
             if concern is not None:
                 return concern
             return self._classify_write(args)
+        if tool_name == "execute_code":
+            return self._classify_execute_code(args)
         if tool_name in SHELL_TOOLS:
             return self._classify_shell(args)
         if tool_name in GIT_WRITE_TOOLS:
@@ -555,10 +725,35 @@ class SecurityPolicy:
                 requires_approval=True,
                 reason=f"{tool_name} 属于强制审批动作，必须人工批准后才执行",
             )
+        if tool_name.startswith(EXTERNAL_TOOL_PREFIX):
+            return self._classify_mcp(tool_name)
         return SafetyDecision(
             allowed=False,
             requires_approval=False,
             reason=f"工具 {tool_name} 尚未接入或不在放行清单内",
+        )
+
+    def _classify_mcp(self, tool_name: str) -> SafetyDecision:
+        """MCP 外部工具（架构 §6.13）。
+
+        **免审批**（2026-10-21 按用户决定改）：一台 server 的 ``command`` 是用户亲手写进
+        ``mcp.json`` 的，那本身就是授权；调用它暴露的工具等于使用已经授权的东西，不是一次新的
+        决定。早先"一律审批"的实测结果是：模型连着调 3~5 个工具就要点 3~5 次卡，而人很快
+        就不再读卡片内容直接点批准——那比不审批更糟，因为它把"审批"变成了仪式。
+
+        免审批**不等于**没有边界，两条仍然在：
+
+        - ``allow_result_spill=False``（只读子任务）直接拒绝：子 Agent 没有人盯着，
+          而装配层本来也不给它 MCP 工具，这条是防御性的第二道门；
+        - 名字必须来自本轮已知集合（``capabilities.is_visible`` 的 ``external_names``），
+          模型幻觉出来的 ``mcp__xxx__yyy`` 依然执行不了。
+        """
+        if not self.allow_result_spill:
+            return SafetyDecision(False, False, "只读子任务不能调用 MCP 外部工具")
+        return SafetyDecision(
+            allowed=True,
+            requires_approval=False,
+            reason=f"{tool_name} 是外部系统的操作（MCP），按 server 配置授权执行",
         )
 
     def _external_side_effect_decision(
@@ -716,6 +911,23 @@ class SecurityPolicy:
             allowed=True, requires_approval=False, reason="创建新文件，未覆盖任何已有内容"
         )
 
+    def _classify_execute_code(self, args: Mapping[str, Any]) -> SafetyDecision:
+        """`execute_code` 的判定（2026-10-22）。
+
+        它跑的是模型给的任意 Python：**逐条审计代码内容做不到**，假装能审反而更糟
+        （例如只匹配 `rm -rf` 却漏掉 `shutil.rmtree`，会给出"已检查"的错觉）。
+        因此边界与 `run_shell` 同级——工作区可写才允许，执行侧仍受沙箱、取消、寿命与
+        输出上限约束。真正的差别只是"少写一个临时脚本"，不放宽任何门。
+        """
+        if not self.external_policy.allows_workspace_write():
+            return SafetyDecision(False, False, "运行代码需要工作区可写权限")
+        code = args.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return SafetyDecision(False, False, "execute_code 缺少 code 参数")
+        return SafetyDecision(
+            True, False, "运行 Python 代码，与 run_shell 同一执行通道与沙箱"
+        )
+
     def _classify_shell(self, args: Mapping[str, Any]) -> SafetyDecision:
         command = args.get("command")
         if not isinstance(command, str) or not command.strip():
@@ -751,13 +963,18 @@ class SecurityPolicy:
         # **档位在这里决定"常规命令问不问"**（2026-10-14）：档位的设计意图本来就是"决定常规小改动
         # 是否需要逐次询问"，但在此之前 Shell 审批完全没读过档位——于是"选了放行还什么都要问"。
         mode = self.external_policy.mode
-        if plan.destructive and self.security.require_approval.destructive_shell and not plan.environment_unavailable:
-            # 四项硬约束之一：破坏性命令**任何档位**都要人工批准（"放行"也不例外）。
+        # 2026-10-23 放宽（§6.6，用户批准）：**工作区内、单目标、非递归的删除**与
+        # `delete_file` 工具同口径免审。放宽前这两条规则不一致，模型据"工作区删除免审批"
+        # 推断后断言"没有出现审批卡"，最终回答与事实相反（实机复现三次）。
+        # 递归、通配、串联、多目标、工作区外、硬拦截词**一律不豁免**，照旧走审批。
+        if (plan.destructive and self.security.require_approval.destructive_shell
+                and not plan.environment_unavailable
+                and not self._is_benign_workspace_delete(plan)):
             # 环境不可用的除外：那种命令**批准了也起不来**，走拒绝（别退回"点了批准然后启动失败"）。
             return SafetyDecision(
                 allowed=False,
                 requires_approval=True,
-                reason=f"{plan.reason}；破坏性命令任何档位都需要人工批准（四项硬约束）",
+                reason=f"{plan.reason}；破坏性命令任何档位都需要人工批准（硬拦截清单）",
             )
         if escalate and plan.executable_path and not plan.environment_unavailable:
             # **运行中提权**（escalation，2026-10-14）：本次请求退出写侧沙箱 → 不管哪一档、

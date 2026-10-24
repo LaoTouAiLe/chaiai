@@ -40,6 +40,21 @@ export function ChevronLeft({ size = 12 }: IconProps) {
   )
 }
 
+export function ChevronDown({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <path
+        d="M2.5 4.5 6 8l3.5-3.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 export function Check({ size = 12 }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
@@ -122,6 +137,24 @@ export function Close({ size = 12 }: IconProps) {
   )
 }
 
+/** 「加图片」入口（2026-10-19）：图片框的轮廓，描述的是"图片"而不是"附件"。 */
+export function ImagePlus({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" aria-hidden="true" focusable="false">
+      <rect x="1.6" y="2.4" width="10.8" height="9.2" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="5" cy="5.8" r="1.05" fill="currentColor" />
+      <path
+        d="M2.4 10.4 5.7 7.4l2.5 2.2 1.6-1.4 1.8 1.7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 export function Doc({ size = 12 }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
@@ -133,6 +166,22 @@ export function Doc({ size = 12 }: IconProps) {
         strokeLinejoin="round"
       />
       <path d="M7 1.8V4h2.3" fill="none" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  )
+}
+
+/** 「欢迎」卡片的小灯泡：从零开始的想法正在被点亮。 */
+export function Bulb({ size = 14 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" aria-hidden="true" focusable="false">
+      <path
+        d="M7 1.6a4.1 4.1 0 0 1 2.5 7.4c-.4.3-.6.7-.6 1.2v.3H5.1v-.3c0-.5-.2-.9-.6-1.2A4.1 4.1 0 0 1 7 1.6Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path d="M5.6 12h2.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
     </svg>
   )
 }

@@ -1,4 +1,4 @@
-"""SQLite 结构迁移与版本记录（架构 §10.3、§10.6，开发文档 T11、T13）。
+﻿"""SQLite 结构迁移与版本记录（架构 §10.3、§10.6，开发文档 T11、T13）。
 
 - 会话索引与 LangGraph Checkpoint 共用同一个数据库文件：一个连接、一个事务边界，
   避免多连接互相加锁（``session_store`` 与 Checkpoint 由 ``checkpoint.open_database``
@@ -20,14 +20,24 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-#: 聊天库（Checkpoint + 会话索引 + 请求台账 + 任务索引）当前代码期望的结构版本（等于最后一个迁移的编号）。
-CHAT_SCHEMA_VERSION = 10
+#: 聊天库（Checkpoint + 会话索引 + 请求台账 + 任务索引 + 文件变更账本）当前代码期望的结构版本
+#: （等于最后一个迁移的编号）。
+#: 11（2026-10-21）：文件变更账本与基线索引——页面要能回答"这次任务改了哪些文件、每个
+#: 文件从改前到改后是什么样"，只靠工具事件里的单次片段拼不出来（见 `persistence/file_changes.py`）。
+#: 14（2026-10-23）：用户终端启动审批的元数据审计，不保存输入和输出。
+#: **编号为什么是 14 而不是 13**：13 已经被侧聊那批列占用了。两批改动此前都写成 13，而迁移器按
+#: "编号 <= 已应用版本就跳过"推进（见 :func:`_apply`），于是新库只会跑前一条 —— `terminal_audit`
+#: 永远建不出来，全新安装启动即崩（`no such table: terminal_audit`，2026-10-23 在临时库上复现）。
+CHAT_SCHEMA_VERSION = 14
 
 #: 长期记忆库当前代码期望的结构版本。
 LONG_TERM_SCHEMA_VERSION = 3
 
 #: 设置库当前结构版本：v2 = 外部路径授权；v3 = 非秘密应用偏好。
-SETTINGS_SCHEMA_VERSION = 3
+#: 4（2026-10-16）：连接新增 ``supports_vision``——"这条连接收不收图像输入"是**用户声明**，不是实测项
+#: （探针只能靠发一张图试，代价与误报都不划算，而且"看不看得见"与"收不收"不是一回事），
+#: 因此它不并进 ``capability_*`` 那组**实测报告**字段，单独一列。
+SETTINGS_SCHEMA_VERSION = 4
 
 #: 兼容既有调用：未加前缀的 ``SCHEMA_VERSION`` 指聊天库。
 SCHEMA_VERSION = CHAT_SCHEMA_VERSION
@@ -169,8 +179,10 @@ CREATE INDEX IF NOT EXISTS idx_request_ledger_status ON request_ledger (status);
 #: - ``model_selection``：默认连接与会话选择（``scope`` + ``scope_id``，默认那条是 ``('default','default')``）；
 #: - ``settings_meta``：导入记账等元数据。
 #:
-#: **结构上就存不下明文密钥**：四张表没有任何一列可以放密钥值，密钥只在系统凭据存储或进程内存里，
-#: 表里留的是不含明文的 ``credential_ref``。这不是靠调用方自觉。
+#: **密钥不进连接表**：四张表没有一列放密钥值，表里留的是不含明文的 ``credential_ref``（一个引用）。
+#: 2026-10-13 起密钥值存在 ``settings_meta`` 的 ``credentials.<ref>`` 键下（§6.8 改动：从系统凭据存储
+#: 改为落设置库，理由是分发形态下凭据管理器在别人机器上会失败）。也就是说密钥与连接**在同一个本地文件**
+#: 里，但**不在同一张表**——"引用与密钥分离"这条性质保持不变，连接表本身仍然放不下明文。
 _SETTINGS_V1_SQL = """
 CREATE TABLE IF NOT EXISTS model_connections (
     connection_id TEXT PRIMARY KEY,
@@ -360,6 +372,73 @@ CREATE INDEX job_children_run ON job_children(parent_run_id);
 """
 
 #: 聊天库的迁移；(版本号, 该版本的结构变更 SQL)，只允许在末尾追加，不允许改写已发布的版本。
+_CHAT_V11_FILE_CHANGES_SQL = """
+CREATE TABLE file_change_baselines (
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    path TEXT NOT NULL,
+    storage_ref TEXT,
+    size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+    sha256 TEXT,
+    unavailable_reason TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, path)
+);
+CREATE TABLE file_change_ops (
+    op_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    run_id TEXT,
+    tool TEXT NOT NULL,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('create', 'modify', 'delete')),
+    additions INTEGER NOT NULL DEFAULT 0 CHECK (additions >= 0),
+    deletions INTEGER NOT NULL DEFAULT 0 CHECK (deletions >= 0),
+    before_sha256 TEXT,
+    after_sha256 TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX file_change_ops_session ON file_change_ops(session_id, op_id);
+"""
+
+_CHAT_V12_CRON_SQL = """
+CREATE TABLE cron_jobs (
+    job_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 80),
+    prompt TEXT NOT NULL CHECK (length(trim(prompt)) BETWEEN 1 AND 4000),
+    schedule TEXT NOT NULL CHECK (length(schedule) BETWEEN 1 AND 120),
+    workspace_root TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT 'agent' CHECK (mode IN ('chat', 'agent')),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    next_run_at TEXT,
+    last_run_at TEXT,
+    last_status TEXT CHECK (last_status IN ('running', 'succeeded', 'failed', 'blocked')),
+    last_error TEXT
+);
+CREATE INDEX cron_jobs_due ON cron_jobs(enabled, next_run_at);
+
+-- session_id 不设外键：运行记录要比会话活得久，会话被清理后仍应能查到"那天跑过、结果是什么"。
+CREATE TABLE cron_runs (
+    run_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES cron_jobs(job_id) ON DELETE CASCADE,
+    session_id TEXT,
+    status TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'blocked')),
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    summary TEXT
+);
+CREATE INDEX cron_runs_job ON cron_runs(job_id, started_at DESC);
+"""
+
+_CHAT_V13_SIDE_CHAT_SQL = """
+-- 侧边会话（§21.7）：只加两列，**不新增 kind**。
+-- 加新 kind 要重建整张 sessions 表（它的 kind 有 CHECK 约束），而那会把 v9 以来的迁移链拖进来；
+-- 用 parent_session_id IS NOT NULL 表达"这是侧聊"，判定同样明确，改动面小一个数量级。
+ALTER TABLE sessions ADD COLUMN parent_session_id TEXT;
+ALTER TABLE sessions ADD COLUMN origin_turn_id TEXT;
+CREATE INDEX idx_sessions_parent ON sessions (parent_session_id);
+"""
+
 _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SESSIONS_SQL),
     (2, _CHAT_V2_SQL),
@@ -414,6 +493,24 @@ _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (8, _CHAT_V8_JOBS_NEEDS_REVIEW_SQL),
     (9, _CHAT_V9_SUBAGENT_SQL),
     (10, _CHAT_V10_CHILDREN_SQL),
+    (11, _CHAT_V11_FILE_CHANGES_SQL),
+    (12, _CHAT_V12_CRON_SQL),
+    (13, _CHAT_V13_SIDE_CHAT_SQL),
+    # 14（不是 13）：13 上面那条已经用掉了，同号的第二条会被 `_apply` 跳过（见 CHAT_SCHEMA_VERSION 注释）。
+    (14, """
+        CREATE TABLE terminal_audit (
+            approval_id TEXT PRIMARY KEY,
+            terminal_id TEXT,
+            workspace_root TEXT NOT NULL,
+            shell TEXT NOT NULL,
+            permission_mode TEXT NOT NULL,
+            fingerprint TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+    """),
 )
 
 #: 长期库 v3（T52）：给 ``facts`` 与 ``task_conclusions`` 加 ``origin`` 列（架构 §10.3、§16.2）。
@@ -434,13 +531,51 @@ _LONG_TERM_MIGRATIONS: tuple[tuple[int, str], ...] = (
 )
 
 #: 模型连接设置库的迁移；规则同上（独立文件、独立版本号）。
+#: v4 的脚本标识（2026-10-16）。这里只当**标记**用，真正的 DDL 见 :func:`_apply_vision_columns`
+#: ——因为它必须按"列在不在"决定做不做，而裸 SQL 表达不了这个条件。
+_SETTINGS_V4_VISION_SQL = (
+    "ALTER TABLE model_connections ADD COLUMN supports_vision INTEGER NOT NULL DEFAULT 0"
+)
+
 _SETTINGS_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SETTINGS_V1_SQL),
     (2, _SETTINGS_V2_SQL),
     # The table may already exist if the process exited before recording version 3.
     (3, ("CREATE TABLE IF NOT EXISTS app_preferences (id INTEGER PRIMARY KEY CHECK(id=1), "
          "version INTEGER NOT NULL CHECK(version>0), values_json TEXT NOT NULL);")),
+    # 4：连接级"支持图像输入"（用户声明，2026-10-16）。**两张表都加**：等待审批的运行恢复时用的是
+    # `model_connection_versions` 里那一版（§6.8"这一轮固定用哪个版本"），只加到当前表会让恢复后的
+    # 运行突然"看不见图"，表现成随机故障。默认 0 = 失败闭合（没声明就是收不了图）。
+    (4, _SETTINGS_V4_VISION_SQL),
 )
+
+
+def _apply_vision_columns(connection: sqlite3.Connection, target: int) -> None:
+    """给两张连接表加 ``supports_vision``（v4），**幂等**：列已经在就只补记版本号。
+
+    **两张都加**：等待审批的运行恢复时读的是 ``model_connection_versions`` 里那一版（§6.8
+    "这一轮固定用哪个版本"），只加当前表会让恢复后的运行突然"看不见图"，表现成随机故障。
+
+    为什么不能用裸 SQL：``ALTER TABLE ... ADD COLUMN`` **不幂等**。v3 的先例说明"进程在记录版本号
+    之前退出"是真会发生的（``test_interrupted_v3_upgrade_recovers_on_restart``），那时重跑一条裸
+    ALTER 会以 ``duplicate column name`` 直接炸掉启动——所以这里按列实际状态决定做不做。
+    """
+    connection.commit()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        for table in ("model_connections", "model_connection_versions"):
+            columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+            if "supports_vision" not in columns:
+                connection.execute(
+                    f"ALTER TABLE {table} ADD COLUMN supports_vision INTEGER NOT NULL DEFAULT 0"
+                )
+        connection.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", (target, _now())
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
 
 _SCHEMA_MIGRATIONS_SQL = (
     "CREATE TABLE IF NOT EXISTS schema_migrations ("
@@ -484,6 +619,11 @@ def _apply(
             _apply_sessions_v9(connection, script, target)
             version = target
             continue
+        if script == _SETTINGS_V4_VISION_SQL:
+            # 幂等加列（2026-10-16）：见 `_apply_vision_columns` 的注释。
+            _apply_vision_columns(connection, target)
+            version = target
+            continue
         if script == _CHAT_V10_CHILDREN_SQL:
             connection.commit()
             try:
@@ -524,6 +664,29 @@ def _apply_sessions_v9(connection: sqlite3.Connection, script: str, target: int)
         connection.execute(f"PRAGMA foreign_keys={foreign_keys}")
 
 
+def _ensure_sessions_columns(connection: sqlite3.Connection) -> None:
+    """兜底补齐 v13 的两列（2026-10-23）。
+
+    **为什么需要它**：线上出现过一次"`schema_migrations` 记了 13、但 `sessions`
+    没有 `parent_session_id`"的库——版本号说升级完成，实际列不在，之后每次列表/切换
+    工作区都 500（`no such column: parent_session_id`）。只靠版本号判断是不够的。
+    这里按**列**校验，缺什么补什么，让这类库在下次启动时自愈。
+    """
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(sessions)")}
+    if "session_id" not in columns:
+        # 表还不存在（全新库）：交给正常迁移去建，这里什么都不做。
+        return
+    missing = [name for name in ("parent_session_id", "origin_turn_id") if name not in columns]
+    if not missing:
+        return
+    with connection:
+        for name in missing:
+            connection.execute(f"ALTER TABLE sessions ADD COLUMN {name} TEXT")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions (parent_session_id)"
+        )
+
+
 def apply_migrations(connection: sqlite3.Connection) -> int:
     """把**聊天库**结构升到当前版本，返回升级后的版本号。
 
@@ -536,7 +699,10 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
     Raises:
         sqlite3.Error: 结构变更失败（例如库文件只读）。
     """
-    return _apply(connection, _CHAT_MIGRATIONS)
+    version = _apply(connection, _CHAT_MIGRATIONS)
+    # 版本号可能是对的、列却不在（见 `_ensure_sessions_columns` 的说明），所以每次都要校验。
+    _ensure_sessions_columns(connection)
+    return version
 
 
 def apply_long_term_migrations(connection: sqlite3.Connection) -> int:

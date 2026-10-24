@@ -1,0 +1,308 @@
+/**
+ * 原语样式（2026-10-22 V2）。
+ *
+ * 规范：`docs/plans/UI_PAGE_IMPLEMENTATION.md` §7。
+ * 调用点只传 variant / size，**不要**在外层覆写这里的 padding、圆角、字号——
+ * 那会让同一个按钮在不同页面长得不一样，正是本批要消除的问题。
+ */
+
+/* ===== Button ======================================================== */
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  border: 1px solid transparent;
+  border-radius: var(--r-control);
+  font-family: inherit;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--dur-hover-out) var(--ease-out),
+    color var(--dur-hover-out) var(--ease-out),
+    border-color var(--dur-hover-out) var(--ease-out);
+}
+
+.button:disabled,
+.button[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* hover 当帧生效 */
+.button:not(:disabled):hover {
+  transition: none;
+}
+
+.sizeSm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: var(--fs-meta);
+}
+
+.sizeDefault {
+  height: 34px;
+  padding: 0 14px;
+  font-size: var(--fs-body);
+}
+
+.sizeLg {
+  height: 40px;
+  padding: 0 18px;
+  font-size: var(--fs-ui);
+}
+
+.block {
+  width: 100%;
+}
+
+.variantPrimary {
+  background: var(--c-accent);
+  color: #ffffff;
+}
+
+.variantPrimary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--c-accent) 88%, #000);
+}
+
+.variantSecondary {
+  background: var(--c-raised);
+  border-color: var(--c-line);
+  color: var(--c-text-1);
+}
+
+.variantSecondary:not(:disabled):hover {
+  background: var(--c-hover);
+}
+
+.variantGhost {
+  background: transparent;
+  color: var(--c-text-2);
+}
+
+.variantGhost:not(:disabled):hover {
+  background: var(--c-hover);
+  color: var(--c-text-1);
+}
+
+.variantDanger {
+  background: var(--c-danger);
+  color: #ffffff;
+}
+
+.variantDanger:not(:disabled):hover {
+  background: color-mix(in srgb, var(--c-danger) 88%, #000);
+}
+
+/* 文字按钮：无底无框，用于「取消」「清除」这类 */
+.variantText {
+  height: auto;
+  padding: 0 4px;
+  background: transparent;
+  color: var(--c-accent);
+  font-size: var(--fs-body);
+}
+
+.variantText:not(:disabled):hover {
+  text-decoration: underline;
+}
+
+/* 图标按钮：正方，必带 aria-label */
+.iconSm {
+  width: 28px;
+  padding: 0;
+}
+
+.iconDefault {
+  width: 34px;
+  padding: 0;
+}
+
+.iconLg {
+  width: 40px;
+  padding: 0;
+}
+
+/* ===== Badge ========================================================= */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-control);
+  font-size: var(--fs-meta);
+  line-height: 1;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.toneNeutral {
+  background: var(--c-sunken);
+  color: var(--c-text-2);
+}
+
+.toneSuccess {
+  background: var(--c-success-soft);
+  color: var(--c-success);
+}
+
+.toneWarn {
+  background: var(--c-warn-soft);
+  color: var(--c-warn);
+}
+
+.toneDanger {
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+}
+
+.toneAccent {
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+}
+
+/* ===== SearchField =================================================== */
+.search {
+  position: relative;
+  display: block;
+  width: 100%;
+}
+
+.search input {
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-control);
+  background: var(--c-raised);
+  color: var(--c-text-1);
+  font-family: inherit;
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+
+.search input::placeholder {
+  color: var(--c-text-3);
+}
+
+.search input:focus-visible {
+  border-color: var(--c-accent);
+  outline: none;
+}
+
+/* 有内容时才占位，避免空框右侧多一块留白 */
+.searchWithClear input {
+  padding-right: 30px;
+}
+
+.clear {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-control);
+  color: var(--c-text-3);
+  font-size: var(--fs-ui);
+  line-height: 1;
+}
+
+.clear:hover {
+  background: var(--c-hover);
+  color: var(--c-text-1);
+}
+
+/* ===== EmptyState ==================================================== */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: 64px var(--sp-6);
+  text-align: center;
+}
+
+.emptyCompact {
+  padding: 32px var(--sp-4);
+}
+
+.emptyIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--c-text-off);
+  margin-bottom: var(--sp-1);
+}
+
+.emptyTitle {
+  color: var(--c-text-1);
+  font-size: var(--fs-title);
+  line-height: var(--lh-title);
+  font-weight: 600;
+}
+
+.emptyCompact .emptyTitle {
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+
+.emptyDescription {
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  max-width: 42ch;
+}
+
+.emptyAction {
+  margin-top: var(--sp-2);
+}
+
+/* ===== SegmentedControl ============================================== */
+/* 容器下沉、选中项上浮：用明度差表达"当前在哪一页"，不靠描边。 */
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-control);
+  background: var(--c-sunken);
+}
+
+.segment {
+  height: 28px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-control);
+  color: var(--c-text-2);
+  font-family: inherit;
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.segment:hover {
+  color: var(--c-text-1);
+  background: var(--c-hover);
+}
+
+.segmentActive {
+  background: var(--c-raised);
+  color: var(--c-text-1);
+  font-weight: 500;
+  box-shadow: var(--sh-menu);
+}
+
+.segmentActive:hover {
+  background: var(--c-raised);
+}
+
+.segmentSm {
+  height: 24px;
+  padding: 0 10px;
+  font-size: var(--fs-meta);
+}

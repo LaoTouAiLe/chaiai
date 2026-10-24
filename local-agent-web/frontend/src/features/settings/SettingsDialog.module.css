@@ -1,20 +1,25 @@
 .overlay {
   position: fixed;
   inset: 0;
+  /* 与其它模态面板同一层（能力/任务中心 40）：没有 z-index 时，会话里带 z-index 的浮层
+     （问题刻度条、吸底按钮）会盖在遮罩上，弹窗背后仍能看见它们（2026-10-19 实测）。 */
+  z-index: 40;
   display: grid;
   place-items: center;
   background: var(--law-bg-mask);
 }
 
-/* Measured from the frozen reference: 800×800, radius 24px, elevation lv3. */
+/* 2026-10-19：从 800×800 单列改为 960×760 的双栏（左导航 + 右内容）。
+   宽度只给到 960：再宽时表单行会拉成长条，说明文字与控件离得太远。 */
 .dialog {
   display: flex;
   flex-direction: column;
-  width: min(800px, calc(100vw - 48px));
-  height: min(800px, calc(100vh - 48px));
-  border-radius: var(--law-radius-3xl);
-  background: var(--law-bg-layer-1);
-  box-shadow: var(--law-shadow-lv3);
+  width: min(960px, calc(100vw - 48px));
+  height: min(760px, calc(100vh - 48px));
+  /* 2026-10-22 V4：24px 圆角收到 10px，阴影统一到 --sh-overlay（§2.5 / §2.6） */
+  border-radius: var(--r-overlay);
+  background: var(--c-canvas);
+  box-shadow: var(--sh-overlay);
   overflow: hidden;
 }
 
@@ -22,9 +27,42 @@
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--law-space-xl);
+  flex-wrap: wrap;
+  gap: var(--law-space-md) var(--law-space-xl);
   padding: var(--law-space-2xl) var(--law-space-3xl) var(--law-space-xl);
   border-bottom: 1px solid var(--law-border-l1);
+}
+
+.headerText {
+  flex: 0 0 auto;
+}
+
+/* ---- 设置项搜索 -------------------------------------------------------- */
+/* 搜索框跟着页头走，不占左导航：结果是"跨分区的跳转目标"，不是某个分区的筛选器。 */
+.searchWrap {
+  display: flex;
+  align-items: center;
+  flex: 1 1 200px;
+  max-width: 300px;
+  margin-left: auto;
+  align-self: center;
+}
+
+.searchInput {
+  width: 100%;
+  height: 30px;
+  min-width: 0;
+  padding: 0 var(--law-space-lg);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-md);
+  background: var(--law-bg-layer-1);
+  color: var(--law-text-primary);
+  font: inherit;
+  font-size: var(--law-text-sm);
+}
+
+.searchInput::placeholder {
+  color: var(--law-text-tertiary);
 }
 
 .title {
@@ -56,10 +94,157 @@
   color: var(--law-text-primary);
 }
 
+/* ---- 搜索结果 ---------------------------------------------------------- */
+/* 结果替换内容区显示，但分区只是 hidden（不卸载），所以草稿不会因为搜一次就丢。 */
+.hits {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* `display: flex` 会盖掉 `hidden` 属性的 UA 规则（作者样式优先），
+   结果面板在非搜索态就露出来了。显式补一条。 */
+.hits[hidden] {
+  display: none;
+}
+
+.hit {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--law-space-md) var(--law-space-lg);
+  border-radius: var(--law-radius-md);
+  cursor: pointer;
+}
+
+.hit:hover,
+.hitSelected {
+  background: var(--law-surface-selector);
+}
+
+.hitMain {
+  display: flex;
+  align-items: baseline;
+  gap: var(--law-space-md);
+  min-width: 0;
+}
+
+.hitLabel {
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  font-weight: var(--law-weight-medium);
+}
+
+.hitSection {
+  flex: 0 0 auto;
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+}
+
+.hitNote {
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+/* 条件显示的字段：说明"先满足哪个条件才看得到"，而不是点了没反应。 */
+.hitRequires {
+  color: var(--law-state-warn-label);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+}
+
+.hitsEmpty {
+  margin: 0;
+  padding: var(--law-space-4xl) var(--law-space-xl);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  text-align: center;
+}
+
+/* 跳转后没找到目标字段时的解释（与搜索结果里的提示同一口径）。 */
+.notice {
+  margin: 0 0 var(--law-space-md);
+  padding: var(--law-space-md) var(--law-space-lg);
+  border: 1px solid var(--law-state-warn-secondary);
+  border-radius: var(--law-radius-md);
+  background: var(--law-state-warn-subtle);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+/* 搜索命中后闪一下目标行。类名由 JS 加/移，规则必须是全局的：
+   行在 PreferenceSection 里渲染，拿不到本模块的局部类名。 */
+:global(.settings-field-flash) {
+  outline: 2px solid var(--law-button-primary-fill);
+  outline-offset: 2px;
+  border-radius: var(--law-radius-md);
+  animation: settings-field-flash 1.6s ease-out;
+}
+
+@keyframes settings-field-flash {
+  0%,
+  35% {
+    background: var(--law-state-info-subtle);
+  }
+
+  100% {
+    background: transparent;
+  }
+}
+
+/* 左导航固定、右内容独立滚动：导航不跟着长表单滚走。 */
 .body {
   flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xl);
+  min-height: 0;
   overflow-y: auto;
-  padding: var(--law-space-2xl) var(--law-space-3xl) var(--law-space-3xl);
+  padding: var(--law-space-2xl) var(--law-space-lg);
+  border-right: 1px solid var(--law-border-l1);
+  background: var(--law-bg-layer-1);
+}
+
+.navGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.navLabel {
+  margin: 0 0 var(--law-space-xxs);
+  padding: 0 var(--law-space-md);
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+  letter-spacing: 0.04em;
+}
+
+/* 右栏的定位基准：刻度条与"滑到最底"箭头浮在它上面，不随内容滚动。 */
+.paneWrap {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.panes {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  /* 右留"滑到最底"箭头的位置，避免圆钮压住输入框右边缘。 */
+  padding: var(--law-space-2xl) 48px 0 var(--law-space-3xl);
 }
 
 .sectionHead {
@@ -138,15 +323,17 @@
 .cards {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-lg);
-  margin-top: var(--law-space-xl);
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
 }
 
+/* 去框（2026-10-22 V4）：卡片不再靠 1px 描边划分，改用底槽色块。
+   弹窗底是 --c-canvas（白），卡片用 --c-panel（灰），靠明度差就够，不需要框线。 */
 .card {
-  padding: var(--law-space-lg) var(--law-space-xl);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-lg);
-  background: var(--law-bg-layer-1);
+  padding: var(--sp-4) var(--sp-5);
+  border: 0;
+  border-radius: var(--r-panel);
+  background: var(--c-panel);
 }
 
 .cardHead {
@@ -215,10 +402,49 @@
 .cardId {
   flex: 0 0 auto;
   margin-left: auto;
-  color: var(--law-text-caption);
-  font-family: var(--law-font-mono);
-  font-size: var(--law-text-xxs);
-  line-height: var(--law-leading-xs);
+  color: var(--c-text-off);
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-caption);
+  line-height: 18px;
+}
+
+/* ---- 收起态（2026-10-22 V4）------------------------------------------ */
+/* 收起行必须仍然回答"这是哪条、什么模型、能不能用"——否则用户得逐张点开找。 */
+.cardModel {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-3);
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-meta);
+}
+
+.cardToggle {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-control);
+  color: var(--c-text-2);
+  font-size: var(--fs-meta);
+}
+
+.cardToggle:hover {
+  background: var(--c-hover);
+  color: var(--c-text-1);
+}
+
+/* 风险标记在收起态也要露一眼：不能靠点开才发现是明文传输。 */
+.riskTagInHead {
+  flex: 0 0 auto;
+  padding: 0 var(--sp-1);
+  border-radius: var(--r-control);
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+  font-size: var(--fs-caption);
+  line-height: 18px;
 }
 
 .cardFacts {
@@ -291,15 +517,17 @@
   margin-top: var(--law-space-md);
 }
 
+/* 能力徽章：无描边，靠底色成组（与 Badge 原语同口径） */
 .capability {
   display: inline-flex;
   align-items: center;
   gap: var(--law-space-xs);
-  padding: var(--law-space-xxs) var(--law-space-sm);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-xs);
-  font-size: var(--law-text-xxs);
-  line-height: var(--law-leading-xs);
+  padding: 2px var(--sp-2);
+  border: 0;
+  border-radius: var(--r-control);
+  background: var(--c-sunken);
+  font-size: var(--fs-meta);
+  line-height: 18px;
 }
 
 .capPassed {
@@ -390,35 +618,31 @@
   font-weight: var(--law-weight-medium);
 }
 
-/* ---- section switcher (T38: both sections are real) --------------------- */
-
-.tabs {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: var(--law-bg-layer-1);
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--law-space-sm);
-  border-bottom: 1px solid var(--law-border-l1);
-}
+/* ---- 左侧分区导航（2026-10-19）-----------------------------------------
+   原先 11 个分区平铺在横向页签条里，800px 宽的对话框必然折成两三排；改成纵向列表后，
+   分组标题与当前分区在任何高度下都能同时看到。选中态用底色而不是下划线——竖排下
+   下划线会指向"下一个"分区，反而容易读错。 */
 
 .tab {
-  height: 32px;
-  padding: 0 var(--law-space-xl);
-  margin-bottom: -1px;
-  border-bottom: 2px solid transparent;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 30px;
+  padding: 0 var(--law-space-md);
+  border-radius: var(--law-radius-md);
   color: var(--law-text-secondary);
   font-size: var(--law-text-sm);
   line-height: var(--law-leading-sm);
+  text-align: left;
 }
 
 .tab:hover {
+  background: var(--law-button-ghost-hover);
   color: var(--law-text-primary);
 }
 
 .tabSelected {
-  border-bottom-color: var(--law-button-primary-fill);
+  background: var(--law-surface-selector);
   color: var(--law-text-primary);
   font-weight: var(--law-weight-medium);
 }
@@ -429,9 +653,10 @@
   margin-top: var(--law-space-xl);
 }
 
+/* 三个档位改成竖排：并排三列时每条说明只剩 ~150px 宽，中文会碎成七八行。 */
 .modeGroup {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--law-space-md);
   margin-top: var(--law-space-lg);
 }
@@ -466,6 +691,14 @@
   color: var(--law-text-secondary);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-sm);
+}
+
+/* 写侧沙箱说明（2026-10-15 起没有开关了，只剩说明），和权限分区的其它块同一条间距口径。 */
+.sandbox {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xs);
+  margin-top: var(--law-space-xl);
 }
 
 .grants {
@@ -608,4 +841,65 @@
 
 .ghost:hover {
   background: var(--law-button-ghost-hover);
+}
+
+/* ---- 窄窗口（<760px）----------------------------------------------------
+   导航折回顶部的横向滚动条：纵向列表在 592px 宽的对话框里要占掉三分之一内容宽度。 */
+@media (max-width: 760px) {
+  .dialog {
+    width: calc(100vw - 24px);
+    height: calc(100vh - 24px);
+  }
+
+  .header {
+    padding: var(--law-space-xl) var(--law-space-xl) var(--law-space-lg);
+  }
+
+  /* 窄窗里搜索框独占一行：和标题挤同一行时只剩不到 120px，连占位符都放不下。 */
+  .searchWrap {
+    order: 3;
+    flex-basis: 100%;
+    max-width: none;
+    margin-left: 0;
+  }
+
+  .body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  /* 折行而不是横向滚动：11 个分区横向滚动时后半段看不见，也没有滚动的视觉提示。 */
+  .nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: var(--law-space-xs) var(--law-space-sm);
+    overflow: visible;
+    padding: var(--law-space-md) var(--law-space-xl);
+    border-right: 0;
+    border-bottom: 1px solid var(--law-border-l1);
+  }
+
+  .navGroup {
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .navLabel {
+    display: none;
+  }
+
+  .tab {
+    width: auto;
+    padding: 0 var(--law-space-md);
+    white-space: nowrap;
+  }
+
+  .panes {
+    padding: var(--law-space-xl) 44px 0 var(--law-space-xl);
+  }
+
+  .modeGroup {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

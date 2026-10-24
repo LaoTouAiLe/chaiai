@@ -1,4 +1,4 @@
-"""HTTP 请求与响应形状（T29；契约 §6.2、§15.1）。
+﻿"""HTTP 请求与响应形状（T29；契约 §6.2、§15.1）。
 
 请求模型**只描述传输层**：`decision` / `edited_arguments` / `reason` 原样透传给应用服务，
 因为"什么算合法决定"的唯一裁定权在服务里（`APPROVAL_DECISIONS`）；本层只挡下**形状**问题
@@ -128,6 +128,20 @@ class SubmitMessageRequest(_Request):
 class ArrangeBranchRequest(_Request):
     title: str = Field(min_length=1, max_length=80)
     position: int = Field(ge=0)
+
+
+class CreateSideChatRequest(_Request):
+    """开侧聊（§21.7）：只传`从哪一轮开出`，上下文由服务端读。"""
+
+    #: 缺省表示取父会话的最新一轮。
+    origin_turn_id: str | None = Field(default=None, max_length=64)
+
+
+class ResolveTaskReviewRequest(_Request):
+    """人工核对结案（§17.1 唯一例外）。"""
+
+    #: `completed`（核对后视为已完成）或 `cancelled`（确认没做完 / 放弃）。
+    outcome: Literal["completed", "cancelled"]
 
 
 class ApprovalDecisionRequest(_Request):
@@ -335,6 +349,43 @@ class CapabilitiesRequest(_Request):
     """
 
     changes: dict[str, bool] = Field(min_length=1)
+
+
+# ---- MCP（2026-10-20；契约 §6.13）------------------------------------------
+
+
+class McpServerRequest(_Request):
+    """改一台 MCP Server 的开关或工具名单。
+
+    只带**本次动过的键**：省略 ``enabled_tools`` 表示"不改它"，显式传 ``null`` 表示"取消白名单"
+    （两条语义不同，所以服务层按"有没有这个键"判断，不靠默认值）。
+    """
+
+    enabled: bool | None = None
+    enabled_tools: list[str] | None = None
+    disabled_tools: list[str] | None = None
+
+
+class McpServerCreateRequest(_Request):
+    """新增一台 MCP Server（只支持 stdio）。
+
+    ``env`` 允许传——否则需要凭据的 server（cookie / token）根本配不出来。但它**只写不回读**：
+    响应里的 `McpView` 没有任何 env 字段，日志也不记（与模型连接密钥同一条口径）。
+    """
+
+    name: str = Field(min_length=1)
+    command: str = Field(min_length=1)
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+class McpServerSpecRequest(_Request):
+    """替换连接方式；省略字段保持原值，env 按键合并且不回读。"""
+
+    command: str | None = Field(default=None, min_length=1)
+    args: list[str] | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+    remove_env: list[str] = Field(default_factory=list)
 
 
 # ---- 技能（技能管理页，2026-10-16；§16.5）----------------------------------

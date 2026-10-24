@@ -8,8 +8,9 @@ import { WebSearchKeyField } from './WebSearchKeyField'
 import styles from './PreferenceSection.module.css'
 
 export type PreferenceGroup = 'general' | 'execution' | 'retrieval' | 'web_access' | 'attachments' | 'memory' | 'medium_term' | 'embedding' | 'advanced'
-type Field = { key: string; label: string; note: string; min?: number; max?: number; step?: number | 'any'; type?: 'text'; providers?: readonly string[]; required?: boolean; unlimited?: boolean; options?: readonly (readonly [string, string])[]; when?: readonly (readonly [string, string])[] }
-const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
+export type Field = { key: string; label: string; note: string; min?: number; max?: number; step?: number | 'any'; type?: 'text'; providers?: readonly string[]; required?: boolean; unlimited?: boolean; optional?: boolean; options?: readonly (readonly [string, string])[]; when?: readonly (readonly [string, string])[] }
+// 字段表对外导出（2026-10-23）：设置项搜索要读同一份清单做索引，避免另建一份索引后与表单漂移。
+export const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
   general: [
     { key: 'theme', label: '主题', note: '跟随系统会随系统外观切换。', options: [['light', '浅色'], ['dark', '深色'], ['system', '跟随系统']] },
     { key: 'font_size', label: '文字大小', note: '调整会话和界面的文字比例。', options: [['small', '小'], ['standard', '标准'], ['large', '大']] },
@@ -22,7 +23,7 @@ const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'max_retries_per_step', label: '重复失败反馈阈值', note: '超过后反馈给模型，不强制停止或转交用户。', min: 0 },
     { key: 'shell_timeout_seconds', label: '命令超时（秒）', note: '留空表示默认不限时；命令仍可取消或单独指定超时。', min: 1, unlimited: true },
     { key: 'shell_max_output_chars', label: '命令输出上限（字符）', note: '限制保留的命令输出长度。', min: 1 },
-    { key: 'safe_delete', label: '安全删除（移入回收站）', note: '删除文件时移进数据目录的 trash 子目录（冻结版默认是 %LOCALAPPDATA%\\chaiai\\trash），而不是立即抹掉，可以手动找回；移动失败会报错而不会退化成直接删除。只对文件工具生效，终端里的删除命令不受它管辖。' },
+    { key: 'safe_delete', label: '安全删除（移入系统回收站）', note: '删除文件时移进系统回收站（Windows 资源管理器里那个；macOS / Linux 也走各自的系统回收站），可以在那里「还原」到原位置，而不是立即抹掉。移不进回收站时会报错并保留文件，不会退化成直接删除。只对文件工具生效，终端里的删除命令不受它管辖。' },
   ],
   retrieval: [
     { key: 'enabled', label: '启用任务前自动检索', note: '控制工具任务开始前的自动代码检索；不影响模型主动调用 grep / glob。' },
@@ -35,6 +36,7 @@ const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'provider', label: '检索方式', note: '自动：配了 Tavily 密钥就用 API，否则用网页版检索。显式指定后，失败不会静默换后端。', options: [['auto', '自动'], ['tavily', 'Tavily API'], ['bing_html', 'Bing 网页版'], ['duckduckgo_html', 'DuckDuckGo 网页版']] },
     { key: 'max_results', label: '检索结果条数上限', note: '模型未指定条数时用它（1–20）。', min: 1, max: 20 },
     { key: 'max_chars', label: '单次取回正文上限（字符）', note: '超过即截断，并在结果里说明；模型可按 start_char 续读（500–100000）。', min: 500, max: 100000 },
+    { key: 'prefetch_pages', label: '结果预抓取条数', note: '搜索后自动抓取前几条的正文首段填进摘要，省掉模型再抓一次；0 = 关闭。每条最多 600 字、超时 3 秒，抓不到就退回原摘要（0–5）。', min: 0, max: 5, optional: true },
     { key: 'max_search_calls', label: '每轮检索次数上限', note: '留空表示不限。', min: 1, unlimited: true },
     { key: 'max_read_pages', label: '每轮读取地址数上限', note: '留空表示不限。', min: 1, unlimited: true },
     { key: 'max_reads_per_page', label: '单页面读取次数上限', note: '留空表示不限。', min: 1, unlimited: true },
@@ -77,8 +79,8 @@ const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'allow_plaintext_http', label: '允许非本机端点明文 HTTP', note: '只在你确认可信网络中的明文传输风险时勾选；HTTPS 与本机回环 HTTP 无需勾选。', providers: ['openai_compatible'] },
   ],
 }
-const TITLES: Record<PreferenceGroup, string> = { general: '通用与外观', execution: '任务执行', retrieval: '任务前自动代码检索', web_access: '联网检索', attachments: '图片与附件', memory: '长期记忆', medium_term: '中期记忆', embedding: '向量库与 Embedding', advanced: '高级配置概览' }
-const ADVANCED: Record<string, string> = {
+export const TITLES: Record<PreferenceGroup, string> = { general: '通用与外观', execution: '任务执行', retrieval: '任务前自动代码检索', web_access: '联网检索', attachments: '图片与附件', memory: '长期记忆', medium_term: '中期记忆', embedding: '向量库与 Embedding', advanced: '高级配置概览' }
+export const ADVANCED: Record<string, string> = {
   compression_enabled: '启用压缩', compression_trigger_ratio: '压缩触发比例',
   preserve_recent_turns: '保留最近轮数', preserve_recent_tool_steps: '保留最近工具步数',
   tool_step_budget_chars: '工具步字符预算', tool_result_keep_chars: '单条工具结果字符阈值',
@@ -104,13 +106,42 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
   const [probe, setProbe] = useState<{ version: number; result: MemoryProbeDto } | null>(null)
   const view = query.data
   if (!view) return <div role="status">{query.isError ? '设置读取失败。' : '正在读取设置…'} <button onClick={() => void query.refetch()}>重新读取</button></div>
-  if (group === 'advanced') return <section className={styles.section}>
-    <header className={styles.head}>
-      <h3 className={styles.title}>{TITLES[group]}</h3>
-      <p className={styles.note}>只读 · 当前进程启动时加载的配置。压缩与历史规则需要单独验证，暂不开放页面修改。</p>
-    </header>
-    <dl className={styles.overview}>{Object.entries(view.advanced).map(([key, value]) => <div key={key}><dt>{ADVANCED[key] ?? key}</dt><dd>{typeof value === 'boolean' ? (value ? '开启' : '关闭') : value}</dd></div>)}</dl>
-  </section>
+  if (group === 'advanced') {
+    // 导出的是"能交给别人看的现场"：只有本页可改的偏好与只读运行配置。
+    // 密钥本就不在偏好里，会话 / 工作区 / 记忆数据也不进来——所以不需要额外的过滤。
+    const exportPreferences = () => {
+      const payload = {
+        exported_at: new Date().toISOString(),
+        version: view.version,
+        values: view.values,
+        advanced: view.advanced,
+      }
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `chaiai-preferences-v${view.version}.json`
+      anchor.click()
+      URL.revokeObjectURL(url)
+    }
+    return <section className={styles.section}>
+      <header className={`${styles.head} ${styles.headRow}`}>
+        <div>
+          <h3 className={styles.title}>{TITLES[group]}</h3>
+          <p className={styles.note}>只读 · 当前进程启动时加载的配置。压缩与历史规则需要单独验证，暂不开放页面修改。</p>
+        </div>
+        <button
+          type="button"
+          className={styles.exportButton}
+          title="导出本页可改的偏好项与只读运行配置；不含密钥、会话与工作区数据"
+          onClick={exportPreferences}
+        >
+          导出为 JSON
+        </button>
+      </header>
+      <dl className={styles.overview}>{Object.entries(view.advanced).map(([key, value]) => <div key={key} id={`field-advanced-${key}`}><dt>{ADVANCED[key] ?? key}</dt><dd>{typeof value === 'boolean' ? (value ? '开启' : '关闭') : value}</dd></div>)}</dl>
+    </section>
+  }
   const fields = draft?.fields ?? fieldsFor(view, group)
   const change = (key: string, value: string | boolean) => {
     setDraft(current => {
@@ -170,6 +201,12 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
     finally { setOperation(null) }
   }
   const resources = view.resources
+  // 条件显示的字段按**当前草稿值**过滤（如对象存储那几项只在后端为 oss 时出现），
+  // 所以这个结果既用于渲染，也用于「恢复初始值」说明影响范围。
+  const visibleFields = FIELDS[group].filter(field =>
+    (!field.providers || field.providers.includes(String(fields.provider))) &&
+    (!field.when || field.when.some(([key, value]) => String(fields[key]) === value)),
+  )
   return <form className={styles.section} onSubmit={event => {
     event.preventDefault()
     if ((event.nativeEvent as SubmitEvent).submitter?.getAttribute('data-action') === 'test') void test()
@@ -194,7 +231,7 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
     </> : null}
     {!view.writable ? <p role="alert">设置库不可用，当前只读。</p> : null}
     <fieldset disabled={busy || !view.writable} className={styles.fields}>
-      {FIELDS[group].filter(field => (!field.providers || field.providers.includes(String(fields.provider))) && (!field.when || field.when.some(([key, value]) => String(fields[key]) === value))).map(field => <label key={field.key} className={styles.field}>
+      {visibleFields.map(field => <label key={field.key} id={`field-${group}-${field.key}`} className={`${styles.field} ${field.type === 'text' ? styles.fieldWide : ''}`}>
         <span className={styles.fieldText}>
           <strong>{field.label}</strong>
           <small>{field.note}</small>
@@ -207,7 +244,7 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
             <span className={styles.switchTrack} aria-hidden="true" />
           </span> : field.type === 'text' ?
             <input type="text" required={field.required && Boolean(fields.enabled)} aria-label={field.label} value={String(fields[field.key] ?? '')} onChange={event => change(field.key, event.target.value)} /> :
-            <input type="number" required={!field.unlimited} aria-label={field.label} placeholder={field.unlimited ? '不限' : undefined} min={field.min} max={field.max} step={field.step ?? 1} value={String(fields[field.key] ?? '')} onChange={event => change(field.key, event.target.value)} />}
+            <input type="number" required={!field.unlimited && !field.optional} aria-label={field.label} placeholder={field.unlimited ? '不限' : undefined} min={field.min} max={field.max} step={field.step ?? 1} value={String(fields[field.key] ?? '')} onChange={event => change(field.key, event.target.value)} />}
         </span>
       </label>)}
     </fieldset>
@@ -226,7 +263,9 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
       <div className={styles.actions}>
         <button type="submit" className={styles.primary} disabled={!draft || busy || !view.writable}>{operation === 'save' ? '正在保存…' : '保存'}</button>
         <button type="button" disabled={!draft || busy} onClick={() => { setDraft(null); setError(null); setSaved(false); setProbe(null) }}>取消修改</button>
-        <button type="button" disabled={busy || !view.writable} onClick={() => { setDraft({ base: view, fields: fieldsFor(view, group, true) }); setError(null); setSaved(false); setProbe(null) }}>恢复初始值</button>
+        {/* 只改草稿、不写库：误点后「取消修改」即可回到已保存值，所以不另加一步确认，
+            而是把影响范围写在 title 里。 */}
+        <button type="button" disabled={busy || !view.writable} title={`把本分区当前可见的 ${visibleFields.length} 项改回初始值；保存前可点「取消修改」还原`} onClick={() => { setDraft({ base: view, fields: fieldsFor(view, group, true) }); setError(null); setSaved(false); setProbe(null) }}>恢复初始值</button>
         {group === 'embedding' ? <button type="submit" data-action="test" disabled={busy || !view.writable}>{operation === 'test' ? '正在测试…' : '测试当前配置'}</button> : null}
       </div>
     </div>

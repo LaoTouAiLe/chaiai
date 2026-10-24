@@ -1,18 +1,188 @@
-/**
+﻿/**
  * Design tokens for the local Agent web UI.
  *
- * Values follow the frozen reference baseline
- * (`local-agent-web/docs/ui-reference/design-tokens.md`): colour, typography,
- * shadow and motion mirror the reference's visual scale, while radii and
- * spacing come from the measured values in that document's §7 because the
- * reference has no tokens for them.
+ * 规范：[docs/plans/UI_PAGE_IMPLEMENTATION.md](../../../../docs/plans/UI_PAGE_IMPLEMENTATION.md) §2。
  *
- * 浅色保持原始基线；设置页通过语义 token 切换深色和文字比例。
+ * 2026-10-22 V0 分层迁移，分三类处理，**不要把它们混为一谈**：
+ *
+ * 1. **新体系**（`--c-*` / `--fs-*` / `--sp-*` / `--r-*` / `--sh-*` / `--dur-*` / `--ease-*`）
+ *    ——本批新增，新代码只用这套。
+ * 2. **已切换的旧名**（`--law-*` 中颜色 / 边界 / 圆角 / 阴影）——以别名指向新体系，
+ *    深色模式只需覆盖 `--c-*`，别名自动跟随。
+ * 3. **未迁移的旧名**（字号、行高、间距、按钮、diff、调色板）——本批保持原值不动。
+ *    字号与间距留到 V2/V3：改名会让全站发生布局位移，必须与骨架调整同一批做。
+ *
+ * 配色原则：surface 与文字一律不透明实色。唯一允许的 alpha 是
+ * 遮罩 `--c-scrim`、阴影、以及叠在不透明底上的 hover 阴影色。
  */
 
 :root {
   --law-font-scale: 1;
-  /* ---- palette: neutral-bluish -------------------------------------- */
+
+  /* ===== 1. 新体系：surface ============================================ */
+  /* 三层中性底靠明度区分，不用边框制造层次。 */
+  --c-canvas: #ffffff;
+  --c-panel: #f7f8fa;
+  --c-raised: #ffffff;
+  --c-sunken: #f1f3f6;
+  /* hover / active 比 sunken 再深一档：在 panel(#f7f8fa) 上必须可见。
+     2026-10-22 截图复核后从 #eef0f4 / #e4e7ec 调深——原值在侧栏选中行上几乎看不出来。 */
+  --c-hover: #eaedf2;
+  --c-active: #dfe3ea;
+  /* 用户气泡：比 #edf3fe 略淡，但必须在白底上仍能分辨出发言方。 */
+  --c-bubble: #eef4ff;
+
+  /* 边界：一条默认 hairline + 一条强调 hairline */
+  --c-line: #e3e6eb;
+  --c-line-strong: #d2d7de;
+
+  /* 文字：四级。承载信息的只有前三档，off 只用于禁用与纯装饰。 */
+  --c-text-1: #14171c; /* 17.0:1 on #fff */
+  --c-text-2: #4a5058; /*  8.1:1 */
+  --c-text-3: #6b7280; /*  4.8:1 */
+  --c-text-off: #9ca3af; /*  2.8:1，禁止承载信息 */
+  --c-text-inverse: #ffffff;
+
+  /* 强调与语义（文字色均已按白底核算 ≥4.5:1） */
+  --c-accent: #2563eb;
+  --c-accent-soft: #eff4ff;
+  --c-success: #12805c;
+  --c-success-soft: #e9f7f1;
+  --c-warn: #b45309;
+  --c-warn-soft: #fdf5e9;
+  --c-danger: #c62828;
+  --c-danger-soft: #fdeeee;
+
+  /* 全站唯一允许的 surface 级 alpha */
+  --c-scrim: #0b0d1280;
+
+  /* ===== 1. 新体系：圆角 ============================================== */
+  /* 同一屏不超过 3 种。大圆角 + 边框是"软塌"观感的主要来源，故上限 10px。 */
+  --r-control: 6px;
+  --r-panel: 6px;
+  --r-overlay: 10px;
+  --r-pill: 999px;
+
+  /* ===== 1. 新体系：阴影 ============================================== */
+  --sh-overlay: 0 0 0 1px #0000000f, 0 8px 24px #1018281a, 0 2px 6px #1018280f;
+  --sh-menu: 0 0 0 1px #00000012, 0 4px 12px #10182814;
+
+  /* ===== 1. 新体系：字体与字号 ======================================== */
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI',
+    'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Helvetica Neue', Arial,
+    sans-serif;
+  --font-mono-code: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas,
+    'Microsoft YaHei Mono', 'Liberation Mono', Menlo, monospace;
+
+  --fs-caption: 11px;
+  --lh-caption: 16px;
+  --fs-meta: 12px;
+  --lh-meta: 18px;
+  --fs-body: 13px;
+  --lh-body: 20px;
+  --fs-ui: 14px;
+  --lh-ui: 20px;
+  --fs-chat: 14px;
+  --lh-chat: 21px;
+  --fs-title: 15px;
+  --lh-title: 22px;
+  --fs-heading: 18px;
+  --lh-heading: 26px;
+  --fs-display: 26px;
+  --lh-display: 34px;
+
+  /* ===== 1. 新体系：间距 ============================================== */
+  /* 4px 基准。旧 `--law-space-*` 不映射到这一套，见文件头第 3 类。 */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 20px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-10: 40px;
+  --sp-14: 56px;
+
+  /* ===== 1. 新体系：动效 ============================================== */
+  --dur-instant: 0ms;
+  --dur-hover-out: 100ms;
+  --dur-overlay: 150ms;
+  --dur-panel: 200ms;
+  --dur-approval: 220ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --ease-panel: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ===== 2. 已切换的旧名（颜色 / 边界 / 圆角 / 阴影） ================= */
+  /* surface */
+  --law-bg-base: var(--c-canvas);
+  --law-bg-layer-1: var(--c-canvas);
+  --law-bg-layer-2: var(--c-panel);
+  --law-bg-layer-3: var(--c-panel);
+  --law-bg-overlay: var(--c-panel);
+  --law-bg-skeleton: var(--c-sunken);
+  --law-bg-mask: var(--c-scrim);
+  --law-surface-sidebar: var(--c-panel);
+  --law-surface-menu: var(--c-raised);
+  --law-surface-bubble: var(--c-bubble);
+  --law-surface-code: var(--c-sunken);
+  --law-surface-inline-code: var(--c-sunken);
+  --law-surface-selector: var(--c-sunken);
+  --law-surface-sunken: var(--c-sunken);
+  /* `--law-surface-tip` 保持原值：提示条底色若改成纯白会消失在白底上。 */
+
+  /* 边界 */
+  --law-border-l1: var(--c-line);
+  --law-border-l2: var(--c-line);
+  --law-border-l3: var(--c-line-strong);
+  --law-border-l4: var(--c-line-strong);
+
+  /* 文字：caption 从 2.1:1 提到 4.8:1，这是本批感知最强的一处 */
+  --law-text-primary: var(--c-text-1);
+  --law-text-secondary: var(--c-text-2);
+  --law-text-tertiary: var(--c-text-3);
+  --law-text-caption: var(--c-text-3);
+  --law-text-dimmed: var(--c-text-off);
+  --law-text-inverse: var(--c-text-inverse);
+  --law-text-on-brand: var(--c-text-inverse);
+
+  /* 交互态：实色替代原来的 alpha 叠色 */
+  --law-hover: var(--c-hover);
+  --law-hover-solid: var(--c-hover);
+  --law-active: var(--c-active);
+  --law-active-accent: var(--c-active);
+  --law-hover-danger: var(--c-danger-soft);
+  --law-scrollbar: var(--c-line-strong);
+  --law-scrollbar-hover: var(--c-text-off);
+
+  /* 语义 */
+  --law-state-success: var(--c-success);
+  --law-state-success-subtle: var(--c-success-soft);
+  --law-state-warn: var(--c-warn);
+  --law-state-warn-label: var(--c-warn);
+  --law-state-warn-subtle: var(--c-warn-soft);
+  --law-state-error: var(--c-danger);
+  --law-state-info: var(--c-accent);
+  --law-state-info-subtle: var(--c-accent-soft);
+  --law-state-error-subtle: var(--c-danger-soft);
+
+  /* 圆角：7 档收敛到 3 档 + pill */
+  --law-radius-xs: var(--r-control);
+  --law-radius-sm: var(--r-panel);
+  --law-radius-md: var(--r-panel);
+  --law-radius-lg: var(--r-panel);
+  --law-radius-xl: var(--r-overlay);
+  --law-radius-2xl: var(--r-overlay);
+  --law-radius-3xl: var(--r-overlay);
+  --law-radius-pill: var(--r-pill);
+
+  /* 阴影：三级收敛到两级 */
+  --law-shadow-lv1: var(--sh-menu);
+  --law-shadow-lv2: var(--sh-menu);
+  --law-shadow-lv3: var(--sh-overlay);
+
+  /* ===== 3. 未迁移的旧名（保持原值，勿在此随手调整） ================== */
+
+  /* 调色板：仍被 button / diff / accent 直引，深色模式需要覆盖 */
   --law-blue-grey-00: #ffffff;
   --law-blue-grey-50: #f9fafb;
   --law-blue-grey-60: #f5f6f7;
@@ -32,7 +202,6 @@
   --law-blue-grey-950: #151517;
   --law-blue-grey-1000: #0f1115;
 
-  /* ---- palette: accents --------------------------------------------- */
   --law-accent-50: #edf3fe;
   --law-accent-100: #e4edfd;
   --law-accent-200: #d3e2ff;
@@ -50,48 +219,10 @@
   --law-amber-500: #f59e0b;
   --law-amber-600: #dd8629;
 
-  /* ---- surfaces ----------------------------------------------------- */
-  --law-bg-base: var(--law-blue-grey-00);
-  --law-bg-layer-1: var(--law-blue-grey-00);
-  --law-bg-layer-2: var(--law-blue-grey-00);
-  --law-bg-layer-3: var(--law-blue-grey-00);
-  --law-bg-overlay: var(--law-blue-grey-150);
-  --law-bg-skeleton: #0000000a;
-  --law-bg-mask: #0000003d;
-  --law-surface-sidebar: var(--law-blue-grey-50);
-  --law-surface-menu: var(--law-blue-grey-00);
-  --law-surface-bubble: var(--law-accent-50);
-  --law-surface-code: var(--law-blue-grey-50);
-  --law-surface-inline-code: var(--law-blue-grey-100);
-  --law-surface-selector: var(--law-blue-grey-60);
+  /* 提示条底色（见上：不能映射到纯白） */
   --law-surface-tip: var(--law-blue-grey-60);
-  --law-surface-sunken: var(--law-blue-grey-75);
 
-  /* ---- borders ------------------------------------------------------ */
-  --law-border-l1: #0000000a;
-  --law-border-l2: #0000001a;
-  --law-border-l3: #0000001f;
-  --law-border-l4: #00000029;
-
-  /* ---- text --------------------------------------------------------- */
-  --law-text-primary: var(--law-blue-grey-1000);
-  --law-text-secondary: var(--law-blue-grey-700);
-  --law-text-tertiary: var(--law-blue-grey-600);
-  --law-text-caption: var(--law-blue-grey-400);
-  --law-text-dimmed: var(--law-blue-grey-200);
-  --law-text-inverse: var(--law-blue-grey-00);
-  --law-text-on-brand: var(--law-blue-grey-00);
-
-  /* ---- interaction -------------------------------------------------- */
-  --law-hover: #2631480f;
-  --law-hover-solid: var(--law-blue-grey-75);
-  --law-active: #2631481a;
-  --law-active-accent: #26314824;
-  --law-hover-danger: #ec13130d;
-  --law-scrollbar: #e5e5e5;
-  --law-scrollbar-hover: #d4d4d4;
-
-  /* ---- buttons ------------------------------------------------------ */
+  /* 按钮：形态在 V2/V3 由 Button 原语接管，本批不改色 */
   --law-button-primary-fill: var(--law-blue-grey-1000);
   --law-button-primary-hover: var(--law-blue-grey-750);
   --law-button-primary-disabled: var(--law-blue-grey-100);
@@ -103,32 +234,23 @@
   --law-button-info-fill: var(--law-accent-500);
   --law-button-info-hover: var(--law-accent-400);
 
-  /* ---- state -------------------------------------------------------- */
-  --law-state-success: var(--law-green-500);
-  --law-state-success-subtle: var(--law-green-100);
-  --law-state-warn: var(--law-amber-500);
-  --law-state-warn-secondary: var(--law-amber-400);
-  --law-state-warn-label: var(--law-amber-600);
-  --law-state-warn-subtle: var(--law-amber-100);
-  --law-state-error: var(--law-red-600);
-  --law-state-error-secondary: var(--law-red-400);
-  --law-state-error-subtle: var(--law-red-50);
-  --law-state-info: var(--law-accent-500);
-  --law-state-info-subtle: var(--law-accent-100);
+  /* diff：2026-10-21 已按 Codex 口径对齐，不动 */
+  --law-diff-add-bg: #dafbe1;
+  --law-diff-del-bg: #ffebe9;
+  --law-diff-add-num-bg: #aceebb;
+  --law-diff-del-num-bg: #ffcecb;
+  --law-diff-add-text: #1a7f37;
+  --law-diff-del-text: #cf222e;
+  --law-diff-gutter: #6e7781;
+  --law-diff-num-text: #1f2328;
 
-  /* ---- diff --------------------------------------------------------- */
-  --law-diff-add-bg: var(--law-green-100);
-  --law-diff-add-text: #16794a;
-  --law-diff-del-bg: var(--law-red-100);
-  --law-diff-del-text: #a81919;
-  --law-diff-gutter: var(--law-blue-grey-400);
-
-  /* ---- typography --------------------------------------------------- */
+  /* 字体：`--law-font-mono` 供旧组件使用，值同步到新等宽栈 */
   --law-font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
     'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
   --law-font-mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono', Menlo, Courier,
     'PingFang SC', 'Microsoft YaHei';
 
+  /* 字号与行高：V3 与对话流重构同批迁移 */
   --law-text-xxs: calc(11px * var(--law-font-scale));
   --law-leading-xxs: calc(14px * var(--law-font-scale));
   --law-text-xs: calc(12px * var(--law-font-scale));
@@ -148,17 +270,7 @@
   --law-weight-semibold: 600;
   --law-weight-bold: 700;
 
-  /* ---- radii (measured, reference has no radius tokens) -------------- */
-  --law-radius-xs: 4px;
-  --law-radius-sm: 6px;
-  --law-radius-md: 8px;
-  --law-radius-lg: 12px;
-  --law-radius-xl: 16px;
-  --law-radius-2xl: 22px;
-  --law-radius-3xl: 24px;
-  --law-radius-pill: 999px;
-
-  /* ---- spacing ------------------------------------------------------ */
+  /* 间距：V2/V3 迁到 `--sp-*`。改这些值会让全站布局位移，必须与骨架同批。 */
   --law-space-xxs: 2px;
   --law-space-xs: 4px;
   --law-space-sm: 6px;
@@ -169,19 +281,17 @@
   --law-space-3xl: 24px;
   --law-space-4xl: 32px;
 
-  /* ---- layout (measured) -------------------------------------------- */
+  /* 布局：顶栏 63 → 56（2026-10-22 拍板，§12 决策 1） */
   --law-sidebar-width: 268px;
   --law-sidebar-width-collapsed: 56px;
-  --law-header-height: 63px;
-  --law-session-row-height: 34px;
-  --law-conversation-max-width: 760px;
+  --law-header-height: 56px;
+  /* 会话行高 34 → 28（2026-10-22）：对齐 hermes 侧栏行（26–28），一屏多看 3–4 条。 */
+  --law-session-row-height: 32px;
+  /* 对话列宽（2026-10-22）：760 → 960。760 在 1440 屏上两边各留 340px 空白，太窄；
+     1080 又显得散（正文与工具行拉得太开）。960 是两者折中，正文仍由 72ch 限制阅读宽度。 */
+  --law-conversation-max-width: 960px;
 
-  /* ---- elevation ---------------------------------------------------- */
-  --law-shadow-lv1: 0 2px 4px 0 #0000000d;
-  --law-shadow-lv2: 0 4px 12px 0 #00000005, 0 2px 8px 0 #0000000a;
-  --law-shadow-lv3: 0 0 1px 0 #0003, 0 0 4px 0 #00000005, 0 12px 32px 0 #00000014;
-
-  /* ---- motion ------------------------------------------------------- */
+  /* 动效：旧名保持原值；新代码用 `--dur-*` / `--ease-*` */
   --law-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --law-duration-fast: 0.1s;
   --law-duration-base: 0.2s;
@@ -190,8 +300,47 @@
 
 :root[data-font-size='small'] { --law-font-scale: .9; }
 :root[data-font-size='large'] { --law-font-scale: 1.125; }
+
+/**
+ * 深色：**只覆盖 `--c-*`**。
+ *
+ * 旧名（`--law-*`）已经是指向 `--c-*` 的别名，会在这里自动跟随，不要在下面重复写。
+ * 仍需单独覆盖的只有第 3 类未迁移项（调色板 / 按钮 / diff）。
+ */
 :root[data-theme='dark'] {
   color-scheme: dark;
+
+  --c-canvas: #111318;
+  /* 2026-10-22 深色截图复核：panel 与 canvas 明度差过小（#16181d vs #111318），三栏糊成一片，
+     panel 提亮到 #1a1d23、hairline 提到 #2e333c，让分区在深色下也能看出来。 */
+  --c-panel: #1a1d23;
+  --c-raised: #20242b;
+  --c-sunken: #0d0f13;
+  --c-hover: #262b34;
+  --c-active: #2f3540;
+  --c-bubble: #1e2a42;
+
+  --c-line: #2e333c;
+  --c-line-strong: #3b414c;
+
+  --c-text-1: #e9ecf1;
+  --c-text-2: #a8b0bc;
+  --c-text-3: #7c8695;
+  --c-text-off: #5a6270;
+  --c-text-inverse: #111318;
+
+  --c-accent: #6e9bff;
+  --c-accent-soft: #1a2438;
+  --c-success: #3dd68c;
+  --c-success-soft: #12271e;
+  --c-warn: #f0a742;
+  --c-warn-soft: #2b2112;
+  --c-danger: #ff6b6b;
+  --c-danger-soft: #2c1618;
+
+  --c-scrim: #000000a6;
+
+  /* 未迁移项仍需手动覆盖（它们不经过 --c-*） */
   --law-blue-grey-00: #181a1f;
   --law-blue-grey-50: #202228;
   --law-blue-grey-60: #25272e;
@@ -214,20 +363,15 @@
   --law-green-100: #213b2f;
   --law-amber-100: #403321;
   --law-amber-600: #f4c078;
-  --law-text-caption: #939aaa;
-  --law-bg-mask: #00000080;
-  --law-bg-skeleton: #ffffff12;
-  --law-border-l1: #ffffff12;
-  --law-border-l2: #ffffff26;
-  --law-border-l3: #ffffff33;
-  --law-border-l4: #ffffff40;
-  --law-hover: #ffffff0d;
-  --law-active: #ffffff1a;
-  --law-active-accent: #ffffff24;
-  --law-scrollbar: #464b58;
-  --law-scrollbar-hover: #616b7e;
+
+  --law-diff-add-bg: #213a2b;
+  --law-diff-del-bg: #4a221d;
+  --law-diff-add-num-bg: #1b4721;
+  --law-diff-del-num-bg: #5a1e1e;
   --law-diff-add-text: #85d9a9;
   --law-diff-del-text: #ff9fa6;
+  --law-diff-gutter: #8b949e;
+  --law-diff-num-text: #d1d5db;
 }
 :root[data-motion='reduced'] *,
 :root[data-motion='reduced'] *::before,

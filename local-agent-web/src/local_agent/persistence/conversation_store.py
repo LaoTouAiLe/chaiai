@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 
@@ -43,6 +44,29 @@ class ConversationStore:
         ).fetchall()
         return [Branch(str(row[0]), str(row[1]), row[2], row[3], row[4], int(row[5]),
                        bool(row[6])) for row in rows]
+
+    def turn_texts(self, session_ids: Sequence[str]) -> list[tuple[str, str, str, str | None]]:
+        """批量取**截断正文**（2026-10-22，§15.11.1）。
+
+        产物扫描要遍历几十个会话的全部轮次。逐会话调 :meth:`turns` 会把整份
+        `answer_text`（单条可达数十 KB）读进内存，实测首次扫描 44 秒。
+        这里一条 SQL，两列各截 2000 字符——抽图片/链接/路径完全够用。
+        """
+        ids = [session_id for session_id in session_ids]
+        if not ids:
+            return []
+        placeholders = ",".join("?" * len(ids))
+        rows = self._connection.execute(
+            "SELECT session_id, substr(question, 1, 2000), substr(answer_text, 1, 2000),"
+            f" submitted_at FROM conversation_turns WHERE session_id IN ({placeholders})"
+            " ORDER BY session_id, ordinal",
+            ids,
+        ).fetchall()
+        return [
+            (str(row[0]), str(row[1] or ""), str(row[2] or ""),
+             None if row[3] is None else str(row[3]))
+            for row in rows
+        ]
 
     def turns(self, session_id: str) -> list[ConversationTurn]:
         rows = self._connection.execute(

@@ -1,23 +1,20 @@
-.controls, .status {
+/* 只读的工作流状态投影（`WorkflowStatus`）。
+ *
+ * 2026-10-13：输入区的参数表单（`WorkflowControls`）已撤下，原来给它的 `.controls` / `.task` 规则
+ * 一并删除——留着死样式只会让人以为还有别的地方在用。
+ */
+.status {
   min-width: 0;
-  margin: 0;
+  margin: 8px 16px;
   padding: 8px 12px;
   border: 1px solid var(--law-border-l2);
   background: var(--law-bg-layer-1);
   border-radius: 8px;
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
-.controls label { display: flex; flex-direction: column; gap: 4px; margin: 4px 0; }
-.controls { max-height: 32vh; overflow-y: auto; }
-.controls input, .controls textarea, .controls select {
-  width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-  font: inherit;
-  color: var(--law-text-primary);
-  background: var(--law-bg-layer-1);
-  border: 1px solid var(--law-border-l2);
+
+.status p {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
 }
-.controls p, .status p { margin: 4px 0; overflow-wrap: anywhere; }
-.task { padding-top: 6px; }
-.status { margin: 8px 16px; overflow-wrap: anywhere; }

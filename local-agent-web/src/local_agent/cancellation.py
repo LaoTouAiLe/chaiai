@@ -33,7 +33,7 @@ class CancellationToken:
     读取方是执行图的线程。
     """
 
-    __slots__ = ("_cancelled", "_hooks", "_lock", "_reason")
+    __slots__ = ("__weakref__", "_cancelled", "_hooks", "_lock", "_reason")
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -74,6 +74,12 @@ class CancellationToken:
         """是否已被取消。"""
         with self._lock:
             return self._cancelled
+
+    def remove_cancel_hook(self, hook: CancelHook) -> None:
+        """调用已结束时解除其清理钩子，不让下一次取消访问已关闭的连接。"""
+        with self._lock:
+            if hook in self._hooks:
+                self._hooks.remove(hook)
 
     @property
     def reason(self) -> str | None:

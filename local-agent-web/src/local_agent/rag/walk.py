@@ -69,6 +69,8 @@ def _walk(directory: Path, *, rules: IgnoreRules) -> Iterator[Path]:
         if name.startswith("."):
             continue
         child = directory / name
+        if child.is_symlink() or bool(getattr(child, "is_junction", lambda: False)()):
+            continue  # 显式检索根可在外部；目录链接不能把本次检索隐式扩大到其他位置。
         if entry.is_dir(follow_symlinks=False):
             # 被 `.gitignore` 忽略的目录**整个剪掉**（同 git：父目录被排除后无法再包含其中的文件）。
             if name.casefold() in SKIPPED_DIRS or rules.ignores(child, is_dir=True):

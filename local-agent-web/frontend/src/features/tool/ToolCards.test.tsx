@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { toolsScenario } from '../../fixtures/scenarios'
-import type { ToolCardView } from '../../fixtures/types'
+import type { ToolCardView, ToolRowView } from '../../fixtures/types'
 import { ToolCard } from './ToolCards'
 import { ToolRow } from './ToolRow'
 
@@ -16,6 +16,15 @@ function cardOf<K extends ToolCardView['kind']>(kind: K): Extract<ToolCardView, 
   throw new Error(`missing ${kind} card in the tools fixture`)
 }
 
+function rowOf(index = 0): ToolRowView {
+  const rows = toolsScenario.messages.flatMap((message) =>
+    message.kind === 'tool' ? [message.tool] : [],
+  )
+  const row = rows[index]
+  if (!row) throw new Error(`missing tool row #${String(index)} in the tools fixture`)
+  return row
+}
+
 describe('ToolCard', () => {
   it('covers every card shape the conversation must render', () => {
     expect(cards().map((card) => card.kind)).toEqual([
@@ -26,12 +35,35 @@ describe('ToolCard', () => {
       'todo',
       'generic',
       'terminal',
+      'delegation',
     ])
   })
 
   it('covers both a failed and a successful command', () => {
     const exits = cards().flatMap((card) => (card.kind === 'terminal' ? [card.exitCode] : []))
     expect(exits).toEqual([1, 0])
+  })
+
+  /**
+   * 自主委派（§18.7）：**每个子 Agent 一行**，带状态、证据条数、工具调用次数与失败原因。
+   *
+   * 这三项是照参照实现的任务面板来的：用户要判断"哪一路查到了、花了多少、哪一路没成"，
+   * 而这些必须是能直接渲染的字段，不是让人去读工具返回的那段 JSON。
+   */
+  it('lists each delegated child with its status, counts and failure reason', () => {
+    render(<ToolCard card={cardOf('delegation')} />)
+
+    expect(screen.getByText('委派只读调查')).toBeInTheDocument()
+    expect(screen.getByText('1/2 个子任务已完成')).toBeInTheDocument()
+    expect(screen.getByText('docs')).toBeInTheDocument()
+    expect(screen.getByText('已完成 · 证据 6 · 工具 4 次')).toBeInTheDocument()
+    // 未完成的那一路必须说明原因：只显示"未完成"用户没法判断要不要重派。
+    expect(screen.getByText('未完成 · 子任务超时')).toBeInTheDocument()
+    // **不摆"预留 token"**（2026-10-13 裁定）：那是切出来的上限、每路几乎一样，摆在这里会被读成
+    // "这一路花了多少"。这条断言就是那道边界，别让它悄悄回来。
+    expect(screen.queryByText(/预留/)).not.toBeInTheDocument()
+    // 核对过的原文摆在同一张卡里（路径 + 行号，用户据此核对）。
+    expect(screen.getByText(/docs\/cancel\.md:1/)).toBeInTheDocument()
   })
 
   it('reads a window with its own line numbers and the file total', () => {
@@ -265,5 +297,22 @@ describe('ToolRow', () => {
     expect(screen.getAllByText('notes/demo.txt')).toHaveLength(2)
     expect(screen.getByRole('figure')).toBeInTheDocument()
     expect(screen.queryByText('结果详情')).not.toBeInTheDocument()
+  })
+
+  it('names the verification result in the user’s terms, never by our internal grade', () => {
+    // 2026-10-15：这一行曾写「· 已机械校验 / · 未通过机械校验」——`verified` 确实是反思层用代码
+    // 核对出来的事实，但"机械校验"是内部评级名，用户要判断的是"这个结论能不能当依据"。
+    const evidence = { evidenceType: 'file_hash', summary: '文件哈希与预期一致', verified: true }
+    const { rerender } = render(<ToolRow tool={{ ...rowOf(), expanded: true, evidence }} />)
+    expect(screen.getByText(/已核对/)).toBeInTheDocument()
+    expect(screen.queryByText(/机械/)).not.toBeInTheDocument()
+
+    rerender(
+      <ToolRow tool={{ ...rowOf(), expanded: true, evidence: { ...evidence, verified: false } }} />,
+    )
+    expect(screen.getByText(/未核对通过/)).toBeInTheDocument()
+    expect(screen.queryByText(/机械/)).not.toBeInTheDocument()
+    // 事实不能为了去术语被删掉：核对依据本身仍要在（用户据此核对结果）。
+    expect(screen.getAllByText(/文件哈希与预期一致/).length).toBeGreaterThan(0)
   })
 })

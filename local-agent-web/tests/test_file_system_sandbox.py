@@ -223,24 +223,21 @@ def test_retargeted_junction_is_rejected_before_publication(tmp_path, policy, mo
         link.rmdir()
 
 def test_safe_delete_moves_the_target_into_the_trash(tmp_path: Path, app_config: AppConfig) -> None:
-    """安全删除（2026-10-20）：开关打开时删文件是**移进回收站**，不是抹掉。
+    """安全删除：开关打开时删文件是**移进系统回收站**，不是抹掉。
 
-    回收站根显式指向临时目录：默认根是真实数据目录，测试不该往用户目录丢东西。
+    这条会真的往本机回收站丢一个临时文件——那正是被测行为本身，不是测试的副作用。
     """
     config = app_config.model_copy(update={
         "security": app_config.security.model_copy(update={"safe_delete": True}),
     })
     policy = SecurityPolicy.from_config(config, workspace_root=tmp_path, environ={})
-    policy.trash_root = tmp_path / "trash"
     target = tmp_path / "note.txt"
     target.write_text("keep me", encoding="utf-8")
 
     result = delete_file_target("note.txt", policy=policy)
 
     assert result.trashed is True
-    assert result.trash_path is not None
     assert not target.exists(), "原位置不该还留着"
-    assert Path(result.trash_path).read_text(encoding="utf-8") == "keep me"
 
 
 def test_safe_delete_off_keeps_the_old_unlink_behaviour(tmp_path: Path, app_config: AppConfig) -> None:
@@ -251,5 +248,5 @@ def test_safe_delete_off_keeps_the_old_unlink_behaviour(tmp_path: Path, app_conf
 
     result = delete_file_target("note.txt", policy=policy)
 
-    assert result.trashed is False and result.trash_path is None
+    assert result.trashed is False
     assert not target.exists()

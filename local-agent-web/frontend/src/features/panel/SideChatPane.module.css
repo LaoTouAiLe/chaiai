@@ -1,0 +1,155 @@
+/* 侧边对话（§21.7）：照主对话的语言来——用户靠右气泡、助手正文、输入框随消息 */
+
+.wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.messages {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+/* 用户消息：与 `Conversation.module.css` 的 `.userBubble` 同一套 token */
+.userRow {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.userBubble {
+  max-width: 84%;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-panel);
+  background: var(--c-bubble);
+  color: var(--c-text-1);
+  font-size: var(--fs-chat);
+  line-height: var(--lh-chat);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.assistantRow {
+  min-width: 0;
+  color: var(--c-text-1);
+  font-size: var(--fs-chat);
+  line-height: var(--lh-chat);
+}
+
+.running {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+.composer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-top: 1px solid var(--c-line);
+  background: var(--c-canvas);
+}
+
+.input {
+  flex: 1 1 auto;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-panel);
+  background: var(--c-surface);
+  color: var(--c-text-1);
+  font-family: inherit;
+  font-size: var(--fs-chat);
+  line-height: var(--lh-chat);
+  resize: none;
+}
+
+.input::placeholder {
+  color: var(--c-text-off);
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--c-accent);
+}
+
+/* 空态：一句话说清它是什么，别写"已带入上下文"那种用户没要求的承诺 */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  height: 100%;
+  padding: var(--sp-5) var(--sp-4);
+  text-align: center;
+}
+
+.emptyTitle {
+  margin: 0;
+  color: var(--c-text-1);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  line-height: var(--lh-body);
+}
+
+.emptyHint {
+  max-width: 240px;
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+/* ---- 对齐主对话（2026-10-23）-----------------------------------------
+   主对话是「外壳带边框 + 输入框透明」（Composer.module.css 的 .input 是 border: 0），
+   侧聊原来是「输入框自己带边框」，所以两边看着是两套东西。 */
+.composer {
+  margin: var(--sp-3);
+  padding: var(--sp-2);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-panel);
+  background: var(--c-surface);
+  align-items: flex-end;
+}
+
+.composer:focus-within {
+  border-color: var(--c-accent);
+}
+
+.input {
+  min-height: 48px;
+  padding: var(--sp-2);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  font-size: var(--fs-chat);
+  line-height: var(--lh-body);
+}
+
+.input:focus {
+  outline: none;
+  border: 0;
+}
+
+/* 用户气泡宽度与主对话一致（那边是 76%） */
+.userBubble {
+  max-width: 76%;
+}
+
+/* `Conversation` 自己带滚动容器（2026-10-23）：外层要让出高度给它，
+   否则复用它之后消息区会塌成 0 高。 */
+.wrap > :first-child {
+  flex: 1 1 auto;
+  min-height: 0;
+}

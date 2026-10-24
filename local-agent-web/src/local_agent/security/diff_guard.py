@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal, cast
 
-from local_agent.exceptions import SecurityError
+from local_agent.exceptions import FileOperationError
 
 DEFAULT_CONTEXT_LINES = 3
 
@@ -87,6 +87,23 @@ def build_unified_diff(
     return text.replace("\r\n", "\n")
 
 
+def count_diff_lines(diff_text: str) -> tuple[int, int]:
+    """从 unified diff 文本数出 ``(新增行数, 删除行数)``。
+
+    文件头（``---`` / ``+++``）与 hunk 头（``@@``）不是内容行，不能计入——
+    变更面板上显示的 ``+N −M`` 必须与实际改动一致，否则用户会拿它核对行数。
+    """
+    additions = deletions = 0
+    for raw in diff_text.splitlines():
+        if raw.startswith(("+++", "---", "@@")):
+            continue
+        if raw.startswith("+"):
+            additions += 1
+        elif raw.startswith("-"):
+            deletions += 1
+    return additions, deletions
+
+
 def count_changed_lines(old_text: str, new_text: str) -> int:
     """变更行数 = 新增行数 + 删除行数（不含上下文行）。
 
@@ -115,20 +132,20 @@ def edit_input_mode(old_text: object, new_text: object, patch: object) -> str:
     函数，避免两处各写一套互斥规则而分叉。非字符串（模型传了数字等）按"未提供"处理。
 
     Raises:
-        SecurityError: 两种模式同时给出，或都没有可执行内容。
+        FileOperationError: 两种模式同时给出，或都没有可执行内容。
     """
     old = old_text if isinstance(old_text, str) else ""
     new = new_text if isinstance(new_text, str) else ""
     raw_patch = patch if isinstance(patch, str) else ""
     if raw_patch.strip():
         if old or new:
-            raise SecurityError(
+            raise FileOperationError(
                 "edit_file 的 patch 模式与 old_text/new_text 不能同时使用："
                 "请只用 patch（unified diff），或改用精确串替换"
             )
         return "patch"
     if not old or not new:
-        raise SecurityError(
+        raise FileOperationError(
             "edit_file 需要提供 old_text 与 new_text（精确串替换，默认模式），"
             "或提供 patch（unified diff）"
         )
@@ -192,14 +209,14 @@ def parse_patch(patch: str) -> PatchPlan:
     一致性在 :func:`apply_patch` 里校验。
 
     Raises:
-        SecurityError: 空 patch、格式不受支持、计数不符、hunk 乱序或重叠。
+        FileOperationError: 空 patch、格式不受支持、计数不符、hunk 乱序或重叠。
     """
     if len(patch) > MAX_PATCH_CHARS:
-        raise SecurityError(
+        raise FileOperationError(
             f"patch 过长（{len(patch)} 字符，上限 {MAX_PATCH_CHARS}）：请缩小改动范围后重试"
         )
     if not patch.strip():
-        raise SecurityError(
+        raise FileOperationError(
             "patch 为空：请提供 unified diff，或改用 old_text/new_text 精确串替换"
         )
 
@@ -219,11 +236,11 @@ def parse_patch(patch: str) -> PatchPlan:
             index += 1
             continue
         if any(line.startswith(prefix) for prefix in _UNSUPPORTED_HEADERS):
-            raise SecurityError(
+            raise FileOperationError(
                 f"不支持的 diff 头（只接受标准 hunk 头）：{line.strip()[:60]}；"
                 "Git 扩展 diff 头与二进制差异不在支持范围内（架构 §6.3）"
             )
-        raise SecurityError(
+        raise FileOperationError(
             "不是有效的 unified diff：文件头之后应当是 @@ 开头的 hunk 头，"
             f"实际是 {line.strip()[:60]!r}"
         )
@@ -234,11 +251,11 @@ def parse_patch(patch: str) -> PatchPlan:
         header = lines[index]
         match = _HUNK_HEADER.match(header)
         if match is None:
-            raise SecurityError(
+            raise FileOperationError(
                 f"hunk 头格式非法：{header.strip()[:80]!r}（应为 @@ -l[,s] +l[,s] @@）"
             )
         if len(hunks) >= MAX_PATCH_HUNKS:
-            raise SecurityError(f"hunk 数超过上限 {MAX_PATCH_HUNKS}，已拒绝")
+            raise FileOperationError(f"hunk 数超过上限 {MAX_PATCH_HUNKS}，已拒绝")
         old_start = int(match.group(1))
         old_count = _count(match.group(2))
         new_start = int(match.group(3))
@@ -249,13 +266,13 @@ def parse_patch(patch: str) -> PatchPlan:
         while index < total and not lines[index].startswith("@@"):
             raw = lines[index]
             if raw.startswith("\\"):
-                raise SecurityError(
+                raise FileOperationError(
                     "patch 含 '\\ No newline at end of file' 标记："
                     "本项目不支持无末尾换行的写回（架构 §6.3）"
                 )
             mark = raw[:1]
             if mark not in _MARKS:
-                raise SecurityError(
+                raise FileOperationError(
                     "hunk 体内出现无前缀行（空上下文行也必须以单个空格开头，不要去掉行首空格）："
                     f"{raw[:60]!r}"
                 )
@@ -265,7 +282,7 @@ def parse_patch(patch: str) -> PatchPlan:
         actual_old = sum(1 for item in body if item.mark != "+")
         actual_new = sum(1 for item in body if item.mark != "-")
         if actual_old != old_count or actual_new != new_count:
-            raise SecurityError(
+            raise FileOperationError(
                 f"hunk 计数与内容不符（声明 -{old_count}/+{new_count}，"
                 f"实际 -{actual_old}/+{actual_new}）：{header.strip()[:60]!r}"
             )
@@ -280,14 +297,14 @@ def parse_patch(patch: str) -> PatchPlan:
         )
 
     if not hunks:
-        raise SecurityError("patch 里没有任何 hunk：空 Patch 不能应用")
+        raise FileOperationError("patch 里没有任何 hunk：空 Patch 不能应用")
 
     # 3) 顺序与重叠：hunk 必须按旧行号升序且互不重叠。
     previous_end = 0
     for position, hunk in enumerate(hunks):
         start = hunk.insert_index
         if start < 0 or (position > 0 and start < previous_end):
-            raise SecurityError(
+            raise FileOperationError(
                 f"hunk 顺序或位置非法（乱序/重叠/越界）：@@ -{hunk.old_start},{hunk.old_count} @@"
             )
         previous_end = start + hunk.old_count
@@ -305,16 +322,16 @@ def apply_patch(original: str, plan: PatchPlan, *, file_name: str) -> str:
     - 新增行一律以换行结束（patch 的"\\ No newline"标记本项目不支持，已在上一步拒绝）。
 
     Raises:
-        SecurityError: 文件头不一致、定位越界、上下文不匹配、应用后内容未变化。
+        FileOperationError: 文件头不一致、定位越界、上下文不匹配、应用后内容未变化。
     """
     for name in plan.header_names:
         basename = _header_basename(name)
         if basename in _NULL_TARGETS:
-            raise SecurityError(
+            raise FileOperationError(
                 "patch 的文件头是 /dev/null（新建或删除文件）：edit_file 只修改已有文件"
             )
         if basename != file_name:
-            raise SecurityError(
+            raise FileOperationError(
                 f"patch 的文件头指向 {basename}，与目标文件 {file_name} 不一致：已拒绝应用"
             )
 
@@ -327,7 +344,7 @@ def apply_patch(original: str, plan: PatchPlan, *, file_name: str) -> str:
         index = hunk.insert_index + offset
         end = index + hunk.old_count
         if index < 0 or end > len(result):
-            raise SecurityError(
+            raise FileOperationError(
                 f"patch 定位越界（@@ -{hunk.old_start},{hunk.old_count} @@）："
                 f"目标文件当前只有 {len(result)} 行，patch 与当前文件不匹配"
             )
@@ -338,7 +355,7 @@ def apply_patch(original: str, plan: PatchPlan, *, file_name: str) -> str:
                 continue
             actual = result[cursor][0] if cursor < len(result) else "<文件结束>"
             if cursor >= len(result) or actual != item.text:
-                raise SecurityError(
+                raise FileOperationError(
                     f"patch 上下文不匹配（第 {cursor + 1} 行）：期望 {item.text!r}，"
                     f"实际 {actual!r}；文件已被改动或 patch 针对的是另一个版本，"
                     "请重新读取文件后再生成 patch"
@@ -366,7 +383,7 @@ def apply_patch(original: str, plan: PatchPlan, *, file_name: str) -> str:
 
     updated = _join_lines(result)
     if updated == original:
-        raise SecurityError("patch 应用后内容没有变化，已拒绝写入")
+        raise FileOperationError("patch 应用后内容没有变化，已拒绝写入")
     return updated
 
 

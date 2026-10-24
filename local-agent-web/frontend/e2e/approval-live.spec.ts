@@ -27,9 +27,14 @@ const REJECTED_REPLY = '该动作已被你拒绝，我不会执行，也不会�
 
 /** 新建会话并提交一句话；返回本次会话的输入区 locator。 */
 async function submit(page: import('@playwright/test').Page, text: string) {
+  const created = page.waitForResponse((response) =>
+    response.url().endsWith('/api/sessions') && response.request().method() === 'POST')
   await page.getByRole('button', { name: '新建会话' }).click()
+  expect((await created).ok()).toBe(true)
+  await expect(page.getByRole('log', { name: '对话' })).toContainText('在工作区里动手做事')
   const input = page.getByPlaceholder('给智能体发消息')
   await input.fill(text)
+  await expect(input).toHaveValue(text)
   await page.getByRole('button', { name: '发送消息' }).click()
   return input
 }
@@ -62,6 +67,14 @@ test('批准一次大范围编辑：卡片接管输入区，刷新不丢，批�
   await expect(card).toContainText('需要人工审批')
   await expect(card).toContainText('查看操作参数')
   await expect(input).toHaveCount(0)
+
+  // 待审批时切到另一会话，再回来仍必须确认；切换不能隐式批准或吞掉审批。
+  await page.getByRole('button', { name: '新建会话' }).click()
+  await expect(page.getByPlaceholder('给智能体发消息')).toBeVisible()
+  await page.getByPlaceholder('给智能体发消息').fill('另一会话的草稿')
+  await page.getByRole('navigation', { name: '会话' }).getByRole('button', { name: /^等待审批 T32_APPROVE / }).click()
+  await expect(card.getByText('等待审批', { exact: true })).toBeVisible()
+  await expect(page.getByPlaceholder('给智能体发消息')).toHaveCount(0)
 
   // 2) 刷新恢复：挂起审批来自服务端检查点，不靠浏览器里的本地状态。
   await page.reload()

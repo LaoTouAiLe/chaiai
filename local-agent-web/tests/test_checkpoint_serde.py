@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from conftest import build_legacy_graph
 from langgraph.checkpoint.serde.event_hooks import register_serde_event_listener
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
@@ -221,6 +222,7 @@ def _exercise(
         reply="好的",
         tool_calls=[{"name": "delete_file", "args": {"path": "note.txt"}, "id": "call-2"}],
     )
+    app_config.security.require_approval.delete_file = True
     approval_context = _context(workspace, approval_model, app_config)
     pending_graph = builder.build_chat_graph(checkpointer(database))
     pending = pending_graph.invoke(
@@ -238,6 +240,15 @@ def _exercise(
         context=approval_context,
     )
     assert (workspace / "note.txt").is_file()
+
+    # ⑤ 旧检查点仍含 EvidenceReference；用兼容图真实生成并重读，不能因新循环不再生成它就删白名单。
+    legacy_model = model_factory(decision="tool", tool_calls=[{
+        "name": "read_file", "args": {"path": "note.txt"}, "id": "legacy-read",
+    }])
+    legacy_context = _context(workspace, legacy_model, app_config)
+    legacy_graph = build_legacy_graph(checkpointer(database))
+    for text in ("旧协议读取 note.txt", "再次读取旧检查点"):
+        legacy_graph.invoke({"user_input": text}, config=_config("legacy"), context=legacy_context)
 
 
 def _default_checkpointer(database: Path) -> SqliteSaver:

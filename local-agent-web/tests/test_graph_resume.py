@@ -105,12 +105,17 @@ def _config(thread_id: str) -> dict[str, dict[str, str]]:
     return {"configurable": {"thread_id": thread_id}}
 
 
-def _context_for(workspace: Path, model: object, app_config: AppConfig) -> RuntimeContext:
+def _context_for(workspace: Path, model: object, app_config: AppConfig, *, external_policy=None) -> RuntimeContext:
+    # 这组恢复用例显式启用可选文件审批；产品默认免审批由 test_autonomy_policy 覆盖。
+    app_config.security.require_approval.delete_file = True
+    app_config.security.require_approval.overwrite_existing_file = True
+    app_config.security.require_approval.large_batch_edit = True
     return builder.build_runtime_context(
         app_config=app_config,
         model_adapter=model,  # type: ignore[arg-type]
         workspace_root=workspace,
         current_cwd=workspace,
+        external_policy=external_policy,
     )
 
 
@@ -234,20 +239,25 @@ def test_delete_target_summary_stops_scanning_at_the_limit(
 
 
 def _external_config(app_config: AppConfig) -> AppConfig:
-    """把工作区外路径档位设成 ``allow`` 的配置（T14C/T38 外部路径用例用）。"""
+    """把权限档位设成「完全放行」的配置（T14C/T38 外部路径用例用）。"""
     data = app_config.model_dump()
-    data["workspace"]["external_paths"] = {"mode": "allow"}
+    data["workspace"]["external_paths"] = {"mode": "danger-full-access"}
     return AppConfig.model_validate(data)
 
 
 def test_external_overwrite_requires_approval_then_executes(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
-    """T38：``allow`` 档下"覆盖已有文件"仍必须人工审批，批准后按同一个规范化目标执行。
+    """T38：「自定义」档下**已授权读写**的外部目标上，覆盖已有文件仍必须人工审批，批准后按同一个
+    规范化目标执行。
 
-    写入一个**新建**的外部文件在读写档下是常规操作（不再逐次询问）；这里钉死的是四类
-    硬约束之一——覆盖已有内容在任何档位都必须人工批准（架构 §1.5）。
+    写入一个**新建**的外部文件在这种授权下是常规操作（不再逐次询问）；这里钉死的是四类硬约束之一
+    ——覆盖已有内容在任何档位都必须人工批准（架构 §1.5）。
+
+    2026-10-14 起"未逐条授权的外部目标"是**硬拒绝**（「放行」档也只放开读），不再进审批——所以
+    这条用例改用显式读写授权来构造"能写、但覆盖仍要批准"的场景。
     """
+    from local_agent.security.path_guard import ExternalPathPolicy, normalize_grant_path
     workspace = tmp_path / "ws"
     workspace.mkdir()
     outside = tmp_path / "outside"
@@ -270,7 +280,14 @@ def test_external_overwrite_requires_approval_then_executes(
             }
         ],
     )
-    context = _context_for(workspace, model, _external_config(app_config))
+    context = _context_for(
+        workspace,
+        model,
+        app_config,
+        external_policy=ExternalPathPolicy(
+            mode="workspace-write", grants={normalize_grant_path(outside): "read_write"}
+        ),
+    )
 
     first = graph.invoke(
         {"user_input": "覆盖工作区外的文件", "thread_id": THREAD},
@@ -337,7 +354,7 @@ def test_external_delete_of_protected_target_is_hard_rejected(
     assert results and "受保护目标" in str(results[0])
 
 
-def test_external_shell_cwd_requires_approval(
+def test_external_shell_cwd_needs_no_approval(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     """T14C：工作区外的 ``run_shell.cwd`` 必须人工审批（图级回归）。
@@ -368,17 +385,9 @@ def test_external_shell_cwd_requires_approval(
         context=context,
     )
 
-    assert first["pending_approval"]["tool_name"] == "run_shell"
-    assert "工作区外" in first["pending_approval"]["impact_summary"]
-
-    rejected = graph.invoke(
-        Command(resume={"decision": "reject", "reason": "不在外部目录跑"}),
-        config=_config(THREAD),
-        context=context,
-    )
-
-    assert [item["decision"] for item in rejected["approval_history"]] == ["reject"]
-    assert not rejected.get("tool_results")  # 拒绝后不执行
+    assert first.get("pending_approval") is None
+    result = next(record for record in first["tool_results"] if record.get("tool_name") == "run_shell")
+    assert result["status"] == "ok" and "Python" in result["output_preview"]
 
 
 def _unanswered_tool_calls(messages: list[AnyMessage]) -> list[str]:
@@ -395,6 +404,54 @@ def _unanswered_tool_calls(messages: list[AnyMessage]) -> list[str]:
         for call in (message.tool_calls or [])
         if str(call["id"]) not in answered
     ]
+
+
+def test_rejection_closes_the_whole_tool_batch_and_the_model_explains_it(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig,
+) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    target = workspace / "keep.txt"
+    target.write_text("keep", encoding="utf-8")
+    reply = "没有删除文件，原因是你希望保留它。我可以继续说明已有信息。"
+    model = model_factory(decision="tool", reply=reply, tool_calls=[
+        {"name": "delete_file", "args": {"path": "keep.txt"}, "id": "delete"},
+        {"name": "list_dir", "args": {"path": "."}, "id": "list"},
+    ])
+    graph = builder.build_chat_graph(checkpoint.open_checkpointer(_database(tmp_path)))
+    context = _context_for(workspace, model, app_config)
+    graph.invoke({"user_input": "先删除再列目录", "thread_id": THREAD},
+                 config=_config(THREAD), context=context)
+    result = graph.invoke(Command(resume={"decision": "reject", "reason": "保留文件，用已有信息回答"}),
+                          config=_config(THREAD), context=context)
+    assert target.read_text(encoding="utf-8") == "keep"
+    assert _unanswered_tool_calls(result["messages"]) == []
+    assert {item["tool_call_id"]: item["status"] for item in result["tool_results"]} == {
+        "delete": "denied", "list": "denied",
+    }
+    assert result["final_response"] == reply
+    assert result["task_status"] == "blocked"
+    assert any("保留文件，用已有信息回答" in prompt and "list_dir 已取消且未执行" in prompt
+               for prompt in model.seen_prompts)
+    assert graph.get_state(_config(THREAD)).next == ()
+
+
+def test_rejection_still_has_an_answer_when_the_explanation_model_fails(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, monkeypatch,
+) -> None:
+    graph, _, target, context, _ = _delete_flow(tmp_path, model_factory, app_config)
+
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("explanation unavailable")
+
+    monkeypatch.setattr(nodes, "stream_answer", fail)
+    result = graph.invoke(Command(resume={"decision": "reject", "reason": "先保留"}),
+                          config=_config(THREAD), context=context)
+    assert target.exists()
+    assert result["final_response"]
+    assert "用户拒绝执行 delete_file" in result["final_response"]
+    assert result["task_status"] == "blocked"
+    assert any("生成降级" in event["message"] for event in result["error_events"])
 
 
 def _delete_flow(
@@ -452,7 +509,8 @@ def test_delete_rejection_keeps_file_and_stops(
 
     assert target.is_file()
     assert [item["decision"] for item in result["approval_history"]] == ["reject"]
-    assert result["final_response"] == nodes.REJECTED_REPLY
+    assert result["final_response"] == "好的"  # 来自模型；拒绝后不再只返回固定模板
+    assert any("先别删" in prompt for prompt in context.model_adapter.seen_prompts)
     assert graph.get_state(_config(THREAD)).next == ()  # 拒绝后不自动重试
     # 回归（T37 真实验收实证，2026-09-29）：被拒的调用也必须留下 ToolMessage 应答。
     # 缺了它，历史里就留下"有 tool_calls 却没有结果"的助手消息，下一轮原样发给
@@ -636,7 +694,7 @@ def test_edit_never_executes_the_edited_arguments(
 
     assert outside.is_file()  # 工作区外目标一字未动
     assert folder.is_dir()  # 原目标也没被"顺手"执行
-    assert not result.get("tool_results")
+    assert not [r for r in result.get("tool_results", []) if r.get("tool_name") != "task_control"]
     assert not result.get("__interrupt__")
 
 
@@ -649,8 +707,10 @@ def _large_edit_flow(
 ) -> tuple[Path, builder.ChatGraph, RuntimeContext]:
     """准备一个“等待审批的大范围编辑”。
 
-    250 行新增远超 ``security.large_edit.max_changed_lines_without_approval``（示例配置 200）。
+    阈值调成 0 来强制进入这条路：判定依据是"本轮改过几个**文件**"（2026-10-15 起），
+    与单次改多大无关。
     """
+    app_config.security.large_edit.max_files_without_approval = 0
     workspace = tmp_path / "ws"
     workspace.mkdir()
     target = workspace / "big.txt"
@@ -712,10 +772,55 @@ def test_large_edit_rejection_keeps_file(
     assert all(record["status"] != "ok" for record in result.get("tool_results") or [])
 
 
+def _two_deletions(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+):
+    """一条回复里两个**都必须批准**的动作（删除）：用来测依次弹卡的回路。
+
+    为什么不用两次 `edit_file`：大范围编辑批准一次后本轮不再问（`note_large_edit_approved`），
+    第二个不会再弹卡——那测不到这条回路。`delete_file` 每次都必须在四项硬约束下批准。
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    first = workspace / "a.txt"
+    second = workspace / "b.txt"
+    first.write_text("a\n", encoding="utf-8", newline="")
+    second.write_text("b\n", encoding="utf-8", newline="")
+    graph = builder.build_chat_graph(checkpoint.open_checkpointer(_database(tmp_path)))
+    model = model_factory(
+        decision="tool",
+        reply="删两个文件",
+        tool_calls=[
+            {"name": "delete_file", "args": {"path": "a.txt"}, "id": "call-a"},
+            {"name": "delete_file", "args": {"path": "b.txt"}, "id": "call-b"},
+        ],
+    )
+    return workspace, first, second, graph, _context_for(workspace, model, app_config)
+
+
+def test_rejecting_a_queued_approval_clears_the_queue(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """拒绝当前这张卡之后，**排队的不再问**：用户已经说了不，不该再连弹两张（B2）。"""
+    _workspace, first, second, graph, context = _two_deletions(tmp_path, model_factory, app_config)
+    graph.invoke(
+        {"user_input": "删两个文件", "thread_id": THREAD}, config=_config(THREAD), context=context
+    )
+
+    after = graph.invoke(
+        Command(resume={"decision": "reject"}), config=_config(THREAD), context=context
+    )
+
+    assert after.get("pending_approval") is None
+    assert after["deferred_tool_calls"] == []
+    assert first.exists() and second.exists()
+
+
 def _large_patch_flow(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> tuple[Path, builder.ChatGraph, RuntimeContext]:
-    """准备一个“等待审批的大范围补丁”：改动 251 行，远超免审上限（200）。"""
+    """准备一个“等待审批的大范围补丁”：阈值调 0（判定依据是本轮改过的文件数，不是行数）。"""
+    app_config.security.large_edit.max_files_without_approval = 0
     workspace = tmp_path / "ws"
     workspace.mkdir()
     target = workspace / "big.txt"
@@ -825,7 +930,13 @@ def test_overwrite_write_rejection_keeps_old_content(
 def test_rejected_action_cannot_be_retried_with_new_call_id(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
-    """拒绝按动作指纹匹配：换个 tool_call_id 也绕不过（架构 §5.3）。"""
+    """拒绝的作用域是**本轮**（2026-10-14 修正）：下一轮可以再问一次，会重新弹审批卡。
+
+    旧口径是"拒绝**故意不按轮次隔离**"，实证代价很坏：用户拒绝过一次 `time /t` 之后，
+    "现在几点"此后每次都直接失败、**连审批卡都不再弹**（用户反复撞上的"又是这个安全策略拦截"）。
+    "换个 tool_call_id 不能绕过"这条性质仍然成立——它由动作指纹保证，且**限制在本轮内**
+    （见 `tests/test_security.py` 的作用域用例）。
+    """
     graph, _, target, context, workspace = _delete_flow(tmp_path, model_factory, app_config)
     graph.invoke(
         Command(resume={"decision": "reject"}), config=_config(THREAD), context=context
@@ -842,10 +953,10 @@ def test_rejected_action_cannot_be_retried_with_new_call_id(
         context=_context_for(workspace, retry_model, app_config),
     )
 
-    assert target.is_file()
-    assert result["tool_results"][-1]["status"] == "denied"
-    assert "已被你拒绝" in result["tool_results"][-1]["output_preview"]
-    assert result.get("pending_approval") is None  # 不再重复弹审批
+    assert target.is_file(), "上一轮拒绝了，文件必须还在"
+    # 下一轮重新提问 → 重新弹审批卡（而不是永久"已被你拒绝"、连卡都没有）
+    assert result["pending_approval"] is not None
+    assert result["pending_approval"]["tool_name"] == "delete_file"
 
 
 def test_edit_result_is_persisted_and_not_replayed(
@@ -887,8 +998,8 @@ def test_edit_result_is_persisted_and_not_replayed(
     reopened = builder.build_chat_graph(checkpoint.open_checkpointer(database))
     values = builder.read_thread_state(reopened, THREAD)
 
-    assert [event.status for event in values["tool_events"]] == ["ok"]
-    assert [record["status"] for record in values["tool_results"]] == ["ok"]
+    assert [event.status for event in values["tool_events"] if event.tool_name != "task_control"] == ["ok"]
+    assert [record["status"] for record in values["tool_results"] if record.get("tool_name") != "task_control"] == ["ok"]
     assert values["final_response"] == "已修改"
     assert target.read_text(encoding="utf-8") == "value = 2\n"
 
@@ -1307,27 +1418,21 @@ def test_unscoped_legacy_records_do_not_leak_into_current_task(
     ]
     assert len(executed) == 2  # 无作用域的旧结果不被当成"已执行"
     assert executed[-1]["run_id"] == result["run_id"]
-    assert [item.source_event_id for item in result["final_evidence"]] == ["call-1"]
+    assert [item.source_event_id for item in result["final_evidence"]] == []
 
 
 def test_two_approval_calls_both_get_results(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
-    """同一条回复里有两个需审批动作时，第二个也要有明确结果（架构 §4.2）。"""
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    (workspace / "a.txt").write_text("a", encoding="utf-8", newline="")
-    (workspace / "b.txt").write_text("b", encoding="utf-8", newline="")
-    graph = builder.build_chat_graph(checkpoint.open_checkpointer(_database(tmp_path)))
-    model = model_factory(
-        decision="tool",
-        reply="好了",
-        tool_calls=[
-            {"name": "delete_file", "args": {"path": "a.txt"}, "id": "del-a"},
-            {"name": "delete_file", "args": {"path": "b.txt"}, "id": "del-b"},
-        ],
+    """同一条回复里两个需审批动作：**依次弹卡，两个最终都执行**（架构 §4.2 + 2026-10-15 B2）。
+
+    原断言是"第二个立刻拿到 `denied` 结果"——那满足的只是"每个调用都有结局"这条形式要求，
+    但给用户看到的是"被安全拦截"（实测里它就是"改多个文件时被告知拒绝"的来源）。现在第二个
+    进 `deferred_tool_calls` 排队：第一个批准并执行完之后自动接着问，两个都做完才算完。
+    """
+    _workspace, first_file, second_file, graph, context = _two_deletions(
+        tmp_path, model_factory, app_config
     )
-    context = _context_for(workspace, model, app_config)
 
     first = graph.invoke(
         {"user_input": "删掉 a.txt 和 b.txt", "thread_id": THREAD},
@@ -1335,20 +1440,33 @@ def test_two_approval_calls_both_get_results(
         context=context,
     )
 
-    assert first["__interrupt__"][0].value["tool_call_id"] == "del-a"
-    pending = {record["tool_call_id"]: record["status"] for record in first["tool_results"]}
-    assert pending["del-b"] == "denied"  # 第二个调用有明确结果，不是凭空消失
-    assert (workspace / "b.txt").is_file()
+    assert first["__interrupt__"][0].value["tool_call_id"] == "call-a"
+    # 还没轮到的那个**不产生结果、也不产生"被拒"记录**：它只是排着队。
+    assert not first.get("tool_results")
+    assert [call["id"] for call in first["deferred_tool_calls"]] == ["call-b"]
+    assert first_file.is_file() and second_file.is_file()
 
-    result = graph.invoke(
+    after_first = graph.invoke(
         Command(resume={"decision": "approve"}), config=_config(THREAD), context=context
     )
+    statuses = {record["tool_call_id"]: record["status"] for record in after_first["tool_results"]}
+    assert statuses["call-a"] == "ok"
+    assert not first_file.exists()
+    assert after_first["pending_approval"]["tool_call_id"] == "call-b"  # 自动接着问
+    assert second_file.is_file()
 
-    statuses = {record["tool_call_id"]: record["status"] for record in result["tool_results"]}
-    assert statuses["del-a"] == "ok"
-    assert statuses["del-b"] == "denied"
-    assert not (workspace / "a.txt").exists()
-    assert (workspace / "b.txt").is_file()
+    after_second = graph.invoke(
+        Command(resume={"decision": "approve"}), config=_config(THREAD), context=context
+    )
+    statuses = {record["tool_call_id"]: record["status"] for record in after_second["tool_results"]}
+    assert statuses["call-a"] == "ok" and statuses["call-b"] == "ok"
+    assert not first_file.exists() and not second_file.exists()
+    assert after_second["pending_approval"] is None
+    # 每个动作**只执行一次**：队列排空后可能留下陈旧条目（走审批回路时状态按检查点恢复），
+    # 路由层靠 `_has_queued_approval`（已产出结果的调用不再排队）把它排除，不能靠"队列为空"。
+    assert sorted(
+        record["tool_call_id"] for record in after_second["tool_results"] if record.get("tool_name") != "task_control"
+    ) == ["call-a", "call-b"]
 
 
 def test_approval_does_not_carry_over_to_another_turn(
@@ -1462,7 +1580,7 @@ def test_reflection_ignores_previous_turn_evidence(
     )
 
     evidence = result["final_evidence"]
-    assert [item.source_event_id for item in evidence] == ["call-1"]
+    assert [item.source_event_id for item in evidence] == []
     assert all(
         "历史错误" not in anomaly for anomaly in result["reflection_result"].anomalies
     )
@@ -1479,7 +1597,11 @@ def _piped_command() -> str:
 def _shell_flow(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> tuple[builder.ChatGraph, dict[str, Any], RuntimeContext]:
-    """准备一个“等待人工审批的管道命令”。"""
+    """准备一个"等待人工审批的管道命令"。
+
+    **2026-10-15 起审批的触发点是"提权"而不是"有管道"**：常规命令一律免审，所以这里显式带上
+    `escalate_sandbox`。顺带这也让"管道真的能跑"不依赖沙箱的读边界——提权的那一条命令不进沙箱。
+    """
     workspace = tmp_path / "ws"
     workspace.mkdir()
     graph = builder.build_chat_graph(checkpoint.open_checkpointer(_database(tmp_path)))
@@ -1487,7 +1609,11 @@ def _shell_flow(
         decision="tool",
         reply="好的",
         tool_calls=[
-            {"name": "run_shell", "args": {"command": _piped_command()}, "id": "call-shell"}
+            {
+                "name": "run_shell",
+                "args": {"command": _piped_command(), "escalate_sandbox": True},
+                "id": "call-shell",
+            }
         ],
     )
     context = _context_for(workspace, model, app_config)
@@ -1499,10 +1625,37 @@ def _shell_flow(
     return graph, first, context
 
 
+def test_read_only_escalation_shows_approval_then_executes(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig,
+) -> None:
+    """只读清单命令带提权参数必须真正弹卡，批准后才能运行。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    config = app_config.model_copy(deep=True)
+    config.security.shell.sandbox = True
+    model = model_factory(decision="tool", reply="好的", tool_calls=[{
+        "name": "run_shell", "args": {"command": "echo REVIEW_OK", "escalate_sandbox": True},
+        "id": "read-only-escalation",
+    }])
+    graph = builder.build_chat_graph(checkpoint.open_checkpointer(_database(tmp_path)))
+    context = _context_for(workspace, model, config)
+    first = graph.invoke(
+        {"user_input": "批准这次退出沙箱", "thread_id": THREAD},
+        config=_config(THREAD), context=context,
+    )
+    assert first["pending_approval"]["arguments"]["escalate_sandbox"] is True
+    assert first.get("__interrupt__")
+    assert not first.get("tool_results")
+    approved = graph.invoke(
+        Command(resume={"decision": "approve"}), config=_config(THREAD), context=context,
+    )
+    assert [record["status"] for record in approved["tool_results"] if record.get("tool_name") != "task_control"] == ["ok"]
+
+
 def test_shell_syntax_waits_for_approval_then_executes_once(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
-    """管道命令必须挂起；批准后按平台适配器执行且只执行一次（架构 §6.6）。
+    """要求提权的管道命令必须挂起；批准后按平台适配器执行且只执行一次（架构 §6.6）。
 
     这条链路同时验证审批节点与工具算出的**动作指纹一致**：两者不一致时，
     批准会失效并报错（这正是 T12 最容易出问题的地方）。
@@ -1518,7 +1671,7 @@ def test_shell_syntax_waits_for_approval_then_executes_once(
     )
 
     results = approved.get("tool_results") or []
-    assert [record["status"] for record in results] == ["ok"]
+    assert [record["status"] for record in results if record.get("tool_name") != "task_control"] == ["ok"]
     tool_messages = [
         message for message in approved["messages"] if isinstance(message, ToolMessage)
     ]
@@ -1558,7 +1711,7 @@ def test_approved_shell_with_explicit_timeout_executes(
         tool_calls=[
             {
                 "name": "run_shell",
-                "args": {"command": "python -V", "timeout_seconds": 5},
+                "args": {"command": "python -V", "timeout_seconds": 5, "escalate_sandbox": True},
                 "id": "call-timeout",
             }
         ],
@@ -1577,7 +1730,7 @@ def test_approved_shell_with_explicit_timeout_executes(
     )
 
     assert result["tool_results"][-1]["status"] == "ok"
-    assert "Python" in result["tool_results"][-1]["output_preview"]
+    assert "Python" in next(record for record in reversed(result["tool_results"]) if record.get("tool_name") != "task_control")["output_preview"]
 
 
 def _with_default_shell_timeout(app_config: AppConfig, seconds: int) -> AppConfig:
@@ -1603,7 +1756,11 @@ def test_approved_shell_without_timeout_uses_config_default(
         decision="tool",
         reply="好了",
         tool_calls=[
-            {"name": "run_shell", "args": {"command": "python -V"}, "id": "call-default"}
+            {
+                "name": "run_shell",
+                "args": {"command": "python -V", "escalate_sandbox": True},
+                "id": "call-default",
+            }
         ],
     )
     context = _context_for(workspace, model, _with_default_shell_timeout(app_config, 30))
@@ -1620,7 +1777,7 @@ def test_approved_shell_without_timeout_uses_config_default(
     )
 
     assert result["tool_results"][-1]["status"] == "ok"
-    assert "Python" in result["tool_results"][-1]["output_preview"]
+    assert "Python" in next(record for record in reversed(result["tool_results"]) if record.get("tool_name") != "task_control")["output_preview"]
 
 
 def test_shell_rejection_does_not_execute(

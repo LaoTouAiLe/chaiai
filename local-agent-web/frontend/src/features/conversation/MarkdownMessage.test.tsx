@@ -22,6 +22,16 @@ afterEach(() => {
 })
 
 describe('MarkdownMessage', () => {
+  it('labels a fenced block with its language, falling back to Plain Text', () => {
+    // 语言名只做展示（2026-10-21）：一眼看出"这是 python 还是 bash"。
+    const first = render(<MarkdownMessage text={'```python\nprint(1)\n```'} />)
+    expect(screen.getByText('python')).toBeInTheDocument()
+    first.unmount()
+
+    render(<MarkdownMessage text={'```\nhello\n```'} />)
+    expect(screen.getByText('Plain Text')).toBeInTheDocument()
+  })
+
   it('renders emphasis, lists and code, and copies the code source', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     setClipboard(writeText)

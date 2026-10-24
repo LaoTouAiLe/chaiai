@@ -322,3 +322,43 @@ class JobStore:
         if updated is None:  # pragma: no cover - 同一事务内刚写过的行不该消失
             raise JobStoreError(f"任务更新后读取失败：{job_id}")
         return updated
+
+    def close_review(self, job_id: str, *, outcome: str, detail: str | None = None) -> Job:
+        """人工核对后结案：`needs_review → completed | cancelled`（§17.1 唯一例外）。
+
+        **为什么需要单独的入口**：`needs_review` 是终态，而 `update_state()` 明文
+        「终态不可改写」。但 `needs_review` 的语义是"服务重启后证明不了结局"，它
+        必须由人收尾——此前**没有任何路径能离开它**，任务会把会话永远钉在侧栏的
+        「需人工核对」上（2026-10-23 实机：点了审批、本轮已结束，那行还红着）。
+
+        把例外收进这个方法名里，`update_state()` 的规则一个字不改：
+        想改结局只能显式调用它，而它只对 `needs_review` 生效。
+
+        Args:
+            job_id: 目标任务。
+            outcome: `completed`（核对后视为已完成）或 `cancelled`（确认没做完 / 放弃）。
+            detail: 结案理由，写进 `detail` 备查。
+
+        Raises:
+            JobStoreError: 任务不存在、不在 `needs_review`、或 outcome 越界。
+        """
+        if outcome not in (JOB_STATE_COMPLETED, JOB_STATE_CANCELLED):
+            raise JobStoreError(f"结案只能转 completed / cancelled，收到 {outcome}")
+        with self._lock:
+            current = self._get_unlocked(job_id)
+            if current is None:
+                raise JobStoreError(f"任务不存在：{job_id}")
+            if current.state != JOB_STATE_NEEDS_REVIEW:
+                raise JobStoreError(
+                    f"只有 needs_review 的任务可以人工结案，当前是 {current.state}")
+            now = _now()
+            with self._connection:
+                self._connection.execute(
+                    "UPDATE jobs SET state = ?, updated_at = ?, finished_at = ?, "
+                    "detail = COALESCE(?, detail) WHERE job_id = ?",
+                    (outcome, now, now, detail, job_id),
+                )
+            updated = self._get_unlocked(job_id)
+        if updated is None:  # pragma: no cover - 同一事务内刚写过的行不该消失
+            raise JobStoreError(f"任务结案后读取失败：{job_id}")
+        return updated

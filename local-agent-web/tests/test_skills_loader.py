@@ -121,6 +121,46 @@ def test_non_kebab_case_directory_is_rejected(tmp_path: Path) -> None:
     assert not SKILL_NAME_PATTERN.match("My_Skill")
 
 
+def test_vendor_namespaced_name_with_uppercase_is_accepted(tmp_path: Path) -> None:
+    """厂商命名（`TRAE-browseruse` 这类"命名空间-功能"、含大写）必须能读进来（2026-10-16）。
+
+    放宽字符集之前，本机 `~/.trae-cn` 内置的 7 个技能（浏览器使用、代码审查、调试器…）**全部被拒**，
+    而那个根在 `USER_ROOTS` 里写着"存在即读"——等于列了根却读不到东西。这里钉住两点：
+    ① 大写不再拒绝；② "名字必须与位置逐字一致"这条**没有**被放宽。
+    """
+    root = tmp_path / "custom"
+    _write_skill(root, "TRAE-browseruse")
+
+    catalog = discover_skills(_config(tmp_path), workspace_root=tmp_path, home=tmp_path)
+
+    assert [skill.name for skill in catalog.skills] == ["TRAE-browseruse"]
+    assert catalog.diagnostics == ()
+    assert SKILL_NAME_PATTERN.match("TRAE-browseruse")
+    # 一致性口径不变：下划线不是 kebab-case 写法，仍然拒绝。
+    assert not SKILL_NAME_PATTERN.match("My_Skill")
+
+
+def test_disabled_skills_are_removed_from_the_catalog(tmp_path: Path) -> None:
+    """`apply_skill_overrides`：用户禁用的技能从目录里消失，诊断保留（技能管理页，2026-10-16）。
+
+    这是"禁用"的**唯一判定点**（清单、`skill_load`、设置页三处共用）。用例同时钉住"空禁用集
+    原样返回"——否则每次调用都白重建一份目录。
+    """
+    from local_agent.context.skills_loader import apply_skill_overrides
+
+    root = tmp_path / "custom"
+    _write_skill(root, "keep-me")
+    _write_skill(root, "drop-me")
+
+    catalog = discover_skills(_config(tmp_path), workspace_root=tmp_path, home=tmp_path)
+    assert {skill.name for skill in catalog.skills} == {"keep-me", "drop-me"}
+
+    filtered = apply_skill_overrides(catalog, disabled={"drop-me"})
+
+    assert [skill.name for skill in filtered.skills] == ["keep-me"]
+    assert apply_skill_overrides(catalog, disabled=()) is catalog
+
+
 def test_directory_name_must_match_frontmatter_name(tmp_path: Path) -> None:
     """目录名与 frontmatter 名不一致时**拒绝整条**——避免"改 A 却加载 B"。"""
     root = tmp_path / "custom"
@@ -394,10 +434,27 @@ def test_load_resource_text_reads_truncates_and_reports_bad_files(tmp_path: Path
     assert bad is not None and "UTF-8" in bad
 
 
-def test_relative_user_dir_is_rejected_at_config_time(tmp_path: Path) -> None:
-    """`user_dirs` 只接受绝对路径：相对路径在**配置加载/构造时**就失败并说明原因。"""
-    with pytest.raises(ValueError, match="只接受绝对路径"):
-        SkillsConfig(enabled=True, user_dirs=["relative/skills"])
+def test_relative_user_dir_is_allowed_but_never_resolved_by_cwd(tmp_path: Path) -> None:
+    """`user_dirs` 允许相对写法，但**扫描层**拒绝"未展开的相对路径"（2026-10-16）。
+
+    两条一起钉：① 配置层不再因为"相对"直接失败——那会挡住"技能随包发布"（包里只能写相对路径）；
+    ② 真到扫描这一层还是相对的就跳过并记诊断：入口（``container.resolve_skill_paths``）本该已把它钉到
+    ``config.yaml`` 所在目录，绕过入口按进程 cwd 去拼，会得到"在这台机器上碰巧能跑"的结果。
+
+    另外 `~` 与空项仍然拒绝：`resolve_under` 不展开 `~`（§8），放过去只会得到一个名为 `~` 的目录，
+    静默地什么都没发现。
+    """
+    settings = SkillsConfig(enabled=True, user_dirs=["packaging/skills"])
+    assert settings.user_dirs == ["packaging/skills"]
+
+    catalog = discover_skills(settings, workspace_root=tmp_path, home=tmp_path / "no-home")
+
+    assert catalog.skills == ()
+    assert any("未展开的相对路径" in item for item in catalog.diagnostics)
+
+    for bad in ("~/.agents/skills", "   "):
+        with pytest.raises(ValueError):
+            SkillsConfig(enabled=True, user_dirs=[bad])
 
 
 def test_missing_root_is_harmless(tmp_path: Path) -> None:

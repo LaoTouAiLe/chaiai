@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -63,6 +66,10 @@ def _harness(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, **model_kwargs: Any
 ) -> Harness:
     """装配一套服务：真实 Graph + 持久台账 + 假模型。"""
+    # 这组恢复用例显式启用可选文件审批；产品默认免审批由 test_autonomy_policy 覆盖。
+    app_config.security.require_approval.delete_file = True
+    app_config.security.require_approval.overwrite_existing_file = True
+    app_config.security.require_approval.large_batch_edit = True
     workspace = tmp_path / WORKSPACE_NAME
     workspace.mkdir(exist_ok=True)
     note = workspace / "note.txt"
@@ -106,6 +113,61 @@ def _open(
 def _session(harness: Harness, *, title: str = "新会话", mode: str = "agent") -> str:
     summary = harness.service.create_session(title=title, workspace_root=harness.workspace, mode=mode)
     return summary.session_id
+
+
+@pytest.mark.parametrize("text,encoding", [
+    ("first visible output line before completion\n", "ascii"),
+    ("第 1 秒：心跳正常\n", "utf-8"),
+    ("录入完成：中文正常\n", "gbk"),
+])
+def test_shell_output_is_visible_while_tool_is_still_executing(
+    tmp_path, app_config, monkeypatch, text, encoding,
+) -> None:
+    from test_t43_main_loop import LoopModel, _call, _tools
+
+    from local_agent.security.process_guard import ProcessOutcome, ProcessRegistry
+    from local_agent.tools import shell_tools
+
+    entered, release = threading.Event(), threading.Event()
+    raw = text.encode(encoding)
+    monkeypatch.setattr(shell_tools.locale, "getpreferredencoding", lambda _: "gbk")
+
+    def run(self, argv, **kwargs):
+        kwargs["on_output"]("stdout", raw)
+        entered.set()
+        assert release.wait(10)
+        return ProcessOutcome(exit_code=0, stdout=raw, stderr=b"")
+
+    monkeypatch.setattr(ProcessRegistry, "run", run)
+    app_config.workspace.external_paths.mode = "danger-full-access"
+    app_config.security.shell.max_output_chars = 12
+    model = LoopModel(messages=iter([]), script=[
+        _tools(_call("run_shell", "command", command="python --version")), AIMessage(content="完成。"),
+    ])
+    harness = _harness(tmp_path, lambda **_: model, app_config)
+    session_id = _session(harness)
+    subscription = harness.service.subscribe_events(session_id)
+    subscription.poll()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(harness.service.submit_message, session_id, "运行命令", "command-stream")
+        try:
+            assert entered.wait(10)
+            snapshot = harness.service.get_session_snapshot(session_id)
+            tool = next(message.tool for message in snapshot.messages if message.kind == "tool")
+            assert tool.status == "running"
+            assert tool.outcome.stdout == text[:12]
+            assert len(tool.outcome.stdout) <= 12
+            assert not future.done()
+            assert any(event.event_type == "tool_output" for event in subscription.poll())
+        finally:
+            release.set()
+        future.result(timeout=15)
+    final = harness.service.get_session_snapshot(session_id)
+    final_tool = next(message.tool for message in final.messages if message.kind == "tool")
+    assert final_tool.status == "ok"
+    assert final_tool.outcome.stdout == text[:12]
+    assert not harness.service._tool_streams
+    harness.service.unsubscribe_events(subscription)
 
 
 def _messages(harness: Harness, session_id: str) -> list[Any]:
@@ -206,6 +268,8 @@ def test_recovery_after_side_effect_never_replays_tool(
     executions: list[str] = []
 
     def crash_after_write(state: Any, runtime: Any) -> Any:
+        if all(call.get("name") == "task_control" for call in state.get("pending_tool_calls", [])):
+            return original(state, runtime)
         original(state, runtime)
         executions.append("write")
         raise RuntimeError("工具落盘后持久化失败")
@@ -261,6 +325,28 @@ def test_empty_session_snapshot_has_no_task(tmp_path: Path, model_factory: Model
 
 
 # ---- 闲聊与工具 ------------------------------------------------------------
+
+
+def test_first_question_names_session_and_keeps_manual_titles(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    harness = _harness(tmp_path, model_factory, app_config, decision="chat", reply="假回答")
+    session_id = _session(harness, mode="chat")
+    with pytest.raises(app_errors.ApplicationError):
+        harness.service.submit_message(session_id, "未执行的问题", "name-rejected", expected_snapshot_id="stale")
+    assert harness.service.get_session_snapshot(session_id).title == "新会话"
+    harness.service.submit_message(session_id, "解释项目结构\n第二行", "name-first")
+    assert harness.service.get_session_snapshot(session_id).title == "解释项目结构"
+    assert harness.service.list_sessions()[0].title == "解释项目结构"
+    harness.service.submit_message(session_id, "换个问题", "name-second")
+    assert harness.service.get_session_snapshot(session_id).title == "解释项目结构"
+    harness.service.rename_session(session_id, "我的项目")
+    harness.service.submit_message(session_id, "继续", "name-third")
+    assert harness.service.get_session_snapshot(session_id).title == "我的项目"
+    custom_id = _session(harness, title="手动标题", mode="chat")
+    harness.service.submit_message(custom_id, "第一问", "name-custom")
+    assert harness.service.get_session_snapshot(custom_id).title == "手动标题"
+    harness.database.connection.close()
 
 
 def test_chat_turn_returns_a_stable_command_result(
@@ -351,6 +437,8 @@ def test_approved_tool_crash_can_end_without_showing_execution_in_progress(
     original = builder.tool_execution_node
 
     def crash(state: Any, runtime: Any) -> Any:
+        if all(call.get("name") == "task_control" for call in state.get("pending_tool_calls", [])):
+            return original(state, runtime)
         original(state, runtime)
         raise RuntimeError("执行后中断")
 
@@ -374,6 +462,56 @@ def test_approved_tool_crash_can_end_without_showing_execution_in_progress(
     assert h.service.submit_message(sid, "继续讨论", "after").status == "completed"
     after = h.service.get_session_snapshot(sid)
     assert after.approval is not None and after.approval.state == "interrupted"
+    h.database.connection.close()
+
+
+def test_reconcile_keeps_the_card_when_the_cursor_lags_behind_the_crash(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """核对收口必须落在**落盘真源**上，不能落在滞后的分支游标上（v0.9 T81，架构 §20.5）。
+
+    现场来自实证（2026-10-12）：崩溃恰好发生在"人工决定已落盘、游标仍指恢复之前那一份"
+    时，`close_interrupted_turn` 写在过期祖先上——那份状态里 `approval_history` 还是空的，
+    收口又清掉 `pending_approval`，**唯一的审批来源就没了**：用户看不到"未完整记录"的核对
+    卡（会话只剩一句模糊的"本轮执行已中断"）。上面那条既有用例就是它偶发失败的现场
+    （进程内 1/49；整文件跑时更密）。
+
+    游标滞后是竞态，用例没法靠重复制造它，所以这里**把它摆回实测到的那份状态**：把游标
+    指回崩溃前的检查点（`pending_approval` 还在、决定还没记），其余（检查点序列、台账、
+    消息）一如既往。断言的是**用户看到的东西**：核对卡必须还在。
+    """
+    original = builder.tool_execution_node
+
+    def crash(state: Any, runtime: Any) -> Any:
+        if all(call.get("name") == "task_control" for call in state.get("pending_tool_calls", [])):
+            return original(state, runtime)
+        original(state, runtime)
+        raise RuntimeError("执行后中断")
+
+    monkeypatch.setattr(builder, "tool_execution_node", crash)
+    h = _delete_harness(tmp_path, model_factory, app_config)
+    sid = _session(h)
+    h.service.submit_message(sid, "删除 note.txt", "delete")
+    before = h.service.get_session_snapshot(sid)
+    approval = before.approval
+    assert approval is not None
+    pre_resume_id = before.snapshot_id
+
+    with pytest.raises(RuntimeError):
+        h.service.resolve_approval(sid, approval.approval_id, "approve", "approve")
+    assert not (h.workspace / "note.txt").exists()
+
+    # 只动游标：原样写回现有问答行，把分支游标指回崩溃前那份检查点。
+    branch = h.service._conversations.active(sid)
+    assert branch is not None
+    h.service._conversations.sync(sid, branch.branch_id,
+                                  h.service._conversations.turns(sid), pre_resume_id)
+
+    blocked = h.service.get_session_snapshot(sid)
+    assert blocked.interrupted_request_id == "approve" and blocked.approval is None
+    ended = h.service.end_interrupted_request(sid, "approve", blocked.snapshot_id)
+    assert ended.approval is not None and ended.approval.state == "interrupted"
+    assert ended.approval.note and "未完整记录" in ended.approval.note
     h.database.connection.close()
 
 
@@ -423,7 +561,7 @@ def test_delete_rejection_keeps_the_file(tmp_path: Path, model_factory: ModelFac
 
     assert result.status == "completed"
     assert target.is_file()
-    assert result.session_state == "completed"
+    assert result.session_state == "blocked"
     entry = harness.ledger.get("req-2")
     assert entry is not None and entry["status"] == STATUS_COMPLETED
 
@@ -816,6 +954,43 @@ def test_final_answer_stream_reaches_sse_with_the_checkpoint_message_id(
     harness.service.unsubscribe_events(subscription)
 
 
+def test_raw_text_stays_in_the_local_database_while_page_and_log_get_the_masked_form(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """§20.3：**本机库允许原文，页面与日志只拿脱敏形态**——三种出口在同一条流程里各自被钉住。
+
+    为什么要**直接读库文件**：这条判断（"本机私有文件可信，投影 / 日志 / 事件不可信"）是 T80 的核心
+    取舍。只断言"页面里没有密钥"证明不了它——那样一个"到处都抹掉"的实现也会通过，而那种实现会
+    **悄悄改变模型所见**（定案 6 否掉了它）。
+    """
+    secret = "sk-test-secret"  # `conftest` 把它设成 `llm.api_key_env` 的值 ⇒ 这是"**已知**密钥值"
+    harness = _harness(
+        tmp_path, model_factory, app_config, decision="chat", reply=f"答案里带着 {secret}。"
+    )
+    session_id = _session(harness, mode="chat")
+
+    with caplog.at_level(logging.DEBUG):
+        harness.service.submit_message(session_id, "你好", "req-raw")
+
+    # ① 本机库（Checkpoint 与台账同库）里是**原文**：模型看到过它，恢复语义也依赖它。
+    #    按**整个库目录**读，而不是只读主文件：库开了 WAL，刚提交的内容可能还在 `-wal` 里。
+    stored = b"".join(
+        item.read_bytes() for item in sorted((tmp_path / "data").iterdir()) if item.is_file()
+    )
+    assert secret.encode() in stored
+
+    # ② 页面（快照投影）与 ③ 日志都不得出现它。`***` 出现即证明值确实流过了这条管线
+    #    （否则这条用例可能只是"值根本没进流程"式的假通过）。
+    snapshot = harness.service.get_session_snapshot(session_id)
+    dumped = json.dumps(snapshot.model_dump(mode="json"), ensure_ascii=False)
+    assert secret not in dumped
+    assert "***" in dumped
+
+    leaks = [record.getMessage() for record in caplog.records if secret in record.getMessage()]
+    assert leaks == [], f"日志里出现了密钥值：{leaks}"
+
+
 @pytest.mark.parametrize("decision", ["approve", "reject"])
 @pytest.mark.parametrize("reopen", [False, True])
 def test_streaming_approval_resume_keeps_the_original_run_and_executes_once(
@@ -847,7 +1022,7 @@ def test_streaming_approval_resume_keeps_the_original_run_and_executes_once(
     assert result.status == "completed"
     assert target.exists() is (decision == "reject")
     after = harness.service.get_session_snapshot(session_id)
-    assert after.session_state == "completed"
+    assert after.session_state == ("blocked" if decision == "reject" else "completed")
     assert after.current_task is not None and after.current_task.run_id == original_run
     entry = harness.ledger.get("req-stream-resume")
     assert entry is not None and entry["status"] == STATUS_COMPLETED and entry["run_id"] == original_run
@@ -857,13 +1032,9 @@ def test_streaming_approval_resume_keeps_the_original_run_and_executes_once(
     completed = [event for event in events if event.event_type == "message_completed"]
     assert len(completed) == 1
     assert all(event.run_id == original_run for event in events)
-    if decision == "approve":
-        assert len(started) == 1 and deltas
-        assert started[0].payload.message_id == completed[0].payload.message_id
-        assert "".join(event.payload.text_delta for event in deltas) == completed[0].payload.text
-    else:
-        # Rejection is acknowledged mechanically, without a new model answer.
-        assert started == deltas == []
+    assert len(started) == 1 and deltas
+    assert started[0].payload.message_id == completed[0].payload.message_id
+    assert "".join(event.payload.text_delta for event in deltas) == completed[0].payload.text
     assert any(row.kind == "assistant" and row.message_id == completed[0].payload.message_id for row in after.messages)
     assert events[-1].event_type == "task_completed"
 
@@ -1519,16 +1690,16 @@ def test_thinking_is_live_recoverable_read_only_and_then_persisted(
                        reply="这是回答。", reasoning="分析证据。sk-test-secret。", stream_chunks=1)
     session_id = _session(harness, mode=mode)
     ready, release = threading.Event(), threading.Event()
-    original = type(harness.model)._stream
+    original = type(harness.model)._astream
 
-    def blocked(model, *args, **kwargs):
-        for chunk in original(model, *args, **kwargs):
+    async def blocked(model, *args, **kwargs):
+        async for chunk in original(model, *args, **kwargs):
             yield chunk
             if chunk.message.additional_kwargs.get("reasoning_content"):
                 ready.set()
-                assert release.wait(10)
+                assert await asyncio.to_thread(release.wait, 10)
 
-    monkeypatch.setattr(type(harness.model), "_stream", blocked)
+    monkeypatch.setattr(type(harness.model), "_astream", blocked)
     subscription = harness.service.subscribe_events(session_id)
     subscription.poll()
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -1620,10 +1791,27 @@ def test_thought_sink_redacts_split_values_caps_display_and_resets_both_channels
     events = subscription.poll()
     thought = "".join(event.payload.text_delta for event in events
                       if event.event_type == "message_delta" and event.payload.channel == "reasoning")
-    assert "configured secret" not in thought and "private.txt" not in thought
+    assert "configured secret" not in thought and "C:/Users/me/private.txt" in thought
     assert thought == view.reasoning
     sink.discard()
     reset = subscription.poll()[0]
     assert reset.payload.reset and reset.payload.chunk_sequence == view.chunk_sequence + 1
     empty = sink.partial_view("r")
     assert not empty.text and not empty.reasoning and not empty.reasoning_truncated
+
+
+def test_answer_stream_keeps_paths_while_redacting_split_secrets():
+    bus = app_service.EventBus(max_pending=100)
+    subscription = bus.subscribe("s", boundary=lambda: None)
+    sink = app_service._StreamingAnswerSink(session_id="s", bus=bus, secrets=("configured secret",))
+    sink.bind_run("r")
+    sink.begin()
+    for piece in ("文件 C:/Us", "ers/Some Name/demo.txt，configured ", "secret。"):
+        sink.push(piece)
+    sink.flush()
+    view = sink.partial_view("r")
+    assert view is not None
+    assert view.text == "文件 C:/Users/Some Name/demo.txt，***。"
+    emitted = "".join(event.payload.text_delta for event in subscription.poll()
+                      if event.event_type == "message_delta" and event.payload.channel == "text")
+    assert emitted == view.text

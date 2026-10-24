@@ -1,0 +1,7 @@
+.root { margin: 16px 0; padding: 16px; border: 1px solid var(--law-border-l1); border-radius: 12px; background: var(--law-bg-layer-1); }
+.root h3 { margin: 0 0 12px; font-size: 13px; font-weight: 600; }
+.root ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 12px; }
+.root li { display: flex; align-items: baseline; gap: 6px 12px; flex-wrap: wrap; font-size: 12px; }
+.root a { color: var(--law-state-info); overflow-wrap: anywhere; }
+.root span, .root small, .root time, .root p { color: var(--law-text-secondary); font-size: 11px; }
+.root p { margin: 12px 0 0; line-height: 1.6; }

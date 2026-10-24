@@ -27,6 +27,20 @@ beforeEach(() => {
 })
 
 describe('useSessionStream approval boundary', () => {
+  it('updates the sidebar title from a snapshot without overwriting other sessions', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    client.setQueryData(queryKeys.sessions(null), [{ session_id: 's1', title: '新会话' }, { session_id: 's2', title: '保留标题' }])
+    mock.read.mockImplementation((_id, handlers: { onEvent: (event: unknown) => void }) => {
+      handlers.onEvent({ event_type: 'session_snapshot', payload: { session_id: 's1', title: '首个问题', messages: [] } })
+      return new Promise(() => undefined)
+    })
+    const wrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    const { unmount } = renderHook(() => useSessionStream('s1'), { wrapper })
+    await waitFor(() => expect(client.getQueryData(queryKeys.sessions(null))).toEqual([
+      { session_id: 's1', title: '首个问题' }, { session_id: 's2', title: '保留标题' },
+    ]))
+    unmount()
+  })
   it.each(['approval_required', 'approval_resolved'] as const)(
     'refreshes the authoritative snapshot on %s',
     async (eventType) => {

@@ -1,4 +1,4 @@
-"""会话索引（架构 §10.6、开发文档 T11）。
+﻿"""会话索引（架构 §10.6、开发文档 T11）。
 
 职责边界：
 
@@ -50,9 +50,11 @@ STATUS_IDLE = "idle"
 #: 查询列顺序与 :class:`Session` 字段顺序严格一致。
 _COLUMNS = (
     "session_id, thread_id, title, workspace_root, project_id, "
-    "created_at, updated_at, last_checkpoint_id, status, mode, archived, kind"
+    "created_at, updated_at, last_checkpoint_id, status, mode, archived, kind, "
+    # 侧边会话（§21.7，2026-10-23）：两列都可空，普通会话恒为 NULL。
+    "parent_session_id, origin_turn_id"
 )
-_PLACEHOLDERS = ", ".join("?" * 12)
+_PLACEHOLDERS = ", ".join("?" * 14)
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,12 @@ class Session:
     #: 会话来源（架构 §10.6、§17.1）：``interactive`` / ``scheduled`` / ``heartbeat``。
     #: 它只影响记忆候选的**来源级别**，不参与 ``mode`` 决定的工具集与提示段落。
     kind: str = DEFAULT_SESSION_KIND
+    #: 侧边会话（§21.7）：从哪个会话开出。普通会话为 ``None``。
+    #: **不新增 kind** —— `sessions.kind` 有 CHECK 约束，加值要重建整张表；
+    #: 用这一列是否存在表达"是不是侧聊"同样明确。
+    parent_session_id: str | None = None
+    #: 从父会话的哪一轮开出；`parent_session_id` 为空时它也为空。
+    origin_turn_id: str | None = None
 
     @property
     def is_active(self) -> bool:
@@ -119,6 +127,8 @@ def _row_to_session(row: tuple[object, ...]) -> Session:
         mode=str(row[9]),
         archived=bool(row[10]),
         kind=str(row[11]),
+        parent_session_id=str(row[12]) if row[12] is not None else None,
+        origin_turn_id=str(row[13]) if row[13] is not None else None,
     )
 
 
@@ -153,18 +163,65 @@ class SessionStore:
         默认列全部是 T14C 的语义变化：当前会话在库内唯一，切换工作区就是切换会话，所以
         侧栏看到的是整库的会话而不是"当前工作区的会话"。需要按工作区过滤时显式传参。
         """
+        # **侧聊不进列表**（2026-10-23 用户裁定）：它是从某个会话开出来的旁支，
+        # 在侧栏各占一行会把真正的主会话挤下去（实机截图里连着 5 条「… · 侧聊 N」）。
+        # 侧聊仍可访问：右栏「侧边对话」页签、会话地图里的「侧聊」入口都用 id 直接取。
+        # 想让它变成正式会话，用「提升」（清掉 parent_session_id 后自然回到列表）。
+        side_chat_filter = " AND parent_session_id IS NULL"
         if workspace_root is None:
             rows = self._connection.execute(
-                f"SELECT {_COLUMNS} FROM sessions WHERE archived = ? "
+                f"SELECT {_COLUMNS} FROM sessions WHERE archived = ?{side_chat_filter} "
                 "ORDER BY updated_at DESC, created_at DESC",
                 (int(archived),),
             ).fetchall()
         else:
             rows = self._connection.execute(
-                f"SELECT {_COLUMNS} FROM sessions WHERE workspace_root = ? AND archived = ? "
-                "ORDER BY updated_at DESC, created_at DESC",
+                f"SELECT {_COLUMNS} FROM sessions WHERE workspace_root = ? AND archived = ?"
+                f"{side_chat_filter} ORDER BY updated_at DESC, created_at DESC",
                 (normalize_path(workspace_root), int(archived)),
             ).fetchall()
+        return [_row_to_session(row) for row in rows]
+
+    def search_sessions(
+        self, query: str, *, limit: int = 20, archived: bool = False
+    ) -> list[Session]:
+        """按**标题或用户提问**搜索会话（§15.11.2，2026-10-22）。
+
+        只匹配 `question`，不碰助手回答：回答是长文本，`LIKE` 扫全表会随历史线性变慢，
+        而用户找会话时记得的通常是"我问过什么"。
+
+        `%` 与 `_` 按字面处理（用户输入不当作通配符），否则一次输入 `%` 就会把全部会话捞出来。
+        """
+        needle = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        rows = self._connection.execute(
+            f"SELECT {_COLUMNS} FROM sessions s "
+            "WHERE s.archived = ? AND (s.title LIKE ? ESCAPE '\\' OR EXISTS ("
+            "SELECT 1 FROM conversation_turns t WHERE t.session_id = s.session_id "
+            "AND t.question LIKE ? ESCAPE '\\')) "
+            "ORDER BY s.updated_at DESC, s.created_at DESC LIMIT ?",
+            (int(archived), needle, needle, limit),
+        ).fetchall()
+        return [_row_to_session(row) for row in rows]
+
+    def promote(self, session_id: str) -> None:
+        """侧聊转为正式会话（§21.7）：清掉血统两列。
+
+        **不删历史、不改 id**：提升只改"它属于谁"，其余一切照旧——
+        改 id 会让已经打开的页面、运行记录里的引用全部失效。
+        """
+        with self._connection:
+            self._connection.execute(
+                "UPDATE sessions SET parent_session_id = NULL, origin_turn_id = NULL"
+                " WHERE session_id = ?",
+                (session_id,),
+            )
+
+    def side_chats(self, parent_session_id: str) -> list[Session]:
+        """某个会话开出来的侧聊（§21.7）。按创建时间升序，用于给标题编号。"""
+        rows = self._connection.execute(
+            f"SELECT {_COLUMNS} FROM sessions WHERE parent_session_id=? ORDER BY created_at",
+            (parent_session_id,),
+        ).fetchall()
         return [_row_to_session(row) for row in rows]
 
     def list_workspaces(self) -> list[str]:
@@ -286,6 +343,9 @@ class SessionStore:
         workspace_root: Path | None = None,
         mode: str = "agent",
         kind: str = DEFAULT_SESSION_KIND,
+        activate: bool = True,
+        parent_session_id: str | None = None,
+        origin_turn_id: str | None = None,
     ) -> Session:
         """新建会话并切换过去（原来的当前会话变为 ``idle``）。
 
@@ -294,6 +354,9 @@ class SessionStore:
             thread_id: 指定 Checkpoint 恢复键；缺省按 ``thread-<session_id>`` 生成。
             workspace_root: 新会话绑定的工作区；缺省用本 store 的启动默认工作区。
                 T14C 起一个会话只绑定一个工作区，``project_id`` 由它算出。
+            activate: 是否把新会话切成当前会话。缺省 ``True``，与既有行为一致；
+                定时任务这类后台会话传 ``False``——它不该抢用户焦点，也不该把
+                用户正在看的会话置为 ``idle``（§21.5）。
 
         Returns:
             新建的会话记录。
@@ -314,13 +377,16 @@ class SessionStore:
             created_at=now,
             updated_at=now,
             last_checkpoint_id=None,
-            status=STATUS_ACTIVE,
+            status=STATUS_ACTIVE if activate else STATUS_IDLE,
             mode=mode,
             kind=kind,
+            parent_session_id=parent_session_id,
+            origin_turn_id=origin_turn_id,
         )
         with self._connection:
             self._register_workspace(root)
-            self._deactivate_all()
+            if activate:
+                self._deactivate_all()
             self._connection.execute(
                 f"INSERT INTO sessions ({_COLUMNS}) VALUES ({_PLACEHOLDERS})",
                 (
@@ -336,6 +402,8 @@ class SessionStore:
                     record.mode,
                     int(record.archived),
                     record.kind,
+                    record.parent_session_id,
+                    record.origin_turn_id,
                 ),
             )
         return record
@@ -429,7 +497,7 @@ class SessionStore:
         Args:
             session_id: 目标会话。
             last_checkpoint_id: 本轮的 Checkpoint 编号；``None`` 表示保持原值。
-            title_hint: 本轮的 ``thread_id``；仅当会话还是默认名时用于自动命名。
+            title_hint: 首条用户提问；仅当会话还是默认名时用于自动命名。
         """
         current = self._require(session_id)
         title = current.title

@@ -222,6 +222,46 @@
   line-height: var(--law-leading-xs);
 }
 
+/* ---- 自主委派（§18.7）------------------------------------------------- */
+
+.delegations {
+  padding: var(--law-space-sm) 0;
+}
+
+.delegation {
+  display: flex;
+  align-items: baseline;
+  gap: var(--law-space-md);
+  padding: var(--law-space-xs) var(--law-space-lg);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.delegationMark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  color: var(--law-state-success);
+}
+
+/* 目录是这一行的标识（用户用来对账的那一项），所以它占位、不换行挤压。 */
+.delegationScope {
+  flex: 0 0 auto;
+  font-family: var(--law-font-mono);
+  color: var(--law-text-primary);
+}
+
+.delegationMeta {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
 /* ---- generic + notes --------------------------------------------------- */
 
 .generic {

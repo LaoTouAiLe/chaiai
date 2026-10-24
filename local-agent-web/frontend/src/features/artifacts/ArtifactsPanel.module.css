@@ -1,0 +1,249 @@
+/**
+ * 产物页（2026-10-22 从数据中台提出）。扁平列表 + 就地预览，不套卡片。
+ */
+.page {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-6) clamp(20px, 4vw, 64px) var(--sp-8);
+  background: var(--c-canvas);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.actions {
+  display: flex;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+.eyebrow {
+  display: block;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+.title {
+  margin: 0;
+  color: var(--c-text-1);
+  font-size: var(--fs-heading);
+  line-height: var(--lh-heading);
+  font-weight: 600;
+}
+
+.subtitle {
+  margin: var(--sp-1) 0 0;
+  max-width: 76ch;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+.filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  margin-top: var(--sp-4);
+  padding-bottom: var(--sp-3);
+  border-bottom: 1px solid var(--c-line);
+  font-size: var(--fs-meta);
+  color: var(--c-text-3);
+}
+
+.filters label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.filters select {
+  height: 28px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-control);
+  background: var(--c-raised);
+  color: var(--c-text-1);
+  font-family: inherit;
+  font-size: var(--fs-meta);
+}
+
+.count {
+  margin-left: auto;
+}
+
+.notice {
+  margin: var(--sp-3) 0 0;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-panel);
+  background: var(--c-warn-soft);
+  color: var(--c-warn);
+  font-size: var(--fs-body);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0;
+  border-bottom: 1px solid var(--c-line);
+}
+
+.thumb {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  object-fit: cover;
+  border-radius: var(--r-control);
+  background: var(--c-sunken);
+}
+
+.kindIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 44px;
+  border-radius: var(--r-control);
+  background: var(--c-sunken);
+  color: var(--c-text-3);
+  font-size: 16px;
+}
+
+.body {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.titleRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+/* 名称就是"打开"这个动作本身：不做成按钮外形，但要看起来可点 */
+.name {
+  color: var(--c-text-1);
+  font-size: var(--fs-ui);
+  font-weight: 500;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+}
+
+.name:hover {
+  text-decoration-color: var(--c-accent);
+  color: var(--c-accent);
+}
+
+.location {
+  display: block;
+  margin-top: var(--sp-1);
+  color: var(--c-text-3);
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-meta);
+  overflow-wrap: anywhere;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+  margin-top: var(--sp-2);
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+}
+
+.link {
+  color: var(--c-accent);
+  font-size: var(--fs-meta);
+  text-decoration: underline;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  margin-top: var(--sp-5);
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+}
+
+/* ---- 就地预览 ---- */
+.previewOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-6);
+  background: var(--c-scrim);
+}
+
+.preview {
+  display: flex;
+  flex-direction: column;
+  width: min(880px, 100%);
+  max-height: 80vh;
+  overflow: hidden;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-overlay);
+  background: var(--c-raised);
+  box-shadow: var(--sh-overlay);
+}
+
+.previewHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--c-line);
+  color: var(--c-text-3);
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-meta);
+  overflow-wrap: anywhere;
+}
+
+.previewBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin: 0;
+  padding: var(--sp-4);
+  color: var(--c-text-1);
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-meta);
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.previewImage {
+  max-width: 100%;
+  max-height: 70vh;
+  margin: auto;
+  object-fit: contain;
+}

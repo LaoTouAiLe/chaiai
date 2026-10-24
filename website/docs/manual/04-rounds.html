@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>聊天、Agent 与一轮任务 · 操作手册 · chaiai</title>
+<meta name="description" content="chaiai 一轮任务：模式切换、发送与停止、审批卡、结果不确定时的收尾。" />
+<meta name="color-scheme" content="light" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="../../site.html" aria-label="chaiai 官网">
+      <svg class="brand__mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <defs>
+          <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#F8B65C"/><stop offset="1" stop-color="#E77737"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="18" fill="url(#chaiaiWarm)"/>
+        <path d="m16 27-1-13c-.4-3 1.2-4 3.3-2.2l8.7 7.4a16 16 0 0 1 10 0l8.7-7.4c2.1-1.8 3.7-.8 3.3 2.2l-1 13c3 3.2 4 7.2 4 11 0 8.4-8.2 14-20 14-2.4 0-4.7-.2-7-.7L15 55l2.3-10.2C13.9 42.4 12 39.4 12 36c0-3.5 1.4-6.7 4-9Z" fill="#FFF7E9"/>
+        <path d="m19.3 16.8.8 8.4 5.1-3.5Zm25.4 0-.8 8.4-5.1-3.5Z" fill="#BF6A37"/>
+        <path d="M24 32.5v2M40 32.5v2" fill="none" stroke="#633E2B" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M29.2 38.1c-.7-.8-.2-2.1.9-2.1h3.8c1.1 0 1.6 1.3.9 2.1L33 40a1.4 1.4 0 0 1-2 0Z" fill="#633E2B"/>
+        <path d="M26.5 42.2c1.5 1.7 3.3 1.7 5.5-.3 2.2 2 4 2 5.5.3" fill="none" stroke="#633E2B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>chaiai</span>
+      <span class="brand__divider" aria-hidden="true"></span>
+      <span class="brand__label">文档</span>
+    </a>
+    <nav class="topnav" aria-label="站点导航">
+      <a href="../index.html">文档首页</a>
+      <a href="index.html" aria-current="page">操作手册</a>
+      <a href="../internals/index.html">技术实现</a>
+      <a class="topnav__out" href="../../site.html">返回官网</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout layout--plain">
+  <nav class="sidebar" aria-label="文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="index.html">手册首页</a>
+      <a href="01-install.html">01 安装与第一次启动</a>
+      <a href="02-model.html">02 连接一个模型</a>
+      <a href="03-permissions.html">03 权限三档与目录授权</a>
+      <a href="04-rounds.html" aria-current="page">04 聊天、Agent 与一轮任务</a>
+      <a href="05-map.html">05 会话地图与分支追问</a>
+      <a href="06-data.html">06 数据中台</a>
+      <a href="07-settings.html">07 设置项与生效时机</a>
+      <a href="08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="../internals/index.html">概览</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+
+  <main class="doc">
+    <p class="kicker">MANUAL · 第 4 章</p>
+    <h1>聊天、Agent 与一轮任务</h1>
+    <p class="lead">发出去之后会发生什么、什么时候需要你点确认、停下来之后还剩下什么。</p>
+
+    <div class="prose">
+      <h2>先选模式</h2>
+      <p>
+        输入框左下有两个常驻分段：<strong>闲聊</strong>（可读取文件，不修改）与
+        <strong>Agent</strong>（可执行受控工具）。切换作用于当前会话，从下一轮生效，草稿、历史与地图分支都保留，
+        不会新建会话。运行中、等待审批或结果待核对时不能切换。
+      </p>
+
+      <h2>发一条消息</h2>
+      <ul>
+        <li>默认 Enter 发送、Shift+Enter 换行；也可以在「设置 → 通用与外观 → 发送快捷键」改成 Ctrl / ⌘ + Enter。</li>
+        <li>图片可以直接粘贴，或点输入框右下角的图片按钮选择。支持 PNG / JPEG / GIF / WebP，按文件内容识别，不看扩展名。</li>
+        <li>只贴一张图、不写字也可以发送。图片会随消息一起交给模型，但只有勾了「这条连接支持图片输入」的连接才会真正看到图。</li>
+      </ul>
+
+      <h2>一轮正在跑的时候</h2>
+      <ul>
+        <li>草稿可以继续写，但发不出去——页面会提示「任务进行中：可以先继续写草稿，但要等这一轮结束才能发送。」</li>
+        <li>点「停止生成」可以中断本轮：已完成工具<strong>不会回滚</strong>，已产生的部分回答保留，并标上「已停止」。</li>
+        <li>停止请求失败时会出现可关闭的提示，可以刷新状态后重试；不要靠重复提交来「顶掉」上一轮，同一会话的第二个提交会被拒绝。</li>
+      </ul>
+
+      <h2>审批卡怎么回</h2>
+      <p>
+        删除、覆盖已有文件、已识别的破坏性 Shell、大范围编辑，以及工作区外的写入，都会停在你的批准之前。
+        普通审批的出口是「允许一次」或「拒绝」；高风险删除会先进入二次确认，还要再勾一次才会执行。
+      </p>
+
+      <figure>
+        <img src="../assets/img/ui-approval-20261019.png" alt="高风险删除的审批卡：等待审批、影响说明与二次确认" width="566" height="300" loading="lazy" />
+        <figcaption>高风险删除的审批卡：写清目标、影响与不可撤销，第一次确认只进入二次确认，不会直接删。</figcaption>
+      </figure>
+
+      <ul>
+        <li>批准只对<strong>这次调用</strong>生效，不会加入免审名单。</li>
+        <li>被拒绝的动作不会执行，本轮会带着这个结论继续。</li>
+        <li>等待审批时切到其他会话不会批准或取消它，任务仍然绑定原会话。</li>
+      </ul>
+
+      <h2>结果不确定时怎么收尾</h2>
+      <p>
+        工具或持久化异常导致结果不可确认时，页面会写：「本轮执行已中断，工具执行结果需要核对。刷新不会重跑工具。」
+        这时的正确做法是：
+      </p>
+      <ol>
+        <li>刷新会话，查看本轮记录与实际文件 / 命令结果；</li>
+        <li>勾选「我已查看本轮记录并核对相关文件或命令结果」；</li>
+        <li>点「结束中断任务」。</li>
+      </ol>
+      <p>
+        这个操作不会重跑工具，也不会撤销已经执行的操作。如果提交结果本身无法确认，页面还会提示先刷新核对，
+        并明确建议不要直接重复执行可能带副作用的操作。
+      </p>
+
+      <h2>一轮结束后</h2>
+      <p>
+        对话按轮展示模型实际返回的 Think、工具、计划、检索 / 记忆、审批与用量。隐藏或没有返回的推理不会被补造；
+        「未流式」「已停止」这类状态会作为中性标注留在输入区附近，不当作错误。
+      </p>
+    </div>
+
+    <nav class="pager" aria-label="翻页">
+      <a href="03-permissions.html">
+        <span class="pager__hint">上一篇</span>
+        <span class="pager__title">← 03 权限三档与目录授权</span>
+      </a>
+      <a class="pager__next" href="05-map.html">
+        <span class="pager__hint">下一篇</span>
+        <span class="pager__title">05 会话地图与分支追问 →</span>
+      </a>
+    </nav>
+
+    <p class="pagefoot">最后更新 2026-10-19 · 适用版本 v1.0</p>
+  </main>
+</div>
+
+</body>
+</html>

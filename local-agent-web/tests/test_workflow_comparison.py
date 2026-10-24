@@ -30,9 +30,9 @@ def test_actual_paired_graph_runs_with_same_config_model_and_frozen_validator(re
         assert case["completion_counts"] == {"free_loop": 2, "subgraph": 2}
         assert case["attempts_per_arm"] == {"free_loop": 2, "subgraph": 2}
         assert case["model_calls_improved_in_every_pair"] is True
-    expected_counts = {("code_change", "free_loop"): (6, 5),
+    expected_counts = {("code_change", "free_loop"): (6, 6),
                        ("code_change", "subgraph"): (1, 6),
-                       ("readonly_research", "free_loop"): (4, 3),
+                       ("readonly_research", "free_loop"): (4, 4),
                        ("readonly_research", "subgraph"): (0, 4)}
     for row in report["runs"]:
         assert row["passed"], row["failures"]
@@ -139,7 +139,7 @@ def test_exception_after_real_tools_keeps_actual_model_calls_and_unknown_tool_au
     class RaiseAfterTools:
         def invoke(self, *args, **kwargs):
             state = graph.invoke(*args, **kwargs)
-            assert len(state["tool_events"]) == 5
+            assert len(state["tool_events"]) == 6
             raise RuntimeError("after real side effects")
 
     monkeypatch.setattr(comparison.builder, "build_chat_graph", RaiseAfterTools)

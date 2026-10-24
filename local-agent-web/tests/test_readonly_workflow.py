@@ -215,7 +215,9 @@ def test_multiple_turns_do_not_duplicate_history_or_reselect_workflow(tmp_path, 
     last = graph.invoke({"user_input": "解释概念", "session_mode": "agent"}, config=config, context=context)
     assert last["workflow"] is None
     assert last["final_response"] == "普通回答"
-    assert len(last["tool_events"]) == 8
+    assert [event for event in last["tool_events"] if event.tool_name != "task_control"] == second["tool_events"]
+    assert [event.tool_name for event in last["tool_events"][-1:]] == ["task_control"]
+    assert len(last["tool_events"]) == 9
     saver.conn.close()
 
 

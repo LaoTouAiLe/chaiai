@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>设置项与生效时机 · 操作手册 · chaiai</title>
+<meta name="description" content="chaiai 设置：四组十二个分区、保存与撤销、改完什么时候生效。" />
+<meta name="color-scheme" content="light" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="../../site.html" aria-label="chaiai 官网">
+      <svg class="brand__mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <defs>
+          <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#F8B65C"/><stop offset="1" stop-color="#E77737"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="18" fill="url(#chaiaiWarm)"/>
+        <path d="m16 27-1-13c-.4-3 1.2-4 3.3-2.2l8.7 7.4a16 16 0 0 1 10 0l8.7-7.4c2.1-1.8 3.7-.8 3.3 2.2l-1 13c3 3.2 4 7.2 4 11 0 8.4-8.2 14-20 14-2.4 0-4.7-.2-7-.7L15 55l2.3-10.2C13.9 42.4 12 39.4 12 36c0-3.5 1.4-6.7 4-9Z" fill="#FFF7E9"/>
+        <path d="m19.3 16.8.8 8.4 5.1-3.5Zm25.4 0-.8 8.4-5.1-3.5Z" fill="#BF6A37"/>
+        <path d="M24 32.5v2M40 32.5v2" fill="none" stroke="#633E2B" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M29.2 38.1c-.7-.8-.2-2.1.9-2.1h3.8c1.1 0 1.6 1.3.9 2.1L33 40a1.4 1.4 0 0 1-2 0Z" fill="#633E2B"/>
+        <path d="M26.5 42.2c1.5 1.7 3.3 1.7 5.5-.3 2.2 2 4 2 5.5.3" fill="none" stroke="#633E2B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>chaiai</span>
+      <span class="brand__divider" aria-hidden="true"></span>
+      <span class="brand__label">文档</span>
+    </a>
+    <nav class="topnav" aria-label="站点导航">
+      <a href="../index.html">文档首页</a>
+      <a href="index.html" aria-current="page">操作手册</a>
+      <a href="../internals/index.html">技术实现</a>
+      <a class="topnav__out" href="../../site.html">返回官网</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout layout--plain">
+  <nav class="sidebar" aria-label="文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="index.html">手册首页</a>
+      <a href="01-install.html">01 安装与第一次启动</a>
+      <a href="02-model.html">02 连接一个模型</a>
+      <a href="03-permissions.html">03 权限三档与目录授权</a>
+      <a href="04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="05-map.html">05 会话地图与分支追问</a>
+      <a href="06-data.html">06 数据中台</a>
+      <a href="07-settings.html" aria-current="page">07 设置项与生效时机</a>
+      <a href="08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="../internals/index.html">概览</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+
+  <main class="doc">
+    <p class="kicker">MANUAL · 第 7 章</p>
+    <h1>设置项与生效时机</h1>
+    <p class="lead">四组十二个分区，改完不用重启——但「什么时候生效」要分清，别在跑着的一轮里等一个不会马上生效的改动。</p>
+
+    <div class="prose">
+      <h2>分区一览</h2>
+      <p>「设置」左侧分四组，右侧对应分区。副标题写明了一条总口径：<strong>密钥只写入不回读</strong>。</p>
+
+      <table class="table--settings table--fixed">
+        <thead>
+          <tr><th>分组</th><th>分区</th><th>管什么</th></tr>
+        </thead>
+        <tbody>
+          <tr><td rowspan="4">模型与权限</td><td>模型连接</td><td>默认连接与每条连接的端点、模型、窗口、流式与图片能力。</td></tr>
+          <tr><td>权限</td><td>三档与「外部可写目录」。</td></tr>
+          <tr><td>技能</td><td>本机发现的技能清单，可逐条开关；关掉不删文件，改完下一次提交生效。</td></tr>
+          <tr><td>能力</td><td>各项能力的开关与依赖状态（读取文件、联网等属「始终开启」，没有开关）；缺依赖时说明安装方法，改完下一轮生效、不用重启。</td></tr>
+          <tr><td rowspan="3">任务与工具</td><td>任务执行</td><td>每轮工具循环上限、命令超时、重复失败反馈阈值。</td></tr>
+          <tr><td>自动代码检索</td><td>只控制任务开始前的那次检索，不控制模型主动调用的 grep / glob。</td></tr>
+          <tr><td>联网检索</td><td>搜索服务与密钥变量名；联网是常态能力，出厂即开。</td></tr>
+          <tr><td rowspan="3">记忆</td><td>长期记忆</td><td>置信度与重要度阈值、遗忘天数、是否允许跨项目的用户级事实。</td></tr>
+          <tr><td>中期记忆</td><td>开关、召回条数、相似度阈值与时间衰减半衰期；启用前要先配好 Embedding。</td></tr>
+          <tr><td>向量库与 Embedding</td><td>本地 ONNX 或兼容 API、缓存目录、离线模式、端点与密钥变量名。</td></tr>
+          <tr><td rowspan="2">通用</td><td>通用与外观</td><td>主题（浅色 / 深色 / 跟随系统）、文字大小、界面动画、发送快捷键、默认展开 Think。</td></tr>
+          <tr><td>高级配置</td><td>只读展示压缩、历史保留与 AGENTS 规则，不开放修改。</td></tr>
+        </tbody>
+      </table>
+
+      <figure>
+        <img src="../assets/img/ui-capabilities-20261019.png" alt="能力面板：可开关的能力与始终开启的能力" width="440" height="580" loading="lazy" />
+        <figcaption>「能力」面板：每一项写明开没开、能不能用、为什么；「始终开启」的能力没有开关，只显示状态。</figcaption>
+      </figure>
+
+      <h2>保存与撤销</h2>
+      <ul>
+        <li>底部三个动作：「保存」「取消修改」「恢复初始值」——恢复初始值后仍需再保存。</li>
+        <li>别的窗口已经保存过新版本时，这里会拒绝覆盖并保留你的草稿；刷新前先确认要保留哪一份。</li>
+        <li>设置写入本地设置库，不改 <code>config.yaml</code>；下次打开读到的是当前保存值。</li>
+      </ul>
+
+      <h2>什么时候生效</h2>
+      <table>
+        <thead>
+          <tr><th>改的东西</th><th>生效时机</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>通用与外观</td><td>保存后立即生效。</td></tr>
+          <tr><td>执行、检索、记忆参数</td><td>从下一次新任务生效；正在执行或等待审批的任务保留提交时的值。</td></tr>
+          <tr><td>模型连接</td><td>编辑保存为新版本，从下一轮请求开始生效。</td></tr>
+          <tr><td>权限档位与授权</td><td>从下一轮请求开始生效；任务执行中沿用提交时的档位。</td></tr>
+          <tr><td>向量库缓存目录</td><td>页面提示「需重启后端」：保存并重启，重启后要再测一次，静态准备状态不证明权重已缓存。</td></tr>
+        </tbody>
+      </table>
+
+      <h2>几个容易误解的点</h2>
+      <ul>
+        <li>「自动代码检索」不是「模型不能搜代码」，它只管任务开始前注入的检索片段。</li>
+        <li>「测试当前配置」（Embedding）会真实生成一条向量，可能加载 / 下载本地模型或产生少量 API 费用；打开设置与保存本身不会。</li>
+        <li>向量库目录与集合名只读展示，不能从页面迁移、重建或清空。</li>
+        <li>高级配置是只读的：压缩阈值等参数目前不能在这里改。</li>
+      </ul>
+    </div>
+
+    <nav class="pager" aria-label="翻页">
+      <a href="06-data.html">
+        <span class="pager__hint">上一篇</span>
+        <span class="pager__title">← 06 数据中台</span>
+      </a>
+      <a class="pager__next" href="08-faq.html">
+        <span class="pager__hint">下一篇</span>
+        <span class="pager__title">08 常见问题与自检 →</span>
+      </a>
+    </nav>
+
+    <p class="pagefoot">最后更新 2026-10-19 · 适用版本 v1.0</p>
+  </main>
+</div>
+
+</body>
+</html>

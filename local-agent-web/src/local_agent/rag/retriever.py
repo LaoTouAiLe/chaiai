@@ -61,7 +61,12 @@ def retrieve_code(
         )
 
     outcome = discover_matches(
-        terms, workspace_root=workspace_root, config=config, resolve=resolve
+        terms,
+        workspace_root=workspace_root,
+        config=config,
+        resolve=resolve,
+        # 本轮的登记表（§20.1）：`rg` 从它出去 ⇒ 超时与取消都按进程树终止。
+        registry=policy.processes,
     )
     notes: list[str] = list(outcome.notes)
     references: list[RAGReference] = []

@@ -1,0 +1,53 @@
+{
+  "api_version": "0.4.0",
+  "config_defaults_sha256": "01c93445c20bc662abbc321cb93d89edad563f2c1537453e44e1c7740c6b351b",
+  "config_schema_sha256": "267f8eb77bb8846c2bfcd71777df02f94db7d220d21249b04aba17435756dcc8",
+  "database_versions": {
+    "chat": 10,
+    "long_term": 3,
+    "settings": 4
+  },
+  "dto_schema_version": 1,
+  "event_common_fields": [
+    "schema_version",
+    "event_id",
+    "event_type",
+    "session_id",
+    "task_id",
+    "run_id",
+    "occurred_at",
+    "stream_sequence",
+    "payload"
+  ],
+  "event_types": [
+    "session_snapshot",
+    "message_started",
+    "message_delta",
+    "message_completed",
+    "plan_updated",
+    "step_started",
+    "step_completed",
+    "tool_started",
+    "tool_output",
+    "tool_completed",
+    "approval_required",
+    "approval_resolved",
+    "memory_recalled",
+    "memory_written",
+    "model_call_started",
+    "model_usage_reported",
+    "model_call_completed",
+    "task_completed",
+    "task_failed",
+    "job_queued",
+    "job_progress",
+    "job_waiting",
+    "job_completed",
+    "task_cancelled"
+  ],
+  "manifest_version": 1,
+  "openapi_sha256": "b95c8729d03b53dab38cb9f1bee8f08bc5b7bcb6ebb9051a452f56282076293e",
+  "package_version": "0.1.0",
+  "release_status": "candidate",
+  "release_target": "1.0.0"
+}

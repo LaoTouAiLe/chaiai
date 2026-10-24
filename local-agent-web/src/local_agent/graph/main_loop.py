@@ -1,77 +1,78 @@
 """T43 主循环的机械收口：工具可信度与模型显式进度分别处理。"""
 
+import json
 from collections.abc import Sequence
-from dataclasses import replace
 
 from langchain_core.messages import AIMessage
 
+from local_agent.graph.projection import current_turn_ai_message, message_id
 from local_agent.graph.state import AgentState, EvidenceReference, ReflectionResult
 from local_agent.reflection.validators import EvidenceLevel
+
+
+def decision_budget_instruction(state: AgentState, *, default_limit: int | None) -> str:
+    """本次决策的实时额度；不写入冻结快照、历史消息或完成状态。"""
+    if (state.get("agent_loop_version") != 1 or state.get("mode") != "tool"
+            or state.get("session_mode") == "chat"):
+        return ""
+    configured = state.get("max_loop_count", default_limit)
+    if configured is None:
+        return ""
+    limit = int(configured)
+    used = max(0, int(state.get("loop_count", 0)))
+    remaining = max(0, limit - used)
+    if not remaining:
+        return ""
+    text = (
+        f"【本次决策额度】本次为第{used + 1}/{limit}次决策，含本次还可调用{remaining}次。"
+        "每次主循环决策计一次，同批独立工具只计一次。用task_control明确声明完成或需要输入。"
+        "优先必要实现与验证，避免重复环境探测、重复取证或仅为记账消耗一轮。"
+    )
+    if remaining <= 4:
+        text += "已临近用户配置的预算，请自行安排剩余工作与交付。"
+    text += "额度不足时如实交代未完成项，不能伪造完成、跳过必要校验或审批。"
+    return text
 
 
 def checkpoint_main_loop(
     state: AgentState, *, trust: EvidenceLevel, anomalies: Sequence[str],
     evidence: Sequence[EvidenceReference], pending_uncertain: Sequence[str], max_retries: int,
 ) -> AgentState:
-    """无模型调用；正常结果回决策，最终文本结束本轮，已知阻塞不能标完成。"""
-    calls = list(state.get("pending_tool_calls") or [])
-    last = state.get("messages", [])[-1] if state.get("messages") else None
-    finished = isinstance(last, AIMessage) and not last.tool_calls
-    plan = list(state.get("plan") or [])
-    managed = bool(state.get("plan_managed"))
-    unfinished = managed and any(step.status not in {"completed", "skipped"} for step in plan)
-    run_id = state.get("run_id")
-    control_events = [event for event in state.get("tool_events", [])
-                      if event.tool_name == "update_plan" and event.run_id == run_id]
-    plan_error = bool(control_events and control_events[-1].status != "ok")
-    completed = (
-        finished and not unfinished and not plan_error
-        and not pending_uncertain and trust == "verified"
-    )
+    """记录执行反馈；由主模型通过task_control决定继续、完成或请求输入。"""
+    action = state.get("model_next_action", "continue")
+    finished = action in {"finish", "ask_user"}
+    completed = action == "finish"
     reflection = ReflectionResult(
         goal_achieved=completed, result_trust=trust, anomalies=tuple(anomalies),
-        next_action=("finish" if completed else "ask_user") if finished else "continue",
-        evidence=tuple(evidence),
+        next_action=action, evidence=tuple(evidence),
     )
     result: AgentState = {
         "final_evidence": list(evidence), "reflection_result": reflection,
         "task_status": "completed" if completed else "blocked" if finished else "running",
+        "tool_feedback_required": False,
     }
-    if pending_uncertain:
-        result["messages"] = [AIMessage(content=(
-            f"本轮有已放行但尚未确认结果的操作（{'、'.join(pending_uncertain)}），可能已经产生影响。"
-            "请先核对文件或命令的实际结果，再决定是否继续。"
-        ))]
-        result["task_status"] = "blocked"
-        result["reflection_result"] = replace(reflection, next_action="ask_user")
-        return result
     if finished:
-        if not isinstance(last, AIMessage) or not last.text.strip():
-            result["messages"] = [AIMessage(content="本轮没有生成可用的回答，请补充问题或重试。")]
-            result["task_status"] = "failed"
-            result["reflection_result"] = replace(reflection, goal_achieved=False)
+        text = state.get("model_final_response", "")
+        result["final_response"] = text
+        answer = current_turn_ai_message(state.get("messages", []))
+        if answer is not None and message_id(answer):
+            # 保留控制调用的原始审计与推理，交付文本投影到同一条流式消息，避免空回答和重复气泡。
+            result["reply_overrides"] = {message_id(answer): text}
+        else:
+            result["messages"] = [AIMessage(content=text)]
         return result
-    # 安全门会清空被拒的 pending_tool_calls，原助手调用仍在审计消息中。
-    if not calls:
-        requested = next((message for message in reversed(state.get("messages", []))
-                          if isinstance(message, AIMessage) and message.tool_calls), None)
-        calls = list(requested.tool_calls) if requested is not None else []
-    current_ids = {str(call.get("id")) for call in calls}
-    latest = [event for event in state.get("tool_events", [])
-              if event.tool_call_id in current_ids and (not run_id or event.run_id == run_id)]
-    if latest and (any(event.status != "ok" for event in latest) or trust != "verified"):
-        index = int(state.get("current_step_index", 0))
-        count = (plan[index].retry_count if 0 <= index < len(plan)
-                 else int(state.get("retry_count", 0))) + 1
-        result["retry_count"] = int(state.get("retry_count", 0)) + 1
-        if 0 <= index < len(plan):
-            plan[index] = replace(plan[index], retry_count=count)
-            result["plan"] = plan
-        if count > max_retries:
-            result["messages"] = [AIMessage(content=(
-                "这一步连续尝试后仍未取得可确认的结果，已停止重试。"
-                "请补充信息或确认下一步的处理方式。"
-            ))]
-            result["task_status"] = "blocked"
-            result["reflection_result"] = replace(reflection, next_action="ask_user")
+    count = 0
+    previous: str | None = None
+    for event in state.get("tool_events", []):
+        if event.run_id != state.get("run_id") or event.tool_name in {"update_plan", "task_control"}:
+            continue
+        if event.status == "ok":
+            count, previous = 0, None
+            continue
+        identity = json.dumps([event.tool_name, {
+            key: value for key, value in event.redacted_arguments.items() if key != "reason"
+        }], sort_keys=True, ensure_ascii=False)
+        count = count + 1 if identity == previous else 1
+        previous = identity
+    result["retry_count"] = count
     return result

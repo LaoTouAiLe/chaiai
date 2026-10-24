@@ -105,6 +105,9 @@ def main() -> int:
     parser.add_argument("--reply", default="这是假模型的固定回答。", help="普通回答的文本")
     parser.add_argument("--decision", default="chat", help='路由分类结果：chat / tool / ...')
     parser.add_argument("--chunk-delay", type=float, default=0.0, help="假模型每个流式块的测试延迟（秒）")
+    parser.add_argument("--background", action="store_true", help="后台任务真服务验收：提交立即返回，任务在 worker 收敛")
+    parser.add_argument("--command-stream-demo", action="store_true", help="隔离命令输出流验收")
+    parser.add_argument("--compression-demo", action="store_true", help="隔离压缩验收：小窗口、长历史与慢摘要")
     parser.add_argument("--variants", action="store_true", help="启用长/空/故障回答的页面验收输入")
     parser.add_argument(
         "--approval-edit",
@@ -136,18 +139,38 @@ def main() -> int:
     os.environ[FAKE_KEY_ENV] = "fake-key-for-e2e"
 
     config = load_config(config_path)
+    if args.compression_demo:
+        config = config.model_copy(update={
+            "llm": config.llm.model_copy(update={"context_window_tokens": 12000, "max_tokens": 512}),
+            "memory": config.memory.model_copy(update={"compression": config.memory.compression.model_copy(
+                update={"enabled": True, "preserve_recent_turns": 1, "summary_max_chars": 1200})}),
+        })
+    if args.background:
+        config = config.model_copy(update={"jobs": config.jobs.model_copy(update={"background": True})})
     # 数据目录就是工作区根（示例配置里 `workspace.root: "."`），种子文件因此落在工作区内。
     tool_calls_by_input = _approval_tool_calls(data_dir) if args.approval_edit else {}
+    if args.command_stream_demo:
+        (data_dir / "command_progress_demo.py").write_text(
+            "import time\nfor index in range(1, 6):\n"
+            "    print(f'step-{index}', flush=True)\n    time.sleep(2)\n", encoding="utf-8",
+        )
+        tool_calls_by_input["COMMAND_STREAM"] = [{
+            "name": "run_shell", "id": "command-stream", "args": {
+                "command": f'"{sys.executable}" -u command_progress_demo.py',
+                "timeout_seconds": 30,
+            },
+        }]
     model: Any = make_model(
         reply=args.reply,
         decision=args.decision,
         stream_delay_seconds=args.chunk_delay,
         tool_calls_by_input=tool_calls_by_input,
-        response_by_input={
+        response_by_input={"COMPRESSION_SEED": "历史事实。" * 2500} if args.compression_demo else {
             "T30_LONG": "这是长回答。" * 1500,
             "T30_EMPTY": "",
         } if args.variants else {},
         fail_on_input=["T30_ERROR"] if args.variants else [],
+        summary_delay_seconds=3.0 if args.compression_demo else 0.0,
     )
     runtime = open_runtime(
         config,

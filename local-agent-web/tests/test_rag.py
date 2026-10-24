@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +18,7 @@ from local_agent.context import prompt_context
 from local_agent.graph.state import RAGReference
 from local_agent.rag import retriever, search, snippets
 from local_agent.security.policy import SecurityPolicy
+from local_agent.security.process_guard import ProcessOutcome
 
 
 @pytest.fixture
@@ -258,17 +258,28 @@ def _fake_rg(
     stdout: str = "",
     returncode: int = 0,
     raises: Exception | None = None,
+    timed_out: bool = False,
 ) -> list[list[str]]:
-    """把 ``subprocess.run`` 换成替身，记录被调用的 argv，并返回构造好的 rg 输出。"""
+    """把**统一执行出口**换成替身，记录被调用的 argv，并返回构造好的 rg 输出。
+
+    v0.9 T76（§20.1）：`rg` 不再直连 ``subprocess.run``，而是走 ``run_process``；替身因此
+    打在这个出口上——于是"它确实从出口出去"这件事也被钉住了。超时由 ``timed_out`` 表达
+    （出口按进程树终止后**如实**返回），不再靠抛 ``TimeoutExpired``。
+    """
     calls: list[list[str]] = []
 
-    def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+    def fake_run(argv: list[str], **kwargs: object) -> ProcessOutcome:
         calls.append(list(argv))
         if raises is not None:
             raise raises
-        return subprocess.CompletedProcess(argv, returncode, stdout.encode("utf-8"), b"")
+        return ProcessOutcome(
+            exit_code=returncode,
+            stdout=stdout.encode("utf-8"),
+            stderr=b"",
+            timed_out=timed_out,
+        )
 
-    monkeypatch.setattr(search.subprocess, "run", fake_run)
+    monkeypatch.setattr(search, "run_process", fake_run)
     return calls
 
 
@@ -342,7 +353,7 @@ def test_rg_timeout_falls_back_to_the_bounded_scan(
 ) -> None:
     """超时同样退化，且说明里写明"超过 N 秒"。"""
     (workspace / "mod.py").write_text("decide_mode = 1\n", encoding="utf-8")
-    _fake_rg(monkeypatch, raises=subprocess.TimeoutExpired(cmd="rg", timeout=1))
+    _fake_rg(monkeypatch, timed_out=True)
 
     result = _find(
         "decide_mode",
@@ -385,6 +396,13 @@ def test_snippet_refuses_paths_outside_the_workspace(
     )
 
     assert snippet is None
+
+
+def test_snippet_drops_a_missing_file_after_classification_changed(workspace, app_config) -> None:
+    assert snippets.read_snippet(
+        workspace / "missing.py", relative_path="missing.py", line_number=1,
+        config=_rag_config(app_config).rag, policy=_policy(app_config, workspace),
+    ) is None
 
 
 def test_snippet_reports_a_stale_hit_as_none(workspace: Path, app_config: AppConfig) -> None:

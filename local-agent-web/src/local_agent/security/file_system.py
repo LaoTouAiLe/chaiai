@@ -32,9 +32,10 @@ class DeletedTarget:
     kind: Literal["file", "dir"]
     files: int
     directories: int
-    #: 是否移进了回收站（2026-10-20，安全删除开启时）；为 `True` 时 `trash_path` 是它现在的位置。
+    #: 是否移进了**系统回收站**（安全删除开启时）。系统回收站不暴露文件在磁盘上的真实位置
+    #: （它在 `$RECYCLE.BIN` 里被改名存放），所以这里只给"在回收站里"这一个事实，
+    #: 不给路径——给了也只是个用户点不开的内部路径。
     trashed: bool = False
-    trash_path: str | None = None
 
 
 class FileSystemSandbox:
@@ -102,19 +103,50 @@ class FileSystemSandbox:
                 yield chunk
         self.check_cancelled()
 
-    def children(self, path: str | Path, limit: int) -> tuple[list[Path], bool]:
+    def children(self, path: str | Path, limit: int) -> tuple[list[os.DirEntry[str]], bool]:
+        """列出直接子项（不递归），返回 ``DirEntry`` 而不是 ``Path``。
+
+        用 ``os.scandir``（2026-10-21）：Windows 上一次目录扫描已经带回每个条目的类型与大小，
+        ``DirEntry.stat()`` 不再逐项做系统调用；此前 ``iterdir()`` + 每项 ``resolve()`` 让
+        200 个条目产生上千次 realpath，实测一次列目录 14 秒。
+        """
         target = self.directory(path)
-        items: list[Path] = []
+        items: list[os.DirEntry[str]] = []
         try:
-            for child in target.iterdir():
-                self.check_cancelled()
-                items.append(child)
-                if len(items) > limit:
-                    return items, True
+            with os.scandir(target) as iterator:
+                for child in iterator:
+                    self.check_cancelled()
+                    items.append(child)
+                    if len(items) > limit:
+                        return items, True
         except OSError:
             # 保留列目录原来的不可读子目录处理，不吞权限拒绝和取消。
             pass
         return items, False
+
+    def entry_from_scan(
+        self, entry: os.DirEntry[str]
+    ) -> tuple[Literal["file", "dir", "symlink", "other"], os.stat_result | None]:
+        """用 scandir 的结果判定条目类型与元数据（不再二次解析路径）。
+
+        与 :meth:`entry` 的区别只有一个：不做 ``Path.resolve()``。扫描的父目录已经过
+        :meth:`directory` 校验，条目名来自目录本身，越界判定由那条校验负责。
+        Junction 仍按真实类型识别：它可能指向工作区外，不能只看 ``is_symlink()``。
+        """
+        try:
+            info = entry.stat(follow_symlinks=False)
+            linked = entry.is_symlink()
+            if not linked and stat.S_ISDIR(info.st_mode):
+                linked = bool(getattr(Path(entry.path), "is_junction", lambda: False)())
+        except OSError:
+            return "other", None
+        if linked:
+            return "symlink", info
+        if stat.S_ISDIR(info.st_mode):
+            return "dir", info
+        if stat.S_ISREG(info.st_mode):
+            return "file", info
+        return "other", info
 
     def stat(self, path: str | Path) -> os.stat_result:
         """元数据也校验路径策略；委派范围限制不能借链接或 stat 绕过。"""
@@ -290,16 +322,14 @@ class FileSystemSandbox:
     def _remove(
         self, target: Path, kind: Literal["file", "dir"], files: int, directories: int
     ) -> DeletedTarget:
-        """真正移除目标：安全删除开着就**移进回收站**，否则按旧行为删掉（2026-10-20）。
+        """真正移除目标：安全删除开着就**移进系统回收站**，否则直接删掉。
 
-        回收站里保留原有结构（目录整体移动），所以"拖回去"就能恢复；移动失败会抛错，
+        目录是整体移动的，回收站里保留原有结构，「还原」后回到原位置；移动失败会抛错，
         绝不回退成直接删除——用户开着这个开关，要的就是"宁可失败也别丢"。
         """
         if self.policy.safe_delete:
-            moved = move_to_trash(target, root=self.policy.trash_root)
-            return DeletedTarget(
-                target, kind, files, directories, trashed=True, trash_path=str(moved)
-            )
+            move_to_trash(target)
+            return DeletedTarget(target, kind, files, directories, trashed=True)
         if kind == "dir":
             shutil.rmtree(target)
         else:

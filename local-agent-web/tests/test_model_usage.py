@@ -803,6 +803,8 @@ def test_later_safety_gate_pass_keeps_the_approval_clock(
     都测不到等待时长。T34 真实基线实测到这个现象（审批轮的 `approval_wait_ms` 全是 null），
     这里把它的最小成因钉住。
     """
+    # 本用例需要真实审批请求，不依赖工作区默认免审批策略。
+    app_config.security.require_approval.delete_file = True
     runtime = _runtime_with_policy(tmp_path, model_factory, app_config)
     call = {"name": "delete_file", "args": {"path": "a.txt"}, "id": "call-1"}
 

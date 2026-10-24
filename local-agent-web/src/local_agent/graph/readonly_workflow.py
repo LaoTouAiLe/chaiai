@@ -21,6 +21,7 @@ from local_agent.graph.nodes import (
     tool_execution_node,
 )
 from local_agent.graph.state import AgentState, EvidenceReference, ReflectionResult, RuntimeContext
+from local_agent.llm.protocol import describe_parse_failure
 from local_agent.llm.usage_recording import TurnRecord
 from local_agent.session_kind import SessionKind
 from local_agent.workflow_contracts import (
@@ -91,8 +92,12 @@ def initialize(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentStat
         return _failed(data, "只读工作流需要 Agent 模式")
     try:
         request = ReadonlyResearchRequest.model_validate(runtime.context.readonly_research)
-    except ValidationError:
-        return _failed(data, "输入不合法，请提供工作区内相对文件模式与字面关键词")
+    except ValidationError as exc:
+        # 带上脱敏原因（字段 + 失败类型）：只说"输入不合法"的话，调用方无从判断该改哪个字段
+        # （2026-10-14 与委派子任务同一批修的同一种折叠）。
+        return _failed(
+            data, f"输入不合法，请提供工作区内相对文件模式与字面关键词（{describe_parse_failure(exc)}）"
+        )
     if not {"files_read", "code_search"} <= set(runtime.context.agent_capabilities):
         return _failed(data, "父 Profile 缺少 files_read 或 code_search 能力")
     data["request"] = {"pattern": request.pattern, "keywords": list(request.keywords)}

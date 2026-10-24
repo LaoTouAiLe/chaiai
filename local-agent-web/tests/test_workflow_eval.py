@@ -48,11 +48,11 @@ def test_baseline_runs_current_graph_and_real_tools(observed) -> None:
     report, states = observed
     assert report["passed"] is True
     code, readonly = report["cases"]
-    assert (code["model_calls"], code["tool_calls"]) == (6, 5)
-    assert (readonly["model_calls"], readonly["tool_calls"]) == (4, 3)
+    assert (code["model_calls"], code["tool_calls"]) == (6, 6)
+    assert (readonly["model_calls"], readonly["tool_calls"]) == (4, 4)
     assert states["code_change"]["agent_loop_version"] == 1
     assert [event.tool_name for event in states["code_change"]["tool_events"]] == [
-        "read_file", "read_file", "edit_file", "run_shell", "read_file",
+        "read_file", "read_file", "edit_file", "run_shell", "read_file", "task_control",
     ]
 
 

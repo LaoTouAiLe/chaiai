@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 340" width="820" height="340" role="img" aria-label="会话地图的分支结构示意：父节点在左，末端追问延续当前路径，中间追问新增子分支">
+  <rect width="820" height="340" fill="#ffffff"/>
+  <style>
+    .box { fill: #ffffff; stroke: #e2e2e3; stroke-width: 1.5; }
+    .box-current { fill: #fdf5ef; stroke: #e77737; stroke-width: 1.5; }
+    .head { font: 500 13px "PingFang SC", "Microsoft YaHei", sans-serif; fill: #1a1a1a; }
+    .sub { font: 12px "PingFang SC", "Microsoft YaHei", sans-serif; fill: #929295; }
+    .tag { font: 11px ui-monospace, "SF Mono", Consolas, monospace; fill: #a94b12; }
+    .edge { fill: none; stroke: #d6d6d9; stroke-width: 1.6; stroke-dasharray: 4 4; }
+    .edge-current { fill: none; stroke: #e77737; stroke-width: 2; }
+    .legend { font: 11.5px "PingFang SC", "Microsoft YaHei", sans-serif; fill: #67676c; }
+  </style>
+
+  <!-- 当前路径 -->
+  <path class="edge-current" d="M180 170 C240 170 250 96 300 96"/>
+  <path class="edge-current" d="M440 96 C500 96 510 96 560 96"/>
+  <!-- 其他分支 -->
+  <path class="edge" d="M180 170 C240 170 250 244 300 244"/>
+  <path class="edge" d="M180 170 C240 170 250 306 300 306"/>
+
+  <!-- 根 -->
+  <rect class="box" x="40" y="142" width="140" height="56" rx="10"/>
+  <text class="head" x="58" y="166">第 1 轮提问</text>
+  <text class="sub" x="58" y="184">会话开头</text>
+
+  <!-- 当前分支 -->
+  <rect class="box-current" x="300" y="70" width="140" height="56" rx="10"/>
+  <text class="head" x="318" y="94">第 2 轮</text>
+  <text class="sub" x="318" y="112">当前路径</text>
+
+  <!-- 追问 -->
+  <rect class="box-current" x="560" y="70" width="180" height="56" rx="10"/>
+  <text class="head" x="578" y="94">基于此轮继续提问</text>
+  <text class="sub" x="578" y="112">新增子分支，原路径保留</text>
+
+  <!-- 其他分支 -->
+  <rect class="box" x="300" y="218" width="140" height="56" rx="10"/>
+  <text class="head" x="318" y="242">分支 B</text>
+  <text class="sub" x="318" y="260">其他分支</text>
+
+  <rect class="box" x="300" y="280" width="140" height="56" rx="10"/>
+  <text class="head" x="318" y="304">分支 C</text>
+  <text class="sub" x="318" y="322">其他分支</text>
+
+  <!-- 图例 -->
+  <path class="edge-current" d="M40 60 L86 60"/>
+  <text class="legend" x="96" y="64">当前路径</text>
+  <path class="edge" d="M180 60 L226 60"/>
+  <text class="legend" x="236" y="64">其他分支（原路径保留）</text>
+</svg>

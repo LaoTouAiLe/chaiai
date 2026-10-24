@@ -23,3 +23,13 @@ data/
 .vscode/
 Thumbs.db
 .DS_Store
+
+# 调试与崩溃产物（不属于交付物）
+hs_err_pid*.log
+replay_pid*.log
+# 所有日志都是运行/构建产物：启动错误、模型失败、打包与 lint 日志都落在本地
+*.log
+# 本地截图草稿：准备 README 素材时产生，内容随时被覆盖，不进版本库
+.preview-*.png
+# 应用运行时写在当前目录的偏好快照（含本机绝对路径）
+pref.json

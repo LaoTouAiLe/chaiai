@@ -24,9 +24,8 @@
 全部是纯函数加环境读取，冻结与否只取决于 :func:`is_frozen` 与 ``LOCALAPPDATA``，测试直接替换
 这两个输入即可，**不需要真的打包**。
 
-**源码形态下必须完全沉默**：非冻结时所有函数回到原口径（``config.yaml``、``.env``、静态页按
-配置文件所在目录解析），:func:`data_dir` 与 :func:`bundled_static_dir` 返回 ``None`` 表示
-"没有第二套路径"——本模块加入前后源码运行行为一致。
+**源码形态**：资源函数返回 ``None``，默认配置与 .env 固定在含 pyproject.toml 的源码项目目录。
+显式传入的配置路径仍优先；安装形态找不到源码目录时回落原相对路径。
 """
 
 from __future__ import annotations
@@ -89,13 +88,19 @@ def default_config_path() -> Path:
     接受这种不确定性。
     """
     base = data_dir()
-    return DEFAULT_CONFIG_PATH if base is None else base / DEFAULT_CONFIG_PATH
+    if base is not None:
+        return base / DEFAULT_CONFIG_PATH
+    if is_frozen():
+        return DEFAULT_CONFIG_PATH
+    source_root = Path(__file__).resolve().parents[2]
+    if (source_root / "pyproject.toml").is_file():
+        return source_root / DEFAULT_CONFIG_PATH
+    return DEFAULT_CONFIG_PATH
 
 
 def default_env_path() -> Path:
     """``--env`` 的默认值：与 :func:`default_config_path` 同一目录（旧密钥路径继续可用）。"""
-    base = data_dir()
-    return DEFAULT_ENV_PATH if base is None else base / DEFAULT_ENV_PATH
+    return default_config_path().with_name(DEFAULT_ENV_PATH.name)
 
 
 def bundled_binary(name: str) -> Path | None:
@@ -106,10 +111,10 @@ def bundled_binary(name: str) -> Path | None:
     这里负责把它变成"可见的绝对路径"，调用方仍按"包内优先、PATH 兜底"的顺序解析，
     这样源码形态与装过 rg 的开发机行为不变。
     """
+    filename = name if name.lower().endswith(".exe") else f"{name}.exe"
     base = resource_dir()
     if base is None:
         return None
-    filename = name if name.lower().endswith(".exe") else f"{name}.exe"
     candidate = base / "bin" / filename
     return candidate if candidate.is_file() else None
 

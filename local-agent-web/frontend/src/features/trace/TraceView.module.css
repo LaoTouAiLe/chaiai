@@ -40,7 +40,8 @@
 .table {
   width: 100%;
   table-layout: fixed;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: var(--law-text-sm);
   line-height: var(--law-leading-sm);
 }
@@ -55,7 +56,7 @@
 
 .table th {
   position: sticky;
-  top: 0;
+  top: calc(-1 * var(--law-space-lg));
   z-index: 1;
   padding: var(--law-space-md) var(--law-space-lg);
   border-bottom: 1px solid var(--law-border-l2);
@@ -75,11 +76,13 @@
 }
 
 .colResult {
-  width: 34%;
+  width: 30%;
 }
 
+/* 耗时列原来是 10%：`203.4ms` 这种值会被省略成 `203…`（读不出单位），所以让它宽一点，
+   从结果列挪 4% 过来——结果列是有省略号的单行，宽 4% 不影响可读性。 */
 .colTime {
-  width: 10%;
+  width: 14%;
 }
 
 .row {
@@ -141,6 +144,13 @@
 
 .statusFailed {
   background: var(--law-state-error);
+}
+
+/* 四列的**信息层级**（2026-10-16）：操作名是这一行的身份，用主色；目标/结果/耗时是细节，
+   降一档。原先 `.typeCell` 被 tsx 引用却没有定义 ✗（样式静默丢失）——这里把意图显式写下来，
+   而不是依赖 `.table td` 的默认色（那样一改表格样式，这一列就会跟着漂）。 */
+.typeCell {
+  color: var(--law-text-primary);
 }
 
 .payloadCell,
@@ -267,30 +277,39 @@
   overflow-wrap: anywhere;
 }
 
+/* ---- 逐次模型调用（2026-10-16 改横排）----
+   一次调用一行：模型/用途在前，数字在后。此前是一行一长串，扫不出"哪次最慢、哪次没吃缓存"。 */
+
 .calls {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-sm);
-  margin: 0;
+  margin: var(--law-space-md) 0 0;
   padding: 0;
   list-style: none;
+  counter-reset: call;
 }
 
 .call {
   display: flex;
-  flex-direction: column;
-  gap: var(--law-space-xxs);
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm) var(--law-space-lg);
+  padding: var(--law-space-xs) 0;
+  border-top: 1px dashed var(--law-border-l1);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-sm);
 }
 
-.callPurpose {
+.callModel {
+  flex: 0 0 auto;
   color: var(--law-text-primary);
   font-weight: var(--law-weight-medium);
 }
 
-.callModel {
-  color: var(--law-text-secondary);
+.callPurpose {
+  flex: 0 0 auto;
+  min-width: 0;
+  color: var(--law-text-tertiary);
 }
 
 .callFingerprint {
@@ -300,8 +319,249 @@
 }
 
 .callNumbers {
+  flex: 0 0 auto;
   color: var(--law-text-secondary);
   font-variant-numeric: tabular-nums;
+}
+
+/* ---- 轮次卡片（2026-10-16 返工：一轮一张卡）----
+   重构前把整轮塞进表格的一行 `<td colSpan=4>`：用量挤成一串、事件流水铺在表前面（与下面的工具表
+   完全重复），真正的工具行被顶到屏幕外，而表头还停在最上面。现在卡头管"这一轮怎么样"，
+   卡身管"做了哪些操作"。 */
+
+.turns {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xl);
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-lg);
+  background: var(--law-bg-layer-1);
+}
+
+.turnCard {
+  display: flex;
+  flex-direction: column;
+  padding: var(--law-space-lg) var(--law-space-xl);
+  border-bottom: 1px solid var(--law-border-l1);
+}
+
+.turnHead {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm) var(--law-space-md);
+}
+
+.turnIndex {
+  flex: 0 0 auto;
+  padding: 0 var(--law-space-sm);
+  border-radius: var(--law-radius-sm);
+  background: var(--law-surface-selector);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-xs);
+  font-weight: var(--law-weight-medium);
+}
+
+.turnPrompt {
+  min-width: 0;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  overflow-wrap: anywhere;
+}
+
+/* 用量：**标签在上、数字在下**的网格——挤成一行时读不出"哪个数是哪个"。 */
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: var(--law-space-md) var(--law-space-lg);
+  margin-top: var(--law-space-md);
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.metricLabel {
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+}
+
+.metricValue {
+  display: flex;
+  align-items: baseline;
+  gap: var(--law-space-xs);
+  color: var(--law-text-primary);
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.metricNote {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xxs);
+}
+
+/* `50.7k / 655.4k` 这类值占两格：挤在一格里会折行，读起来像两个数。 */
+.metricWide {
+  grid-column: span 2;
+}
+
+/* 调用次数多时默认收起的那个壳（超过 4 次才出现）。 */
+.callsBox {
+  margin-top: var(--law-space-md);
+}
+
+.callsSummary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+/* "未知"比实际值弱一档：一眼能看出哪些数我们没有，而不是把它当成 0 读过去。 */
+.metricValue[data-unknown='true'] {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-sm);
+}
+
+/* ---- 事件流水与时间轴（2026-10-16）----
+   时间轴回答"时间花在哪"，流水回答"发生过什么"。两者都只用**时长与条数**，不用钟点
+   （钟点受时区影响：同一份数据在不同机器上会显示成不同的字符串）。 */
+
+.eventBlock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xs);
+  margin-top: var(--law-space-sm);
+}
+
+.timeline {
+  position: relative;
+  display: block;
+  height: 10px;
+  border-radius: var(--law-radius-pill);
+  background: var(--law-bg-layer-2);
+}
+
+.span {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  min-width: 2px;
+  border-radius: var(--law-radius-pill);
+}
+
+/* 等首字：模型侧还没吐第一个字（TTFT）。 */
+.spanWait {
+  background: var(--law-state-warn-label);
+  opacity: 0.55;
+}
+
+/* 解码：首字之后的生成。 */
+.spanDecode {
+  background: var(--law-state-info);
+}
+
+.spanTool {
+  background: var(--law-text-tertiary);
+}
+
+/* 审批：等用户点那一下——往往是"这一轮为什么慢"的答案。 */
+.spanApproval {
+  background: var(--law-state-success);
+}
+
+.spanCompaction {
+  background: var(--law-state-error);
+  opacity: 0.7;
+}
+
+/* 时间构成：**数字**比一百条 2px 的段好读（2026-10-16 实拍结论）。 */
+.breakdown {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm) var(--law-space-lg);
+  margin-top: var(--law-space-md);
+}
+
+.breakdownLabel {
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xxs);
+}
+
+.breakdownItem {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--law-space-xs);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.legendDot {
+  display: inline-block;
+  width: 10px;
+  height: 6px;
+  border-radius: var(--law-radius-pill);
+}
+
+.eventList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xxs);
+  margin: var(--law-space-sm) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.event {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.eventKind {
+  flex: 0 0 auto;
+  padding: 0 var(--law-space-xs);
+  border-radius: var(--law-radius-sm);
+  background: var(--law-bg-layer-2);
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xxs);
+}
+
+.eventLabel {
+  min-width: 0;
+  color: var(--law-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.eventMeta {
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xxs);
+  font-variant-numeric: tabular-nums;
+}
+
+.metricsMissing,
+.turnEmpty {
+  margin: 0;
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
 }
 
 /* 窄窗：表格与检查器上下堆叠。固定 360px 的检查器在 640 下会越出视口 28px，

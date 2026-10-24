@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>安装与第一次启动 · 操作手册 · chaiai</title>
+<meta name="description" content="chaiai 安装与第一次启动：发行包与源码两条路径、启动自检与预期结果。" />
+<meta name="color-scheme" content="light" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="../../site.html" aria-label="chaiai 官网">
+      <svg class="brand__mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <defs>
+          <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#F8B65C"/><stop offset="1" stop-color="#E77737"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="18" fill="url(#chaiaiWarm)"/>
+        <path d="m16 27-1-13c-.4-3 1.2-4 3.3-2.2l8.7 7.4a16 16 0 0 1 10 0l8.7-7.4c2.1-1.8 3.7-.8 3.3 2.2l-1 13c3 3.2 4 7.2 4 11 0 8.4-8.2 14-20 14-2.4 0-4.7-.2-7-.7L15 55l2.3-10.2C13.9 42.4 12 39.4 12 36c0-3.5 1.4-6.7 4-9Z" fill="#FFF7E9"/>
+        <path d="m19.3 16.8.8 8.4 5.1-3.5Zm25.4 0-.8 8.4-5.1-3.5Z" fill="#BF6A37"/>
+        <path d="M24 32.5v2M40 32.5v2" fill="none" stroke="#633E2B" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M29.2 38.1c-.7-.8-.2-2.1.9-2.1h3.8c1.1 0 1.6 1.3.9 2.1L33 40a1.4 1.4 0 0 1-2 0Z" fill="#633E2B"/>
+        <path d="M26.5 42.2c1.5 1.7 3.3 1.7 5.5-.3 2.2 2 4 2 5.5.3" fill="none" stroke="#633E2B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>chaiai</span>
+      <span class="brand__divider" aria-hidden="true"></span>
+      <span class="brand__label">文档</span>
+    </a>
+    <nav class="topnav" aria-label="站点导航">
+      <a href="../index.html">文档首页</a>
+      <a href="index.html" aria-current="page">操作手册</a>
+      <a href="../internals/index.html">技术实现</a>
+      <a class="topnav__out" href="../../site.html">返回官网</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout layout--plain">
+  <nav class="sidebar" aria-label="文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="index.html">手册首页</a>
+      <a href="01-install.html" aria-current="page">01 安装与第一次启动</a>
+      <a href="02-model.html">02 连接一个模型</a>
+      <a href="03-permissions.html">03 权限三档与目录授权</a>
+      <a href="04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="05-map.html">05 会话地图与分支追问</a>
+      <a href="06-data.html">06 数据中台</a>
+      <a href="07-settings.html">07 设置项与生效时机</a>
+      <a href="08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="../internals/index.html">概览</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+
+  <main class="doc">
+    <p class="kicker">MANUAL · 第 1 章</p>
+    <h1>安装与第一次启动</h1>
+    <p class="lead">两条路：用发行包，或从源码跑。两条路最后都得到同一个本机服务 <code>http://127.0.0.1:8000</code>。</p>
+
+    <div class="prose">
+      <h2>需要什么</h2>
+      <ul>
+        <li>Windows 10/11（x64 / x86）。Linux 与 macOS 也能运行，但没有 OS 级写边界，界面与工具结果会如实说明这一点。</li>
+        <li>源码安装需要 Python 与 Node；版本以 <code>pyproject.toml</code>、<code>frontend/package.json</code> 为准（前端要求 Node 22.20–22.x、npm 10.9+）。</li>
+        <li>不需要注册账号，也不需要事先写 <code>config.yaml</code>——模型连接在网页设置里填。</li>
+      </ul>
+
+      <h2>从源码启动</h2>
+      <p>以下命令都在 <code>local-agent-web/</code> 目录执行：</p>
+      <pre><code>uv sync
+cd frontend
+npm ci
+npm run build
+cd ..
+uv run python -m local_agent.api</code></pre>
+      <p>
+        首次启动会创建本机数据库，之后浏览器打开 <code>http://127.0.0.1:8000</code> 就能进界面。
+        开发时也可以另开一个终端，在 <code>frontend/</code> 执行 <code>npm run dev</code>，
+        用 <code>http://127.0.0.1:5173</code> 访问（<code>/api</code> 会代理到 8000）。
+      </p>
+
+      <h2>用发行包启动</h2>
+      <p>
+        取得发行包后按随包说明安装并启动，入口同样是 <code>127.0.0.1:8000</code>。
+        安装方式、版本要求与升级 / 卸载步骤以随包文档为准。
+      </p>
+
+      <h2>跑完应该看到什么</h2>
+      <ul>
+        <li>终端没有报错，浏览器能打开界面并看到输入框；</li>
+        <li>根路径提示「前端产物不存在」时，是还没构建前端——按提示在 <code>frontend/</code> 执行 <code>npm run build</code>，或在开发态用 <code>npm run dev</code>；</li>
+        <li><code>127.0.0.1:8000</code> 只在本机可访问，同一局域网的其他设备打不开，这是设计而不是故障。</li>
+      </ul>
+
+      <figure>
+        <img src="../assets/img/ui-empty-session-20261019.png" alt="第一次启动后的空会话界面" width="1440" height="900" loading="lazy" />
+        <figcaption>第一次启动后的空会话：中间一句说明它会怎么做，底部是输入区与模式切换。侧栏里的会话均为示意数据。</figcaption>
+      </figure>
+
+      <h2>启动前自检</h2>
+      <p>不确定环境哪里有问题时，先跑诊断（不启动服务、不读密钥）：</p>
+      <pre><code>uv run python -m local_agent.api --diagnose</code></pre>
+      <p>
+        它输出一段 JSON：<code>{"ok": true/false, "checks": [...]}</code>，逐项检查配置、前端产物、
+        三个 SQLite、向量库依赖、git / rg 与模型配置；<code>ok</code> 为假时退出码为 1。
+        注意它只验证静态条件：不代表模型能连通，也不证明沙箱真的生效。
+      </p>
+    </div>
+
+    <nav class="pager" aria-label="翻页">
+      <a href="index.html">
+        <span class="pager__hint">上一篇</span>
+        <span class="pager__title">← 手册首页</span>
+      </a>
+      <a class="pager__next" href="02-model.html">
+        <span class="pager__hint">下一篇</span>
+        <span class="pager__title">02 连接一个模型 →</span>
+      </a>
+    </nav>
+
+    <p class="pagefoot">最后更新 2026-10-19 · 适用版本 v1.0</p>
+  </main>
+</div>
+
+</body>
+</html>

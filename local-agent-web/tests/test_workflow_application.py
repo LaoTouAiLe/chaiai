@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from threading import Event, Thread
 
@@ -41,7 +42,8 @@ def workflow_api(tmp_path, model_factory, monkeypatch):
         config.jobs.background = background
         config.jobs.max_concurrent_jobs = 1
         if approval:
-            config.security.large_edit.max_changed_lines_without_approval = 1
+            config.security.require_approval.large_batch_edit = True
+            config.security.large_edit.max_files_without_approval = 0
         runtime = open_runtime(config, base_dir=tmp_path, model=model or model_factory(decision="chat", reply="普通回答"))
         runtimes.append(runtime)
         return TestClient(create_app(runtime), base_url="http://127.0.0.1"), runtime
@@ -76,6 +78,31 @@ def _wait(client, sid, terminal):
             return snapshot
         time.sleep(0.02)
     pytest.fail(f"未到达 {terminal}: {snapshot}")
+
+
+def test_failed_tests_are_reported_and_survive_refresh_without_reexecution(workflow_api, tmp_path):
+    model = ProposalModel(messages=iter([]), body=json.dumps({
+        "old_text": "    return value\n", "new_text": "    return 5\n",
+    }))
+    client, _ = workflow_api(model=model)
+    sid = _session(client)
+    assert _send(client, sid, CODE).status_code == 200
+    snapshot = _snapshot(client, sid)
+    assert snapshot["session_state"] == "failed"
+    assert snapshot["final_result"]["state"] == "failed"
+    assert "测试失败" in snapshot["final_result"]["summary"]
+    shells = [message["tool"] for message in snapshot["messages"]
+              if message["kind"] == "tool" and message["tool"]["tool_name"] == "run_shell"]
+    assert len(shells) == 1 and shells[0]["status"] == "error"
+    assert shells[0]["outcome"]["exit_code"] == 1
+    assert "FAILED (failures=2)" in shells[0]["outcome"]["stderr"]
+    # 刷新和幂等重放不得再次改文件或运行测试。
+    assert _send(client, sid, CODE).status_code == 200
+    refreshed = _snapshot(client, sid)
+    assert refreshed["final_result"] == snapshot["final_result"]
+    assert sum(message["kind"] == "tool" for message in refreshed["messages"]) == 4
+    assert len(model.requests) == 1
+    assert (tmp_path / "bounds.py").read_text().endswith("    return 5\n")
 
 
 @pytest.mark.parametrize("workflow,kind", [(READ, "readonly_research"), (CODE, "code_change"), (CHILD, "delegated_research")])

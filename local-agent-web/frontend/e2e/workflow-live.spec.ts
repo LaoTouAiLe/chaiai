@@ -4,7 +4,7 @@ async function createSession(page: import('@playwright/test').Page) {
   const response = page.waitForResponse((response) => response.url().endsWith('/api/sessions') && response.request().method() === 'POST')
   await page.getByRole('button', { name: '新建会话' }).click()
   expect((await response).ok()).toBe(true)
-  await expect(page.getByRole('log', { name: '对话' })).toContainText('开始一个新会话')
+  await expect(page.getByRole('log', { name: '对话' })).toContainText('在工作区里动手做事')
   await expect(page.getByLabel('执行方式')).toBeEnabled()
 }
 

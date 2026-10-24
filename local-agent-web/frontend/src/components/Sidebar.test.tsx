@@ -85,3 +85,19 @@ it('搜索会话会筛选侧栏，并能清空恢复', () => {
   fireEvent.change(search, { target: { value: '' } })
   expect(screen.getByText('修复测试')).toBeInTheDocument()
 })
+
+it('每个工作区独立展示更多，保留选中项且搜索全部会话', () => {
+  render(<Sidebar workspaces={['甲', '乙'].map((title) => ({ id: title, title,
+    sessions: Array.from({ length: 8 }, (_, index) => ({ id: `${title}-${index}`, title: `${title}会话${index}`,
+      status: 'idle' as const, timeLabel: '', selected: title === '甲' && index === 7 })),
+  }))} />)
+  expect(screen.queryByText('甲会话5')).not.toBeInTheDocument()
+  expect(screen.getByText('甲会话7')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '甲展示更多会话' }))
+  expect(screen.getByText('甲会话5')).toBeInTheDocument()
+  expect(screen.queryByText('乙会话5')).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '甲收起会话' }))
+  expect(screen.queryByText('甲会话5')).not.toBeInTheDocument()
+  fireEvent.change(screen.getByRole('searchbox', { name: '搜索会话' }), { target: { value: '乙会话6' } })
+  expect(screen.getByText('乙会话6')).toBeInTheDocument()
+})

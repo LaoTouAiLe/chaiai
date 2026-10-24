@@ -139,6 +139,33 @@ def test_invalid_model_proposal_never_writes(tmp_path, body):
     assert (tmp_path / "bounds.py").read_text() == BROKEN_CODE
 
 
+def test_fenced_proposal_with_prose_is_tolerated(tmp_path):
+    """2026-10-14 回归：真实模型把修改提议包在 ``` 围栏里、前后加一句说明。
+
+    原先是手写的 ``model_validate_json``，围栏会让整条工作流在副作用之前失败（与委派子任务同一个
+    缺陷，同一天改走 §11.7 的解析链）。
+    """
+    body = (
+        "修改如下：\n```json\n"
+        + json.dumps({"old_text": "    return value\n", "new_text": "    return min(upper, max(lower, value))\n"})
+        + "\n```\n以上。"
+    )
+    context, _ = _environment(tmp_path, body=body)
+    result = _invoke(context)
+    assert result["task_status"] == "completed", result["final_response"]
+    assert validate_outcome(CODE_CASE, tmp_path, result) == []
+
+
+def test_invalid_proposal_reports_field_and_kind_without_raw_output(tmp_path):
+    """提议仍不合法时，失败原因要带字段与失败类型，但不回显模型原文。"""
+    body = '{"old_text": "    return value\\n", "new_text": "    return 5\\n", "path": "test_bounds.py"}'
+    context, _ = _environment(tmp_path, body=body)
+    result = _invoke(context)
+    assert result["task_status"] == "failed"
+    assert "extra_forbidden" in result["final_response"] and "path" in result["final_response"]
+    assert "test_bounds.py" not in result["final_response"]
+
+
 def test_model_exception_is_recorded_without_retry(tmp_path):
     context, model = _environment(tmp_path, raises=True)
     result = _invoke(context)
@@ -167,6 +194,13 @@ def test_real_failed_tests_do_not_complete_or_rollback(tmp_path):
     assert (tmp_path / "bounds.py").read_text().endswith("    return 5\n")
     assert (tmp_path / "test_bounds.py").read_text() == TEST_CODE
     assert sum(event.tool_name == "edit_file" for event in result["tool_events"]) == 1
+    shells = [event for event in result["tool_events"] if event.tool_name == "run_shell"]
+    assert len(shells) == 1 and shells[0].status == "error"
+    payload = json.loads(next(message.content for message in result["messages"]
+                              if isinstance(message, ToolMessage) and message.name == "run_shell"))
+    assert payload["exit_code"] == 1
+    assert "Ran 3 tests" in payload["stderr"] and "FAILED (failures=2)" in payload["stderr"]
+    assert result["final_evidence"] == []
 
 
 def test_expected_test_count_is_checked(tmp_path):
@@ -232,7 +266,8 @@ def test_post_test_changes_fail_reread_validation(tmp_path, monkeypatch, target)
 @pytest.mark.parametrize("decision", ["approve", "reject", "edit"])
 def test_write_approval_uses_parent_node_and_same_call(tmp_path, decision):
     context, model = _environment(tmp_path)
-    context.app_config.security.large_edit.max_changed_lines_without_approval = 1
+    context.app_config.security.require_approval.large_batch_edit = True
+    context.app_config.security.large_edit.max_files_without_approval = 0
     saver = checkpoint.open_checkpointer(tmp_path / "checkpoints.sqlite")
     try:
         graph = builder.build_chat_graph(saver)
@@ -256,21 +291,25 @@ def test_write_approval_uses_parent_node_and_same_call(tmp_path, decision):
         saver.conn.close()
 
 
-@pytest.mark.parametrize("decision", ["approve", "reject"])
-def test_shell_approval_does_not_repeat_write(tmp_path, decision):
+def test_shell_step_no_longer_asks_and_write_happens_once(tmp_path):
+    """壳步骤（真实跑测试）**不再弹卡**：整条受控修改一次调用跑完，写只发生一次。
+
+    2026-10-15 权限模型重构：常规命令免审，工作流里那条 `run_shell` 不再进审批，所以一条用例
+    只会有**零次**挂起。这条的旧判据是"壳审批拒绝后写入不重复"——那种审批在新模型里不存在了；
+    保留的覆盖是"写入一次、输入只跑一次、真实测试真的跑过"，与"审批只由提权 / 破坏性触发"一致。
+    """
     context, model = _environment(tmp_path)
-    context.app_config.security.shell.whitelist = []
+    context.app_config.security.shell.whitelist = []  # 白名单已不影响审批，留着证明这一点
     saver = checkpoint.open_checkpointer(tmp_path / "checkpoints.sqlite")
     try:
         graph = builder.build_chat_graph(saver)
-        cfg = {"configurable": {"thread_id": "shell-approval"}}
-        pending = _invoke(context, graph, cfg)
-        assert pending["pending_approval"]["tool_name"] == "run_shell"
+        cfg = {"configurable": {"thread_id": "shell-no-approval"}}
+        result = _invoke(context, graph, cfg)
+        assert not result.get("pending_approval"), "常规命令不再弹卡"
+        assert result["task_status"] == "completed", result["final_response"]
         assert (tmp_path / "bounds.py").read_text() == FIXED_CODE
-        result = graph.invoke(Command(resume={"decision": decision}), config=cfg, context=context)
         assert sum(event.tool_name == "edit_file" for event in result["tool_events"]) == 1
         assert len(model.requests) == len(result["model_call_records"]) == 1
-        assert result["task_status"] == ("completed" if decision == "approve" else "failed")
     finally:
         saver.conn.close()
 
@@ -314,11 +353,13 @@ def test_test_file_case_alias_cannot_be_edit_target(tmp_path):
 @pytest.mark.parametrize("fault", [
     "missing_body", "old_run", "truncated", "timed_out", "exit_code", "empty_output", "skipped",
     "bad_edit_hash", "bad_read_hash",
+    "error_with_zero_exit", "denied_with_valid_output", "error_read", "error_edit",
 ])
 def test_incomplete_or_inconsistent_tool_evidence_is_rejected(tmp_path, monkeypatch, fault):
     context, _ = _environment(tmp_path)
     original = code_workflow.execute
-    target = "edit_file" if fault == "bad_edit_hash" else "read_file" if fault == "bad_read_hash" else "run_shell"
+    target = ("edit_file" if fault in {"bad_edit_hash", "error_edit"} else
+              "read_file" if fault in {"bad_read_hash", "error_read"} else "run_shell")
     def execute(state, runtime):
         update = original(state, runtime)
         if state["pending_tool_calls"][0]["name"] != target:
@@ -327,6 +368,9 @@ def test_incomplete_or_inconsistent_tool_evidence_is_rejected(tmp_path, monkeypa
             update["messages"] = []
         elif fault == "old_run":
             update["tool_events"] = [replace(event, run_id="old-run") for event in update["tool_events"]]
+        elif fault in {"error_with_zero_exit", "denied_with_valid_output", "error_read", "error_edit"}:
+            status = "denied" if fault == "denied_with_valid_output" else "error"
+            update["tool_events"] = [replace(event, status=status) for event in update["tool_events"]]
         else:
             messages = []
             for message in update["messages"]:
@@ -354,19 +398,23 @@ def test_incomplete_or_inconsistent_tool_evidence_is_rejected(tmp_path, monkeypa
     assert result["final_evidence"] == []
 
 
-def test_two_approvals_preserve_counts_and_do_not_repeat_side_effects(tmp_path):
+def test_single_approval_preserves_counts_and_does_not_repeat_side_effects(tmp_path):
+    """只剩**一次**审批：批准写步骤之后整条受控修改跑完，计数与副作用都不重复。
+
+    2026-10-15 权限模型重构前这里等的是两次挂起（`edit_file` 之后还有 `run_shell` 那条真实测试命令）；
+    常规命令免审之后第二次挂起不会再出现，但"批准一次 → 全流程不重复执行、计数不变"这条照旧验。
+    """
     context, model = _environment(tmp_path)
-    context.app_config.security.large_edit.max_changed_lines_without_approval = 1
-    context.app_config.security.shell.whitelist = []
+    context.app_config.security.require_approval.large_batch_edit = True
+    context.app_config.security.large_edit.max_files_without_approval = 0
     saver = checkpoint.open_checkpointer(tmp_path / "checkpoints.sqlite")
     try:
         graph = builder.build_chat_graph(saver)
-        cfg = {"configurable": {"thread_id": "both"}}
+        cfg = {"configurable": {"thread_id": "single-approval"}}
         first = _invoke(context, graph, cfg)
         assert first["pending_approval"]["tool_name"] == "edit_file"
-        second = graph.invoke(Command(resume={"decision": "approve"}), config=cfg, context=context)
-        assert second["pending_approval"]["tool_name"] == "run_shell"
         result = graph.invoke(Command(resume={"decision": "approve"}), config=cfg, context=context)
+        assert not result.get("pending_approval"), "常规命令不再弹第二次卡"
         assert result["task_status"] == "completed", result["final_response"]
         assert result["workflow"]["tool_calls"] == 6
         assert len(result["tool_events"]) == len({event.tool_call_id for event in result["tool_events"]}) == 6
@@ -378,7 +426,8 @@ def test_two_approvals_preserve_counts_and_do_not_repeat_side_effects(tmp_path):
 
 def test_cancel_while_waiting_for_write_approval_does_not_execute(tmp_path):
     context, model = _environment(tmp_path)
-    context.app_config.security.large_edit.max_changed_lines_without_approval = 1
+    context.app_config.security.require_approval.large_batch_edit = True
+    context.app_config.security.large_edit.max_files_without_approval = 0
     saver = checkpoint.open_checkpointer(tmp_path / "checkpoints.sqlite")
     try:
         graph = builder.build_chat_graph(saver)

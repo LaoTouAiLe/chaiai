@@ -140,7 +140,7 @@ def test_parallel_is_real_and_shares_the_serial_budget(tmp_path):
     {"tasks": [{"scope": "./docs", "question": "q"}]},
     {"tasks": [{"scope": "docs", "question": " "}]},
     {"tasks": [{"scope": "docs", "question": "q", "tasks": []}]},
-    {"tasks": [{"scope": "docs", "question": "q"}], "concurrency": 3},
+    {"tasks": [{"scope": "docs", "question": "q"}], "concurrency": 0},
     {"tasks": [{"scope": "docs", "question": "q"}], "concurrency": True},
     {"tasks": [{"scope": "docs", "question": "q"}], "next_node": "shell"},
 ])
@@ -204,6 +204,32 @@ def test_invalid_plan_or_missing_evidence_is_failure(tmp_path, body):
     assert not result["final_evidence"]
 
 
+def test_fenced_plan_with_prose_is_tolerated(tmp_path):
+    """2026-10-14 线上故障回归：真实模型把检索计划包在 ``` 围栏里、前后还各加一句话。
+
+    原来这里走手写的 ``model_validate_json``，遇到围栏直接 ``json_invalid``，于是 1–3 个子任务
+    同因失败、整条委派只回一句"子执行异常（ValidationError）"。改用 §11.7 的解析链后应当照常完成。
+    """
+    body = '好的，检索计划如下：\n```json\n{"pattern": "*.md", "keywords": []}\n```\n需要我继续吗？'
+    context, _ = _environment(tmp_path, body=body)
+    result = _invoke(context)
+    assert result["task_status"] == "completed", result["final_response"]
+    assert all(child["status"] == "completed" for child in result["workflow"]["children"])
+    assert result["final_evidence"]
+
+
+def test_plan_failure_reports_field_and_kind_without_raw_output(tmp_path):
+    """计划仍然不合法时（多了字段），失败原因要能自查：带字段与失败类型，但不回显模型原文。"""
+    context, _ = _environment(tmp_path, body=json.dumps({"pattern": "*.md", "tool": "write_file"}))
+    result = _invoke(context)
+    assert result["task_status"] == "failed"
+    error = result["workflow"]["children"][0]["error"]
+    assert "extra_forbidden" in error and "tool" in error
+    assert "ValidationError" not in error
+    assert "write_file" not in error
+    assert "extra_forbidden" in result["final_response"]
+
+
 @pytest.mark.parametrize("options", [{"raises": True}, {"tool_call": True},
     {"usage": {"input_tokens": 99999, "output_tokens": 1, "total_tokens": 100000}},
     {"usage": {"input_tokens": 1, "output_tokens": 99999, "total_tokens": 100000}}])
@@ -241,7 +267,7 @@ def test_parent_cancellation_during_child_execution(tmp_path, monkeypatch):
 def test_child_context_has_no_parent_history_or_authorization(tmp_path, monkeypatch):
     context, model = _environment(tmp_path)
     context.agents_context = "PRIVATE PARENT RULES"
-    context.security_policy.external_policy = ExternalPathPolicy(mode="allow")
+    context.security_policy.external_policy = ExternalPathPolicy(mode="danger-full-access")
     seen = []
     original = readonly_workflow.initialize
     def capture(state, runtime):
@@ -257,7 +283,7 @@ def test_child_context_has_no_parent_history_or_authorization(tmp_path, monkeypa
     assert child.workspace_root == tmp_path / "docs" and child.current_cwd == child.workspace_root
     assert child.agent_capabilities == ("files_read", "code_search")
     assert child.security_policy is not context.security_policy and child.tool_registry is not context.tool_registry
-    assert child.security_policy.external_policy.mode == "deny"
+    assert child.security_policy.external_policy.mode == "read-only"
     assert child.security_policy.allow_result_spill is False
     assert not child.app_config.memory.long_term.enabled and not child.app_config.agents.enabled
     assert "PRIVATE" not in str(model.requests)
@@ -268,7 +294,7 @@ def test_child_context_has_no_parent_history_or_authorization(tmp_path, monkeypa
 @pytest.mark.parametrize("attack", ["write", "shell", "outside", "sensitive"])
 def test_execution_gate_rejects_injected_child_tool_even_with_safety_bypassed(tmp_path, monkeypatch, attack):
     context, _ = _environment(tmp_path)
-    context.security_policy.external_policy = ExternalPathPolicy(mode="allow")
+    context.security_policy.external_policy = ExternalPathPolicy(mode="danger-full-access")
     outside = tmp_path / "private.txt"
     outside.write_text("parent-only", encoding="utf-8")
     (tmp_path / "docs" / ".env").write_text("secret", encoding="utf-8")
@@ -409,11 +435,10 @@ def test_v9_failure_rolls_back_schema_version_and_restores_foreign_key_setting(t
 
 
 def test_config_and_request_constraints_are_actual_consumers():
-    for field, value in (("max_children", 4), ("max_concurrency", 3), ("child_timeout_seconds", 0)):
+    for field, value in (("max_children", 0), ("max_concurrency", 0), ("child_timeout_seconds", 0)):
         with pytest.raises(ValidationError):
             WorkflowsConfig(**{field: value})
-    with pytest.raises(ValidationError):
-        DelegatedResearchRequest.model_validate({"tasks": [{"scope": ".", "question": "q"}] * 4})
+    assert len(DelegatedResearchRequest.model_validate({"tasks": [{"scope": ".", "question": "q"}] * 8}).tasks) == 8
 
 
 def test_one_failed_child_never_upgrades_partial_success(tmp_path, monkeypatch):
@@ -492,7 +517,7 @@ def test_checkpoint_turns_append_each_child_once_and_normal_turn_does_not_redele
             usage_recorder=context.usage_recorder)
         last = graph.invoke({"user_input": "解释概念", "session_mode": "agent"}, config=config, context=normal)
         assert last["workflow"] is None and last["final_response"] == "普通回答"
-        assert len(last["tool_events"]) == 8
+        assert len(last["tool_events"]) == 9
         assert all("child" not in identity for identity in last["turn_records"][last["run_id"]].model_call_ids)
     finally:
         saver.conn.close()

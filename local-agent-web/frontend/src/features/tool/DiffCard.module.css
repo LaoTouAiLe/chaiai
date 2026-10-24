@@ -1,18 +1,17 @@
+/* Codex 风格的 diff：没有卡片边框、没有灰色标题条，只有文件名一行 + 连续的行。 */
 .card {
   margin: 0;
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-lg);
-  background: var(--law-bg-layer-1);
-  overflow: hidden;
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-xs);
+  line-height: 20px;
+  background: transparent;
 }
 
 .header {
   display: flex;
   align-items: center;
-  gap: var(--law-space-md);
-  padding: var(--law-space-md) var(--law-space-lg);
-  border-bottom: 1px solid var(--law-border-l1);
-  background: var(--law-surface-sunken);
+  gap: var(--law-space-sm);
+  padding: 2px 0 var(--law-space-xs);
 }
 
 .path {
@@ -21,18 +20,14 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--law-font-mono);
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-xs);
   color: var(--law-text-primary);
 }
 
 .stats {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: var(--law-space-xs);
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-xs);
+  gap: 6px;
+  flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
 }
 
@@ -44,18 +39,23 @@
   color: var(--law-diff-del-text);
 }
 
-.fileCount {
-  color: var(--law-text-caption);
-}
-
+/* 复制按钮不抢视觉：hover 这一块时才出现，键盘聚焦时也可见。 */
 .copy {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  height: 24px;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
   border-radius: var(--law-radius-sm);
   color: var(--law-text-tertiary);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.card:hover .copy,
+.copy:focus-visible {
+  opacity: 1;
 }
 
 .copy:hover {
@@ -63,84 +63,107 @@
   color: var(--law-text-primary);
 }
 
-/* Horizontal scrolling lives here so long lines never reflow. */
+/* 横向滚动放在这一层：长行不换行，行号列 sticky 住在左边。 */
 .body {
   overflow-x: auto;
-}
-
-.hunk + .hunk {
-  border-top: 1px solid var(--law-border-l1);
-}
-
-.hunkHeader {
-  position: sticky;
-  left: 0;
-  padding: var(--law-space-sm) var(--law-space-lg);
-  background: var(--law-surface-sunken);
-  color: var(--law-text-tertiary);
-  font-family: var(--law-font-mono);
-  font-size: var(--law-text-xxs);
-  line-height: var(--law-leading-xxs);
-  white-space: nowrap;
+  border-radius: var(--law-radius-sm);
 }
 
 .row {
   display: flex;
   align-items: stretch;
   min-width: max-content;
-  font-family: var(--law-font-mono);
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-xs);
 }
 
 .rowAdd {
   background: var(--law-diff-add-bg);
-  color: var(--law-diff-add-text);
 }
 
 .rowDel {
   background: var(--law-diff-del-bg);
-  color: var(--law-diff-del-text);
 }
 
-/* Sticky gutters keep the line numbers visible while the code scrolls. */
-.gutter {
+/* 行号列：sticky、右对齐、自带一档更饱和的底色（加/删行）。 */
+.num {
+  position: sticky;
+  left: 0;
   flex: 0 0 auto;
-  width: 40px;
-  padding: 0 var(--law-space-sm);
+  box-sizing: border-box;
+  padding: 0 var(--law-space-sm) 0 var(--law-space-md);
   text-align: right;
   color: var(--law-diff-gutter);
   font-variant-numeric: tabular-nums;
-  background: inherit;
   user-select: none;
 }
 
-.gutterOld {
-  position: sticky;
-  left: 0;
+.rowAdd .num {
+  background: var(--law-diff-add-num-bg);
+  color: var(--law-diff-num-text);
 }
 
-.gutterNew {
-  position: sticky;
-  left: 40px;
+.rowDel .num {
+  background: var(--law-diff-del-num-bg);
+  color: var(--law-diff-num-text);
 }
 
+/* gutter 符号：与正文同一行底色，只占一个字符的宽度。 */
 .sign {
   flex: 0 0 auto;
-  width: 16px;
+  width: 1.6em;
   text-align: center;
-  background: inherit;
+  color: var(--law-text-tertiary);
   user-select: none;
+}
+
+.rowAdd .sign {
+  color: var(--law-diff-add-text);
+}
+
+.rowDel .sign {
+  color: var(--law-diff-del-text);
 }
 
 .code {
   flex: 1 0 auto;
-  padding: 0 var(--law-space-xl) 0 0;
+  padding-right: var(--law-space-2xl);
   white-space: pre;
-  color: inherit;
+  color: var(--law-text-primary);
 }
 
-/* Context rows keep the default text colour even inside a tinted hunk. */
-.row:not(.rowAdd):not(.rowDel) .code {
+/* hunk 之间的 `⋮`：一行矮的分隔，不占正文的行号。 */
+.gap {
+  display: flex;
+  align-items: center;
+  min-width: max-content;
+  height: 16px;
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xxs);
+}
+
+/* 长 hunk 的"还有 N 行"：一行按钮，不抢正文的视觉权重。 */
+.more {
+  display: block;
+  width: 100%;
+  padding: 4px var(--law-space-md);
+  border: none;
+  border-top: 1px dashed var(--law-border-l1);
+  background: transparent;
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xxs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.more:hover {
   color: var(--law-text-primary);
+  background: var(--law-surface-sunken);
+}
+
+.gap .num {
+  background: transparent;
+}
+
+.gap .sign {
+  width: 1.6em;
+  color: var(--law-text-caption);
 }

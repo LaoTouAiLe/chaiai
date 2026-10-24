@@ -1,0 +1,52 @@
+/* 上下文压缩行（2026-10-16）：与 Think 行同级——一行、可扫读，不抢注意力。 */
+
+.root {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm);
+  padding: var(--law-space-xs) 0;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+.icon {
+  flex: 0 0 auto;
+  color: var(--law-text-tertiary);
+}
+
+.title {
+  flex: 0 0 auto;
+  color: var(--law-text-primary);
+  font-weight: var(--law-weight-medium);
+}
+
+.detail {
+  min-width: 0;
+  color: var(--law-text-tertiary);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* 运行中：一个缓慢呼吸的点（不用旋转器——那会让人以为界面在转圈等它）。 */
+.root[data-state='running'] .icon {
+  color: var(--law-state-info);
+  animation: compressionBreath 1.4s ease-in-out infinite;
+}
+
+@keyframes compressionBreath {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root[data-state='running'] .icon {
+    animation: none;
+  }
+}

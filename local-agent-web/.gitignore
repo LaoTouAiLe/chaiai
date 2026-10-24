@@ -9,14 +9,21 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+# Native compiler intermediates are not runtime distribution assets.
+src/local_agent/native/windows/bin/*.pdb
+src/local_agent/native/windows/bin/*.lib
 
 # 本地密钥与私有配置（示例文件与 uv.lock 必须保留在版本库中）
 .env
 config.yaml
+# MCP server 的连接配置：`env` 里是**明文凭据**（cookie / token），与 .env 同级对待。
+# 这里忽略的是实际文件；模板与说明写在 docs/plans/MCP_CLIENT_PLAN.md，不另建可提交的副本。
+mcp.json
 data/
 
 # T23 评测的生成报表（本地可比对的产物，不进版本库）
 eval/
+.agent-runtime/
 
 # 编辑器
 .idea/

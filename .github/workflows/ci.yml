@@ -1,0 +1,97 @@
+# 持续集成：开源后每个 PR 必须过的三道闸。
+#
+# 三个 job 各自独立，任何一个红都不阻塞另外两个——但合并前要求全绿：
+#   1. backend  ：后端 pytest（Windows 跑，因为写侧沙箱与命令相关用例只对 Windows 有意义）
+#   2. frontend ：前端类型检查 + lint + 生产构建
+#   3. secrets  ：密钥扫描（规则见仓库根的 .gitleaks.toml）
+#
+# **前端单测（vitest）暂时没进 CI**：本地在无头环境里跑 `vitest run` 会挂起（只打出 RUN 横幅后不动），
+# 原因未查清。等能在 CI 里稳定跑起来再加，不要先加一条会常态红的检查。
+
+name: CI
+
+on:
+  push:
+    # 同时写 main 与 master：本地当前主分支是 master（Gitee 上的远端也是它），
+    # 将来迁到 GitHub 时大概率会被改成 main。两个都列上，避免"推上去了但 CI 一直不跑"。
+    branches: [main, master]
+  pull_request:
+
+# 只读权限：CI 不需要写仓库（发布走单独的 release workflow）
+permissions:
+  contents: read
+
+# 同一分支的旧跑批直接取消，省 runner 时间
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: backend / pytest
+    runs-on: windows-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: local-agent-web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: local-agent-web/pyproject.toml
+
+      - name: 安装依赖（含 memory 可选组）
+        # `requirements.txt` 只有一行 `-e .`，开发依赖在 pyproject 的 dependency-groups 里；
+        # memory 组（chromadb / fastembed）必须装：不装的话 tests/test_memory.py 会跳过一整组用例，
+        # 那等于"记忆系统的回归在 CI 里看不见"。
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[memory]" pytest pytest-asyncio
+
+      - name: 跑全部后端用例
+        run: python -m pytest -q
+
+  frontend:
+    name: frontend / typecheck + lint + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: local-agent-web/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: local-agent-web/frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: lint
+        run: npx eslint .
+
+      - name: 生产构建（确认产物能打出来）
+        run: npm run build
+
+  secrets:
+    name: secrets / gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 扫描整段历史，而不只是本次 diff：历史里曾经提交过的密钥同样要能发现
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml

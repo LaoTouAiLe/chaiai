@@ -35,16 +35,16 @@ from local_agent.exceptions import (
 )
 from local_agent.graph import builder
 from local_agent.model_settings import (
-    META_AGENT_PROFILE,
+    META_AGENT_CAPABILITIES,
     META_EXTERNAL_PATHS_MODE,
     CapabilityReport,
+    CapabilityStore,
     ConnectionDraft,
     ConnectionStore,
+    DatabaseCredentialStore,
     InMemoryCredentialStore,
-    KeyringCredentialStore,
     ModelConnection,
     PermissionStore,
-    ProfileStore,
     SelectionRef,
     credential_ref_for,
     current_settings_version,
@@ -57,6 +57,7 @@ from local_agent.model_settings import (
     transport_of,
     validate_draft,
 )
+from local_agent.model_settings.credentials import CREDENTIAL_META_PREFIX
 from local_agent.persistence import checkpoint, migrations
 from local_agent.persistence.checkpoint import ChatDatabase
 from local_agent.persistence.request_ledger import RequestLedger
@@ -172,36 +173,59 @@ def test_in_memory_store_keeps_secrets_in_process_only() -> None:
     assert store.get(ref) is None
 
 
-def test_open_credential_store_falls_back_on_non_windows() -> None:
-    store = open_credential_store("auto", platform="linux")
+def test_open_credential_store_defaults_to_the_local_settings_database() -> None:
+    """默认凭据后端是**本地设置库**，不是系统凭据管理器（2026-10-13 的契约改动，§6.8）。
 
-    assert store.kind == "memory"
-    assert store.note is not None and "POSIX" in store.note
+    为什么改：分发形态（双击 exe）下凭据管理器会在**别人的机器**上因服务或策略失败，而失败的表现是
+    "重启后密钥没了"——用户无从判断自己哪里做错了；设置库本来就是本机的单个 SQLite 文件，
+    密钥与连接放在同一处，暴露面没有变化。
+    """
+    store = open_credential_store("auto")
 
-
-def test_open_credential_store_prefers_the_os_store_on_windows_with_a_working_backend() -> None:
-    store = open_credential_store("auto", platform="win32", module=_FakeKeyring())
-
-    assert store.kind == "os"
+    assert store.kind == "local"
     assert store.note is None
-    ref = credential_ref_for("mc-1", 1)
-    store.set(ref, SECRET)
-    assert store.get(ref) == SECRET
-    store.delete(ref)
-    assert store.get(ref) is None
+    # 还没绑库：读写必须**失败闭合**，不能静默返回空值（那会让"密钥丢了"看起来像"没配过"）。
+    with pytest.raises(CredentialStoreError):
+        store.get(credential_ref_for("mc-1", 1))
 
 
-def test_open_credential_store_degrades_when_the_os_store_refuses() -> None:
-    """系统凭据存储探测失败 → 临时模式 + 原因，**不是**静默写明文文件。"""
-    store = open_credential_store("auto", platform="win32", module=_BrokenKeyring())
+def test_database_store_persists_across_a_reopen(tmp_path: Path) -> None:
+    """**这次改动要买到的性质**：保存 → 关库 → 重开 → 密钥仍在。
 
-    assert store.kind == "memory"
-    assert store.note is not None and "降级" in store.note
+    用两个 store 实例（而不是共用一个内存对象）模拟真实重启：只有真落进设置库才可能读回来。
+    """
+    path = tmp_path / "settings.sqlite"
+    first = open_settings_database(path, credentials=open_credential_store("auto"))
+    saved = first.connections.save(_draft(), api_key=SECRET)
+    first.connection.close()
+
+    reopened = open_settings_database(path, credentials=open_credential_store("auto"))
+    assert reopened.connections.resolve_api_key(saved) == SECRET
+    reopened.connection.close()
 
 
-def test_keyring_store_rejects_a_ref_that_is_not_ours() -> None:
+def test_database_store_keeps_the_secret_in_settings_meta_only(tmp_path: Path) -> None:
+    """密钥**只**落在 `settings_meta` 的 `credentials.<引用>` 键下。
+
+    连接表里仍然只有引用——"引用与密钥分离"这条性质没变（`migrations.py` 的结构说明同步改过）：
+    任何按连接表渲染的 DTO 都拿不到密钥。
+    """
+    path = tmp_path / "settings.sqlite"
+    database = open_settings_database(path, credentials=open_credential_store("auto"))
+    saved = database.connections.save(_draft(), api_key=SECRET)
+
+    keys = [row[0] for row in database.connection.execute("SELECT key FROM settings_meta")]
+    assert f"{CREDENTIAL_META_PREFIX}{saved.credential_ref}" in keys
+    rows = database.connection.execute("SELECT credential_ref FROM model_connections").fetchall()
+    assert [row[0] for row in rows] == [saved.credential_ref]
+    assert SECRET not in str(saved.credential_ref)
+    database.connection.close()
+
+
+def test_database_store_rejects_a_ref_that_is_not_ours(tmp_path: Path) -> None:
     """引用必须是我们生成的形状：防止有人把密钥本身塞进 `credential_ref` 字段。"""
-    store = KeyringCredentialStore(module=_FakeKeyring())
+    store = DatabaseCredentialStore()
+    open_settings_database(tmp_path / "settings.sqlite", credentials=store)
 
     with pytest.raises(CredentialStoreError):
         store.set(SECRET, "value")
@@ -210,10 +234,18 @@ def test_keyring_store_rejects_a_ref_that_is_not_ours() -> None:
 
 
 def test_open_credential_store_can_be_forced_to_memory() -> None:
-    store = open_credential_store("memory", platform="win32")
+    """`memory` 仍然可用：不想让密钥落盘时选它，代价是重启后重新录入。"""
+    store = open_credential_store("memory")
 
     assert store.kind == "memory"
     assert store.note is not None and "临时模式" in store.note
+
+
+def test_open_credential_store_degrades_on_an_unknown_preference() -> None:
+    store = open_credential_store("nonsense")
+
+    assert store.kind == "memory"
+    assert store.note is not None and "降级" in store.note
 
 
 def test_secrets_from_skips_missing_entries() -> None:
@@ -612,13 +644,9 @@ def _service(
     database = checkpoint.open_database(
         tmp_path / "data" / "checkpoints.sqlite", workspace_root=workspace
     )
-    # 默认用"系统凭据存储可用"的口径（假后端，不碰本机凭据管理器）：密钥重启后仍在。
+    # 默认用"持久"口径（密钥落设置库）：重启后仍在。
     # `session_only=True` 换成临时模式，用来验"重启后需重新录入"的提示口径。
-    credentials: Any = (
-        InMemoryCredentialStore()
-        if session_only
-        else KeyringCredentialStore(module=_FakeKeyring())
-    )
+    credentials: Any = InMemoryCredentialStore() if session_only else open_credential_store("auto")
     settings = open_settings_database(
         tmp_path / "data" / "settings.sqlite", credentials=credentials
     )
@@ -788,6 +816,7 @@ def test_awaiting_approval_keeps_the_pinned_version_when_settings_change(
     tmp_path: Path, model_factory: Callable[..., Any], app_config: AppConfig
 ) -> None:
     """§6.8 的停止条件：切换/编辑设置**不得**改动正在等待审批的运行。"""
+    app_config.security.require_approval.delete_file = True
     harness = _service(
         tmp_path,
         model_factory,
@@ -1010,17 +1039,30 @@ def test_redaction_covers_the_legacy_env_key_and_a_newly_saved_one(
     assert typed_key in harness.service._secrets
     assert legacy_key in harness.service._secrets
 
-    # 两个密钥都没有进设置库文件：脱敏集合是内存里的，不是又抄了一份到磁盘。
+    # 密钥的落盘位置（2026-10-13 契约改动后）：**页面录入的**密钥确实落在设置库里，
+    # 但只在 `settings_meta` 的 `credentials.<引用>` 键下；连接表里仍然只有引用。
     settings_bytes = (tmp_path / "data" / "settings.sqlite").read_bytes()
+    assert typed_key.encode() in settings_bytes
+    # 环境变量那条老路的值不落库（它本来就在环境里，没有第二份拷贝）。
     assert legacy_key.encode() not in settings_bytes
-    assert typed_key.encode() not in settings_bytes
+    connection = sqlite3.connect(tmp_path / "data" / "settings.sqlite")
+    try:
+        refs = [row[0] for row in connection.execute("SELECT credential_ref FROM model_connections")]
+        meta_keys = [row[0] for row in connection.execute("SELECT key FROM settings_meta")]
+    finally:
+        connection.close()
+    assert refs and all(ref and typed_key not in ref for ref in refs)
+    assert any(key.startswith(CREDENTIAL_META_PREFIX) for key in meta_keys)
 
 
 def test_restart_collects_historical_version_keys_for_redaction(tmp_path: Path) -> None:
-    """旧版本凭据供审批恢复保留，也必须在重启后继续参与展示脱敏。"""
-    credentials = InMemoryCredentialStore()
+    """旧版本凭据供审批恢复保留，也必须在重启后继续参与展示脱敏。
+
+    这里刻意用**两个** store 实例（模拟真实重启）：密钥必须真落进设置库，重启后才收集得到，
+    否则轮换前的旧密钥会漏进快照、SSE 或诊断文案。
+    """
     path = tmp_path / "settings.sqlite"
-    first_database = open_settings_database(path, credentials=credentials)
+    first_database = open_settings_database(path, credentials=open_credential_store("auto"))
     first = first_database.connections.save(_draft(), api_key="CUSTOM_OLD_SECRET_12345")
     first_database.connections.save(
         _draft(connection_id=first.connection_id, display_name="轮换后"),
@@ -1029,7 +1071,7 @@ def test_restart_collects_historical_version_keys_for_redaction(tmp_path: Path) 
     )
     first_database.connection.close()
 
-    reopened = open_settings_database(path, credentials=credentials)
+    reopened = open_settings_database(path, credentials=open_credential_store("auto"))
     assert reopened.connections.secret_values() == [
         "CUSTOM_NEW_SECRET_67890",
         "CUSTOM_OLD_SECRET_12345",
@@ -1076,6 +1118,35 @@ def _permissions(
     return database.connection, database.permissions
 
 
+def test_connection_declares_vision_and_the_run_config_carries_it(tmp_path: Path) -> None:
+    """逐连接声明"支持图片输入"（2026-10-16）：存得住、读得出，且**运行期配置带上它**。
+
+    三处都要钉，缺一处就会"看着开了其实没生效"：
+    ① 落盘（刷新/重启后还在不在）；② 回读（`list_connections` 走 `_row_to_connection`）；
+    ③ `to_llm_config()` —— `builder` 读的是**运行期** `LlmConfig.supports_vision`，不是数据库那一列。
+    默认必须是**关**：没勾的连接不该悄悄带上图像能力（失败闭合）。
+    """
+    connection, store = _store(tmp_path)
+    saved = store.save(_draft(supports_vision=True), api_key=None)
+
+    assert saved.supports_vision is True
+    assert saved.to_llm_config().supports_vision is True
+
+    # 直接查库：这一列真的写进去了，而不是只在内存对象上。
+    row = connection.execute(
+        "SELECT supports_vision FROM model_connections WHERE connection_id = ?",
+        (saved.connection_id,),
+    ).fetchone()
+    assert row is not None and int(row[0]) == 1
+
+    # 回读（走 `_row_to_connection`）：
+    assert [item.supports_vision for item in store.list_connections()] == [True]
+
+    # 没勾的连接：列表里是 False，运行期也不带。
+    plain = store.save(_draft(display_name="第二条", supports_vision=False), api_key=None)
+    assert plain.to_llm_config().supports_vision is False
+
+
 def test_settings_v2_upgrade_adds_the_grants_table_without_touching_older_rows(
     tmp_path: Path,
 ) -> None:
@@ -1098,80 +1169,151 @@ def test_permission_store_prefers_the_user_choice_over_the_factory_default(
 ) -> None:
     """档位的唯一真源是设置库；``config.yaml`` 只在库里还没有用户选择时兜底。"""
     _connection, permissions = _permissions(tmp_path)
-    assert permissions.mode() == "whitelist" and permissions.default_mode == "whitelist"
+    assert permissions.mode() == "workspace-write" and permissions.default_mode == "workspace-write"
 
-    permissions.set_mode("deny")
+    permissions.set_mode("read-only")
 
     # 重开：出厂默认换了，用户的选择仍然生效（改档位不写回 config.yaml）。
     reopened = open_settings_database(
-        tmp_path / "settings.sqlite", default_external_paths_mode="allow"
+        tmp_path / "settings.sqlite", default_external_paths_mode="danger-full-access"
     )
-    assert reopened.permissions.default_mode == "allow"
-    assert reopened.permissions.mode() == "deny"
+    assert reopened.permissions.default_mode == "danger-full-access"
+    assert reopened.permissions.mode() == "read-only"
     reopened.connection.close()
 
 
-def test_permission_store_falls_back_to_the_factory_default_on_unknown_mode(
+def test_permission_store_falls_back_to_read_only_on_unknown_mode(
     tmp_path: Path,
 ) -> None:
-    """库里出现不认识的档位文本：回落到出厂默认，判定层不会拿到非法档位。"""
+    """损坏/未来版本的档位不能借出厂默认变为可写，保留原始记录供修复。"""
     connection, permissions = _permissions(tmp_path)
     connection.execute(
         "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)",
         (META_EXTERNAL_PATHS_MODE, "yolo", "2026-01-01T00:00:00+00:00"),
     )
 
-    assert permissions.mode() == "whitelist"
+    assert permissions.mode() == "read-only"
 
 
-def _profiles(
+def _capabilities_store(
     tmp_path: Path, **kwargs: Any
-) -> tuple[sqlite3.Connection, ProfileStore]:
+) -> tuple[sqlite3.Connection, CapabilityStore]:
     database = open_settings_database(
         tmp_path / "settings.sqlite", credentials=InMemoryCredentialStore(), **kwargs
     )
-    return database.connection, database.profiles
+    return database.connection, database.capabilities
 
 
-def test_profile_store_prefers_the_user_choice_over_the_factory_default(
+def test_skill_store_remembers_only_the_disabled_ones(tmp_path: Path) -> None:
+    """技能禁用表（技能管理页，2026-10-16；§16.5）：**默认可用**，库里只记被禁用的那些。
+
+    "只记例外"是这一格的关键：反过来存"启用了哪些"，明天新装一个技能就会落在表外、被判成不可用
+    （用户看到的是"装了新技能却用不了"）。
+    """
+    from local_agent.model_settings.store import open_settings_database
+
+    database = open_settings_database(tmp_path / "settings.sqlite")
+    try:
+        assert database.skills.disabled() == frozenset()
+
+        database.skills.update({"a-skill": False, "b-skill": True})
+        assert database.skills.disabled() == frozenset({"a-skill"})
+
+        # 合并式：再动一项不会把已有的丢掉。
+        database.skills.update({"b-skill": False})
+        assert database.skills.disabled() == frozenset({"a-skill", "b-skill"})
+
+        # 启用即从例外表里移除（回到"默认可用"）。
+        database.skills.update({"a-skill": True})
+        assert database.skills.disabled() == frozenset({"b-skill"})
+    finally:
+        database.connection.close()
+
+
+def test_skill_store_treats_broken_rows_as_no_disables(tmp_path: Path) -> None:
+    """坏数据一律当作"没有禁用任何技能"（与 `CapabilityStore.overrides` 同一条失败闭合）。
+
+    库里存的是**例外表**：读不出来时按"全都禁用了"处理，用户会看到自己的技能集体消失；而真正的可见性
+    另有 `skills.enabled` 与 `skill` 能力开关把关，这里不是最后一道边界。
+    """
+    from local_agent.model_settings.store import META_SKILL_DISABLED, open_settings_database
+
+    database = open_settings_database(tmp_path / "settings.sqlite")
+    try:
+        cases = {
+            "not json": frozenset(),
+            '{"a": false}': frozenset(),
+            '["ok"]': frozenset({"ok"}),
+        }
+        for raw, expected in cases.items():
+            database.connection.execute(
+                "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (META_SKILL_DISABLED, raw, "2026-01-01T00:00:00+00:00"),
+            )
+            database.connection.commit()
+            assert database.skills.disabled() == expected, raw
+    finally:
+        database.connection.close()
+
+
+def test_capability_store_prefers_the_user_choice_over_the_factory_default(
     tmp_path: Path,
 ) -> None:
-    """档位（§16.6）的唯一真源是设置库；``config.yaml`` 只在库里还没有用户选择时兜底。
+    """能力开关（§16.1）的唯一真源是设置库；``config.yaml`` 只在库里还没有用户选择时兜底。
 
-    与外部路径档位（T38）同一条口径：页面改过之后，重启读到的仍是用户的选择——改档位不写回配置文件。
+    与外部路径档位（T38）同一条口径：页面改过之后，重启读到的仍是用户的选择——改开关不写回配置文件。
+    库里只存**改过的那几项**，所以"用户没动过"的能力仍然跟着出厂默认走。
     """
-    _connection, profiles = _profiles(
-        tmp_path, default_profile="reviewer", profile_names=("coder", "researcher", "reviewer")
+    # 样本刻意避开 `web`：它自 2026-10-14 起是**锁定能力**，验不了"用户选择优先"这条
+    # （锁定的项无论库里写什么都不生效，见下一条用例）。
+    factory = {"shell": False, "plan": True}
+    switchable = ("shell", "plan")
+    _connection, store = _capabilities_store(
+        tmp_path, default_capabilities=factory, switchable_capabilities=switchable
     )
-    assert profiles.profile() == "reviewer" and profiles.default_profile == "reviewer"
-    assert profiles.selectable == ("coder", "researcher", "reviewer")
+    assert store.switches()["shell"] is False
+    assert store.switchable == switchable
+    assert store.overrides() == {}
 
-    profiles.set_profile("coder")
+    store.update_switches({"shell": True})
+    assert store.overrides() == {"shell": True}
 
     reopened = open_settings_database(
         tmp_path / "settings.sqlite",
-        default_profile="reviewer",
-        profile_names=("coder", "researcher", "reviewer"),
+        default_capabilities=factory,
+        switchable_capabilities=switchable,
     )
-    assert reopened.profiles.default_profile == "reviewer"
-    assert reopened.profiles.profile() == "coder"
+    assert reopened.capabilities.switches()["shell"] is True
+    # 没改过的那一项仍走出厂默认——这是"只存改过的项"要保住的性质。
+    assert reopened.capabilities.switches()["plan"] is True
     reopened.connection.close()
 
 
-def test_profile_store_falls_back_when_the_stored_name_is_gone(tmp_path: Path) -> None:
-    """库里那个名字已经不在可选集里（自定义档位被从配置删掉）：回落到出厂默认。
+def test_capability_store_ignores_dirty_rows_and_never_unlocks_base_capabilities(
+    tmp_path: Path,
+) -> None:
+    """库里的脏数据按"没改过"处理，且**不可关闭的基础能力永远为真**（§16.1）。
 
-    不能让运行期去解析一个不存在的档位——那会在装配上下文时才炸，报错离原因很远。
+    脏数据包括坏 JSON、不是对象的 JSON、未登记的能力名与非布尔取值：它们都必须失败闭合到出厂默认，
+    而不是让判定层拿到一个可疑的开关表。``files_read`` / ``code_search`` / ``web`` 由 `resolve_switches`
+    最后强制置真——库里写 false 也不生效（前两个关掉会让闲聊与只读调查都无解，``web`` 是常态能力）。
     """
-    connection, profiles = _profiles(
-        tmp_path, default_profile="coder", profile_names=("coder", "reviewer")
+    connection, store = _capabilities_store(
+        tmp_path, default_capabilities={"shell": False}, switchable_capabilities=("shell",)
     )
-    connection.execute(
-        "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)",
-        (META_AGENT_PROFILE, "my-custom", "2026-01-01T00:00:00+00:00"),
-    )
-
-    assert profiles.profile() == "coder"
+    for raw in ("not json", '["shell"]', '{"shell": "yes", "nope": true}', '{"files_read": false}'):
+        connection.execute(
+            "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (META_AGENT_CAPABILITIES, raw, "2026-01-01T00:00:00+00:00"),
+        )
+        connection.commit()
+        switches = store.switches()
+        assert switches["shell"] is False, raw
+        assert switches["files_read"] is True and switches["code_search"] is True, raw
+        # 联网同为锁定能力：库里写 false 也一样不生效（2026-10-14 起常态化）。
+        assert switches["web"] is True, raw
 
 
 def test_selectable_profiles_are_built_ins_first_then_custom_names() -> None:
@@ -1242,57 +1384,19 @@ def test_permission_policy_reflects_the_current_mode_and_grants(tmp_path: Path) 
     policy = permissions.policy()
 
     assert isinstance(policy, ExternalPathPolicy)
-    assert policy.mode == "whitelist"
+    assert policy.mode == "workspace-write"
     assert policy.access_for(outside.resolve()) == "read"
-    # 档位改成 deny 后，已授权的目标也不再放行（授权条目留在库里，只是当档位不读它）。
-    permissions.set_mode("deny")
-    assert permissions.policy().access_for(outside.resolve()) is None
+    # 档位决定**授权能给到哪一级**（授权条目留在库里，档位换了就按新档重算）：
+    # 「只读」档把读写授权降级为只读——那一档的语义就是"哪儿都不许写"。
+    permissions.set_mode("read-only")
+    permissions.grant(outside, "read_write")
+    assert permissions.policy().access_for(outside.resolve()) == "read"
+    # 换回可写档，同一条授权恢复成它自己的级别。
+    permissions.set_mode("workspace-write")
+    assert permissions.policy().access_for(outside.resolve()) == "read_write"
     assert len(permissions.grants()) == 1
 
 
-# ---- 真机（可选）：系统凭据存储 ---------------------------------------------
-
-
-@pytest.mark.skipif(
-    os.environ.get("LOCAL_AGENT_TEST_CREDENTIAL_STORE") != "1",
-    reason="真机凭据存储测试：默认跳过（会读写本机凭据管理器），用 LOCAL_AGENT_TEST_CREDENTIAL_STORE=1 打开",
-)
-def test_real_os_credential_store_round_trip() -> None:
-    """在目标 Windows 上真机验证一次写入 / 读回 / 删除；用专用引用，结束后清理。"""
-    store = open_credential_store("auto")
-
-    assert store.kind == "os", store.note
-    ref = credential_ref_for("mc-selftest")
-    try:
-        store.set(ref, SECRET)
-        assert store.get(ref) == SECRET
-    finally:
-        store.delete(ref)
-    assert store.get(ref) is None
-
-
-class _FakeKeyring:
-    """内存版 keyring，用来测"系统凭据存储可用"这条路径而不碰本机凭据管理器。"""
-
-    def __init__(self) -> None:
-        self.data: dict[tuple[str, str], str] = {}
-
-    def set_password(self, service: str, ref: str, secret: str) -> None:
-        self.data[(service, ref)] = secret
-
-    def get_password(self, service: str, ref: str) -> str | None:
-        return self.data.get((service, ref))
-
-    def delete_password(self, service: str, ref: str) -> None:
-        self.data.pop((service, ref), None)
-
-
-class _BrokenKeyring:
-    def set_password(self, service: str, ref: str, secret: str) -> None:
-        raise RuntimeError("no backend")
-
-    def get_password(self, service: str, ref: str) -> str | None:
-        raise RuntimeError("no backend")
-
-    def delete_password(self, service: str, ref: str) -> None:
-        raise RuntimeError("no backend")
+# 2026-10-13：原来这里有一组"真机系统凭据存储"用例与两个假 keyring 后端。密钥改为落设置库之后，
+# 那条路径连同它的测试一起删掉——留着就是死代码（`DatabaseCredentialStore` 的读写由上面的用例覆盖，
+# 跨重启那条由 `test_database_store_persists_across_a_reopen` 覆盖）。

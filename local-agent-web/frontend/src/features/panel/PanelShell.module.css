@@ -1,0 +1,657 @@
+﻿/**
+ * 右栏工作面板（§21.6）。与中栏并列，不覆盖内容。
+ */
+.panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  /* 宽度由组件里的拖拽决定（inline style）；这里只保证它不参与 flex 收缩 */
+  flex: 0 0 auto;
+  min-height: 0;
+  border-left: 1px solid var(--c-line);
+  background: var(--c-panel);
+  /* 打开时从右侧滑入（2026-10-23） */
+  animation: panel-in 160ms ease-out;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* 左边缘拖拽区：宽一点好抓，但视觉上只是一条线 */
+.resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  width: 6px;
+  z-index: 2;
+  cursor: col-resize;
+}
+
+.resizer:hover {
+  background: var(--c-accent-soft);
+}
+
+/* 文件树滚动区：树很高，必须自己滚，别把整栏顶开 */
+.treeScroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  margin: 0 calc(var(--sp-1) * -1);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+  padding: var(--sp-2);
+  border-bottom: 1px solid var(--c-line);
+  background: var(--c-canvas);
+}
+
+/* 首屏菜单（2026-10-23）：先列能力再进面板，一打开就知道这栏能干什么 */
+.menu {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2);
+}
+
+.menuLead {
+  margin: var(--sp-2) var(--sp-2) var(--sp-1);
+  color: var(--c-text-off);
+  font-size: var(--fs-caption);
+  line-height: 18px;
+}
+
+.menuItem {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2);
+  border-radius: var(--r-control);
+  text-align: left;
+}
+
+.menuItem:hover {
+  background: var(--c-hover);
+}
+
+.menuIcon {
+  display: inline-flex;
+  flex: 0 0 16px;
+  margin-top: 2px;
+  color: var(--c-text-2);
+}
+
+.menuText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.menuLabel {
+  color: var(--c-text-1);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  font-weight: 500;
+}
+
+.menuHint {
+  color: var(--c-text-3);
+  font-size: var(--fs-caption);
+  line-height: 18px;
+}
+
+.headTitle {
+  color: var(--c-text-2);
+  font-size: var(--fs-meta);
+  line-height: 26px;
+}
+
+.headRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* 分段控件形态：容器下沉、选中上浮——与顶栏页签同一套语言 */
+.tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--r-control);
+  background: var(--c-sunken);
+}
+
+.tab {
+  height: 26px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-control);
+  color: var(--c-text-2);
+  font-family: inherit;
+  font-size: var(--fs-body);
+}
+
+.tab:hover {
+  color: var(--c-text-1);
+  background: var(--c-hover);
+}
+
+.tabActive,
+.tabActive:hover {
+  background: var(--c-raised);
+  color: var(--c-text-1);
+  font-weight: 500;
+  box-shadow: var(--sh-menu);
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-2) var(--sp-3) var(--sp-4);
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-height: 0;
+}
+
+.terminalBody {
+  display: flex;
+  overflow: hidden;
+}
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 26px;
+}
+
+.back {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-control);
+  color: var(--c-text-2);
+  font-size: var(--fs-meta);
+}
+
+.back:hover:not(:disabled) {
+  background: var(--c-hover);
+  color: var(--c-text-1);
+}
+
+.back:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 面包屑：每一级都可点，不用一级级"上一级" */
+.crumbGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.crumb {
+  max-width: 140px;
+  overflow: hidden;
+  padding: 0 var(--sp-1);
+  border-radius: var(--r-control);
+  color: var(--c-text-3);
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crumb:hover {
+  background: var(--c-hover);
+  color: var(--c-text-1);
+}
+
+.crumb[aria-current='page'] {
+  color: var(--c-text-1);
+  font-weight: 500;
+}
+
+.crumbSep {
+  color: var(--c-text-off);
+  font-size: var(--fs-meta);
+}
+
+.pathText {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--c-text-3);
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 28px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-control);
+  color: var(--c-text-1);
+  font-size: var(--fs-body);
+  text-align: left;
+}
+
+.row:hover {
+  background: var(--c-hover);
+}
+
+.icon {
+  flex: 0 0 14px;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  text-align: center;
+}
+
+/* 目录用强调色标出来，一眼分得清"能进去"和"能看内容" */
+.stepRow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.stepRow > .row {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 「侧聊」：hover 才露出来，不占常驻视觉重量 */
+.stepChat {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-control);
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  opacity: 0;
+}
+
+.stepRow:hover .stepChat,
+.stepChat:focus-visible {
+  opacity: 1;
+}
+
+.stepChat:hover {
+  background: var(--c-hover);
+  color: var(--c-text-1);
+}
+
+.stepIndex {
+  flex: 0 0 18px;
+  color: var(--c-text-3);
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-meta);
+  text-align: center;
+}
+
+.dirIcon {
+  color: var(--c-accent);
+}
+
+.name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.size {
+  flex: 0 0 auto;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+}
+
+/* 每个标签顶部的一句说明：第一次打开就知道这一栏在干什么 */
+.note {
+  margin: 0 0 var(--sp-1);
+  padding: 0 var(--sp-1);
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+.hint {
+  margin: var(--sp-2) 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+.pre {
+  margin: 0;
+  padding: var(--sp-3);
+  border-radius: var(--r-panel);
+  background: var(--c-raised);
+  color: var(--c-text-1);
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-meta);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.image {
+  max-width: 100%;
+  border-radius: var(--r-panel);
+}
+
+/* ---- 文件面板：左预览 + 右树（2026-10-23）------------------------------
+   点文件只换左边内容，树留在原处——"跳进去再返回"的交互被否掉了。 */
+.filesSplit {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.filesMain {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.filesSide {
+  /* 宽度由拖拽决定（inline style），这里只保证不参与收缩 */
+  flex: 0 0 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--c-line);
+  background: var(--c-canvas);
+}
+
+.filesSideHead {
+  flex: 0 0 auto;
+  padding: var(--sp-2);
+  border-bottom: 1px solid var(--c-line);
+}
+
+.filesHead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--c-line);
+}
+
+.filesBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--sp-3);
+}
+
+/* 未选中文件时的空态：图标 + 一句"从树里选一个" */
+.filesEmpty {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-5);
+  text-align: center;
+}
+
+.filesEmptyIcon {
+  color: var(--c-text-off);
+}
+
+.filesEmptyTitle {
+  margin: 0;
+  color: var(--c-text-1);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  line-height: var(--lh-body);
+}
+
+.filesEmptyHint {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+/* ---- 多标签页签（2026-10-23，同类可多开）----------------------------- */
+.tabStrip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.tabStrip::-webkit-scrollbar {
+  display: none;
+}
+
+.chip {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  height: 26px;
+  padding: 0 2px 0 var(--sp-2);
+  border-radius: var(--r-control);
+  color: var(--c-text-2);
+}
+
+.chip:hover {
+  background: var(--c-hover);
+}
+
+.chipActive,
+.chipActive:hover {
+  background: var(--c-raised);
+  box-shadow: var(--sh-menu);
+}
+
+.chipLabel {
+  max-width: 120px;
+  overflow: hidden;
+  padding: 0 2px;
+  color: inherit;
+  font-size: var(--fs-meta);
+  line-height: 26px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chipActive .chipLabel {
+  color: var(--c-text-1);
+  font-weight: 500;
+}
+
+/* 关闭键 hover 才露，页签本身别被一串 × 挤满 */
+.chipClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: var(--r-control);
+  color: var(--c-text-3);
+  opacity: 0;
+}
+
+.chip:hover .chipClose,
+.chipActive .chipClose {
+  opacity: 1;
+}
+
+.chipClose:hover {
+  background: var(--c-hover);
+  color: var(--c-text-1);
+}
+
+.err {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+/* ---- 2026-10-23 对齐 hermes 的侧栏规格（读自 apps/desktop/components/ui/sidebar.tsx）
+   SidebarMenuButton = h-8 / text-sm / rounded-md / gap-2 / icon size-4。
+   覆盖在文件末尾，避免逐条改动打散原有注释。 */
+.menuItem,
+.row,
+.dirRow,
+.fileRow,
+.chip {
+  height: 32px;
+  font-size: var(--fs-chat);
+}
+
+.menuItem {
+  padding: var(--sp-2);
+  border-radius: var(--r-panel);
+}
+
+.chip {
+  border-radius: var(--r-panel);
+}
+
+.chipLabel {
+  font-size: var(--fs-chat);
+  line-height: 32px;
+}
+
+.menuLabel {
+  font-size: var(--fs-chat);
+}
+
+/* ---- 首屏菜单对齐参考图（2026-10-23 第二轮）---------------------------
+   参考图里菜单是**垂直居中**的，每项一行「图标 + 名称 + 说明」，说明跟在名称后面。 */
+.menu {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 var(--sp-3) var(--sp-5);
+  min-height: 0;
+}
+
+.menuLead {
+  margin: 0 0 var(--sp-2) var(--sp-2);
+  color: var(--c-text-off);
+  font-size: var(--fs-meta);
+  line-height: 20px;
+}
+
+.menuItem {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  height: 34px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-panel);
+  text-align: left;
+}
+
+.menuItem:hover {
+  background: var(--c-hover);
+}
+
+.menuIcon {
+  display: inline-flex;
+  flex: 0 0 16px;
+  margin-top: 0;
+  color: var(--c-text-3);
+}
+
+.menuLabel {
+  flex: 0 0 auto;
+  color: var(--c-text-1);
+  font-size: var(--fs-chat);
+  line-height: 34px;
+}
+
+.menuHint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: 34px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 说明紧跟名称（参考图里 "文件  浏览和预览任务文件" 是连着的，不是两端对齐） */
+.menuHint {
+  flex: 0 0 auto;
+  margin-left: var(--sp-2);
+}
+
+/* 树与预览之间的拖拽条（2026-10-23） */
+.filesResizer {
+  flex: 0 0 6px;
+  margin-left: -3px;
+  z-index: 2;
+  cursor: col-resize;
+}
+
+.filesResizer:hover {
+  background: var(--c-accent-soft);
+}
+
+/* shiki 高亮输出（2026-10-23）：它自带 <pre><code>，这里统一字号与内边距，
+   并把背景换成与面板一致——shiki 默认给的是主题底色。 */
+.highlight :global(pre),
+.highlight :global(code) {
+  margin: 0;
+  padding: 0;
+  background: transparent !important;
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-caption);
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -502,7 +502,7 @@ def test_error_view_is_actionable_and_executable() -> None:
     assert unknown.retryable is False
 
 
-def test_error_text_rejects_secrets_and_private_paths() -> None:
+def test_error_text_rejects_secrets_but_accepts_paths() -> None:
     """错误展示文本 fail-closed：脱敏是调用方的责任，这里是最后一道门。"""
     base: dict[str, Any] = {
         "code": app_errors.MODEL_AUTH_FAILED,
@@ -517,9 +517,10 @@ def test_error_text_rejects_secrets_and_private_paths() -> None:
     }
     assert ErrorView(**base).code == app_errors.MODEL_AUTH_FAILED
 
-    for leaked in ("key=sk-abcdefghijklmnop", "路径 C:\\Users\\asus\\secret", "见 /home/asus/.env"):
-        with pytest.raises(ValidationError):
-            ErrorView(**{**base, "hint": leaked})
+    with pytest.raises(ValidationError):
+        ErrorView(**{**base, "hint": "key=sk-abcdefghijklmnop"})
+    for text in ("路径 C:\\Users\\asus\\secret", "见 /home/asus/.env", "见 /Users/Some Name/file.txt"):
+        assert ErrorView(**{**base, "hint": text}).hint == text
 
     for unsafe_id in ("sk-abcdefghijklmnop", "C:\\Users\\asus\\secret", "err/../../secret"):
         with pytest.raises(ValidationError):
@@ -660,14 +661,10 @@ def test_connection_view_ignores_unknown_key_fields_and_rejects_embedded_credent
     assert loopback.transport == "loopback_http"
 
 
-def test_snapshot_never_carries_secrets_or_private_paths() -> None:
+def test_snapshot_never_carries_secrets() -> None:
     leaked = _snapshot(api_key="sk-abcdefghijklmnop")
     dumped = canonical_json(leaked)
     assert "sk-" not in dumped
-    assert not re.search(r"[A-Za-z]:\\", dumped)
-    assert "/home/" not in dumped
-    assert "/home/" not in dumped
-    assert "/Users/" not in dumped
 
     # 展示文本走既有脱敏入口。
     assert redact_values({"preview": "key=sk-abcdefghijklmnop"}, ["sk-abcdefghijklmnop"]) == {

@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from local_agent.exceptions import LocalAgentError
 from local_agent.graph.nodes import safety_gate_node, tool_execution_node
 from local_agent.graph.state import AgentState, EvidenceReference, ReflectionResult, RuntimeContext
+from local_agent.llm.protocol import describe_parse_failure, parse_structured
 from local_agent.llm.usage_recording import record_model_call
 from local_agent.llm.workflow_model import single_attempt_model
 from local_agent.workflow_contracts import (
@@ -195,14 +196,22 @@ def _payload(state: AgentState, data: CodeWorkflowState) -> dict[str, Any] | Non
                   if event.run_id == data["run_id"] and event.tool_call_id == call["id"]), None)
     message = next((message for message in reversed(state.get("messages", []))
                     if isinstance(message, ToolMessage) and message.tool_call_id == call["id"]), None)
-    if (event is None or event.status != "ok" or event.tool_name != call["name"]
+    test_error = (data["phase"] == "test" and call["name"] == "run_shell"
+                  and event is not None and event.status == "error")
+    if (event is None or (event.status != "ok" and not test_error) or event.tool_name != call["name"]
             or message is None or message.name != call["name"] or not isinstance(message.content, str)):
         return None
     try:
         result = json.loads(message.content)
     except ValueError:
         return None
-    return result if isinstance(result, dict) else None
+    if not isinstance(result, dict):
+        return None
+    # 非零退出也是可核实的测试结果，交给 observe 报告测试失败；不能借此接受
+    # error + 退出0的矛盾记录，否则它可能通过后面的成功校验。
+    if test_error and (type(result.get("exit_code")) is not int or result["exit_code"] == 0):
+        return None
+    return result
 
 
 def _read(payload: dict[str, Any], path: str, identity: str) -> CodeSourceData | None:
@@ -311,9 +320,16 @@ def propose(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
                 or isinstance(actual_input, int) and actual_input > data["model_input_reserved"]
                 or isinstance(actual_output, int) and actual_output > data["model_output_reserved"]):
             return _fail(state, data, "模型响应超过预留额度")
-        proposal = CodeProposal.model_validate_json(response.content)
+        try:
+            proposal = parse_structured(response, CodeProposal)
+        except (ValidationError, ValueError) as exc:
+            # 与委派子任务同一天修掉的手写解析（原为 ``model_validate_json``）：容忍 ``` 围栏与前后
+            # 说明文字，并把脱敏后的原因带出来（只留字段与失败类型，不回显模型原文）。
+            return _fail(state, data, f"模型提议不可用：{describe_parse_failure(exc)}")
     except Exception as exc:  # noqa: BLE001 - 模型/协议失败在副作用前闭合，不重试供应商调用。
-        return _fail(state, data, f"模型调用或提议校验失败（{type(exc).__name__}）")
+        reason = (describe_parse_failure(exc) if isinstance(exc, (ValidationError, ValueError))
+                  else type(exc).__name__)
+        return _fail(state, data, f"模型调用或提议校验失败（{reason}）")
     source = data["sources"][data["request"]["source_path"]]
     if (proposal.old_text == proposal.new_text or source["content"].count(proposal.old_text) != 1):
         return _fail(state, data, "修改片段不唯一或没有变化")

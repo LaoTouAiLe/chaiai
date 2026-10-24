@@ -1,0 +1,85 @@
+/* 文件树（2026-10-23）：缩进表达层级，默认全展开 */
+
+.list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dirRow,
+.fileRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 26px;
+  border-radius: var(--r-control);
+  text-align: left;
+  font-size: var(--fs-meta);
+  line-height: 26px;
+}
+
+.dirRow:hover,
+.fileRow:hover {
+  background: var(--c-hover);
+}
+
+.fileRowActive,
+.fileRowActive:hover {
+  background: var(--c-accent-soft);
+}
+
+.caret {
+  display: inline-flex;
+  flex: 0 0 12px;
+  align-items: center;
+  justify-content: center;
+  color: var(--c-text-3);
+  transition: transform 120ms ease;
+}
+
+/* 折叠时箭头转回去：与文件资源管理器的手感一致 */
+.caretClosed {
+  transform: rotate(-90deg);
+}
+
+.dirName {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--c-text-1);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--c-text-2);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.size {
+  flex: 0 0 auto;
+  padding-right: var(--sp-2);
+  color: var(--c-text-off);
+  font-size: var(--fs-caption);
+}
+
+.hint {
+  margin: var(--sp-3) var(--sp-2);
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+/* 与 PanelShell 同一套行尺寸（2026-10-23）：hermes 的菜单项是 h-8 / text-sm */
+.dirRow,
+.fileRow {
+  height: 32px;
+  border-radius: var(--r-panel);
+  font-size: var(--fs-chat);
+  line-height: 32px;
+}

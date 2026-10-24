@@ -35,6 +35,7 @@ from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from local_agent.llm.usage import ActualUsage, extract_usage
+from local_agent.performance import TimingSpan, start_span
 
 __all__ = [
     "DEFAULT_PURPOSE",
@@ -57,13 +58,19 @@ __all__ = [
 
 T = TypeVar("T")
 
-ModelCallStatus = Literal["ok", "error"]
+#: 一次模型调用的结局。``aborted``（2026-10-13 起内部也用这个取值）表示**本轮被取消、调用被中止**：
+#: 与 §17.4 的口径一致，它既不是成功也不是失败——用量照实记（已经花掉的 token 不退），
+#: 但页面不该把它显示成"调用失败"。取这个名字是为了与公开视图
+#: （`ModelCallRecordView.status` 的 `Literal["running","ok","error","aborted"]`）**同一套词**，
+#: 免得投影层再写一张映射表。
+ModelCallStatus = Literal["ok", "error", "aborted"]
 
 #: 节点名 → 产品级调用用途。不在表里的节点用 :data:`DEFAULT_PURPOSE`。
 PURPOSE_BY_NODE: dict[str, str] = {
     "chat_node": "chat",
     "agent_decision_node": "tool_decision",
     "final_response_node": "final_answer",
+    "tool_feedback_node": "final_answer",
     "compression_node": "summarize",
     "planner_node": "planning",
     "reflection_node": "reflection",
@@ -127,7 +134,7 @@ class TurnRecord:
     run_id: str
     submitted_at: datetime
     final_at: datetime | None
-    #: ``running`` / ``completed`` / ``failed`` / ``blocked``
+    #: ``running`` / ``completed`` / ``failed`` / ``blocked`` / ``cancelled``
     final_state: str
     model_call_ids: tuple[str, ...]
     tool_event_ids: tuple[str, ...]
@@ -155,6 +162,7 @@ class ModelCallHandle:
     first_token_at: datetime | None = None
     first_token_monotonic: float | None = None
     usage: ActualUsage | None = None
+    timing_span: TimingSpan | None = None
 
     def usage_from(self, value: Any) -> None:
         """尽量从调用结果里提取实际用量（消息本身，或 ``.message``）。"""
@@ -252,11 +260,14 @@ class ModelCallRecorder:
             system_prompt_fingerprint=system_fp,
             history_prefix_fingerprint=history_fp,
             dynamic_context_fingerprint=dynamic_fp,
+            timing_span=start_span("model", purpose, self._run_id),
         )
 
     def finish(self, handle: ModelCallHandle, *, status: ModelCallStatus) -> ModelCallRecord:
         """收尾一次调用并落成记录（只在**真正结束时**调用一次）。"""
         finished_at = datetime.now(timezone.utc)
+        if handle.timing_span is not None:
+            handle.timing_span.finish(status)
         elapsed_ms = max(0, round((time.monotonic() - handle.started_monotonic) * 1000))
         ttft_ms: int | None = None
         if handle.first_token_monotonic is not None:
@@ -415,8 +426,12 @@ def request_fingerprints(messages: Sequence[Any] | None) -> tuple[str | None, st
     """只保存请求各段的哈希；动态段在 T34 指本次用户输入及其后续请求消息。"""
     if not messages:
         return None, None, None
-    system = [str(message.content) for message in messages if getattr(message, "type", None) == "system"]
-    conversation = [message for message in messages if getattr(message, "type", None) != "system"]
+    # 只把连续的头部系统消息算作稳定前缀；请求尾部的实时指令属于动态段。
+    prefix_end = 0
+    while prefix_end < len(messages) and getattr(messages[prefix_end], "type", None) == "system":
+        prefix_end += 1
+    system = [str(message.content) for message in messages[:prefix_end]]
+    conversation = list(messages[prefix_end:])
     latest_user = max(
         (index for index, message in enumerate(conversation) if getattr(message, "type", None) == "human"),
         default=len(conversation),

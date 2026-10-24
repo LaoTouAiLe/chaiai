@@ -21,8 +21,12 @@ export default defineConfig({
   // 默认套件只依赖 node，不能顺手把它们收进来——收了就会以"没有服务"的方式失败（实测 2 条），
   // 而那是配置错误不是产品缺陷。
   testIgnore: [
+    '**/terminal-live.spec.ts',
+    '**/mcp-live.spec.ts',
     '**/conversation-live.spec.ts',
     '**/conversation-streaming.spec.ts',
+    '**/conversation-background.spec.ts',
+    '**/compression-live.spec.ts',
     '**/conversation-variants.spec.ts',
     '**/approval-live.spec.ts',
     '**/workflow-live.spec.ts',

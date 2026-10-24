@@ -6,16 +6,20 @@
 }
 
 .main {
+  min-height: 0;
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
   min-width: 0;
 }
 
+
+
 /* Transport-level notice from the event stream (`stream_overrun`, idle timeout,
    an unparsable frame). It states what happened instead of pretending the
    connection was healthy — T30. */
 .notice {
+  flex-shrink: 0;
   margin: 0;
   padding: var(--law-space-xs) var(--law-space-2xl);
   background: var(--law-surface-tip);
@@ -23,4 +27,69 @@
   color: var(--law-text-secondary);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
+}
+
+/* 中断恢复提示条（2026-10-23）：原来借用 `.notice`，勾选框和按钮都挤在一行、
+   按钮还是裸的，用户看不出「勾了之后能点」。现在分两行，按钮有明确的可点/不可点外观。 */
+.recovery {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--c-warn-soft);
+  border-bottom: 1px solid var(--c-line);
+  color: var(--c-text-2);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+.recoveryLead {
+  margin: 0;
+  color: var(--c-text-1);
+}
+
+.recoveryRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.recoveryCheck {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: pointer;
+  color: var(--c-text-1);
+}
+
+/* 原生勾选框在自定义主题下很小：放大到 15px 并跟着手型光标 */
+.recoveryCheck input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--c-accent);
+}
+
+.recoveryButton {
+  height: 28px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-control);
+  background: var(--c-accent);
+  color: #fff;
+  font-size: var(--fs-meta);
+  cursor: pointer;
+}
+
+/* 未勾选时**明显变灰**：这是「刚才那一下有没有生效」的唯一反馈 */
+.recoveryButton:disabled {
+  background: var(--c-line);
+  color: var(--c-text-3);
+  cursor: not-allowed;
+}
+
+.recoveryButton:not(:disabled):hover {
+  filter: brightness(0.94);
 }

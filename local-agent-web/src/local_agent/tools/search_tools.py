@@ -1,47 +1,11 @@
-"""检索类工具（``grep`` / ``glob``）：让模型先**定位**、再定点读（架构 §3、§6.1）。
-
-为什么需要它们
---------------
-在这两个工具存在之前，``tool`` 模式绑定的 6 个工具里**没有任何检索能力**，而 Shell 兜底也不
-可用——``security.shell_guard`` 的安全白名单要求**参数完全匹配**（``list(argv[1:]) != entry.args``
-即落到"需人工审批"），``rg`` / ``Select-String`` / ``git grep`` 这类搜索命令一律会触发审批，模型
-实际上搜不了。于是它只能 ``list_dir`` 枚举 + ``read_file`` 通读：实测一次"梳理架构"的提问做了
-30 次 ``list_dir`` + 26 次 ``read_file``，单个 ``read_file`` 动辄撞 2 万字符上限，模型既定位不准
-也读不全，还会把"证据被截断"误判成"任务未完成"而空转收尾。
-
-两条工具的分工与主流编码 Agent 一致：
-
-- ``glob``：按**路径模式**找文件（``**/*.py``、``src/**/test_*.py``）；
-- ``grep``：按**正则**找内容，返回 ``路径:行号:内容``，并支持 ``files_with_matches`` / ``count``
-  两种汇总模式——先看"哪些文件命中"，再定点读，而不是把整个仓库读进上下文。
-
-安全
-----
-两个工具都是**只读**（已登记进 ``security.policy.READ_ONLY_TOOLS``），因此不需要人工审批；
-但边界与 ``read_file`` 完全相同：
-
-- 检索根目录必须位于工作区内（``resolve_within_workspace``），越界直接拒绝；
-- 跳过符号链接（可能指向工作区外）与敏感文件（``is_sensitive_path``，密钥不进入检索结果）；
-- 跳过隐藏目录/文件、依赖目录、符号链接、敏感文件、`.gitignore` 忽略的路径——遍历与跳过口径在
-  :mod:`local_agent.rag.walk` 一处实现（静态清单在 :mod:`local_agent.rag.ignore`），与按需 RAG 共用；
-- 跳过二进制、非 UTF-8 与超大文件；
-- 文件数、命中数、单行长度与墙钟时间都有上限，达到时**如实标注结果不完整**，不静默截断
-  （上限也可能在同一个文件的**中间**触达，说明必须在这一处也补上）；
-- **超限时怎么选：同级轮转**（§6.7）——同一目录下的条目轮流各出一条，因此上限决定"看到多少"，
-  却不再决定"只看得到哪一个子树"；`note` 也会**说明这是采样**，而不是只说"不完整"。
-
-超限之后还能拿到完整结果（v0.6 T63；架构 §6.7）
-----------------------------------------------
-默认只给"受上限约束的预览 + 不完整说明"，被截掉的候选取不回来。`save_full=true` 时**收集**不再受
-命中上限约束，完整列表落到工作区内的 `.local-agent/results/`，`note` 给出**工作区相对路径**作为
-locator——既有 `read_file`（可带行区间）与 `grep path=<locator>` 都能读它，**不新增工具、不新增读取
-通道**。落盘失败**绝不会**把检索变成错误（只如实说明"未能保存"）；这些口径都在
-:mod:`local_agent.tools.result_spill` 里，一处实现、两个工具共用。
-"""
+"""可调预算的流式文本搜索与路径分页；省略内容明确报告，游标始终复核路径策略。"""
 
 from __future__ import annotations
 
+import codecs
 import fnmatch
+import json
+import math
 import re
 import time
 from collections.abc import Iterator
@@ -49,11 +13,7 @@ from pathlib import Path
 
 from langchain_core.tools import BaseTool, tool
 
-from local_agent.rag.walk import iter_candidate_files
-from local_agent.security.path_guard import (
-    is_sensitive_path,
-    resolve_within_workspace,
-)
+from local_agent.security.path_guard import display_path, is_within
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.result_spill import (
     SPILL_FAILED_NOTE,
@@ -68,24 +28,18 @@ from local_agent.tools.result_types import (
     GrepOutputMode,
     GrepResult,
 )
+from local_agent.tools.search_cursor import decode_cursor, encode_cursor, query_key, resume_files
+from local_agent.tools.text_stream import BinaryTextError, text_lines
 
 #: 单次检索最多扫描的文件数；超出即停止并如实标注。
 MAX_SCAN_FILES = 2000
 #: ``glob`` 默认最多返回的文件数。
 DEFAULT_GLOB_FILES = 500
-#: 单文件字节上限：更大的文件跳过（与按需 RAG 扫描同一口径）。
-MAX_SCAN_FILE_BYTES = 1_000_000
 #: 单次检索的墙钟上限（秒）。
 SCAN_TIMEOUT_SECONDS = 20.0
 #: ``grep`` 默认返回的最大命中条数。
 DEFAULT_MAX_MATCHES = 100
-#: ``grep`` 命中条数的**硬上限**：模型传更大的值也不会超过它（防止一次把上下文灌满）。
-HARD_MAX_MATCHES = 500
-#: ``hits``（每文件命中数汇总）的**安全上限**。``save_full`` 下该汇总**刻意**不受 ``max_matches``
-#: 约束——"先看汇总"不该骗人（见 ``tests/test_search_spill.py``）。但它也不允许随扫描范围无限增长：
-#: 全仓命中时把扫描到的每个文件（上限 :data:`MAX_SCAN_FILES`）都灌回上下文，正好抵消了
-#: ``save_full`` 把大头搬出上下文的意义。超过时只列命中数最多的前这么多个文件，真实总数仍由
-#: ``total_matches`` 给出、完整清单仍在 locator 里（汇总截断不丢数据）。
+#: 大量结果落盘时的文件计数预览上限。
 MAX_HITS_FILES = 500
 #: 内容命中单行展示的长度上限：超长行（压缩产物、单行 JSON）不该把上下文撑爆。
 MAX_MATCH_LINE_CHARS = 300
@@ -93,52 +47,27 @@ MAX_MATCH_LINE_CHARS = 300
 MAX_SEARCHED_LINE_CHARS = 4_000
 #: 模式串长度上限（``grep`` 与 ``glob`` 共用）。
 MAX_PATTERN_CHARS = 200
-#: 判定二进制文件的 NUL 探测窗口（与 ``read_file`` / 按需 RAG 同一口径）。
-_BINARY_PROBE_BYTES = 4_096
 
 
 def _resolve_search_root(policy: SecurityPolicy, path: str) -> Path:
-    """把检索根解析为工作区内的路径；可以是**目录**，也可以是**单个文件**。
+    """解析检索根；默认工作区，也接受显式本机外部绝对路径，可以是目录或单文件。
 
     2026-09-30 修：此前要求必须是目录，于是模型最自然的用法——"在这个文件里找"（``path='README.md'``）
     ——被拒，界面上弹出"工具被安全策略拒绝: grep"，文案还把它说成"改为在工作区内操作"（其实路径就在
     工作区内，只是不是目录）。实测一轮里 4 次调用被这样拒掉，模型只好自己改写成
     ``glob='README.md'`` 绕过去。``rg`` 本身就是这个语义（``rg pattern file.py``），没有理由拆开。
 
-    越界仍然拒绝（``resolve_within_workspace`` 抛 ``WorkspaceBoundaryError``）；路径不存在抛
+    相对越界、设备路径和外部网络路径仍然拒绝；路径不存在抛
     ``ValueError`` 而不是 ``SecurityError``——前者映射成"工具执行失败／检查工具参数"，后者会显示
     成"被安全策略拦截"，而"不存在"根本不是策略问题。
     """
     raw = (path or "").strip() or "."
-    root = policy.workspace_root
-    resolved = resolve_within_workspace(raw, base_dir=root, workspace_root=root)
-    if not resolved.is_dir() and not resolved.is_file():
-        raise ValueError(f"检索路径不存在（既不是目录也不是文件）：{raw}")
-    return resolved
+    return policy.files.search_root(raw)
 
 
 def _relative(path: Path, workspace_root: Path) -> str:
-    """展示用路径：相对工作区的 posix 形式；绝不对模型暴露绝对路径。"""
-    try:
-        return path.resolve().relative_to(workspace_root.resolve()).as_posix()
-    except (OSError, ValueError):  # pragma: no cover - 调用方保证在工作区内
-        return path.name
-
-
-def _read_text(path: Path) -> str | None:
-    """读取可检索的文本；二进制、非 UTF-8、超大或读失败时返回 ``None``（静默跳过）。"""
-    try:
-        if path.stat().st_size > MAX_SCAN_FILE_BYTES:
-            return None
-        data = path.read_bytes()
-    except OSError:
-        return None
-    if b"\x00" in data[:_BINARY_PROBE_BYTES]:
-        return None
-    try:
-        return data.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return None
+    """候选文件与本页展示基准均已解析；外部仍返回绝对路径。"""
+    return display_path(path, workspace_root)
 
 
 def match_glob(relative: str, pattern: str) -> bool:
@@ -170,18 +99,10 @@ def _iter_files(root: Path, policy: SecurityPolicy, *, glob: str | None = None) 
     把 ``.env`` 当检索根同样不会返回内容。
     """
     workspace_root = policy.workspace_root
-    if root.is_file():
-        # **显式点名的文件不受 `.gitignore` 影响**（同 ripgrep 的取向）：规则只管"枚举到什么"。
-        relative = _relative(root, workspace_root)
-        if (
-            not root.is_symlink()
-            and not is_sensitive_path(root)
-            and (glob is None or match_glob(relative, glob))
-        ):
-            yield root
-        return
-    for candidate in iter_candidate_files(root, workspace_root=workspace_root):
-        if glob is not None and not match_glob(_relative(candidate, workspace_root), glob):
+    # 工作区内保持既有模式基准；外部目录的模式相对于本次选定的检索根。
+    pattern_root = workspace_root if is_within(root, workspace_root) else (root.parent if root.is_file() else root)
+    for candidate in policy.files.search_files(root):
+        if glob is not None and not match_glob(candidate.relative_to(pattern_root).as_posix(), glob):
             continue
         yield candidate
 
@@ -191,7 +112,7 @@ def _snippet(line: str, regex: re.Pattern[str]) -> str:
     stripped = line.rstrip("\n\r")
     if len(stripped) <= MAX_MATCH_LINE_CHARS:
         return stripped
-    head = stripped[:MAX_SEARCHED_LINE_CHARS]
+    head = stripped
     found = regex.search(head)
     if found is None:
         return f"{head[:MAX_MATCH_LINE_CHARS]}…"
@@ -215,6 +136,11 @@ def _compile(pattern: str, *, ignore_case: bool, kind: str) -> re.Pattern[str]:
         raise ValueError(f"正则不合法：{exc}") from exc
 
 
+def _positive(name: str, value: float | None) -> None:
+    if value is not None and (not math.isfinite(value) or value <= 0):
+        raise ValueError(f"{name} 必须为正数或 null")
+
+
 def grep_content(
     pattern: str,
     *,
@@ -225,126 +151,114 @@ def grep_content(
     ignore_case: bool = False,
     max_matches: int = DEFAULT_MAX_MATCHES,
     save_full: bool = False,
+    cursor: str | None = None,
+    max_scan_files: int | None = MAX_SCAN_FILES,
+    max_file_bytes: int | None = None,
+    max_line_chars: int | None = MAX_SEARCHED_LINE_CHARS,
+    timeout_seconds: float | None = SCAN_TIMEOUT_SECONDS,
+    encoding: str = "utf-8-sig",
 ) -> GrepResult:
-    """在工作区里按正则检索文件内容。
-
-    Args:
-        pattern: Python 正则（也接受普通字面量）。
-        policy: 安全策略；检索根必须在工作区内。
-        path: 检索根目录（相对工作区）。省略表示整个工作区。
-        glob: 只在这些路径上检索（如 ``*.py``、``src/**``）。
-        output_mode: ``content`` 给命中行；``files_with_matches`` 只给文件名；
-            ``count`` 只给每个文件的命中数。**先看汇总再定点读**是省上下文的关键。
-        ignore_case: 忽略大小写。
-        max_matches: 最多返回多少条命中；超过硬上限 :data:`HARD_MAX_MATCHES` 时按硬上限。
-
-    Returns:
-        :class:`GrepResult`；``hits`` 三种模式都填，``matches`` 只有 ``content`` 才填。
-
-    Raises:
-        ValueError: 正则不合法或过长、``output_mode`` 不合法，或检索路径不存在。
-        WorkspaceBoundaryError: 检索根不在工作区内。
-    """
+    """流式检索文本页，预算可调；截断给出续查游标，跳过内容明确计数。"""
     if save_full:
         policy.require_result_spill()
     if output_mode not in ("content", "files_with_matches", "count"):
-        raise ValueError(f"output_mode 不合法：{output_mode}")
+        raise ValueError("output_mode 必须为 content、files_with_matches 或 count")
+    for name, value in (("max_matches", max_matches), ("max_scan_files", max_scan_files),
+                        ("max_file_bytes", max_file_bytes), ("max_line_chars", max_line_chars),
+                        ("timeout_seconds", timeout_seconds)):
+        _positive(name, value)
+    codecs.lookup(encoding)
     regex = _compile(pattern, ignore_case=ignore_case, kind="grep")
     root = _resolve_search_root(policy, path)
-    limit = max(1, min(int(max_matches), HARD_MAX_MATCHES))
-
-    notes: list[str] = []
+    display_root = policy.workspace_root.resolve()
+    key = query_key("grep", str(root), pattern, glob, output_mode, ignore_case, encoding, max_line_chars)
+    position = decode_cursor(cursor, key)
+    files = resume_files(_iter_files(root, policy, glob=glob), position, policy)
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
     matches: list[GrepMatch] = []
     per_file: dict[str, int] = {}
-    scanned = 0
-    truncated = False
-    deadline = time.monotonic() + SCAN_TIMEOUT_SECONDS
-    #: `save_full` 时的完整命中列表（`路径:行号:内容`），落盘用；`matches` 仍只是**受上限约束的预览**。
+    skipped: dict[str, int] = {}
     spilled: list[str] = []
-
-    limit_hit = False
-    for file_path in _iter_files(root, policy, glob=glob):
-        if scanned >= MAX_SCAN_FILES:
-            truncated = True
-            # 说明里必须带"这是采样"：否则模型会以为"没看到的都在后面"，而实际是**轮转取来的一部分**
-            # （§6.7 的口径：上限决定看到多少，不再决定只看得到哪一个子树）。
-            notes.append(
-                f"已达文件数上限 {MAX_SCAN_FILES}，未继续扫描剩余目录"
-                "（同级轮转采样：已扫到的分布在多个目录）"
+    notes: list[str] = []
+    scanned = total = limited_lines = 0
+    next_cursor = None
+    stop_reason = ""
+    for file_path, start in files:
+        if ((max_scan_files is not None and scanned >= max_scan_files)
+                or (deadline is not None and time.monotonic() > deadline)
+                or (not save_full and total >= max_matches)):
+            next_cursor = encode_cursor(key, file_path, start, policy)
+            stop_reason = (
+                f"已达文件数上限 {max_scan_files}" if max_scan_files is not None and scanned >= max_scan_files
+                else f"已达命中上限 {max_matches} 条" if not save_full and total >= max_matches
+                else f"已达时间上限 {timeout_seconds} 秒"
             )
             break
-        if time.monotonic() > deadline:
-            truncated = True
-            notes.append(f"已达时间上限 {SCAN_TIMEOUT_SECONDS:g} 秒，未继续扫描剩余文件")
-            break
-        # `save_full` 时**收集**不受命中上限约束（完整列表要落盘），预览仍按 `limit` 截。
-        if not save_full and sum(per_file.values()) >= limit:
-            limit_hit = True
-            break
         scanned += 1
-        text = _read_text(file_path)
-        if text is None:
-            continue
-        relative = _relative(file_path, policy.workspace_root)
-        for number, line in enumerate(text.splitlines(), start=1):
-            if not regex.search(line[:MAX_SEARCHED_LINE_CHARS]):
+        relative = _relative(file_path, display_root)
+        try:
+            # 一次 stat 拿到大小与 mtime：此前这里连续 stat 两次，而每次 stat 都要走一遍
+            # `resolve()`（Windows 上是 realpath），单文件就多花一次全链解析（2026-10-21）。
+            before = policy.files.stat(file_path)
+            if max_file_bytes is not None and before.st_size > max_file_bytes:
+                skipped["size_limit"] = skipped.get("size_limit", 0) + 1
                 continue
-            if not save_full and sum(per_file.values()) >= limit:
-                limit_hit = True
-                break
-            per_file[relative] = per_file.get(relative, 0) + 1
-            if output_mode == "content" and len(matches) < limit:
-                matches.append(
-                    GrepMatch(path=relative, line_number=number, text=_snippet(line, regex))
-                )
-            if save_full:
-                spilled.append(f"{relative}:{number}:{line.rstrip()}")
-        if limit_hit:
+            for number, line, limited in text_lines(file_path, policy, encoding, max_line_chars):
+                if number < start:
+                    continue
+                if ((deadline is not None and time.monotonic() > deadline)
+                        or (not save_full and total >= max_matches)):
+                    next_cursor = encode_cursor(key, file_path, number, policy)
+                    stop_reason = (f"已达命中上限 {max_matches} 条" if not save_full and total >= max_matches
+                                   else f"已达时间上限 {timeout_seconds} 秒")
+                    break
+                limited_lines += int(limited)
+                if regex.search(line) is None:
+                    continue
+                total += 1
+                per_file[relative] = per_file.get(relative, 0) + 1
+                if output_mode == "content" and len(matches) < max_matches:
+                    matches.append(GrepMatch(path=relative, line_number=number, text=_snippet(line, regex)))
+                if save_full:
+                    spilled.append(f"{relative}:{number}:{line}")
+        except BinaryTextError:
+            skipped["binary"] = skipped.get("binary", 0) + 1
+        except UnicodeError:
+            skipped["encoding"] = skipped.get("encoding", 0) + 1
+        except OSError:
+            skipped["unreadable"] = skipped.get("unreadable", 0) + 1
+        else:
+            after = policy.files.stat(file_path)
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise ValueError("检索期间文件已变化，请从头检索")
+        if next_cursor is not None:
             break
-
-    # 说明必须**在循环外统一补**：上限也可能在**同一个文件的中间**触达（那里的 break 曾在早期实现
-    # 里直接跳出而不写说明，于是返回 `truncated: true` 却 `note: null`——模型看到一个"不完整但没有
-    # 原因"的结果，最容易把它误判成"没有更多了"。这是新增用例当场抓到的缺陷）。
-    if limit_hit:
-        truncated = True
-        notes.append(
-            f"已达命中上限 {limit} 条，未继续扫描剩余文件"
-            "（同级轮转采样：命中分布在多个文件）"
-        )
-
+    incomplete = bool(next_cursor or skipped or limited_lines)
+    if next_cursor:
+        notes.append(f"{stop_reason}；同级轮转采样，传 next_cursor 继续检索，可增加预算")
+    if skipped:
+        notes.append(f"跳过文件（按原因计数）：{skipped}；可调整大小预算或 encoding 后重新检索")
+    if limited_lines:
+        notes.append(f"{limited_lines} 行超出 max_line_chars，只匹配行首；可增加预算或设 null 后重新检索")
     if save_full:
         ref = save_result(
-            workspace_root=policy.workspace_root,
-            kind="grep",
-            key=spill_key("grep", pattern, path, glob, output_mode, ignore_case),
-            lines=spilled,
-            complete=not truncated,
+            workspace_root=policy.workspace_root, policy=policy, kind="grep",
+            key=spill_key("grep", pattern, path, glob, output_mode, ignore_case, cursor, encoding, max_line_chars),
+            lines=spilled, complete=not incomplete,
         )
-        # 成功给 locator；失败**如实**说"未能保存"，且绝不改变"结果仍不完整"这个事实（§6.7）。
         notes.append(spill_note(ref) if ref is not None else SPILL_FAILED_NOTE)
-
-    if not per_file and not truncated:
+    if not total and not incomplete:
         notes.append("没有匹配")
-
-    # 汇总按"命中数最多"排序（同数时按文件名）后**只列前 MAX_HITS_FILES 个**：`save_full` 下
-    # `per_file` 不封顶（真实 `total_matches` 要它），但**返回给模型**的 `hits` 必须有安全上限。
     ranked = sorted(per_file.items(), key=lambda item: (-item[1], item[0]))
     if len(ranked) > MAX_HITS_FILES:
-        notes.append(
-            f"命中的文件数 {len(ranked)} 超过汇总上限 {MAX_HITS_FILES}，hits 仅列出命中数最多的前 "
-            f"{MAX_HITS_FILES} 个文件（total_matches 是真实总数）"
-        )
-
+        notes.append(f"命中文件超过汇总上限 {MAX_HITS_FILES}；请用较小页面或落盘查看完整清单")
     return GrepResult(
-        pattern=str(pattern).strip(),
-        path=(path or ".").strip() or ".",
-        glob=glob,
-        output_mode=output_mode,
-        matches=matches,
+        pattern=pattern.strip(), path=(path or ".").strip() or ".", glob=glob,
+        output_mode=output_mode, matches=matches,
         hits=[GrepFileHits(path=name, count=count) for name, count in ranked[:MAX_HITS_FILES]],
-        total_matches=sum(per_file.values()),
-        files_scanned=scanned,
-        truncated=truncated,
+        total_matches=total, files_scanned=scanned, truncated=incomplete,
+        has_more=next_cursor is not None, next_cursor=next_cursor,
+        skipped_files=skipped, limited_lines=limited_lines,
         note="；".join(notes) if notes else None,
     )
 
@@ -356,89 +270,58 @@ def glob_files(
     path: str = ".",
     max_files: int = DEFAULT_GLOB_FILES,
     save_full: bool = False,
+    cursor: str | None = None,
+    timeout_seconds: float | None = SCAN_TIMEOUT_SECONDS,
 ) -> GlobResult:
-    """按路径模式列出工作区里的文件。
-
-    Args:
-        pattern: 路径模式（``**/*.py``、``src/**/test_*.py``、``*.md``）。``**/`` 表示"零个或多个
-            目录"，因此 ``src/**/*.py`` 也能匹配 ``src/a.py``。
-        policy: 安全策略；检索根必须在工作区内。
-        path: 检索根目录（相对工作区）。
-        max_files: 最多返回多少个文件。
-        save_full: 置真时把**完整**文件列表写到工作区内的落盘文件，`note` 给出 locator（§6.7）。
-
-    Returns:
-        :class:`GlobResult`。
-
-    Raises:
-        ValueError: 模式为空或过长，或检索路径不存在。
-        WorkspaceBoundaryError: 检索根不在工作区内。
-    """
+    """分页列出匹配文件；可调页面大小和时间预算，无固定 2000 项硬上限。"""
     if save_full:
         policy.require_result_spill()
+    _positive("max_files", max_files)
+    _positive("timeout_seconds", timeout_seconds)
     text = (pattern or "").strip()
     if not text:
         raise ValueError("glob 的 pattern 不能为空")
     if len(text) > MAX_PATTERN_CHARS:
         raise ValueError(f"pattern 过长（上限 {MAX_PATTERN_CHARS} 字符）：{len(text)}")
     root = _resolve_search_root(policy, path)
-    limit = max(1, min(int(max_files), MAX_SCAN_FILES))
-
+    display_root = policy.workspace_root.resolve()
+    key = query_key("glob", str(root), text)
+    position = decode_cursor(cursor, key)
+    files = resume_files(_iter_files(root, policy, glob=text), position, policy)
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
     notes: list[str] = []
     found: list[str] = []
-    #: `save_full` 时的完整文件列表（落盘用）；`found` 仍只是**受上限约束的预览**。
     spilled: list[str] = []
-    truncated = False
-    deadline = time.monotonic() + SCAN_TIMEOUT_SECONDS
-
-    for file_path in _iter_files(root, policy, glob=text):
-        # `save_full` 时**遍历**不为预览上限提前停下（只受时间上限约束），预览仍按 `limit` 截。
-        if not save_full and len(found) >= limit:
-            truncated = True
-            notes.append(
-                f"已达文件数上限 {limit}，未继续遍历剩余目录"
-                "（同级轮转采样：结果分布在多个目录）"
-            )
+    next_cursor = None
+    for file_path, start in files:
+        if ((not save_full and len(found) >= max_files)
+                or (deadline is not None and time.monotonic() > deadline)):
+            next_cursor = encode_cursor(key, file_path, start, policy)
             break
-        if time.monotonic() > deadline:
-            truncated = True
-            notes.append(f"已达时间上限 {SCAN_TIMEOUT_SECONDS:g} 秒，未继续遍历")
-            break
-        relative = _relative(file_path, policy.workspace_root)
-        if len(found) < limit:
+        relative = _relative(file_path, display_root)
+        if len(found) < max_files:
             found.append(relative)
         if save_full:
             spilled.append(relative)
-
+    if next_cursor:
+        notes.append("已达本页预算/上限；同级轮转采样，传 next_cursor 继续，可增加 max_files 或 timeout_seconds")
     if save_full:
         ref = save_result(
-            workspace_root=policy.workspace_root,
-            kind="glob",
-            key=spill_key("glob", text, path),
-            lines=spilled,
-            complete=not truncated,
+            workspace_root=policy.workspace_root, policy=policy, kind="glob",
+            key=spill_key("glob", text, path, cursor), lines=spilled, complete=next_cursor is None,
         )
         notes.append(spill_note(ref) if ref is not None else SPILL_FAILED_NOTE)
-
-    if not found and not truncated:
+    if not found and not next_cursor:
         notes.append("没有匹配的文件")
-
     return GlobResult(
-        pattern=text,
-        path=(path or ".").strip() or ".",
-        files=found,
-        total_files=len(found),
-        truncated=truncated,
+        pattern=text, path=(path or ".").strip() or ".", files=found, total_files=len(found),
+        truncated=next_cursor is not None, has_more=next_cursor is not None, next_cursor=next_cursor,
         note="；".join(notes) if notes else None,
     )
 
 
 def build_search_tools(policy: SecurityPolicy) -> list[BaseTool]:
-    """构造检索工具（``grep`` / ``glob``），闭包持有安全策略。
-
-    与 :func:`local_agent.tools.file_tools.build_file_tools` 同一形态：工具只负责解析参数与
-    序列化结果，边界判定全部落在 :class:`SecurityPolicy` 与 ``path_guard`` 上。
-    """
+    """构造持有本轮策略的分页检索工具。"""
 
     @tool
     def grep(
@@ -449,35 +332,38 @@ def build_search_tools(policy: SecurityPolicy) -> list[BaseTool]:
         ignore_case: bool = False,
         max_matches: int = DEFAULT_MAX_MATCHES,
         save_full: bool = False,
+        cursor: str | None = None,
+        max_scan_files: int | None = MAX_SCAN_FILES,
+        max_file_bytes: int | None = None,
+        max_line_chars: int | None = MAX_SEARCHED_LINE_CHARS,
+        timeout_seconds: float | None = SCAN_TIMEOUT_SECONDS,
+        encoding: str = "utf-8-sig",
     ) -> str:
-        """在工作区里按**正则**检索文件内容，返回命中位置；用来**先定位再定点读**。
-
-        **优先用它，不要用 ``read_file`` 通读整篇**：先 ``output_mode=files_with_matches`` 看哪些
-        文件命中，再对其中一两个文件用 ``read_file`` 读相关行区间。这样在多大的仓库里都能定位到
-        该看的地方，也不会把无关内容读进上下文。
+        """按正则定位本机文本内容，返回路径、行号、分页位置及省略原因。
 
         Args:
-            pattern: Python 正则，最多200字符，超长应拆组检索；普通字面量也可以。需要时传 ignore_case。
-            path: 已存在的文件或目录（相对工作区），不能带通配符；通配放 glob。省略表示整个工作区。
-            glob: 只在这些路径上检索，如 "*.py"、"src/**"、"**/*.ts"。
-            output_mode: "content" 返回命中行（含行号）；"files_with_matches" 只返回文件名；
-                "count" 返回每个文件的命中数。
+            pattern: Python 正则，最多 200 字符。
+            path: 工作区相对路径或显式本机外部绝对路径，目录或单个文件。
+            glob: 可选路径过滤，如 **/*.py；不跟随链接，不搜索敏感、忽略或依赖目录。
+            output_mode: content 返回命中行；files_with_matches 或 count 返回每页文件计数。
             ignore_case: 是否忽略大小写。
-            max_matches: 最多返回多少条命中（硬上限 500）。超过时 note 会说明"结果不完整"；
-                需要**完整**结果就改用 save_full=true（见下一条）。
-            save_full: 命中太多、而你需要**完整**列表时置真：工具会把完整命中列表写到一个可读文件，
-                note 里给出该文件的**工作区相对路径**——用 read_file 读它，或 grep path=<该路径>
-                在其中再查。完整收集会一直扫到文件数/时间上限，因此比默认慢；默认 false 只给预览。
+            max_matches: 每页命中行预算，默认 100，可增加。
+            save_full: 显式将本次预算内命中落盘，note 给路径；只读档请用分页。
+            cursor: 上页 next_cursor，保留查询参数；has_more 时继续。目录变化后应从头重查。
+            max_scan_files: 每页扫描文件预算，默认 2000，可增加或设 null。
+            max_file_bytes: 单文件大小预算，默认 null，不因文件大而跳过。
+            max_line_chars: 每行参与匹配的字符预算，默认 4000；长行遗漏会报告，必要时增加或设 null。
+            timeout_seconds: 文件/行间检查的时间预算，默认 20 秒，可增加或设 null。
+            encoding: 默认 UTF-8（兼容 BOM），可明确传 gbk、utf-16 等。
+
+        先搜索定位再定点读文件。各页计数只对应本页，不是整个仓库的总数。
         """
         return grep_content(
-            pattern,
-            policy=policy,
-            path=path,
-            glob=glob,
+            pattern, policy=policy, path=path, glob=glob,
             output_mode=output_mode,  # type: ignore[arg-type]
-            ignore_case=ignore_case,
-            max_matches=max_matches,
-            save_full=save_full,
+            ignore_case=ignore_case, max_matches=max_matches, save_full=save_full, cursor=cursor,
+            max_scan_files=max_scan_files, max_file_bytes=max_file_bytes, max_line_chars=max_line_chars,
+            timeout_seconds=timeout_seconds, encoding=encoding,
         ).model_dump_json()
 
     @tool
@@ -486,23 +372,68 @@ def build_search_tools(policy: SecurityPolicy) -> list[BaseTool]:
         path: str = ".",
         max_files: int = DEFAULT_GLOB_FILES,
         save_full: bool = False,
+        cursor: str | None = None,
+        timeout_seconds: float | None = SCAN_TIMEOUT_SECONDS,
     ) -> str:
-        """按**路径模式**列出工作区里的文件；用来先搞清楚有哪些文件，再决定读/搜哪个。
+        """按路径模式分页找本机文件；不跟随链接、敏感、忽略或依赖目录。
 
         Args:
-            pattern: 路径模式，如 "**/*.py"、"src/**/test_*.py"、"*.md"。
-                ``**/`` 表示"零个或多个目录"，所以 "src/**/*.py" 也能匹配 "src/a.py"。
-            path: 从哪个目录开始找（相对工作区）。省略表示整个工作区。
-            max_files: 最多返回多少个文件；超过时 note 会说明"结果不完整"。
-            save_full: 文件太多、而你需要**完整**列表时置真：完整列表会写到一个可读文件，
-                note 里给出它的**工作区相对路径**（用 read_file 读它）。默认 false 只给预览。
+            pattern: 路径模式，如 **/*.py、src/**/test_*.py；**/ 允许零层目录。
+            path: 工作区相对路径或显式本机外部绝对目录/文件。
+            max_files: 每页文件预算，默认 500，可增加。
+            save_full: 显式将本次时间预算内列表落盘，note 给可读路径。
+            cursor: 上页 next_cursor，保留查询参数；has_more 时继续，目录变化后从头重查。
+            timeout_seconds: 时间预算，默认 20 秒，可增加或设 null。
         """
         return glob_files(
-            pattern,
-            policy=policy,
-            path=path,
-            max_files=max_files,
-            save_full=save_full,
+            pattern, policy=policy, path=path, max_files=max_files,
+            save_full=save_full, cursor=cursor, timeout_seconds=timeout_seconds,
         ).model_dump_json()
 
-    return [grep, glob]
+    @tool
+    def search_files(
+        pattern: str,
+        path: str = ".",
+        glob: str | None = None,
+        mode: str = "content",
+        ignore_case: bool = False,
+        max_matches: int = DEFAULT_MAX_MATCHES,
+        save_full: bool = False,
+        cursor: str | None = None,
+    ) -> str:
+        """一次调用完成"按内容搜"或"按名字找"。
+
+        模型经常"先按文件名找、再按内容搜"——那是**一个意图、两次往返**，这个工具把它们合起来。
+        原来的 `grep` / `glob` 仍然保留（旧会话与脚本不受影响），新任务优先用这一个。
+
+        Args:
+            pattern: `mode=content` 时是 Python 正则；`mode=files` 时是 glob 模式（如 **/*.py）。
+            path: 搜索根目录，默认工作区。
+            glob: 只在 `mode=content` 时生效：把搜索限定在这些文件里（如 **/*.tsx）。
+            mode: `content`（默认，搜内容）或 `files`（找文件名）。
+            ignore_case: 是否忽略大小写（仅 content 模式）。
+            max_matches: 本页预算：content 是命中行数，files 是文件数。
+            save_full: 把本页预算内的结果落盘并给出路径。
+            cursor: 上一页的 next_cursor，用于继续；其余查询参数必须保持一致。
+
+        返回结构与原来一致，多一个 `mode` 字段标识这次是哪一种。
+        """
+        if mode == "files":
+            files_result = glob_files(
+                pattern, policy=policy, path=path, max_files=max_matches,
+                save_full=save_full, cursor=cursor,
+            )
+            return json.dumps(
+                {"mode": "files", **files_result.model_dump()}, ensure_ascii=False
+            )
+        if mode != "content":
+            raise ValueError("mode 必须为 content 或 files")
+        grep_result = grep_content(
+            pattern, policy=policy, path=path, glob=glob, ignore_case=ignore_case,
+            max_matches=max_matches, save_full=save_full, cursor=cursor,
+        )
+        return json.dumps(
+            {"mode": "content", **grep_result.model_dump()}, ensure_ascii=False
+        )
+
+    return [grep, glob, search_files]

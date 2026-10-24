@@ -159,6 +159,27 @@ def parse_structured(response: Any, schema: type[SchemaT]) -> SchemaT:
     return schema.model_validate(extract_json(text))
 
 
+def describe_parse_failure(error: BaseException) -> str:
+    """把解析失败压成一句可读、且**不回显模型原文**的原因。
+
+    为什么不直接用 ``str(error)``：pydantic 的默认消息带 ``input_value`` / ``input_url``（就是模型
+    的原始输出），而这条原因会进工具结果、页面与日志。这里只取**字段位置**与**失败类型**——足够让人
+    与模型知道"该改哪个字段"，又不把输出搬出去（§15.8 的同一条口径：摘要与错误信息不回显原文）。
+
+    2026-10-14：委派子任务的计划解析曾把失败折叠成 ``ValidationError`` 这个**类型名**，线上故障因此
+    完全无法自查（两处折叠点见 ``graph/delegated_workflow.py`` 与 ``graph/readonly_workflow.py``）。
+    """
+    if isinstance(error, ValidationError):
+        details = []
+        for item in error.errors():
+            location = ".".join(str(part) for part in item.get("loc") or ()) or "<root>"
+            details.append(f"{location} — {item.get('type')}")
+        return "；".join(details[:3]) or "结构不符"
+    lines = str(error).splitlines()
+    detail = lines[0][:120] if lines else ""
+    return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+
+
 def extract_json(text: str) -> Any:
     """从文本中提取 JSON 对象（容忍 ``` 围栏与前后说明文字）。"""
     candidate = text.strip()

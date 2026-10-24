@@ -1,4 +1,4 @@
-"""LangGraph 节点（节点名严格对齐架构 §5.1）。
+﻿"""LangGraph 节点（节点名严格对齐架构 §5.1）。
 
 当前实现：
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -115,8 +116,8 @@ from local_agent.llm.usage_recording import (
     tools_fingerprint,
     use_model_purpose,
 )
+from local_agent.mcp.errors import McpFailure
 from local_agent.media import data_url
-from local_agent.message_flags import DEFAULT_IMAGE_CONTEXT_TURNS, TOOL_IMAGE_FLAG
 from local_agent.memory import long_term, medium_term, recall, writer
 from local_agent.memory.schemas import (
     ORIGIN_OWNER,
@@ -135,6 +136,12 @@ from local_agent.memory.short_term import (
     turns_fitting_tokens,
 )
 from local_agent.memory.summarizer import summarize_conversation
+from local_agent.message_flags import (
+    DEFAULT_IMAGE_CONTEXT_TURNS,
+    TOOL_IMAGE_FLAG,
+    is_tool_image_message,
+)
+from local_agent.performance import span as timing_span
 from local_agent.rag.retriever import retrieve_code
 from local_agent.reflection.memory_candidates import (
     RejectedCandidate,
@@ -178,8 +185,10 @@ from local_agent.security.policy import (
 )
 from local_agent.session_kind import SESSION_KIND_INTERACTIVE
 from local_agent.tools.file_tools import OUTPUT_PREVIEW_CHARS
+from local_agent.tools.mcp_tools import MCP_SEARCH_TOOL_NAME
 from local_agent.tools.plan_tools import PlanUpdate, TaskControl
 from local_agent.tools.progress import shell_progress
+from local_agent.tools.result_spill import offload_tool_result
 from local_agent.tools.result_types import ToolResultRecord, ToolResultStatus
 from local_agent.ui.decision_streaming import stream_decision
 from local_agent.ui.streaming import stream_answer
@@ -256,6 +265,8 @@ def prepare_context_node(
         "task_status": "running",
         # 以下都是"本轮"字段（覆盖语义），新一轮必须回到初始值
         "task_goal": None,
+        # 覆盖语义：默认没有上下文，只有侧聊首轮由应用服务写入（§21.7）。
+        "context_prefix": None,
         "plan": [],
         "current_step_index": 0,
         "agent_loop_version": 1,
@@ -297,12 +308,18 @@ def prepare_context_node(
             )
             for item in attachments
         ]
+        # 侧聊首轮（§21.7）：上下文单独作一条 SystemMessage 插在提问之前。
+        # **不能拼进 HumanMessage**——那条会被存成 `conversation_turns.question`，
+        # 用户就会在气泡里看到整段上下文（上一版实机反馈"怎么这么注入上下文"）。
+        # 投影只渲染 user/assistant，SystemMessage 不进界面，也不进轮次统计。
+        prefix = str(state.get("context_prefix") or "").strip()
         update["messages"] = [
+            *([SystemMessage(content=prefix, id=f"{run_id}:context")] if prefix else []),
             HumanMessage(
                 content=user_input,
                 id=message_id,
                 additional_kwargs=({_IMAGE_REFS_KEY: image_refs} if image_refs else {}),
-            )
+            ),
         ]
         if attachments:
             # 引用另记一份（2026-10-16）：页面靠这份引用把缩略图挂回这条消息（只记引用，
@@ -674,7 +691,8 @@ def _tool_definition_tokens(state: AgentState, context: RuntimeContext) -> int:
     if registry is None:
         return 0
     return estimate_tools_tokens(
-        registry.tools_for(str(state.get("mode", "chat")), context.agent_capabilities)
+        registry.tools_for(str(state.get("mode", "chat")), context.agent_capabilities,
+                           discovered_mcp=state.get("discovered_mcp_tools") or ())
     )
 
 
@@ -1436,26 +1454,30 @@ def agent_decision_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
         raise LocalAgentError("运行上下文缺少 tool_registry，无法进行工具决策")
 
     capabilities = context.model_capabilities
-    tools = registry.tools_for(str(state.get("mode", "chat")), context.agent_capabilities)
+    tools = registry.tools_for(str(state.get("mode", "chat")), context.agent_capabilities,
+                           discovered_mcp=state.get("discovered_mcp_tools") or ())
     if tools and isinstance(capabilities, ModelCapabilities) and not capabilities.tool_calling:
         # 架构 §11.7：不支持 Tool Calling 时不得静默退化成闲聊，要明确告知
         return _tool_calling_unavailable(state, capabilities)
     model = context.model_adapter.bind_tools(tools) if tools else context.model_adapter
-    snapshot = _runtime_snapshot(state, context)
-    # 主循环使用稳定前缀；旧协议的反思请求仍共用这个构造器。
-    budget_messages = _decision_budget_messages(state, context)
-    outbound = [
-        *_main_conversation_prefix(state, context, snapshot),
-        *budget_messages,
-    ]
+    with timing_span("context_build", "decision_prompt", state.get("run_id")):
+        snapshot = _runtime_snapshot(state, context)
+        # 主循环使用稳定前缀；旧协议的反思请求仍共用这个构造器。
+        budget_messages = _decision_budget_messages(state, context)
+        outbound = [
+            *_main_conversation_prefix(state, context, snapshot),
+            *budget_messages,
+        ]
+        outbound_tokens = estimate_messages_tokens(outbound) + estimate_tools_tokens(tools)
+        schema_fingerprint = tools_fingerprint(tools)
     stream_failure: str | None = None
     if state.get("agent_loop_version") == 1 and state.get("session_mode") != "chat":
         generated = stream_decision(
             model, outbound,
             capabilities=capabilities if isinstance(capabilities, ModelCapabilities) else None,
             enabled=context.app_config.llm.streaming,
-            estimated_prompt_tokens=estimate_messages_tokens(outbound) + estimate_tools_tokens(tools),
-            tools_schema_fingerprint=tools_fingerprint(tools),
+            estimated_prompt_tokens=outbound_tokens,
+            tools_schema_fingerprint=schema_fingerprint,
             # 传输层流式（§11.7）：决策调用同样逐块读，取消时丢掉未闭合的工具调用。
             cancellation=context.cancellation,
         )
@@ -1469,8 +1491,8 @@ def agent_decision_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
     else:
         response = record_model_call(
             lambda: model.invoke(outbound),
-            estimated_prompt_tokens=estimate_messages_tokens(outbound) + estimate_tools_tokens(tools),
-            tools_schema_fingerprint=tools_fingerprint(tools),
+            estimated_prompt_tokens=outbound_tokens,
+            tools_schema_fingerprint=schema_fingerprint,
             messages=outbound,
         )
     if not isinstance(response, AIMessage):
@@ -1635,6 +1657,10 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
     # 排队的待审批动作排在本批**前面**（2026-10-15，B2）：上一张卡批准并执行完之后，路由把流程
     # 送回这里继续处理它们，因此顺序必须保持，不能重排。
     batch = [*(state.get("deferred_tool_calls") or []), *state.get("pending_tool_calls", [])]
+    # 本轮已知的 MCP 工具名（**含 Deferred**）：模型经 mcp_tool_search 找到的工具必须能调用，
+    # 否则检索就是个摆设。注意这不是"绑给模型的范围"（那个由 tools_for 控制）。
+    _registry = runtime.context.tool_registry
+    external_names = tuple(_registry.external_names()) if _registry is not None else ()
     for call in batch:
         call_id = _call_id(call)
         name = call["name"]
@@ -1645,6 +1671,7 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
             name,
             # 取消后可见集合就是空集（§17.4）：判定挂在**同一道门**上，下面的拒绝分支照用。
             cancelled=_is_cancelled(runtime.context),
+            external_names=external_names,
         ):
             # 原来这里只硬拦 chat 模式（"闲聊只允许读"）；T51 起改成**按可见集合**拦：
             # chat 的可见集合恰好就是 {list_dir, read_file}（行为不变），而 Profile 缺哪一档能力
@@ -1838,6 +1865,18 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
     return update
 
 
+#: 检索结果里的工具行（``- mcp__server__tool：描述``）。
+#:
+#: 为什么从**给模型看的文本**里读回来：``mcp_tool_search`` 是个纯函数工具，拿不到 State，
+#: 而这段格式是我们自己生成的（见 ``tools/mcp_tools.py``），比让工具偷偷改全局状态可靠。
+_MCP_TOOL_LINE = re.compile(r"^-\s+(mcp__[A-Za-z0-9_-]+)", re.MULTILINE)
+
+
+def _extract_mcp_tool_names(text: str) -> list[str]:
+    """从检索结果里取出工具名（保持出现顺序，去重交给调用方）。"""
+    return _MCP_TOOL_LINE.findall(text)
+
+
 def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
     """执行放行的工具调用，并把结果回填成 ``ToolMessage``（架构 §6）。
 
@@ -1848,6 +1887,10 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
     registry = context.tool_registry
     if registry is None:
         raise LocalAgentError("运行上下文缺少 tool_registry，无法执行工具")
+    # MCP 外部工具（2026-10-20；契约 §6.13）：它们不在静态能力表里，**执行侧的两道门
+    # （并行预取过滤、纵深防御）也必须知道本轮有哪些**。只在安全门传是不够的——审批恢复
+    # 不经过安全门，执行节点是它唯一的门；漏传的后果是"批准了却仍被判不可见"。
+    external_names = registry.external_names()
 
     scope = current_task_scope(state)
     # "已执行过"按 (run_id, tool_call_id) 判定：上一轮复用同一个调用 ID 不算已执行
@@ -1862,6 +1905,8 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
     results: list[ToolResultRecord] = []
     records: list[DecisionRecord] = []
     errors: list[ErrorEvent] = []
+    #: 本轮经 ``mcp_tool_search`` 新发现的外部工具名（合并后写回 State，跨轮保留）。
+    discovered_mcp: list[str] = []
 
     plan_changes: AgentState = {}
     # 更早运行留下的"已放行但没有确认结果"的副作用动作：**执行前**就要拦住（架构 §4.2）。
@@ -1885,7 +1930,8 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
             and candidate["name"] not in stale_names
             and registry.get(candidate["name"]) is not None
             and is_visible(str(state.get("mode", "chat")), context.agent_capabilities,
-                           candidate["name"], cancelled=_is_cancelled(context))
+                           candidate["name"], cancelled=_is_cancelled(context),
+                           external_names=external_names)
         )
 
     def invoke_read(candidate: ToolCall) -> tuple[_MessageContent, ToolResultStatus]:
@@ -1905,6 +1951,7 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
             name,
             # 纵深防御这一条同样按取消判定：审批恢复不经过安全门，这里是它唯一的门（§17.4）。
             cancelled=_is_cancelled(context),
+            external_names=external_names,
         ):
             # 防御纵深：正常路径上安全门已经拦掉了不可见的调用。这里再拦一次，是因为
             # **审批恢复**会把被批准过的调用直接放回待执行列表、不重新经过安全门（架构 §4.2）。
@@ -2141,8 +2188,24 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
                 # 批准是一次性的：执行完立即撤销（架构 §6.5 的"恰好执行一次"）
                 policy.revoke(fingerprint)
 
+        # 超预算时先把这条结果的正文落盘，换成"预览 + locator"（2026-10-22）：
+        # 只替换当前这条；历史消息与 State 里的旧结果不动。落盘失败会原样返回，不假装保存。
+        if policy.result_budget_exceeded:
+            content = offload_tool_result(content, policy=policy, tool_name=name)
         # 预览、指纹与截断判定只看**文本部分**（图像块既不该进预览，也不该被反复哈希）。
         preview_text = _tool_output_text(content)
+        # 轮级结果预算（2026-10-22）：串行与并行批次的结果都汇到这一行，统一累计进入上下文的
+        # 字符数。这一步只记账；超限后的"落盘 + 预览"在结果处理层接。
+        policy.note_tool_result(len(preview_text))
+        # 读取去重只在**连续两次 read_file** 之间生效（2026-10-22 实测修正）：子流程常见的
+        # "读原文 → 生成补丁 → 再读验证"中间夹着别的工具，若也去重，第二次会拿到空内容，
+        # 任务会被判成"修改未完成"。所以任何非 read_file 的工具调用都清掉去重表。
+        if name != "read_file":
+            policy.read_cache.clear()
+        # 检索到工具之后，把名字记进会话状态：下一轮装配时它们会被绑给模型，
+        # 免得模型每轮都重新搜一遍（契约 §6.13 的 Deferred → 可见）。
+        if name == MCP_SEARCH_TOOL_NAME and status == "ok":
+            discovered_mcp.extend(_extract_mcp_tool_names(preview_text))
         # 图片只能出现在 **user** 消息里（DeepSeek 等端点的硬规则）：图像块若留在 ToolMessage，
         # 下一轮请求会直接被 400 拒绝（2026-10-20 实测："unsupported image"）。拆出来由紧随
         # 其后的一条 user 消息承载，ToolMessage 只留文本。
@@ -2247,6 +2310,12 @@ def tool_execution_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> 
         "pending_approval": None,
         **plan_changes,
     }
+    if discovered_mcp:
+        # **覆盖语义**：写"旧集合 ∪ 本轮新发现"。用追加 reducer 会让同一个名字随每次搜索重复累加，
+        # 最终把绑定列表撑大、前缀逐轮变化。
+        existing = list(state.get("discovered_mcp_tools") or [])
+        merged = existing + [name for name in discovered_mcp if name not in existing]
+        update["discovered_mcp_tools"] = merged
     if messages:
         update["messages"] = messages
         update["tool_events"] = merge_appended(
@@ -2578,7 +2647,8 @@ def task_memory_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
     try:
         registry = context.tool_registry
         tools = (
-            registry.tools_for(str(state.get("mode", "chat")), context.agent_capabilities)
+            registry.tools_for(str(state.get("mode", "chat")), context.agent_capabilities,
+                           discovered_mcp=state.get("discovered_mcp_tools") or ())
             if registry
             else []
         )
@@ -4527,7 +4597,18 @@ def approval_interrupt_node(state: AgentState, runtime: Runtime[RuntimeContext])
     if not isinstance(request, Mapping):
         return {}
 
-    first = _as_mapping(interrupt(_approval_prompt(request, stage=1)))
+    # 无人值守会话（§21.4，2026-10-22）：不 interrupt，直接按拒绝处理。
+    # 这类会话（定时任务 / 心跳 / 子 Agent）没有人能点"批准"，真挂起来会永远停在
+    # ``awaiting_approval``。复用下面的既有 reject 分支，所以 ToolMessage、ToolEvent、
+    # 结果记录与事件投影一并照旧，不新增第二条拒绝路径。
+    unattended = str(state.get("session_kind") or SESSION_KIND_INTERACTIVE) != SESSION_KIND_INTERACTIVE
+    if unattended:
+        first: Mapping[str, Any] = {
+            "decision": "reject",
+            "reason": "无人值守会话不等待审批：该动作越界，已拒绝且不会自动重试。",
+        }
+    else:
+        first = _as_mapping(interrupt(_approval_prompt(request, stage=1)))
     decision_input: Mapping[str, Any] = first
     if bool(request.get("requires_second_confirmation")) and (
         _normalize_choice(first.get("decision")) == "approve"
@@ -4558,7 +4639,9 @@ def approval_interrupt_node(state: AgentState, runtime: Runtime[RuntimeContext])
         _decision(
             state,
             stage="approval_interrupt",
-            summary=f"人工决策 {choice}：{approved_name}",
+            # 审计上必须分得清"人拒的"和"系统拒的"（§21.4）
+            summary=(f"无人值守拒绝：{approved_name}" if unattended
+                     else f"人工决策 {choice}：{approved_name}"),
             tool_call_id=approved_id,
         )
     ]
@@ -4957,11 +5040,18 @@ def _invoke_tool(
     if not callable(invoke):  # pragma: no cover - 正常情况下 BaseTool 一定有 invoke
         return f"工具 {call['name']} 不可调用", "error"
     try:
-        raw = invoke(call)
+        # 按**工具名**埋点（2026-10-22）：此前 tool span 只到 `tool_execution_node`，
+        # 汇总时只能得到"工具总共 228 秒"，看不出是哪类工具占的（实测 run_shell 占 97%）。
+        with timing_span("tool", str(call["name"])):
+            raw = invoke(call)
     except FileOperationError as exc:
         return f"文件参数或状态不符：{policy.redact(str(exc))}", "error"
     except SecurityError as exc:
         return f"被安全策略拒绝：{policy.redact(str(exc))}", "denied"
+    except McpFailure as exc:
+        # MCP 的失败文案本身就是"哪台 server + 什么原因 + 下一步"，再套一层
+        # "工具执行失败（McpFailure）"只会把有用信息埋掉。
+        return policy.redact(exc.message), "error"
     except Exception as exc:  # noqa: BLE001 — 工具失败必须回填给模型，不能中断整张图
         return f"工具执行失败（{type(exc).__name__}）：{policy.redact(str(exc))}", "error"
 
@@ -5122,6 +5212,43 @@ def _materialize_message_images(
     return message.model_copy(update={"content": kept, "additional_kwargs": meta})
 
 
+def _tool_images_after_replies(messages: Sequence[AnyMessage]) -> list[AnyMessage]:
+    """兼容历史交错图片：完整工具批次的回复必须紧跟 assistant。
+
+    只移动内部图片帧，不跨真实用户/assistant 消息，不补造缺失回复，也不修改 State。
+    """
+    ordered: list[AnyMessage] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        ordered.append(message)
+        index += 1
+        if not isinstance(message, AIMessage) or not message.tool_calls:
+            continue
+        expected = {call["id"] for call in message.tool_calls}
+        end = index
+        replies: list[ToolMessage] = []
+        images: list[HumanMessage] = []
+        while end < len(messages):
+            following = messages[end]
+            if isinstance(following, ToolMessage) and following.tool_call_id in expected:
+                replies.append(following)
+            elif isinstance(following, HumanMessage) and is_tool_image_message(following):
+                images.append(following)
+            else:
+                break
+            end += 1
+        if images and len(replies) == len(expected) and {
+            reply.tool_call_id for reply in replies
+        } == expected:
+            ordered.extend(replies)
+            ordered.extend(images)
+        else:
+            ordered.extend(messages[index:end])
+        index = end
+    return ordered
+
+
 def _resolve_message_images(
     messages: Sequence[AnyMessage], context: RuntimeContext
 ) -> list[AnyMessage]:
@@ -5129,6 +5256,7 @@ def _resolve_message_images(
 
     只作用于**送给模型的副本**，不写回 State——Checkpoint 里始终只有引用。
     """
+    messages = _tool_images_after_replies(messages)
     turns = int(getattr(context, "image_context_turns", DEFAULT_IMAGE_CONTEXT_TURNS) or 1)
     turns = max(1, turns)
     starts = turn_starts(messages)

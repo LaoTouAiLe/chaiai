@@ -13,9 +13,18 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from langchain_core.runnables import RunnableConfig
+from langgraph.checkpoint.base import (
+    ChannelVersions,
+    Checkpoint,
+    CheckpointMetadata,
+    CheckpointTuple,
+)
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from langgraph.checkpoint.sqlite import SqliteSaver
 
@@ -29,7 +38,9 @@ from local_agent.graph.state import (
     ToolEvent,
 )
 from local_agent.llm.usage_recording import ModelCallRecord, TurnRecord
+from local_agent.performance import span as timing_span
 from local_agent.persistence import migrations
+from local_agent.persistence.database_maintenance import verify_connection
 from local_agent.persistence.session_store import SessionStore
 
 #: 第一个会话（也是 v0.1a 的唯一会话）使用的 ``thread_id``。
@@ -83,6 +94,25 @@ class ChatDatabase:
     sessions: SessionStore
 
 
+class TimedSqliteSaver(SqliteSaver):
+    """Measure the existing saver including serialization, lock wait and commit."""
+
+    def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
+        with timing_span("checkpoint", "get_tuple"):
+            return super().get_tuple(config)
+
+    def put(self, config: RunnableConfig, checkpoint: Checkpoint,
+            metadata: CheckpointMetadata, new_versions: ChannelVersions) -> RunnableConfig:
+        run_id = checkpoint.get("channel_values", {}).get("run_id")
+        with timing_span("checkpoint", "put", run_id):
+            return super().put(config, checkpoint, metadata, new_versions)
+
+    def put_writes(self, config: RunnableConfig, writes: Sequence[tuple[str, Any]],
+                   task_id: str, task_path: str = "") -> None:
+        with timing_span("checkpoint", "put_writes"):
+            super().put_writes(config, writes, task_id, task_path)
+
+
 def _connect(database_path: Path) -> sqlite3.Connection:
     database_path.parent.mkdir(parents=True, exist_ok=True)
     return sqlite3.connect(str(database_path), check_same_thread=False)
@@ -91,10 +121,15 @@ def _connect(database_path: Path) -> sqlite3.Connection:
 def _prepare(database_path: Path) -> tuple[sqlite3.Connection, SqliteSaver]:
     """打开连接、升级库结构、建好 Checkpoint 表。"""
     connection = _connect(database_path)
-    migrations.apply_migrations(connection)
-    saver = SqliteSaver(connection, serde=build_checkpoint_serializer())
-    saver.setup()
-    return connection, saver
+    try:
+        verify_connection(connection)
+        migrations.apply_migrations(connection)
+        saver = TimedSqliteSaver(connection, serde=build_checkpoint_serializer())
+        saver.setup()
+        return connection, saver
+    except BaseException:
+        connection.close()
+        raise
 
 
 def open_checkpointer(database_path: Path) -> SqliteSaver:

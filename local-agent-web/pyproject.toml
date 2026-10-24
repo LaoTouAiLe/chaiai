@@ -26,7 +26,12 @@ dependencies = [
   "pathspec>=1.0,<2",
   "fastapi>=0.141.1",
   "uvicorn>=0.52.4",
+  "websockets>=16,<17",
   "keyring>=25.7.0",
+  "websocket-client>=1.8,<2",
+  "mcp>=2.3.0",
+  "send2trash>=2.1.0",
+  "croniter>=6.2.4",
 ]
 
 [project.optional-dependencies]
@@ -36,6 +41,9 @@ dependencies = [
 # metadata、维度校验时机），换小版本必须重新核实。
 # fastembed 同理：它还是 0.x，构造参数（cache_dir / local_files_only / 模型元数据）在 0.8 上核实。
 memory = ["chromadb>=1.5,<1.6", "tiktoken", "fastembed>=0.8,<0.9"]
+# desktop：打包形态的窗口（WebView2）。Windows 上依赖系统自带的 WebView2 运行时（Win10/11 默认有）；
+# 没装这一组时入口自动退回外部浏览器，不会起不来。
+desktop = ["pywebview>=6,<7"]
 # 按需代码检索（T21）不新增 Python 运行依赖：优先调用外部 `rg`（可选加速器，不由 uv 安装），
 # 缺失时退化为有界 Python 扫描。局部 AST 若经实测加入，再单独开一个可选组。
 
@@ -50,6 +58,10 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+local_agent = ["native/windows/*.c", "native/windows/*.h", "native/windows/bin/*.dll",
+               "native/windows/bin/*.exe", "native/windows/bin/manifest.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -86,6 +98,10 @@ module = [
   "chromadb.*",
   "fastembed",
   "fastembed.*",
+  # 系统回收站（2026-10-21）：库本身没有类型存根，`types-Send2Trash` 也没覆盖它的
+  # 异常导出；这里跳过它，调用点自己把异常收敛成 `FileOperationError`。
+  "send2trash",
+  "send2trash.*",
 ]
 follow_imports = "skip"
 ignore_missing_imports = true

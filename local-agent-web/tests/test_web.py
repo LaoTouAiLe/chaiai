@@ -620,7 +620,7 @@ def test_page_surfaces_the_approval_card_and_executes_after_approval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory: Any
 ) -> None:
     """挂起 → 卡片 → 批准后才真正执行（架构 §5.3、§6.5）。"""
-    _write_config(tmp_path, PAGE_CONFIG)
+    _write_config(tmp_path, PAGE_CONFIG + "\nsecurity:\n  require_approval:\n    delete_file: true\n")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
     monkeypatch.setattr(
         factory,
@@ -653,7 +653,7 @@ def test_page_surfaces_the_approval_card_and_executes_after_approval(
 def test_page_rejecting_an_approval_keeps_the_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, model_factory: Any
 ) -> None:
-    _write_config(tmp_path, PAGE_CONFIG)
+    _write_config(tmp_path, PAGE_CONFIG + "\nsecurity:\n  require_approval:\n    delete_file: true\n")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
     monkeypatch.setattr(
         factory,
@@ -684,7 +684,7 @@ def test_pending_approval_survives_a_refresh_and_a_restart(
     页面进程按设计一直占着单实例锁（§15.1），所以"重启"用一个 `instance_lock=False` 的只读
     运行时来读同一份库表示——那正是新进程启动后会看到的东西。
     """
-    _write_config(tmp_path, PAGE_CONFIG)
+    _write_config(tmp_path, PAGE_CONFIG + "\nsecurity:\n  require_approval:\n    delete_file: true\n")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-fake")
     monkeypatch.setattr(
         factory,

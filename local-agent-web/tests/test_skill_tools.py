@@ -210,6 +210,32 @@ def test_skill_tools_are_read_only_and_need_no_approval(tmp_path: Path) -> None:
         assert decision.requires_approval is False
 
 
+def test_disabled_skill_leaves_the_list_and_cannot_be_loaded(tmp_path: Path) -> None:
+    """用户在设置里禁用的技能：**清单里不出现**，`skill_load` 给出"被禁用"的准确原因（2026-10-16）。
+
+    这条钉的是"清单与取正文同源"：只把清单摘掉、正文还能取，等于用户以为关掉了其实没关。同时钉住
+    **拒绝理由**——"被用户在设置里禁用"与"没有这个技能"是两回事，说错会把用户引到错误的方向。
+    """
+    root = tmp_path / "skills-root"
+    _write(root, "keep-me", "留下")
+    _write(root, "drop-me", "禁用")
+    settings = SkillsConfig(enabled=True, include_user_skills=False, user_dirs=[str(root)])
+    tools = {
+        tool.name: tool
+        for tool in build_skill_tools(
+            settings, home=tmp_path / "empty-home", disabled_skills=["drop-me"]
+        )
+    }
+
+    listed = json.loads(tools["skill_list"].invoke({}))
+    assert [entry["name"] for entry in listed["skills"]] == ["keep-me"]
+
+    loaded = json.loads(tools["skill_load"].invoke({"name": "drop-me"}))
+    assert loaded["content"] == ""
+    assert "被用户在设置里禁用" in loaded["note"]
+    assert "没有名为" not in loaded["note"], "禁用与「没有这个技能」必须说清是两回事"
+
+
 def test_tools_are_still_constructed_when_disabled(tmp_path: Path) -> None:
     """关掉开关时工具**仍然构造**（能力覆盖校验要求），只是能力不进有效集合、不绑给模型。"""
     settings = SkillsConfig(enabled=False)

@@ -158,6 +158,12 @@ class ModelConnection:
     capability: CapabilityReport = field(default_factory=CapabilityReport)
     enabled: bool = True
     allow_plaintext_http: bool = False
+    #: **这条连接是否支持图像输入**（用户声明，2026-10-16）：决定 `view_image` 绑不绑给模型、
+    #: 以及上传图片能不能发出去。**默认 False = 失败闭合**——没声明就是收不了图，宁可少一个能力，
+    #: 也不要让模型收到一张它看不见的图（那既浪费上下文，又会让它以为自己看过了）。
+    #: 它不是 `capability`（那组是**实测报告**）：收不收图只能靠发图试，"测不出来"与"不支持"是两回事。
+    #: 放在**有默认值**这一段：dataclass 不允许默认值字段排在无默认值字段前面。
+    supports_vision: bool = False
     provider: str = PROVIDER
     #: 旧 ``config.yaml`` 的取 Key 路径（``api_key_env``）。只在幂等导入时保留，
     #: 页面不编辑它：它说明"这条连接原本从哪个环境变量取密钥"。
@@ -206,6 +212,9 @@ class ModelConnection:
             timeout_seconds=self.timeout_seconds,
             retry_count=self.retry_count,
             streaming=self.streaming,
+            # 视觉能力跟着**连接**走（2026-10-16）：`builder` 读的就是运行期 `LlmConfig` 这一位，
+            # 所以带上它以后，"谁能收图"由这条连接说了算，`config.yaml` 那个键只是旧单模型路径的兜底。
+            supports_vision=self.supports_vision,
         )
 
 
@@ -226,6 +235,9 @@ class ConnectionDraft:
     timeout_seconds: int = 120
     retry_count: int = 2
     streaming: bool = False
+    #: 用户勾选的"这条连接支持图片输入"（2026-10-16）。默认关：勾错会让每次请求失败，
+    #: 所以页面上要写清"不确定就别勾"。
+    supports_vision: bool = False
     auth_mode: AuthMode = "api_key"
     allow_plaintext_http: bool = False
     connection_id: str | None = None

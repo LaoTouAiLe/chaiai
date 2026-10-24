@@ -197,6 +197,10 @@ class WriteFileResult(BaseModel):
     size_bytes: int = 0
     line_count: int = 0
     note: str | None = None
+    #: 本次写入的 unified diff（新建文件 = 整份内容都是新增行）。
+    #: 为什么要它（2026-10-21）：此前 `write_file` 只有字节数与行数，页面回答不了
+    #: "这个文件被写成了什么"，`edit_file` 却一直有 diff——同样是改文件，口径不该两样。
+    diff: str = ""
     #: 本次**顺带新建**的父目录（工作区相对路径，由外到内）。空列表 = 父目录本来就存在。
     #: 为什么报出来：创建目录是这次调用新产生的副作用，用户与模型都该能核对（§15.8 的口径）。
     created_directories: list[str] = Field(default_factory=list)
@@ -217,6 +221,10 @@ class ShellResult(BaseModel):
     note: str | None = None
     #: 执行方式：``argv`` 直执行，``cmd`` / ``pwsh`` / ``sh`` 表示经该适配器执行（T12）。
     executor: str = "argv"
+    #: ``completed`` = 这一轮等到它结束；``running`` = 用户按了"转后台"，命令仍在跑（2026-10-21）。
+    status: str = "completed"
+    #: 后台命令的句柄；只有 ``status == "running"`` 时才有意义（`read_command` / `stop_command` 用它）。
+    command_id: str | None = None
 
 
 class DeleteFileResult(BaseModel):
@@ -228,11 +236,11 @@ class DeleteFileResult(BaseModel):
     removed_files: int = 0
     removed_dirs: int = 0
     reason: str = ""
-    #: 是否移进了回收站（2026-10-20，设置里的「安全删除」开启时）。为 `True` 时目标仍在磁盘上，
-    #: 只是换了位置——模型据此告诉用户"可以找回"，而不是宣称"已彻底删除"。
+    #: 是否移进了**系统回收站**（设置里的「安全删除」开启时）。为 `True` 时目标还能找回来
+    #: （回收站右键「还原」回到原位置），模型据此说"可以还原"，而不是宣称"已彻底删除"。
+    #: **没有** `trash_path`：系统回收站会把文件改名存进 `$RECYCLE.BIN`，那个内部路径用户点不开，
+    #: 给出来只会让模型转述一个假位置。
     trashed: bool = False
-    #: 回收站里的新位置（绝对路径）；没有进回收站时为 `None`。
-    trash_path: str | None = None
 
 
 class ToolResultRecord(TypedDict):

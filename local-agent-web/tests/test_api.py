@@ -196,6 +196,52 @@ def _submit(client: TestClient, session_id: str, text: str, request_id: str):
 # ---- 健康检查与会话 ---------------------------------------------------------
 
 
+@pytest.mark.parametrize("expected", ["succeeded", "blocked"])
+def test_cron_http_lifecycle_uses_default_database_rows(
+    open_api: OpenApi, tmp_path: Path, expected: str,
+) -> None:
+    options: dict[str, Any] = {"decision": "chat", "reply": "已完成。"}
+    if expected == "blocked":
+        options.update(decision="tool", tool_calls=[{
+            "name": "delete_file", "args": {"path": "note.txt"}, "id": "cron-delete",
+        }])
+    client, runtime = open_api(**options)
+    target = tmp_path / WORKSPACE_NAME / "note.txt"
+    target.write_text("保留我", encoding="utf-8")
+    assert runtime.service._cron._connection.row_factory is None
+    created = client.post("/api/cron/jobs", json={
+        "name": "HTTP 定时任务", "prompt": "删除 note.txt", "schedule": "0 9 * * *",
+    })
+    assert created.status_code == 201
+    job = created.json()
+    url = f"/api/cron/jobs/{job['job_id']}"
+    assert client.get("/api/cron/jobs").json()["jobs"] == [job]
+    paused = client.patch(url, json={"enabled": False})
+    assert paused.status_code == 200 and paused.json()["enabled"] is False
+    resumed = client.patch(url, json={"enabled": True})
+    assert resumed.status_code == 200 and resumed.json()["enabled"] is True
+    triggered = client.post(f"{url}/run")
+    assert triggered.status_code == 200
+    deadline = time.monotonic() + 10
+    while True:
+        history = client.get(f"{url}/runs")
+        assert history.status_code == 200
+        run = history.json()["runs"][0]
+        if run["status"] != "running" or time.monotonic() >= deadline:
+            break
+        time.sleep(0.02)
+    assert run["status"] == expected
+    assert run["run_id"] == triggered.json()["run_id"]
+    assert run["session_id"] and run["finished_at"] and run["summary"]
+    assert client.get("/api/cron/jobs").json()["jobs"][0]["last_status"] == expected
+    assert client.get(f"/api/sessions/{run['session_id']}").status_code == 200
+    assert target.read_text(encoding="utf-8") == "保留我"
+    assert client.delete(url).status_code == 204
+    assert client.get("/api/cron/jobs").json()["jobs"] == []
+    assert client.get(f"{url}/runs").status_code == 404
+    assert runtime.service._cron._connection.row_factory is None
+
+
 def test_conversation_map_http_fork_detail_switch_and_arrange(api: tuple[TestClient, ApiRuntime]) -> None:
     client, runtime = api
     sid = _create_session(client)
@@ -2255,6 +2301,11 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/workspaces/pick",
         "/api/workspaces/select",
         "/api/workspaces/{workspace_id}",
+        # §21.6：只读工作面板及工作区文件搜索。
+        "/api/workspace/files",
+        "/api/workspace/files/search",
+        "/api/workspace/git/status",
+        "/api/workspace/git/diff",
         "/api/sessions",
         "/api/sessions/{session_id}",
         "/api/sessions/{session_id}/select",
@@ -2268,8 +2319,22 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/attachments/oss/test",
         # v0.6 T60：取消在跑的任务（幂等，§17.4）
         "/api/sessions/{session_id}/cancel",
+        # 已实现的命令转后台与会话文件变更账本。
+        "/api/sessions/{session_id}/commands/{command_id}/detach",
+        "/api/sessions/{session_id}/changes",
+        "/api/sessions/{session_id}/changes/diff",
         # v0.6 T62：任务中心（只读索引，不读会话 Checkpoint，§17.6）
         "/api/tasks",
+        # §21.5：定时任务管理、立即运行与运行记录。
+        "/api/cron/jobs",
+        "/api/cron/jobs/{job_id}",
+        "/api/cron/jobs/{job_id}/run",
+        "/api/cron/jobs/{job_id}/runs",
+        # §23：用户终端的审批、查询与结束；WebSocket 不属于 OpenAPI 的 HTTP 面。
+        "/api/terminals",
+        "/api/terminals/requests",
+        "/api/terminals/requests/{approval_id}/decision",
+        "/api/terminals/{terminal_id}",
         "/api/sessions/{session_id}/archive",
         "/api/sessions/{session_id}/restore",
         "/api/sessions/{session_id}/events",
@@ -2292,6 +2357,9 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/preferences/memory/test",
         "/api/data-center/memories",
         "/api/data-center/usage",
+        # §15.11.1、§15.11.3：产物汇总与只读预览。
+        "/api/data-center/artifacts",
+        "/api/data-center/artifacts/preview",
         "/api/permissions/grants",
         # 联网检索的服务凭据（Tavily）：读状态 + 写入/删除，密钥不回读（§6.8）。
         "/api/web-search/credential",
@@ -2299,6 +2367,11 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/skills",
         # 发现根（2026-10-20）：添加 / 移除用户自己的技能目录（只引用，不复制）。
         "/api/skills/roots",
+        "/api/mcp",
+        "/api/mcp/servers",
+        "/api/mcp/servers/{name}",
+        "/api/mcp/servers/{name}/spec",
+        "/api/mcp/reload",
     }
     text = json.dumps(schema, ensure_ascii=False)
     # 内部**类型名**与模块名不得出现。刻意不查 "checkpoint" 这个词：公开 DTO 里本来就有
@@ -3239,3 +3312,300 @@ def test_restore_rejects_an_unknown_session(api: tuple[TestClient, ApiRuntime]) 
     restored = client.post(f"/api/sessions/{session_id}/restore")
     assert restored.status_code == 200, restored.text
     assert restored.json()["session_id"] == session_id
+
+
+# ---- MCP 外部工具（2026-10-20；契约 §6.13）----------------------------------
+
+
+def test_mcp_endpoint_reports_the_off_state(api: tuple[TestClient, ApiRuntime]) -> None:
+    """默认关闭：没有 server、没有配置错误，规模统计全零。"""
+    client, _runtime = api
+    response = client.get("/api/mcp")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["enabled"] is False
+    assert body["servers"] == []
+    assert body["config_error"] is None
+    assert body["config_path"].endswith("mcp.json")
+    assert body["summary"] == {
+        "configured": 0,
+        "enabled": 0,
+        "connected": 0,
+        "failed": 0,
+        "tools": 0,
+        "direct": 0,
+        "deferred": 0,
+    }
+
+
+def test_mcp_reload_surfaces_a_broken_config(
+    api: tuple[TestClient, ApiRuntime], tmp_path: Path
+) -> None:
+    """写坏了要能当场看到第几行——这正是"启动不阻断"的配套。"""
+    client, _runtime = api
+    (tmp_path / "mcp.json").write_text('{"mcpServers": {,}}', encoding="utf-8")
+
+    response = client.post("/api/mcp/reload")
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == MODEL_SETTINGS_INVALID
+    assert "不是合法 JSON" in response.json()["error"]["message"]
+    # 读接口同样回报（用户刷新页面就能看到，不必去翻日志）。
+    assert client.get("/api/mcp").json()["config_error"]
+
+
+def test_mcp_server_toggle_requires_a_declared_server(
+    api: tuple[TestClient, ApiRuntime], tmp_path: Path
+) -> None:
+    """只能改 ``mcp.json`` 里声明过的 server；未声明给 422 并说明当前有哪些。"""
+    client, _runtime = api
+
+    missing = client.put("/api/mcp/servers/nope", json={"enabled": True})
+    assert missing.status_code == 422, missing.text
+    assert "mcp.json" in missing.json()["error"]["message"]
+
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"fake": {"type": "stdio", "command": "python"}}}),
+        encoding="utf-8",
+    )
+    changed = client.put("/api/mcp/servers/fake", json={"enabled": True})
+    assert changed.status_code == 200, changed.text
+    # 总开关（能力 `mcp`）还关着：记录存下来了，但管理器不建、所以不报告任何工具。
+    assert changed.json()["enabled"] is False
+    assert changed.json()["summary"]["configured"] == 1
+    assert changed.json()["summary"]["tools"] == 0
+    # 空变更只表示"读回当前状态"，不改变任何东西。
+    assert client.put("/api/mcp/servers/fake", json={}).status_code == 200
+
+
+def test_mcp_server_can_be_added_without_echoing_secrets(
+    api: tuple[TestClient, ApiRuntime], tmp_path: Path
+) -> None:
+    """新增 server：写进 ``mcp.json``，但**响应里不出现 env 的值**。"""
+    client, _runtime = api
+
+    response = client.post(
+        "/api/mcp/servers",
+        json={
+            "name": "demo",
+            "command": "npx",
+            "args": ["-y", "mcp-demo"],
+            "env": {"TOKEN": "s3cret-value"},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert "s3cret-value" not in response.text, "凭据被回显了"
+
+    written = json.loads((tmp_path / "mcp.json").read_text(encoding="utf-8"))
+    assert written["mcpServers"]["demo"]["env"] == {"TOKEN": "s3cret-value"}
+    assert written["mcpServers"]["demo"]["args"] == ["-y", "mcp-demo"]
+
+
+def test_adding_a_duplicate_server_is_rejected(
+    api: tuple[TestClient, ApiRuntime], tmp_path: Path
+) -> None:
+    """同名不能覆盖——覆盖一份带凭据的配置不该由"新增"按钮顺手完成。"""
+    client, _runtime = api
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"demo": {"type": "stdio", "command": "npx"}}}),
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/api/mcp/servers", json={"name": "demo", "command": "npx"}
+    )
+
+    assert response.status_code == 422, response.text
+    assert "已经存在" in response.json()["error"]["message"]
+
+
+def test_adding_a_server_with_an_unsafe_name_is_rejected(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    client, _runtime = api
+
+    response = client.post(
+        "/api/mcp/servers", json={"name": "蓝图", "command": "npx"}
+    )
+
+    assert response.status_code == 422, response.text
+    assert "mcp__<server>__<tool>" in response.json()["error"]["message"]
+
+
+def test_mcp_off_view_supports_edit_delete_and_same_name_recreation(api, tmp_path):
+    client, runtime = api
+    response = client.post("/api/mcp/servers", json={
+        "name": "demo", "command": "python", "args": ["old path"],
+        "env": {"TOKEN": "original-secret", "REMOVE": "delete-secret"},
+    })
+    assert response.status_code == 200
+    server = response.json()["servers"][0]
+    assert server["name"] == "demo" and server["enabled"] is False
+    assert set(server["env_keys"]) == {"TOKEN", "REMOVE"}
+    assert "original-secret" not in response.text
+    assert client.put("/api/mcp/servers/demo", json={"enabled": True, "disabled_tools": ["old"]}).status_code == 200
+    changed = client.put("/api/mcp/servers/demo/spec", json={"args": ["new path"], "env": {}})
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["servers"][0]["enabled"] is False
+    config = json.loads((tmp_path / "mcp.json").read_text())
+    assert config["mcpServers"]["demo"]["env"]["TOKEN"] == "original-secret"
+    updated = client.put("/api/mcp/servers/demo/spec", json={
+        "env": {"TOKEN": "replacement-secret"}, "remove_env": ["REMOVE"],
+    })
+    assert updated.status_code == 200
+    assert "replacement-secret" not in updated.text
+    assert json.loads((tmp_path / "mcp.json").read_text())["mcpServers"]["demo"]["env"] == {"TOKEN": "replacement-secret"}
+    assert client.delete("/api/mcp/servers/demo").json()["servers"] == []
+    assert "demo" not in runtime.settings.mcp.states()
+    fresh = client.post("/api/mcp/servers", json={"name": "demo", "command": "python"})
+    assert fresh.json()["servers"][0]["disabled_tools"] == []
+    assert fresh.json()["servers"][0]["enabled"] is False
+
+
+def test_mcp_env_only_edit_keeps_the_server_enabled(api, tmp_path):
+    """轮换 cookie 不该把 server 关掉。
+
+    只有换**程序**（command / args）才需要重新表态；而每次 MCP 调用本来都要弹审批卡，
+    关掉开关换不来额外安全性，只会让用户改完还得手动打开一次。
+    """
+    client, _ = api
+    client.post("/api/mcp/servers", json={
+        "name": "demo", "command": "python", "env": {"TOKEN": "old-secret"},
+    })
+    client.put("/api/mcp/servers/demo", json={"enabled": True})
+
+    rotated = client.put("/api/mcp/servers/demo/spec", json={"env": {"TOKEN": "new-secret"}})
+
+    assert rotated.status_code == 200, rotated.text
+    assert rotated.json()["servers"][0]["enabled"] is True
+    assert "new-secret" not in rotated.text
+    assert json.loads((tmp_path / "mcp.json").read_text())["mcpServers"]["demo"]["env"] == {
+        "TOKEN": "new-secret",
+    }
+
+
+def test_mcp_program_change_requires_renewed_consent(api):
+    """换程序要重新表态：旧信任不能直接执行一条新命令。"""
+    client, _ = api
+    client.post("/api/mcp/servers", json={"name": "demo", "command": "python"})
+    client.put("/api/mcp/servers/demo", json={"enabled": True})
+
+    switched = client.put("/api/mcp/servers/demo/spec", json={"command": "node"})
+    assert switched.status_code == 200, switched.text
+    assert switched.json()["servers"][0]["enabled"] is False
+
+    client.put("/api/mcp/servers/demo", json={"enabled": True})
+    rearmed = client.put("/api/mcp/servers/demo/spec", json={"args": ["-e", "1"]})
+    assert rearmed.json()["servers"][0]["enabled"] is False
+
+
+def test_mcp_rejects_invalid_lists_and_preserves_state(api):
+    client, _ = api
+    client.post("/api/mcp/servers", json={"name": "demo", "command": "python"})
+    for bad in ({"enabled": None}, {"disabled_tools": None},
+                {"enabled_tools": [""]}, {"disabled_tools": ["echo", "echo"]},
+                {"enabled_tools": ["echo"], "disabled_tools": ["echo"]}):
+        response = client.put("/api/mcp/servers/demo", json=bad)
+        assert response.status_code == 422, response.text
+    saved = client.put("/api/mcp/servers/demo", json={"enabled_tools": []})
+    assert saved.json()["servers"][0]["enabled_tools"] == []
+    unlimited = client.put("/api/mcp/servers/demo", json={"enabled_tools": None})
+    assert unlimited.json()["servers"][0]["enabled_tools"] is None
+
+
+def test_mcp_validation_never_echoes_credential_inputs(api):
+    client, _ = api
+    for env in ({"BAD-KEY": "secret-in-invalid-env"}, {"TOKEN": {"value": "secret-in-invalid-env"}}):
+        response = client.post("/api/mcp/servers", json={"name": "demo", "command": "python", "env": env})
+        assert response.status_code == 422
+        assert "secret-in-invalid-env" not in response.text
+    client.post("/api/mcp/servers", json={"name": "demo", "command": "python"})
+    for payload in ({"command": None}, {"args": None}, {"env": {"INVALID-KEY": "hidden-secret"}}):
+        response = client.put("/api/mcp/servers/demo/spec", json=payload)
+        assert response.status_code == 422
+        assert "hidden-secret" not in response.text
+
+
+def test_mcp_file_lists_are_defaults_and_reload_forgets_removed_state(api, tmp_path):
+    client, runtime = api
+    path = tmp_path / "mcp.json"
+    path.write_text(json.dumps({"mcpServers": {"demo": {
+        "command": "python", "enabled_tools": ["echo"], "disabled_tools": ["other"],
+    }}}))
+    view = client.get("/api/mcp").json()["servers"][0]
+    assert view["enabled_tools"] == ["echo"] and view["disabled_tools"] == ["other"]
+    client.put("/api/mcp/servers/demo", json={"enabled": True})
+    path.write_text('{"mcpServers": {}}')
+    assert client.post("/api/mcp/reload").status_code == 200
+    assert "demo" not in runtime.settings.mcp.states()
+
+
+def test_mcp_lazy_manager_closes_on_global_off_and_runtime_exit(api):
+    client, runtime = api
+    assert runtime.mcp_manager is None
+    assert client.put("/api/capabilities", json={"changes": {"mcp": True}}).status_code == 200
+    assert client.get("/api/mcp").status_code == 200
+    lazy = runtime.service._mcp_manager
+    assert lazy is not None
+    assert client.put("/api/capabilities", json={"changes": {"mcp": False}}).status_code == 200
+    assert runtime.service._mcp_manager is None
+    assert lazy._stopping.is_set()
+    client.put("/api/capabilities", json={"changes": {"mcp": True}})
+    client.get("/api/mcp")
+    again = runtime.service._mcp_manager
+    runtime.service.close_mcp()
+    assert again._stopping.is_set()
+
+
+def test_mcp_background_state_reads_share_the_application_sqlite_lock(api, monkeypatch):
+    client, runtime = api
+    checked = []
+    original = runtime.settings.mcp.states
+    def states(*args, **kwargs):
+        assert runtime.database.checkpointer.lock.locked()
+        checked.append(True)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(runtime.settings.mcp, "states", states)
+    client.put("/api/capabilities", json={"changes": {"mcp": True}})
+    assert client.get("/api/mcp").status_code == 200
+    manager = runtime.service._mcp_manager
+    assert manager is not None
+    manager.states()
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(manager.states) for _ in range(30)]
+        for _ in range(20):
+            assert client.get("/api/mcp").status_code == 200
+            assert client.get("/api/capabilities").status_code == 200
+        for future in futures:
+            future.result()
+    assert len(checked) >= 30
+
+
+def test_mcp_startup_manager_uses_the_shared_lock(app_config, tmp_path, model_factory, monkeypatch):
+    configured = _config(tmp_path, app_config)
+    configured.mcp.enabled = True
+    runtime = open_runtime(configured, base_dir=tmp_path, model=model_factory())
+    try:
+        original = runtime.settings.mcp.states
+        def states(*args, **kwargs):
+            assert runtime.database.checkpointer.lock.locked()
+            return original(*args, **kwargs)
+        monkeypatch.setattr(runtime.settings.mcp, "states", states)
+        assert runtime.mcp_manager is not None
+        assert runtime.mcp_manager.states() == {}
+    finally:
+        runtime.close()
+
+
+def test_mcp_concurrent_config_writes_do_not_lose_other_servers(api):
+    from concurrent.futures import ThreadPoolExecutor
+    _, runtime = api
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(runtime.service.add_mcp_server, {"name": f"s{i}", "command": "python"})
+                   for i in range(12)]
+        for future in futures:
+            future.result()
+    assert {server.name for server in runtime.service.mcp_view().servers} == {f"s{i}" for i in range(12)}

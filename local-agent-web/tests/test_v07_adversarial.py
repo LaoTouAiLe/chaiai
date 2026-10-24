@@ -128,13 +128,12 @@ def test_child_task_bounds() -> None:
     for bad_question in ("", "   ", "问" * 1001):
         with pytest.raises(ValidationError):
             DelegatedResearchRequest(tasks=[{"scope": ".", "question": bad_question}])
-    for bad_count in ([], [{"scope": ".", "question": "问"}] * 4):
-        with pytest.raises(ValidationError):
-            DelegatedResearchRequest(tasks=bad_count)
+    with pytest.raises(ValidationError):
+        DelegatedResearchRequest(tasks=[])
+    tasks = [{"scope": ".", "question": "问"}] * 16
+    assert len(DelegatedResearchRequest(tasks=tasks, concurrency=8).tasks) == 16
     with pytest.raises(ValidationError):
         DelegatedResearchRequest(tasks=[{"scope": ".", "question": "问"}], concurrency=0)
-    with pytest.raises(ValidationError):
-        DelegatedResearchRequest(tasks=[{"scope": ".", "question": "问"}], concurrency=3)
 
 
 # ---- 二、运行时边界（真的跑图）----------------------------------------------

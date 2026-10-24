@@ -16,7 +16,8 @@ from local_agent.api.container import ApiRuntime
 from local_agent.config import WebConfig
 
 #: 受控文档的落盘位置（相对 `local-agent-web/`）。
-OPENAPI_PATH: Final[str] = "docs/api/openapi.json"
+#: 2026-10-25 起文档统一放在仓库根 `docs/`，所以这里多一层 `../`。
+OPENAPI_PATH: Final[str] = "../docs/api/openapi.json"
 
 
 class _PlaceholderRuntime:

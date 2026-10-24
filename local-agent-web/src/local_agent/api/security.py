@@ -94,7 +94,7 @@ class LocalBoundaryMiddleware:
         self.max_body_bytes = max_body_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
+        if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
 
@@ -103,6 +103,15 @@ class LocalBoundaryMiddleware:
             for key, value in scope.get("headers", [])
         }
         host = _host_of(headers.get("host", ""))
+        if scope["type"] == "websocket":
+            origin = headers.get("origin")
+            if (host not in self.allowed_hosts or not origin
+                    or not self._origin_allowed(origin, headers.get("host", ""))):
+                await send({"type": "websocket.close", "code": 1008,
+                            "reason": "终端连接必须来自允许的本机页面。"})
+                return
+            await self.app(scope, receive, send)
+            return
         if host not in self.allowed_hosts:
             await self._reject(send, 403, "Host 不在允许列表里：本服务只接受本机访问。")
             return
@@ -113,6 +122,11 @@ class LocalBoundaryMiddleware:
                 await self._reject(send, 403, "跨源来源不在允许列表里：状态修改请求只接受本机同源。")
                 return
 
+        # 图片上传取消大小配额；保留上方的Host与Origin校验。
+        if (scope["method"] == "POST" and scope.get("path", "").startswith("/api/sessions/")
+                and scope.get("path", "").endswith("/attachments")):
+            await self.app(scope, receive, send)
+            return
         declared = headers.get("content-length")
         if declared is not None:
             try:

@@ -1,4 +1,4 @@
-// React Query 层（T30）：会话、工作区与快照的服务端状态。
+﻿// React Query 层（T30）：会话、工作区与快照的服务端状态。
 //
 // 分工（计划 §6.3）：**服务端权威的东西全在这里**（快照、会话列表、工作区），本地 UI 状态在
 // `stores/`。事件流只做两件事：把 `session_snapshot` 写进这里、把增量放进临时尾部（`stores/stream.ts`）。
@@ -9,15 +9,28 @@ import { useRef } from 'react'
 import {
   ApiError,
   cancelTask,
+  closeTaskReview,
   setSessionMode,
   endInterruptedRequest,
   createSession,
+  addMcpServer,
+  editMcpServer,
+  deleteMcpServer,
   getCapabilities,
+  getMcp,
   getSkills,
   getHealth,
   getTasks,
+  getArtifacts,
   getMemoryPage,
   getUsagePage,
+  getWorkspaceGitDiff,
+  getWorkspaceGitStatus,
+  listCronJobs,
+  listCronRuns,
+  listWorkspaceFiles,
+  previewArtifact,
+  searchWorkspaceFiles,
   getSessionSnapshot,
   listModelConnections,
   listSessions,
@@ -27,21 +40,101 @@ import {
   resolveApproval,
   selectSessionModel,
   setCapabilities,
+  setMcpServer,
   setSkillEnabled,
+  reloadMcp,
   addSkillRoot,
   removeSkillRoot,
   selectWorkspace,
   submitMessage,
+  getSessionChanges,
+  getSessionChangeDiff,
 } from './client'
 import type { components } from './schema.gen'
 import type { SubmissionContext } from './client'
-import type { MemoryFilters, UsageFilters } from './client'
+import type { ArtifactFilters, MemoryFilters, UsageFilters } from './client'
 
 export function useMemoryPage(filters: MemoryFilters, enabled: boolean) {
   return useQuery({ queryKey: ['data-center', 'memory', filters], queryFn: () => getMemoryPage(filters), enabled, staleTime: 5000 })
 }
 export function useUsagePage(filters: UsageFilters, enabled: boolean) {
   return useQuery({ queryKey: ['data-center', 'usage', filters], queryFn: () => getUsagePage(filters), enabled, staleTime: 5000 })
+}
+/** 产物汇总（§15.11.1）：只读、服务端分页；窗口 `days` 参与 queryKey，换窗口要重新取。 */
+export function useArtifacts(filters: ArtifactFilters, enabled: boolean) {
+  return useQuery({ queryKey: ['data-center', 'artifacts', filters], queryFn: () => getArtifacts(filters), enabled, staleTime: 5000 })
+}
+/** 右栏文件面板（§21.6）：列一层目录。 */
+export function useWorkspaceFiles(
+  path: string,
+  enabled: boolean,
+  recursive = false,
+  workspaceId?: string,
+) {
+  return useQuery({
+    // `workspaceId` 必须进 key：不然切换工作区后拿到的是上一个工作区的缓存
+    // （2026-10-23 实机反馈："切了工作区，文件列表还是第一个工作区的"）。
+    queryKey: ['workspace', 'files', workspaceId ?? '', path, recursive],
+    queryFn: () => listWorkspaceFiles(path, workspaceId, recursive),
+    enabled,
+    staleTime: 5000,
+  })
+}
+/** 工作区文件名搜索（§21.6）：空串不发请求。 */
+export function useSearchWorkspaceFiles(q: string) {
+  return useQuery({
+    queryKey: ['workspace', 'file-search', q],
+    queryFn: () => searchWorkspaceFiles(q),
+    enabled: q.trim().length >= 1,
+    staleTime: 5000,
+  })
+}
+
+export function useWorkspaceGitStatus(enabled: boolean) {
+  return useQuery({
+    queryKey: ['workspace', 'git-status'],
+    queryFn: () => getWorkspaceGitStatus(),
+    enabled,
+    staleTime: 5000,
+  })
+}
+export function useWorkspaceGitDiff(path: string | null) {
+  return useQuery({
+    queryKey: ['workspace', 'git-diff', path],
+    queryFn: () => getWorkspaceGitDiff(path ?? ''),
+    enabled: path !== null,
+    staleTime: 5000,
+  })
+}
+/**
+ * 产物内容预览（§15.11.3）：`path=null` 时不发请求。
+ *
+ * `workspaceId` 必须与条目所属工作区一致——不传就会按"启动工作区"解析，
+ * 在别的会话工作区里必然读不到文件。
+ */
+export function useArtifactsDetail(
+  path: string | null,
+  workspaceId?: string,
+  scope: 'workspace' | 'attachments' = 'workspace',
+) {
+  return useQuery({
+    queryKey: ['data-center', 'artifact-preview', scope, workspaceId ?? '', path],
+    queryFn: () => previewArtifact(path ?? '', workspaceId, scope),
+    enabled: path !== null,
+    staleTime: 60_000,
+  })
+}
+/** 定时任务列表（§21.5）。`scheduler_running=false` 时页面要说明"不会触发"。 */
+export function useCronJobs(enabled = true) {
+  return useQuery({ queryKey: ['cron', 'jobs'], queryFn: listCronJobs, enabled, staleTime: 5000 })
+}
+export function useCronRuns(jobId: string | null) {
+  return useQuery({
+    queryKey: ['cron', 'runs', jobId],
+    queryFn: () => listCronRuns(jobId ?? '', 0, 20),
+    enabled: jobId !== null,
+    staleTime: 5000,
+  })
 }
 
 export const queryKeys = {
@@ -51,8 +144,34 @@ export const queryKeys = {
   snapshot: (sessionId: string) => ['snapshot', sessionId] as const,
   modelConnections: ['model-connections'] as const,
   capabilities: ['capabilities'] as const,
+  mcp: ['mcp'] as const,
   skills: ['skills'] as const,
   tasks: (workspaceId: string | null) => ['tasks', workspaceId] as const,
+  changes: (sessionId: string) => ['session-changes', sessionId] as const,
+}
+
+/**
+ * 会话内的文件变更总览（2026-10-21）。
+ *
+ * 不使用轮询：一轮结束由 `useSessionStream` 的 `task_completed` 事件失效它；面板关着时
+ * `enabled=false`，不产生任何请求。
+ */
+export function useSessionChanges(sessionId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: queryKeys.changes(sessionId ?? ''),
+    queryFn: () => getSessionChanges(sessionId ?? ''),
+    enabled: sessionId !== null && enabled,
+  })
+}
+
+/** 单个文件的整文件 diff；只在用户点开某个文件时才取。 */
+export function useSessionChangeDiff(sessionId: string | null, path: string | null) {
+  return useQuery({
+    queryKey: [...queryKeys.changes(sessionId ?? ''), 'diff', path ?? ''],
+    queryFn: () => getSessionChangeDiff(sessionId ?? '', path ?? ''),
+    enabled: sessionId !== null && path !== null,
+    staleTime: 5000,
+  })
 }
 
 /**
@@ -96,6 +215,49 @@ export function useSetCapabilities() {
     mutationFn: (changes: Record<string, boolean>) => setCapabilities(changes),
     onSuccess: (view) => {
       queryClient.setQueryData(queryKeys.capabilities, view)
+    },
+  })
+}
+
+/**
+ * MCP 面板（2026-10-20；契约 §6.13）：server 状态、工具与规模统计。
+ *
+ * 服务端每次现算（含重读 `mcp.json`），所以不设 `staleTime`：打开这一页就取一次最新的。
+ */
+export function useMcp() {
+  return useQuery({ queryKey: queryKeys.mcp, queryFn: getMcp, refetchInterval: 2000 })
+}
+
+/** 改一台 server 的开关或名单：成功后用服务端返回的完整视图替换缓存。 */
+export function useSetMcpServer() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ name, changes }: { name: string; changes: Record<string, unknown> }) =>
+      setMcpServer(name, changes),
+    onSuccess: view => {
+      queryClient.setQueryData(queryKeys.mcp, view)
+    },
+  })
+}
+
+/** 新增一台 MCP Server：成功后用服务端返回的完整视图替换缓存（新 server 已进列表）。 */
+export function useAddMcpServer() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: addMcpServer,
+    onSuccess: view => {
+      queryClient.setQueryData(queryKeys.mcp, view)
+    },
+  })
+}
+
+/** 重读 `mcp.json`；配置写坏时服务端返回带行号的 422，由调用方原样展示。 */
+export function useReloadMcp() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: reloadMcp,
+    onSuccess: view => {
+      queryClient.setQueryData(queryKeys.mcp, view)
     },
   })
 }
@@ -261,6 +423,19 @@ export function useSetSessionMode() {
  * 都由服务端说了算，页面自己推算一份就是第二套真相（与审批决定同一口径）。失败也重取——取消可能
  * 刚好被别处抢先处理，那只能由服务端说清楚。
  */
+/** 人工核对结案（§17.1 唯一例外）：成功后刷任务索引，侧栏那行才会消失。 */
+export function useCloseTaskReview() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (request: { jobId: string; outcome: 'completed' | 'cancelled' }) =>
+      closeTaskReview(request.jobId, request.outcome),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      void queryClient.invalidateQueries({ queryKey: ['sessions'] })
+    },
+  })
+}
+
 export function useCancelTask() {
   const queryClient = useQueryClient()
   return useMutation({
@@ -283,6 +458,8 @@ export function useEndInterruptedRequest() {
     onSettled: (_data, _error, request) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
       void queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      // 侧栏那行的「执行中 / 等待审批」来自任务索引，不刷它会落后于实际状态。
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
       void queryClient.invalidateQueries({ queryKey: ['conversation-map', request.sessionId] })
     },
   })
@@ -333,6 +510,8 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
       // 提交返回的是**命令结果**（不是快照）：权威状态仍以快照为准，所以拉一次。
       void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
       void queryClient.invalidateQueries({ queryKey: ['sessions'] })
+      // 侧栏那行的「执行中 / 等待审批」来自任务索引，不刷它会落后于实际状态。
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
       void queryClient.invalidateQueries({ queryKey: ['conversation-map', request.sessionId] })
       return result
     },
@@ -344,11 +523,19 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
   return {
     // 带的附件是**引用**（`AttachmentView.attachment_id`），不是文件本身；字节已经在上传接口落盘了。
     mutate: (
-      request: { text: string; attachments?: readonly string[] },
+      // `context` 可**按次覆盖**：行内编辑（2026-10-21）要临时换 `parent_turn_id`，
+      // 而它记在 hook 参数里、渲染期就定了。合并而不是整体替换，是因为其余几项
+      // （branch / snapshot / workflow）仍该沿用当前上下文。
+      request: { text: string; attachments?: readonly string[]; context?: SubmissionContext },
       options?: Parameters<typeof mutation.mutate>[1],
     ) => {
       if (sessionId === null) throw new Error('还没有打开会话')
-      mutation.mutate({ sessionId, text: request.text, context, attachments: request.attachments }, options)
+      mutation.mutate({
+        sessionId,
+        text: request.text,
+        context: { ...context, ...(request.context ?? {}) },
+        attachments: request.attachments,
+      }, options)
     },
     isPending: belongsHere && mutation.isPending,
     isError: belongsHere && mutation.isError,
@@ -386,10 +573,16 @@ export function useResolveApproval(sessionId: string | null) {
     },
     onSuccess: (_result, request) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
+      // 侧栏那行「需人工核对」来自**任务索引**，不是快照（§19.1）。
+      // 只刷快照的话，审批点了批准，列表里那行还要等它的 15 秒轮询才变
+      // ——用户看到的就是「点了之后没有任何联动」（2026-10-23 实机反馈）。
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      void queryClient.invalidateQueries({ queryKey: ['sessions'] })
     },
     // 失败也要重取：过期与被别处抢先处理都只能由服务端说清楚，页面不替它下结论。
     onError: (_error, request) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
     },
   })
 
@@ -413,3 +606,20 @@ export function asApiError(error: unknown): ApiError | Error {
 export type Snapshot = components['schemas']['SessionSnapshot']
 export type SessionSummary = components['schemas']['SessionSummaryView']
 export type Workspace = components['schemas']['WorkspaceRef']
+
+export function useEditMcpServer() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ name, changes }: { name: string; changes: Record<string, unknown> }) =>
+      editMcpServer(name, changes),
+    onSuccess: view => queryClient.setQueryData(queryKeys.mcp, view),
+  })
+}
+
+export function useDeleteMcpServer() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: deleteMcpServer,
+    onSuccess: view => queryClient.setQueryData(queryKeys.mcp, view),
+  })
+}

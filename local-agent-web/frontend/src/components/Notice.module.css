@@ -1,0 +1,5 @@
+.notice { display: flex; flex-shrink: 0; align-items: flex-start; gap: 12px; padding: 8px 24px; background: var(--law-surface-tip); border-bottom: 1px solid var(--law-border-l1); color: var(--law-text-secondary); font-size: var(--law-text-xs); line-height: var(--law-leading-xs); }
+.content { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.content button { margin-left: 8px; text-decoration: underline; }
+.close { flex-shrink: 0; width: 24px; height: 24px; border-radius: var(--law-radius-md); font-size: 20px; }
+.close:hover { background: var(--law-button-ghost-hover); }

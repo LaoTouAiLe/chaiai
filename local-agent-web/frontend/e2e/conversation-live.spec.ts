@@ -15,7 +15,7 @@ test('两轮真实对话，刷新后内容一致', async ({ page }) => {
   await page.goto('/')
 
   // 1) 空会话：没有任何会话时，页面说的是"还没有会话"，而不是拿 fixture 充数。
-  await expect(page.getByText('还没有会话')).toBeVisible()
+  await expect(page.getByText(/还没有会话/)).toBeVisible()
 
   // 2) 新建会话。
   await page.getByRole('button', { name: '新建会话' }).click()
@@ -50,6 +50,18 @@ test('两轮真实对话，刷新后内容一致', async ({ page }) => {
   await page.getByRole('button', { name: '选择会话模型' }).click()
   const menu = page.getByRole('region', { name: '模型选择' })
   await expect(menu).toBeVisible()
+  await input.fill('关闭模型面板后保留草稿')
+  await menu.getByRole('button', { name: '关闭模型选择' }).click()
+  await expect(menu).toHaveCount(0)
+  await expect(input).toHaveValue('关闭模型面板后保留草稿')
+  const modelTrigger = page.getByRole('button', { name: '选择会话模型' })
+  await expect(modelTrigger).toBeFocused()
+  await modelTrigger.click()
+  await menu.getByRole('button', { name: '关闭模型选择' }).focus()
+  await page.keyboard.press('Escape')
+  await expect(menu).toHaveCount(0)
+  await expect(modelTrigger).toBeFocused()
+  await modelTrigger.click()
   await menu.getByRole('list', { name: '模型连接' }).getByRole('button').first().click()
   await expect(menu).toHaveCount(0)
   await page.getByRole('button', { name: '选择会话模型' }).click()
@@ -68,20 +80,21 @@ test('在当前会话切换模式，保留草稿并在刷新后恢复', async ({
   const before = await (await page.request.get('/api/sessions')).json() as { session_id: string }[]
   await page.getByPlaceholder('给智能体发消息').fill('保留切换前草稿')
 
-  await page.getByRole('button', { name: '选择会话模式' }).click()
-  const modeMenu = page.getByRole('menu', { name: '会话模式' })
-  await expect(modeMenu).toContainText('历史记录保留')
+  // 模式切换是两段常驻控件（2026-10-13 换掉下拉）：操作说明仍在 DOM 里（对读屏软件可见），
+  // 只是不再占一行视觉文案；点"闲聊"那一段就是一次切换。
+  const modeSelector = page.getByRole('group', { name: '选择会话模式' })
+  await expect(modeSelector).toHaveAccessibleDescription(/历史记录保留/)
   const chatUpdated = page.waitForResponse((response) =>
     response.url().endsWith(`/api/sessions/${first.session_id}/mode`) && response.request().method() === 'PATCH' && response.status() === 200)
-  await modeMenu.getByRole('menuitemradio', { name: /闲聊/ }).click()
+  await modeSelector.getByRole('button', { name: '闲聊' }).click()
   const chat = await (await chatUpdated).json() as { session_id: string; mode: string }
   expect(chat.session_id).toBe(first.session_id)
   expect(chat.mode).toBe('chat')
-  await expect(page.getByRole('button', { name: '选择会话模式' })).toContainText('闲聊')
+  await expect(page.getByRole('button', { name: '闲聊' })).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByPlaceholder('给智能体发消息')).toHaveValue('保留切换前草稿')
 
   await page.reload()
-  await expect(page.getByRole('button', { name: '选择会话模式' })).toContainText('闲聊')
+  await expect(page.getByRole('button', { name: '闲聊' })).toHaveAttribute('aria-pressed', 'true')
   const sessions = await (await page.request.get('/api/sessions')).json() as { session_id: string; mode: string }[]
   expect(sessions.find((item) => item.session_id === chat.session_id)?.mode).toBe('chat')
   expect(sessions).toHaveLength(before.length)

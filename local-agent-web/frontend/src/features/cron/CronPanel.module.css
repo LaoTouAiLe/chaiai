@@ -1,0 +1,218 @@
+/**
+ * 定时任务（2026-10-22 J2）。与能力中心同一套整页留白，列表用扁平行而不是卡片。
+ */
+.page {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-6) clamp(20px, 4vw, 64px) var(--sp-8);
+  background: var(--c-canvas);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.eyebrow {
+  display: block;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+.title {
+  margin: 0;
+  color: var(--c-text-1);
+  font-size: var(--fs-heading);
+  line-height: var(--lh-heading);
+  font-weight: 600;
+}
+
+.subtitle {
+  margin: var(--sp-1) 0 0;
+  max-width: 76ch;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+.notice {
+  margin: var(--sp-4) 0 0;
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-panel);
+  background: var(--c-warn-soft);
+  color: var(--c-warn);
+  font-size: var(--fs-body);
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin-top: var(--sp-5);
+  padding: var(--sp-4);
+  border-radius: var(--r-panel);
+  background: var(--c-panel);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  font-size: var(--fs-meta);
+  color: var(--c-text-3);
+}
+
+.field input,
+.field textarea,
+.field select {
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid transparent;
+  border-radius: var(--r-control);
+  background: var(--c-raised);
+  color: var(--c-text-1);
+  font-family: inherit;
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+
+.field textarea {
+  resize: vertical;
+}
+
+/* 频率：预设下拉 + 可直接编辑的表达式，下面跟一行中文解释。 */
+.scheduleRow {
+  display: flex;
+  gap: var(--sp-2);
+}
+
+.scheduleRow select {
+  flex: 0 0 auto;
+  width: 220px;
+}
+
+.scheduleRow input {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono-code);
+}
+
+@media (max-width: 640px) {
+  .scheduleRow {
+    flex-direction: column;
+  }
+
+  .scheduleRow select {
+    width: 100%;
+  }
+}
+
+.field input:focus-visible,
+.field textarea:focus-visible,
+.field select:focus-visible {
+  border-color: var(--c-accent);
+  outline: none;
+}
+
+.formActions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.hint {
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+}
+
+/* 任务行：扁平行 + 一条 hairline 分隔，不用卡片 */
+.list {
+  display: flex;
+  flex-direction: column;
+  margin: var(--sp-4) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+  border-bottom: 1px solid var(--c-line);
+}
+
+.rowMain {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-3);
+}
+
+.name {
+  color: var(--c-text-1);
+  font-size: var(--fs-ui);
+  font-weight: 500;
+}
+
+.schedule {
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-control);
+  background: var(--c-sunken);
+  color: var(--c-text-2);
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-meta);
+}
+
+.time {
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+}
+
+.rowActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+}
+
+.lastError {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-meta);
+  overflow-wrap: anywhere;
+}
+
+.runs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin: var(--sp-1) 0 0;
+  padding: var(--sp-3);
+  list-style: none;
+  border-radius: var(--r-panel);
+  background: var(--c-panel);
+}
+
+.runs li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  font-size: var(--fs-meta);
+}
+
+.summary {
+  color: var(--c-text-2);
+  overflow-wrap: anywhere;
+}
+
+.link {
+  color: var(--c-accent);
+  font-size: var(--fs-meta);
+  text-decoration: underline;
+}

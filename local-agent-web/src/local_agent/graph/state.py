@@ -24,7 +24,6 @@ from langchain_core.messages import AnyMessage, ToolCall
 from langgraph.graph.message import add_messages
 
 from local_agent.attachments import LoadedAttachment
-from local_agent.message_flags import DEFAULT_IMAGE_CONTEXT_TURNS
 from local_agent.cancellation import CancellationToken
 from local_agent.capabilities import DEFAULT_PROFILE, PROFILES
 from local_agent.config import RunConfig
@@ -34,6 +33,7 @@ from local_agent.graph.scope import tool_scope_key
 from local_agent.llm.models import ModelCapabilities
 from local_agent.llm.usage_recording import ModelCallRecord, ModelCallRecorder, TurnRecord
 from local_agent.memory.schemas import MemoryReference, Origin
+from local_agent.message_flags import DEFAULT_IMAGE_CONTEXT_TURNS
 from local_agent.model_settings.models import ModelBinding
 from local_agent.security.approval import ApprovalDecision, ApprovalRequest
 from local_agent.security.policy import SecurityPolicy
@@ -448,6 +448,13 @@ class AgentState(TypedDict, total=False):
 
     # 本轮输入与路由（覆盖语义）
     user_input: str
+    #: 侧聊首轮要**前置给模型**的上下文（2026-10-23，§21.7）。
+    #:
+    #: **不进 HumanMessage**：那条消息会被 `conversation.sync` 存成
+    #: `conversation_turns.question`，用户就会在气泡里看到几千字上下文和分界符
+    #: （上一版就是这么错的）。这里单独作一条 SystemMessage 插在提问之前——
+    #: 模型看得到，投影不显示，轮次里只有用户自己的话。
+    context_prefix: str | None
     session_mode: Literal["chat", "agent"]
     #: 会话来源（架构 §10.6、§17.1）：只决定记忆候选的**来源级别**，不进系统提示（不改变稳定前缀）。
     #: 由应用服务在每次提交时按会话索引写入；旧 Checkpoint 缺这个字段时按 ``interactive`` 处理。
@@ -481,6 +488,10 @@ class AgentState(TypedDict, total=False):
     #: 它存在的理由：原来这里把其余调用直接回填成 `denied`，用户看到的是"稍微多改点就被拒"
     #: ——那是审批节流，不是安全边界。覆盖语义：安全门每次重新算这一批。
     deferred_tool_calls: list[ToolCall]
+    #: 本会话经 ``mcp_tool_search`` 发现过的外部工具名（2026-10-20；契约 §6.13）。
+    #: **会话级、覆盖语义**：不在 ``prepare_context_node`` 的"本轮复位"列表里——搜过一次就持续可用，
+    #: 否则模型每轮都要重新搜一遍才能调同一个工具。
+    discovered_mcp_tools: list[str]
     tool_feedback_required: bool
     tool_events: Annotated[list[ToolEvent], operator.add]
     tool_results: Annotated[list[ToolResultRecord], operator.add]

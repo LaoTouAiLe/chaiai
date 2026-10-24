@@ -20,16 +20,21 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from local_agent import app_paths
 from local_agent.config import RagConfig
 from local_agent.rag.walk import iter_candidate_files
 from local_agent.security.path_guard import is_sensitive_path, is_within
+from local_agent.security.process_guard import (
+    ProcessCancelledError,
+    ProcessRegistry,
+    run_process,
+)
 from local_agent.security.shell_guard import build_environment, resolve_executable
 
 #: 命中来源：正文、文件名、路径。
@@ -192,6 +197,7 @@ def discover_matches(
     workspace_root: Path,
     config: RagConfig,
     resolve: Callable[..., str | None] = resolve_executable,
+    registry: ProcessRegistry | None = None,
 ) -> SearchOutcome:
     """按词项在当前工作区内发现候选（正文优先 ``rg``，缺失退化逐行扫描）。
 
@@ -201,6 +207,8 @@ def discover_matches(
         config: ``rag.*`` 限额（超时、文件数、字节数、命中数）。
         resolve: 可执行文件解析函数（默认 :func:`shell_guard.resolve_executable`）；
             测试用它注入"有 ``rg`` / 没有 ``rg``"两种情形。
+        registry: **本轮**的进程登记表（§20.1）：``rg`` 从它出去，于是超时与取消都按进程树
+            终止。省略时用一次性登记表（无令牌）——行为仍是"统一出口"，只是不参与取消。
 
     Returns:
         候选命中、实际来源与降级说明。
@@ -239,18 +247,27 @@ def discover_matches(
         per_term[match.term] += 1
         matches.append(match)
 
-    # 2) 正文命中：优先 rg；不可用或失败才退化到逐行扫描（复用同一批已遍历文件）。
+    # 2) 正文命中：优先 rg（包内自带的优先于 PATH）；不可用或失败才退化到逐行扫描。
     executable: str | None = None
-    try:
-        executable = resolve("rg", cwd=workspace_root)
-    except OSError:  # pragma: no cover - 解析器自身异常按"没有 rg"处理
-        executable = None
+    bundled = app_paths.bundled_binary("rg")
+    if bundled is not None:
+        executable = str(bundled)
+    else:
+        try:
+            executable = resolve("rg", cwd=workspace_root)
+        except OSError:  # pragma: no cover - 解析器自身异常按"没有 rg"处理
+            executable = None
 
     source = "python_scan"
     if executable:
         try:
             content, rg_notes, rg_truncated = _rg_matches(
-                executable, terms, cwd=workspace_root, config=config, deadline=deadline
+                executable,
+                terms,
+                cwd=workspace_root,
+                config=config,
+                deadline=deadline,
+                registry=registry,
             )
         except RgFailed as exc:
             # 加速器坏了就说清楚，然后退化；不能因为 rg 失败就宣称"工作区里没有相关代码"。
@@ -307,8 +324,14 @@ def _rg_matches(
     cwd: Path,
     config: RagConfig,
     deadline: float,
+    registry: ProcessRegistry | None = None,
 ) -> tuple[list[SearchMatch], list[str], bool]:
     """调用 ``rg --json`` 做正文候选发现。
+
+    走**统一执行出口**（§20.1）：超时与取消都按**进程树**终止（``rg`` 自己派生的子进程也一并收掉），
+    而不是只杀直接子进程。**退化口径一字不变**：超时仍是 ``RgFailed("超过 N 秒")``、起不来仍是
+    ``RgFailed("无法启动（…）")``、退出码非 0/1 仍是 ``RgFailed("退出码 N…")``，调用方据此退化到
+    有界 Python 扫描——"rg 失败"永远不会被说成"工作区里没有相关代码"。
 
     Raises:
         RgFailed: 超时、无法启动或返回错误码（调用方据此退化到逐行扫描）。
@@ -325,30 +348,36 @@ def _rg_matches(
     argv.append(".")
     remaining = max(deadline - time.monotonic(), 0.1)
     try:
-        completed = subprocess.run(
+        outcome = run_process(
             argv,
             cwd=str(cwd),
             env=build_environment(()),
-            shell=False,
-            capture_output=True,
-            timeout=remaining,
-            check=False,
+            timeout_seconds=remaining,
+            registry=registry,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise RgFailed(f"超过 {config.timeout_seconds} 秒") from exc
+    except ProcessCancelledError as exc:
+        # 门已通过、取消同时发生（§20.1）：**不启动**，按既有的"检索未完成"如实说明并退化。
+        raise RgFailed(str(exc)) from exc
     except OSError as exc:
         raise RgFailed(f"无法启动（{type(exc).__name__}）") from exc
 
+    if outcome.timed_out:
+        raise RgFailed(f"超过 {config.timeout_seconds} 秒")
+
     # rg 退出码：0 = 有命中，1 = 没有命中，2 = 出错。
-    if completed.returncode not in (0, 1):
-        detail = completed.stderr.decode("utf-8", errors="replace").strip()[:200]
-        raise RgFailed(f"退出码 {completed.returncode}{f'：{detail}' if detail else ''}")
+    code = outcome.exit_code
+    if code is None:
+        # 只可能出现在"终止后仍读不到输出"这种极端情形：如实说没取到，不拿 0 顶替。
+        raise RgFailed("未取到退出码（进程被终止后仍未读完输出）")
+    if code not in (0, 1):
+        detail = outcome.stderr.decode("utf-8", errors="replace").strip()[:200]
+        raise RgFailed(f"退出码 {code}{f'：{detail}' if detail else ''}")
 
     matches: list[SearchMatch] = []
     truncated = False
     root = cwd.resolve()
     limit = config.max_files * config.max_matches_per_term
-    for line in completed.stdout.decode("utf-8", errors="replace").splitlines():
+    for line in outcome.stdout.decode("utf-8", errors="replace").splitlines():
         if len(matches) >= limit:
             truncated = True
             break

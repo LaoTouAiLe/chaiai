@@ -12,10 +12,13 @@ export function TasksSection({
   workspaceId,
   onOpenSession,
   onClose,
+  onCloseReview,
 }: {
   workspaceId: string | null
   onOpenSession: (sessionId: string) => void
   onClose: () => void
+  /** 人工核对结案（§17.1 唯一例外）：由容器把请求发出去，面板只负责按钮。 */
+  onCloseReview?: (taskId: string, outcome: 'completed' | 'cancelled') => void
 }) {
   const query = useTasks(workspaceId)
 
@@ -25,6 +28,7 @@ export function TasksSection({
       errorText={query.error === null ? null : asApiError(query.error).message}
       onOpenSession={onOpenSession}
       onClose={onClose}
+      onCloseReview={onCloseReview}
     />
   )
 }

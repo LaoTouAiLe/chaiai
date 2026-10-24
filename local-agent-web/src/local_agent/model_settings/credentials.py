@@ -1,22 +1,30 @@
-"""密钥存储（T29A；契约 §6.8 第 4 条）。
+"""密钥存储（T29A；契约 §6.8 第 4 条；2026-10-13 改为**落设置库**）。
 
 三条硬规则：
 
-1. **密钥只进系统凭据存储或进程内存**：设置库、Checkpoint、请求台账、事件、日志、导出与截图都不许有明文；
+1. **密钥只进设置库或进程内存**：Checkpoint、请求台账、事件、日志、导出与截图都不许有明文；
 2. **读取接口不返回密钥**：对页面只回答"已配置 / 未配置"；:meth:`CredentialStore.get` 是**构造模型客户端**
    用的内部通道，不得进入任何 DTO；
-3. **不可用时不落盘**：系统凭据存储不可用时降级为**进程内临时**密钥，并明确提示"重启后需重新录入"，
-   绝不允许悄悄写明文文件。
+3. **只有一处落盘**：设置库的 ``settings_meta``（与连接、能力开关同一个本地文件）。运行时缺设置库时
+   降级为**进程内临时**密钥并明确提示，绝不在别处悄悄写明文。
 
-Windows 走 ``keyring``（后端即凭据管理器）做持久存储；其它平台按 §6.8 只提供临时模式——POSIX 持久凭据
-需要真机验证，本轮不做，免得给人一个"看起来保存了、其实没保存"的假象。
+**为什么从系统凭据存储改成落设置库**（2026-10-13 由项目负责人裁定）：应用要分发给朋友（双击 exe），
+而凭据管理器那条路在别人的机器上会因服务、组策略或会话形态而失败，失败的表现还是"重启后密钥没了"——
+用户无从判断自己哪里做错了；另一条老路（``.env`` + ``api_key_env``）要求用户手写文件，分发形态根本走不通。
+设置库本来就是**本机的单个 SQLite 文件**（``data/model_settings.sqlite``），连接与能力开关都在里面，
+密钥放同一处是"暴露面不变"的选择：代价是它在那个文件里是**明文**，收益是"保存即持久、重启仍在"在
+所有机器上行为一致。
+
+**配套约束不变**：密钥不得进入任何 DTO、日志、错误消息、导出与截图——脱敏（:func:`secrets_from`）与
+"``sk-`` 不出现在响应里"那批检查照旧生效，它们与"密钥存在哪个后端"无关。
 """
 
 from __future__ import annotations
 
-import sys
+import sqlite3
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Final, Literal, Protocol
 
 from local_agent.exceptions import CredentialStoreError
@@ -24,13 +32,10 @@ from local_agent.exceptions import CredentialStoreError
 #: 凭据引用的前缀：引用里只放连接 id，不含任何密钥材料。
 CREDENTIAL_REF_PREFIX: Final[str] = "local-agent-web:"
 
-#: 系统凭据存储里的"服务名"（Windows 凭据管理器按 服务 + 账号 定位一条记录）。
-KEYRING_SERVICE: Final[str] = "local-agent-web"
+#: ``settings_meta`` 里放密钥的键前缀；键的其余部分就是 ``credential_ref`` 本身。
+CREDENTIAL_META_PREFIX: Final[str] = "credentials."
 
-#: 启动探测用的引用：只在真实凭据存储里写/读/删一次，用来确认它真的可用。
-_PROBE_REF: Final[str] = f"{CREDENTIAL_REF_PREFIX}__probe__"
-
-CredentialKind = Literal["os", "memory"]
+CredentialKind = Literal["os", "local", "memory"]
 
 
 def credential_ref_for(connection_id: str, config_version: int) -> str:
@@ -51,9 +56,10 @@ def is_credential_ref(value: str) -> bool:
 class CredentialStore(Protocol):
     """密钥存储的最小面：按引用写入 / 读取 / 删除。"""
 
-    #: ``os`` = 系统凭据存储（重启后仍在）；``memory`` = 仅本进程有效。
+    #: ``local`` = 本地设置库（重启后仍在）；``memory`` = 仅本进程有效；``os`` = 历史值（系统凭据存储，
+    #: v1.0 之前默认，现在没有代码路径会产出它，DTO 里保留仅为兼容）。
     kind: CredentialKind
-    #: 给页面显示的降级说明（``kind="os"`` 时为 ``None``）。
+    #: 给页面显示的降级说明（``kind`` 为持久存储时是 ``None``）。
     note: str | None
 
     def set(self, ref: str, secret: str) -> None:
@@ -73,7 +79,7 @@ class CredentialStore(Protocol):
 class InMemoryCredentialStore:
     """进程内临时密钥；进程结束即消失（降级模式，页面必须提示"重启后需重新录入"）。"""
 
-    note: str | None = "系统凭据存储不可用：密钥只在本进程内有效，重启后需要重新录入。"
+    note: str | None = "密钥存储不可用：密钥只在本进程内有效，重启后需要重新录入。"
     kind: CredentialKind = "memory"
     _secrets: dict[str, str] = field(default_factory=dict, repr=False)
 
@@ -87,56 +93,83 @@ class InMemoryCredentialStore:
         self._secrets.pop(ref, None)
 
 
+def _now_iso() -> str:
+    """与设置库其它时间戳同一写法（UTC、秒级、ISO 文本）。"""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 @dataclass
-class KeyringCredentialStore:
-    """系统凭据存储（Windows 凭据管理器）。``module`` 可注入假后端做测试。"""
+class DatabaseCredentialStore:
+    """把密钥存进**设置库**的 ``settings_meta``（键 ``credentials.<ref>`` → 明文密钥）。
+
+    为什么是 ``settings_meta`` 而不是给连接表加一列：那一列要跟着"每个版本一份凭据"的历史行一起加
+    （§6.8 要求固定版本取固定凭据），而通用 KV 表本来就在、且已经承担了同类的运行时偏好
+    （能力开关、外部路径档位）。**不新增迁移**，也不动连接表的形状。
+
+    先建对象、后到连接（装配顺序如此）：:meth:`bind` 由
+    :func:`~local_agent.model_settings.store.open_settings_database` 在开库后调用；
+    绑上前任何读写都按"设置库不可用"**失败闭合**，不是静默返回空。
+    """
 
     note: str | None = None
-    kind: CredentialKind = "os"
-    service: str = KEYRING_SERVICE
-    #: 被注入的 keyring 模块；``None`` 时用真实 ``keyring``。
-    module: object | None = None
+    kind: CredentialKind = "local"
+    _connection: sqlite3.Connection | None = None
 
-    def _backend(self) -> object:
-        if self.module is not None:
-            return self.module
-        import keyring  # 只有真要走系统凭据存储时才导入
+    def bind(self, connection: sqlite3.Connection) -> None:
+        """绑定已打开的设置库连接（幂等：重复绑定到同一个连接没有副作用）。"""
+        self._connection = connection
 
-        return keyring
+    def _require(self) -> sqlite3.Connection:
+        if self._connection is None:
+            raise CredentialStoreError("设置库尚未打开：密钥读写不可用")
+        return self._connection
 
     def set(self, ref: str, secret: str) -> None:
         if not is_credential_ref(ref):
             raise CredentialStoreError(f"凭据引用不合法（应以 {CREDENTIAL_REF_PREFIX} 开头）：{ref}")
+        connection = self._require()
         try:
-            self._backend().set_password(self.service, ref, secret)  # type: ignore[attr-defined]
-        except Exception as exc:  # 后端五花八门，统一转成本项目异常
-            raise CredentialStoreError(f"写入系统凭据存储失败：{type(exc).__name__}") from exc
+            connection.execute(
+                "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (CREDENTIAL_META_PREFIX + ref, secret, _now_iso()),
+            )
+            connection.commit()
+        except sqlite3.Error as exc:  # 只读库、磁盘满等：转成本项目异常，由调用方给可读提示
+            raise CredentialStoreError(f"写入设置库失败：{type(exc).__name__}") from exc
 
     def get(self, ref: str) -> str | None:
+        connection = self._require()
         try:
-            return self._backend().get_password(self.service, ref)  # type: ignore[attr-defined]
-        except Exception as exc:
-            raise CredentialStoreError(f"读取系统凭据存储失败：{type(exc).__name__}") from exc
+            row = connection.execute(
+                "SELECT value FROM settings_meta WHERE key = ?", (CREDENTIAL_META_PREFIX + ref,)
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise CredentialStoreError(f"读取设置库失败：{type(exc).__name__}") from exc
+        return None if row is None else str(row[0])
 
     def delete(self, ref: str) -> None:
         try:
-            self._backend().delete_password(self.service, ref)  # type: ignore[attr-defined]
-        except Exception:  # noqa: BLE001 - keyring 在"条目不存在"时抛后端专有异常，删除按尽力而为处理
+            connection = self._require()
+            connection.execute(
+                "DELETE FROM settings_meta WHERE key = ?", (CREDENTIAL_META_PREFIX + ref,)
+            )
+            connection.commit()
+        except (CredentialStoreError, sqlite3.Error):
+            # 删除按尽力而为：库短暂不可写不该阻断调用方（与 keyring 时代的 delete 同一口径）。
             return
 
 
-def open_credential_store(
-    preference: str = "auto", *, platform: str | None = None, module: object | None = None
-) -> CredentialStore:
-    """按配置与平台挑一个可用的凭据存储。
+def open_credential_store(preference: str = "auto") -> CredentialStore:
+    """按配置挑一个可用的凭据存储（2026-10-13：默认从系统凭据存储改为**落设置库**）。
 
     Args:
-        preference: ``"auto"`` 按平台决定；``"memory"`` 强制临时模式（用户不想写系统凭据存储，或测试）。
-        platform: 平台名，默认 ``sys.platform``；测试可注入。
-        module: keyring 后端；``None`` 用真实 ``keyring``（测试注入假后端，避免动本机凭据管理器）。
+        preference: ``"auto"``（默认）→ 回落设置库；``"memory"`` 强制临时模式（不想让密钥落盘时用，
+            代价是重启后要重新录入）。
 
     Returns:
-        可用的存储。系统凭据存储**探测失败**时返回临时模式并带上原因，不是静默失败。
+        存储对象。``auto`` 返回的 :class:`DatabaseCredentialStore` 需要调用方在开库后
+        :meth:`~DatabaseCredentialStore.bind`——`open_settings_database` 会做这件事。
     """
     if preference == "memory":
         return InMemoryCredentialStore(
@@ -144,32 +177,13 @@ def open_credential_store(
         )
     if preference != "auto":
         return InMemoryCredentialStore(note=f"credential_store={preference} 无法识别：已降级为临时模式。")
-
-    current = sys.platform if platform is None else platform
-    if not current.startswith("win"):
-        return InMemoryCredentialStore(
-            note=(
-                f"当前平台（{current}）没有可用的持久凭据方案：密钥只在本进程内有效，"
-                "重启后需要重新录入（POSIX 持久凭据尚未真机验证）。"
-            )
-        )
-
-    # 探测一次真写入/读回：只有它能证明"这家机器上真的存得进去"，光看后端类型不算。
-    store = KeyringCredentialStore(module=module)
-    try:
-        store.set(_PROBE_REF, "probe")
-        if store.get(_PROBE_REF) != "probe":
-            raise CredentialStoreError("系统凭据存储读回校验失败")
-    except CredentialStoreError as exc:
-        return InMemoryCredentialStore(note=f"{exc}：已降级为临时模式，重启后需要重新录入。")
-    store.delete(_PROBE_REF)
-    return store
+    return DatabaseCredentialStore()
 
 
 def secrets_from(store: CredentialStore, refs: Iterable[str | None]) -> list[str]:
     """把一批引用的密钥值取出来，**只用于脱敏**（页面与日志都不能出现这些值）。
 
-    取不到（条目丢了、后端坏了）就跳过：脱敏是尽力而为的最后一道网，不能因为它失败而阻断请求。
+    取不到（条目丢了、库暂时打不开）就跳过：脱敏是尽力而为的最后一道网，不能因为它失败而阻断请求。
     """
     values: list[str] = []
     for ref in refs:

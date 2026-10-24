@@ -70,6 +70,125 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/cron/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 定时任务列表
+         * @description `scheduler_running=false` 表示调度线程没起来——页面上要点明"不会触发"。
+         */
+        get: operations["list_cron_jobs_api_cron_jobs_get"];
+        put?: never;
+        /** 新建定时任务 */
+        post: operations["create_cron_job_api_cron_jobs_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cron/jobs/{job_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** 删除定时任务 */
+        delete: operations["delete_cron_job_api_cron_jobs__job_id__delete"];
+        options?: never;
+        head?: never;
+        /** 修改定时任务 */
+        patch: operations["update_cron_job_api_cron_jobs__job_id__patch"];
+        trace?: never;
+    };
+    "/api/cron/jobs/{job_id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 立即触发一次
+         * @description 不等排期地跑一次；**排期本身不动**。上一次没跑完时返回 409。
+         */
+        post: operations["run_cron_job_api_cron_jobs__job_id__run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/cron/jobs/{job_id}/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 运行记录 */
+        get: operations["list_cron_runs_api_cron_jobs__job_id__runs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-center/artifacts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 只读产物汇总
+         * @description Agent 跑出来的东西：图片、写出的文件、引用过的链接（§15.11.1）。
+         *
+         *     每次请求现算，不新建表；触扫描闸门时 `incomplete=true` 并说明没扫全。
+         *     `refresh=true` 跳过 60 秒结果缓存（页面「刷新」按钮用）。
+         */
+        get: operations["artifacts_page_api_data_center_artifacts_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/data-center/artifacts/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 产物内容预览
+         * @description 看一眼产物的内容（§15.11.3）：只读、有大小上限、不代打开外链。
+         */
+        get: operations["preview_artifact_api_data_center_artifacts_preview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/data-center/memories": {
         parameters: {
             query?: never;
@@ -120,6 +239,112 @@ export interface paths {
          */
         get: operations["health_api_health_get"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mcp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * MCP Server、工具清单与规模统计
+         * @description 每台 server 的状态、工具与"多少按需检索"（**每次现算**）。
+         *
+         *     ``config_error`` 每次重读 ``mcp.json`` 现算：改坏文件后刷新页面就能看到第几行错了。
+         */
+        get: operations["mcp_api_mcp_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mcp/reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 重读 mcp.json
+         * @description 重读配置文件并让连接管理器换一份（"添加 server"之后走这里）。
+         *
+         *     与保存开关不同，这一步**会断开**新配置里已经不存在的 server，并清掉它的工具目录。
+         */
+        post: operations["reload_mcp_api_mcp_reload_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mcp/servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 新增一台 MCP Server
+         * @description 把一台只走 stdio 的 server 写进 ``mcp.json``（已存在的同名会被拒）。
+         *
+         *     `env` 里的凭据**只写不回读**：响应与日志都没有它们。写完立即重载连接管理器。
+         */
+        post: operations["add_mcp_server_api_mcp_servers_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mcp/servers/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * 改一台 MCP Server 的开关或工具名单
+         * @description 打开/关闭一台 server，或收窄它的工具名单：**保存即生效、作用于下一轮**。
+         *
+         *     只带本次动过的键；显式传 ``enabled_tools: null`` 表示"取消白名单"。响应是保存后的完整视图。
+         */
+        put: operations["set_mcp_server_api_mcp_servers__name__put"];
+        post?: never;
+        /** 删除 MCP Server */
+        delete: operations["delete_mcp_server_api_mcp_servers__name__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mcp/servers/{name}/spec": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** 编辑 MCP Server 连接方式 */
+        put: operations["edit_mcp_server_api_mcp_servers__name__spec_put"];
         post?: never;
         delete?: never;
         options?: never;
@@ -329,8 +554,11 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * 会话列表
+         * 会话列表或搜索
          * @description `workspace_id` 缺省表示列出全部会话。
+         *
+         *     `q` 非空时改为搜索（§15.11.2）：匹配标题与用户提问，按最近活动倒序。
+         *     **不传 `q` 时行为与响应和旧实现完全一致**，`limit` 也只在搜索分支生效。
          */
         get: operations["list_sessions_api_sessions_get"];
         put?: never;
@@ -485,6 +713,72 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 会话内文件变更总览
+         * @description 按轮分组的"改了哪些文件、各改了几行"（2026-10-21）。
+         *
+         *     数据来自变更账本（写盘时记账 + 首次改动前留基线），**不是**从工具消息里的事件拼出来的：
+         *     一个文件被 edit 四次时，事件里只有四段互不相干的片段。
+         */
+        get: operations["session_changes_api_sessions__session_id__changes_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/changes/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 单个文件的整文件 diff
+         * @description ``baseline``（首次改动前原文）对当前磁盘内容，覆盖整个文件。
+         */
+        get: operations["session_change_diff_api_sessions__session_id__changes_diff_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/commands/{command_id}/detach": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 把正在前台等待的命令转入后台
+         * @description 只发"转后台"信号，不结束进程（2026-10-21）。
+         *
+         *     返回 ``{"detached": false}`` 表示这条命令已经不在等（跑完了、或 id 对不上）——
+         *     页面据此说"这条命令已经结束"，而不是假装它还在后台。
+         */
+        post: operations["detach_command_api_sessions__session_id__commands__command_id__detach_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/conversation-map": {
         parameters: {
             query?: never;
@@ -579,6 +873,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/promote": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 侧聊提升为正式会话
+         * @description 清掉血统即可（§21.7）：**不改 id、不删历史**——改 id 会让已打开的页面与运行记录全部失效。
+         */
+        post: operations["promote_session_api_sessions__session_id__promote_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/recovery": {
         parameters: {
             query?: never;
@@ -624,6 +938,28 @@ export interface paths {
         put?: never;
         /** Select Session */
         post: operations["select_session_api_sessions__session_id__select_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/side-chats": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 从某个会话开一个侧聊
+         * @description 侧聊是**独立会话**（带 `parent_session_id`），不打断父会话的 active 分支。
+         *
+         *     上下文由服务端读父会话的问答文本生成，**客户端不许传历史**——能传就能伪造。
+         */
+        post: operations["create_side_chat_api_sessions__session_id__side_chats_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -727,6 +1063,96 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/tasks/{job_id}/review": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 人工核对结案
+         * @description 把 `needs_review` 的任务结案（§17.1 唯一例外）。
+         *
+         *     没有这个入口，那条任务**出不去终态**，会话会永远挂在侧栏的「需人工核对」上。
+         */
+        post: operations["close_task_review_api_tasks__job_id__review_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/terminals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Listing */
+        get: operations["listing_api_terminals_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/terminals/requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Request */
+        post: operations["request_api_terminals_requests_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/terminals/requests/{approval_id}/decision": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Decide */
+        post: operations["decide_api_terminals_requests__approval_id__decision_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/terminals/{terminal_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Stop */
+        delete: operations["stop_api_terminals__terminal_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/web-search/credential": {
         parameters: {
             query?: never;
@@ -758,6 +1184,86 @@ export interface paths {
          *     "删了就一定没有凭据了"。
          */
         delete: operations["delete_web_search_credential_api_web_search_credential_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspace/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 列一层目录（只读）
+         * @description **不递归**、不含 `node_modules` 这类噪声目录；读文件内容走产物预览端点。
+         */
+        get: operations["workspace_files_api_workspace_files_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspace/files/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 按文件名搜索工作区（只读）
+         * @description 递归搜索文件名，跳过 `node_modules` 等噪声目录，最多 50 条、深度 8 层。
+         */
+        get: operations["search_workspace_files_api_workspace_files_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspace/git/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 单文件 diff（只读）
+         * @description 相对 `HEAD` 的 diff。未跟踪文件没有 diff——那是状态信息，不在这里编造。
+         */
+        get: operations["workspace_git_diff_api_workspace_git_diff_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/workspace/git/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 工作区 git 状态（只读）
+         * @description 工作区不是 git 仓库时返回 `available=false`，不是错误。
+         */
+        get: operations["workspace_git_status_api_workspace_git_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1020,6 +1526,100 @@ export interface components {
             position: number;
             /** Title */
             title: string;
+        };
+        /**
+         * ArtifactPreviewView
+         * @description 单条产物的内容预览（§15.11.3）。
+         *
+         *     **只允许工作区内、且不超过上限**的文件：这是"看一眼"而不是"文件管理"，
+         *     不提供写入、下载、任意路径读取。
+         */
+        ArtifactPreviewView: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "text" | "image" | "too_large" | "unreadable" | "binary";
+            /**
+             * Size Bytes
+             * @default 0
+             */
+            size_bytes: number;
+            /** Suffix */
+            suffix?: string | null;
+            /** Text */
+            text?: string | null;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+            /** Url */
+            url?: string | null;
+        };
+        /**
+         * ArtifactView
+         * @description 一条产物：图片、文件或链接（2026-10-22，§15.11.1）。
+         */
+        ArtifactView: {
+            /** Artifact Id */
+            artifact_id: string;
+            /** Created At */
+            created_at?: string | null;
+            /**
+             * External
+             * @default false
+             */
+            external: boolean;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "image" | "file" | "link";
+            /** Location */
+            location: string;
+            /**
+             * Scope
+             * @default workspace
+             * @enum {string}
+             */
+            scope: "workspace" | "attachments";
+            /** Session Id */
+            session_id: string;
+            /** Session Title */
+            session_title: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "attachment" | "file_change" | "message";
+            /** Title */
+            title: string;
+            /** Workspace Id */
+            workspace_id?: string | null;
+        };
+        /** ArtifactsPageView */
+        ArtifactsPageView: {
+            /** Entries */
+            entries: components["schemas"]["ArtifactView"][];
+            /**
+             * Incomplete
+             * @default false
+             */
+            incomplete: boolean;
+            /** Limit */
+            limit: number;
+            /** Notices */
+            notices?: string[];
+            /** Offset */
+            offset: number;
+            /**
+             * Scanned Sessions
+             * @default 0
+             */
+            scanned_sessions: number;
+            /** Total */
+            total: number;
         };
         /** AssistantMessageView */
         AssistantMessageView: {
@@ -1391,6 +1991,8 @@ export interface components {
             nodes: components["schemas"]["ConversationNodeView"][];
             /** Session Id */
             session_id: string;
+            /** Side Chats */
+            side_chats?: components["schemas"]["SideChatView"][];
         };
         /** ConversationNodeView */
         ConversationNodeView: {
@@ -1430,6 +2032,113 @@ export interface components {
             title?: string | null;
             /** Workspace Id */
             workspace_id?: string | null;
+        };
+        /**
+         * CreateSideChatRequest
+         * @description 开侧聊（§21.7）：只传`从哪一轮开出`，上下文由服务端读。
+         */
+        CreateSideChatRequest: {
+            /** Origin Turn Id */
+            origin_turn_id?: string | null;
+        };
+        /**
+         * CronJobCreateRequest
+         * @description 新建任务。**没有** `next_run_at` 字段：排期只由服务端算（§21.5）。
+         */
+        CronJobCreateRequest: {
+            /**
+             * Mode
+             * @default agent
+             * @enum {string}
+             */
+            mode: "chat" | "agent";
+            /** Name */
+            name: string;
+            /** Prompt */
+            prompt: string;
+            /** Schedule */
+            schedule: string;
+            /** Workspace Id */
+            workspace_id?: string | null;
+        };
+        /**
+         * CronJobUpdateRequest
+         * @description 局部更新：只传要改的字段，未传的保持原值。
+         */
+        CronJobUpdateRequest: {
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Mode */
+            mode?: ("chat" | "agent") | null;
+            /** Name */
+            name?: string | null;
+            /** Prompt */
+            prompt?: string | null;
+            /** Schedule */
+            schedule?: string | null;
+        };
+        /** CronJobView */
+        CronJobView: {
+            /** Enabled */
+            enabled: boolean;
+            /** Job Id */
+            job_id: string;
+            /** Last Error */
+            last_error?: string | null;
+            /** Last Run At */
+            last_run_at?: string | null;
+            /** Last Status */
+            last_status?: string | null;
+            /** Mode */
+            mode: string;
+            /** Name */
+            name: string;
+            /** Next Run At */
+            next_run_at?: string | null;
+            /** Prompt */
+            prompt: string;
+            /** Schedule */
+            schedule: string;
+            /** Workspace Root */
+            workspace_root: string;
+        };
+        /** CronJobsView */
+        CronJobsView: {
+            /** Jobs */
+            jobs: components["schemas"]["CronJobView"][];
+            /**
+             * Scheduler Running
+             * @default false
+             */
+            scheduler_running: boolean;
+        };
+        /** CronRunView */
+        CronRunView: {
+            /** Finished At */
+            finished_at?: string | null;
+            /** Job Id */
+            job_id: string;
+            /** Run Id */
+            run_id: string;
+            /** Session Id */
+            session_id?: string | null;
+            /** Started At */
+            started_at: string;
+            /** Status */
+            status: string;
+            /** Summary */
+            summary?: string | null;
+        };
+        /** CronRunsPageView */
+        CronRunsPageView: {
+            /** Limit */
+            limit: number;
+            /** Offset */
+            offset: number;
+            /** Runs */
+            runs: components["schemas"]["CronRunView"][];
+            /** Total */
+            total: number;
         };
         /** DelegatedResearchRequest */
         DelegatedResearchRequest: {
@@ -1649,6 +2358,63 @@ export interface components {
             updated_at?: string | null;
         };
         /**
+         * FileChangeDiffView
+         * @description 整文件 diff：``baseline``（首次改动前原文）对 ``当前磁盘内容``。
+         *
+         *     与工具卡片里的 :class:`FileDiffView` 结构一致，但**覆盖整个文件**，不是单次调用的片段。
+         */
+        FileChangeDiffView: {
+            /** Additions */
+            additions: number;
+            /** After Sha256 */
+            after_sha256?: string | null;
+            /** Before Sha256 */
+            before_sha256?: string | null;
+            /** Deletions */
+            deletions: number;
+            /** Has Baseline */
+            has_baseline: boolean;
+            /** Hunks */
+            hunks?: components["schemas"]["FileDiffHunkView"][];
+            /** Path */
+            path: string;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+            /** Unavailable Reason */
+            unavailable_reason?: string | null;
+        };
+        /**
+         * FileChangeSummaryView
+         * @description 一次任务里某个文件的累计变更（2026-10-21）。
+         *
+         *     ``edits`` 是**被改了几次**（同一个文件被 edit 多次是正常的：一次改一处），
+         *     ``additions``/``deletions`` 是这一组内的累计行数，不是最后一次的片段。
+         */
+        FileChangeSummaryView: {
+            /** Additions */
+            additions: number;
+            /** Deletions */
+            deletions: number;
+            /** Edits */
+            edits: number;
+            /** Has Baseline */
+            has_baseline: boolean;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "create" | "modify" | "delete";
+            /** Last At */
+            last_at: string;
+            /** Path */
+            path: string;
+            /** Unavailable Reason */
+            unavailable_reason?: string | null;
+        };
+        /**
          * FileDiffHunkView
          * @description 一个 hunk：`@@ -x,y +z,w @@` 头部加它覆盖的行。
          */
@@ -1739,10 +2505,44 @@ export interface components {
             send_shortcut: "enter" | "ctrl_enter";
             /**
              * Theme
-             * @default light
+             * @default system
              * @enum {string}
              */
             theme: "light" | "dark" | "system";
+        };
+        /** GitDiffView */
+        GitDiffView: {
+            /** Available */
+            available: boolean;
+            /** Note */
+            note?: string | null;
+            /** Patch */
+            patch?: string | null;
+            /** Path */
+            path: string;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        };
+        /** GitStatusEntryView */
+        GitStatusEntryView: {
+            /** Index Status */
+            index_status: string;
+            /** Path */
+            path: string;
+            /** Worktree Status */
+            worktree_status: string;
+        };
+        /** GitStatusView */
+        GitStatusView: {
+            /** Available */
+            available: boolean;
+            /** Entries */
+            entries?: components["schemas"]["GitStatusEntryView"][];
+            /** Note */
+            note?: string | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -1972,6 +2772,194 @@ export interface components {
             forget_after_days: number;
             /** Importance Threshold */
             importance_threshold: number;
+        };
+        /**
+         * McpServerCreateRequest
+         * @description 新增一台 MCP Server（只支持 stdio）。
+         *
+         *     ``env`` 允许传——否则需要凭据的 server（cookie / token）根本配不出来。但它**只写不回读**：
+         *     响应里的 `McpView` 没有任何 env 字段，日志也不记（与模型连接密钥同一条口径）。
+         */
+        McpServerCreateRequest: {
+            /** Args */
+            args?: string[];
+            /** Command */
+            command: string;
+            /** Env */
+            env?: {
+                [key: string]: string;
+            };
+            /** Name */
+            name: string;
+        };
+        /**
+         * McpServerRequest
+         * @description 改一台 MCP Server 的开关或工具名单。
+         *
+         *     只带**本次动过的键**：省略 ``enabled_tools`` 表示"不改它"，显式传 ``null`` 表示"取消白名单"
+         *     （两条语义不同，所以服务层按"有没有这个键"判断，不靠默认值）。
+         */
+        McpServerRequest: {
+            /** Disabled Tools */
+            disabled_tools?: string[] | null;
+            /** Enabled */
+            enabled?: boolean | null;
+            /** Enabled Tools */
+            enabled_tools?: string[] | null;
+        };
+        /**
+         * McpServerSpecRequest
+         * @description 替换连接方式；省略字段保持原值，env 按键合并且不回读。
+         */
+        McpServerSpecRequest: {
+            /** Args */
+            args?: string[] | null;
+            /** Command */
+            command?: string | null;
+            /** Env */
+            env?: {
+                [key: string]: string;
+            };
+            /** Remove Env */
+            remove_env?: string[];
+        };
+        /**
+         * McpServerView
+         * @description 一台 MCP Server 的状态与工具清单（**不含任何凭据**）。
+         */
+        McpServerView: {
+            /** Args */
+            args?: string[];
+            /**
+             * Command
+             * @default
+             */
+            command: string;
+            /** Disabled Tools */
+            disabled_tools?: string[];
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /** Enabled Tools */
+            enabled_tools?: string[] | null;
+            /** Env Keys */
+            env_keys?: string[];
+            /** Failure Kind */
+            failure_kind?: string | null;
+            /** Failure Message */
+            failure_message?: string | null;
+            /** Name */
+            name: string;
+            /**
+             * Status
+             * @default disabled
+             * @enum {string}
+             */
+            status: "disabled" | "idle" | "connecting" | "connected" | "failed";
+            /**
+             * Tool Count
+             * @default 0
+             */
+            tool_count: number;
+            /** Tools */
+            tools?: components["schemas"]["McpToolView"][];
+        };
+        /**
+         * McpSummaryView
+         * @description 一行能读懂的规模事实（页面必须明说"多少工具、多少按需检索"）。
+         */
+        McpSummaryView: {
+            /**
+             * Configured
+             * @default 0
+             */
+            configured: number;
+            /**
+             * Connected
+             * @default 0
+             */
+            connected: number;
+            /**
+             * Deferred
+             * @default 0
+             */
+            deferred: number;
+            /**
+             * Direct
+             * @default 0
+             */
+            direct: number;
+            /**
+             * Enabled
+             * @default 0
+             */
+            enabled: number;
+            /**
+             * Failed
+             * @default 0
+             */
+            failed: number;
+            /**
+             * Tools
+             * @default 0
+             */
+            tools: number;
+        };
+        /**
+         * McpToolView
+         * @description 一个外部工具在页面上的样子。
+         *
+         *     **这里必须显示工具名**——与能力面板"只讲能力不讲工具"（§16.6）相反。理由是工具名不是内部
+         *     实现细节：它是用户自己配的外部资产，不显示出来就没法核对"我配的这个 server 到底暴露了什么"。
+         */
+        McpToolView: {
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            /**
+             * Disabled
+             * @default false
+             */
+            disabled: boolean;
+            /**
+             * Exposure
+             * @default hidden
+             * @enum {string}
+             */
+            exposure: "direct" | "deferred" | "hidden";
+            /** Name */
+            name: string;
+            /** Reason */
+            reason?: string | null;
+            /** Tool */
+            tool: string;
+        };
+        /**
+         * McpView
+         * @description MCP 面板的全部数据（**每次现算**，与能力面板同一口径）。
+         */
+        McpView: {
+            /** Config Error */
+            config_error?: string | null;
+            /** Config Path */
+            config_path?: string | null;
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /** Servers */
+            servers?: components["schemas"]["McpServerView"][];
+            /**
+             * Store Unavailable
+             * @default false
+             */
+            store_unavailable: boolean;
+            summary?: components["schemas"]["McpSummaryView"];
         };
         /** MediumTermPreferences */
         MediumTermPreferences: {
@@ -2971,6 +3959,17 @@ export interface components {
             /** Title */
             title: string;
         };
+        /**
+         * ResolveTaskReviewRequest
+         * @description 人工核对结案（§17.1 唯一例外）。
+         */
+        ResolveTaskReviewRequest: {
+            /**
+             * Outcome
+             * @enum {string}
+             */
+            outcome: "completed" | "cancelled";
+        };
         /** RetrievalPreferences */
         RetrievalPreferences: {
             /** Context Lines */
@@ -3101,6 +4100,26 @@ export interface components {
             config_version: number | null;
             /** Connection Id */
             connection_id: string | null;
+        };
+        /**
+         * SessionChangesView
+         * @description 整个会话的文件变更总览（最新的轮次在前）。
+         */
+        SessionChangesView: {
+            /** Additions */
+            additions: number;
+            /** Deletions */
+            deletions: number;
+            /** Session Id */
+            session_id: string;
+            /** Total Files */
+            total_files: number;
+            /** Turns */
+            turns?: components["schemas"]["TurnChangesView"][];
+            /** Unrecorded */
+            unrecorded?: components["schemas"]["UnrecordedChangeView"][];
+            /** Unrecorded Note */
+            unrecorded_note?: string | null;
         };
         /** SessionModeRequest */
         SessionModeRequest: {
@@ -3255,6 +4274,8 @@ export interface components {
              * @enum {string}
              */
             mode: "chat" | "agent";
+            /** Parent Session Id */
+            parent_session_id?: string | null;
             /** Session Id */
             session_id: string;
             /** Title */
@@ -3265,6 +4286,23 @@ export interface components {
              */
             updated_at: string;
             workspace: components["schemas"]["WorkspaceRef"];
+        };
+        /**
+         * SideChatView
+         * @description 会话地图里挂着的侧聊（§21.7，2026-10-23）。
+         *
+         *     侧聊是**独立会话**（各自 thread、各自 checkpoint），但在图上要显示成主会话的
+         *     关联分支——否则用户在"会话地图"里看不到它，就会以为侧聊是凭空冒出来的。
+         */
+        SideChatView: {
+            /** Created At */
+            created_at?: string | null;
+            /** Origin Turn Id */
+            origin_turn_id?: string | null;
+            /** Session Id */
+            session_id: string;
+            /** Title */
+            title: string;
         };
         /**
          * SkillEntryView
@@ -3653,6 +4691,67 @@ export interface components {
             task_id: string;
             workspace: components["schemas"]["WorkspaceRef"];
         };
+        /** TerminalDecision */
+        TerminalDecision: {
+            /**
+             * Cols
+             * @default 80
+             */
+            cols: number;
+            /**
+             * Decision
+             * @enum {string}
+             */
+            decision: "approve" | "reject";
+            /**
+             * Rows
+             * @default 24
+             */
+            rows: number;
+        };
+        /** TerminalList */
+        TerminalList: {
+            /** Available */
+            available: boolean;
+            /** Items */
+            items: components["schemas"]["TerminalView"][];
+            /** Reason */
+            reason?: string | null;
+        };
+        /** TerminalRequest */
+        TerminalRequest: {
+            /** Workspace Id */
+            workspace_id: string;
+        };
+        /** TerminalView */
+        TerminalView: {
+            /** Approval Id */
+            approval_id: string;
+            /** Cwd */
+            cwd: string;
+            /** Detail */
+            detail?: string | null;
+            /** Exit Code */
+            exit_code?: number | null;
+            /** Expires At */
+            expires_at: string;
+            /**
+             * Permission Mode
+             * @enum {string}
+             */
+            permission_mode: "read-only" | "workspace-write";
+            /** Shell */
+            shell: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "rejected" | "expired" | "running" | "exited" | "stopped" | "failed";
+            /** Terminal Id */
+            terminal_id?: string | null;
+            /** Workspace Id */
+            workspace_id: string;
+        };
         /** ToolCompletedEvent */
         ToolCompletedEvent: {
             /** Event Id */
@@ -3732,6 +4831,11 @@ export interface components {
          *     不能把一段任意文本当成已知工具的结构。
          */
         ToolOutcomeView: {
+            /**
+             * Background
+             * @default false
+             */
+            background: boolean;
             /** Children */
             children?: components["schemas"]["DelegationChildView"][];
             diff?: components["schemas"]["FileDiffView"] | null;
@@ -3925,6 +5029,18 @@ export interface components {
             wait_ms?: number | null;
         };
         /**
+         * TurnChangesView
+         * @description 一轮（``run_id``）里的文件变更；页面按轮次分组显示。
+         */
+        TurnChangesView: {
+            /** Files */
+            files?: components["schemas"]["FileChangeSummaryView"][];
+            /** Run Id */
+            run_id: string | null;
+            /** Started At */
+            started_at: string | null;
+        };
+        /**
          * TurnRecordView
          * @description 一轮（一次用户提交到终态）的汇总记录（§15.6）。
          *
@@ -4003,6 +5119,24 @@ export interface components {
             usage: components["schemas"]["TurnRecordView"];
             /** User Message Id */
             user_message_id: string;
+        };
+        /**
+         * UnrecordedChangeView
+         * @description 命令/代码改过、但**没有进账本**的文件（2026-10-22）。
+         *
+         *     为什么单列而不并进账本：这些写入没有"改前原文"，塞进账本会让面板假装自己有基线。
+         *     用户需要知道的是"还有这些文件被动过"，而不是让面板谎报完整性。
+         */
+        UnrecordedChangeView: {
+            /** Path */
+            path: string;
+            /**
+             * Reason
+             * @default 经命令或代码写入，没有逐次改前内容
+             */
+            reason: string;
+            /** Status */
+            status: string;
         };
         /** UsageBucketView */
         UsageBucketView: {
@@ -4290,6 +5424,39 @@ export interface components {
             /** Tool Calls */
             tool_calls: number;
         };
+        /** WorkspaceEntryView */
+        WorkspaceEntryView: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "file" | "dir";
+            /** Modified At */
+            modified_at?: string | null;
+            /** Name */
+            name: string;
+            /** Path */
+            path?: string | null;
+            /**
+             * Size Bytes
+             * @default 0
+             */
+            size_bytes: number;
+        };
+        /** WorkspaceFilesView */
+        WorkspaceFilesView: {
+            /** Entries */
+            entries?: components["schemas"]["WorkspaceEntryView"][];
+            /** Parent */
+            parent?: string | null;
+            /** Path */
+            path: string;
+            /**
+             * Truncated
+             * @default false
+             */
+            truncated: boolean;
+        };
         /**
          * WorkspaceRef
          * @description 工作区引用。
@@ -4477,6 +5644,257 @@ export interface operations {
             };
         };
     };
+    list_cron_jobs_api_cron_jobs_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CronJobsView"];
+                };
+            };
+        };
+    };
+    create_cron_job_api_cron_jobs_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CronJobCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CronJobView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_cron_job_api_cron_jobs__job_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_cron_job_api_cron_jobs__job_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CronJobUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CronJobView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    run_cron_job_api_cron_jobs__job_id__run_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CronRunView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_cron_runs_api_cron_jobs__job_id__runs_get: {
+        parameters: {
+            query?: {
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CronRunsPageView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    artifacts_page_api_data_center_artifacts_get: {
+        parameters: {
+            query?: {
+                workspace_id?: string | null;
+                kind?: ("image" | "file" | "link") | null;
+                days?: number;
+                offset?: number;
+                limit?: number;
+                refresh?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactsPageView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    preview_artifact_api_data_center_artifacts_preview_get: {
+        parameters: {
+            query: {
+                path: string;
+                workspace_id?: string | null;
+                scope?: "workspace" | "attachments";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactPreviewView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     memory_page_api_data_center_memories_get: {
         parameters: {
             query?: {
@@ -4565,6 +5983,234 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HealthView"];
+                };
+            };
+        };
+    };
+    mcp_api_mcp_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpView"];
+                };
+            };
+        };
+    };
+    reload_mcp_api_mcp_reload_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpView"];
+                };
+            };
+            /** @description mcp.json 里没有这台 server，或配置/名单不合法 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    add_mcp_server_api_mcp_servers_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["McpServerCreateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpView"];
+                };
+            };
+            /** @description mcp.json 里没有这台 server，或配置/名单不合法 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    set_mcp_server_api_mcp_servers__name__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["McpServerRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpView"];
+                };
+            };
+            /** @description mcp.json 里没有这台 server，或配置/名单不合法 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_mcp_server_api_mcp_servers__name__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpView"];
+                };
+            };
+            /** @description mcp.json 里没有这台 server，或配置/名单不合法 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    edit_mcp_server_api_mcp_servers__name__spec_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["McpServerSpecRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["McpView"];
+                };
+            };
+            /** @description mcp.json 里没有这台 server，或配置/名单不合法 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 没有可用的设置库，改动存不下来 */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -5106,6 +6752,8 @@ export interface operations {
             query?: {
                 workspace_id?: string | null;
                 archived?: boolean;
+                q?: string;
+                limit?: number | null;
             };
             header?: never;
             path?: never;
@@ -5596,6 +7244,131 @@ export interface operations {
             };
         };
     };
+    session_changes_api_sessions__session_id__changes_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionChangesView"];
+                };
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    session_change_diff_api_sessions__session_id__changes_diff_get: {
+        parameters: {
+            query: {
+                path: string;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FileChangeDiffView"];
+                };
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    detach_command_api_sessions__session_id__commands__command_id__detach_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                command_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: boolean;
+                    };
+                };
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     conversation_map_api_sessions__session_id__conversation_map_get: {
         parameters: {
             query?: {
@@ -5837,6 +7610,37 @@ export interface operations {
             };
         };
     };
+    promote_session_api_sessions__session_id__promote_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSummaryView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     end_interrupted_request_api_sessions__session_id__recovery_post: {
         parameters: {
             query?: never;
@@ -5957,6 +7761,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_side_chat_api_sessions__session_id__side_chats_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSideChatRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionSummaryView"];
                 };
             };
             /** @description Validation Error */
@@ -6199,6 +8038,173 @@ export interface operations {
             };
         };
     };
+    close_task_review_api_tasks__job_id__review_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveTaskReviewRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: string;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    listing_api_terminals_get: {
+        parameters: {
+            query: {
+                workspace_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TerminalList"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    request_api_terminals_requests_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TerminalRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TerminalView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    decide_api_terminals_requests__approval_id__decision_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                approval_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TerminalDecision"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TerminalView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stop_api_terminals__terminal_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                terminal_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TerminalView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_web_search_credential_api_web_search_credential_get: {
         parameters: {
             query?: never;
@@ -6295,6 +8301,134 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    workspace_files_api_workspace_files_get: {
+        parameters: {
+            query?: {
+                path?: string;
+                workspace_id?: string | null;
+                recursive?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceFilesView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_workspace_files_api_workspace_files_search_get: {
+        parameters: {
+            query: {
+                q: string;
+                workspace_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkspaceFilesView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    workspace_git_diff_api_workspace_git_diff_get: {
+        parameters: {
+            query: {
+                path: string;
+                workspace_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GitDiffView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    workspace_git_status_api_workspace_git_status_get: {
+        parameters: {
+            query?: {
+                workspace_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GitStatusView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

@@ -138,7 +138,7 @@ def action_fingerprint(
     elif tool_name == "delete_file":
         path = _normalized_path(policy, str(args.get("path") or ""))
         parts += [path, str(bool(args.get("recursive"))), _delete_target_summary(path)]
-    elif tool_name == "run_shell":
+    elif tool_name in {"run_shell", "start_shell"}:
         # 指纹要覆盖"实际会被执行的计划"：命令、工作目录、透传变量、执行方式，
         # 以及判定阶段解析出的可执行文件路径。这样批准后若 PATH 变化导致同一个命令
         # 会落到别的程序上，指纹随之变化、批准自动失效（架构 §5.3 的执行前复核）。
@@ -172,6 +172,10 @@ def action_fingerprint(
             str(plan.timeout_seconds),
             plan.executor,
             plan.executable_path or "",
+            # **是否请求退出写侧沙箱**（escalation）也是执行计划的一部分：批准"在沙箱里跑"与批准
+            # "跳出沙箱跑"不是同一个动作。漏掉它会让一次**普通**调用的批准直接复用到提权调用上
+            # （2026-10-14）。归一规则与执行侧一致：缺省即 False。
+            str(bool(args.get("escalate_sandbox"))),
         ]
     else:
         parts.append(
@@ -225,17 +229,22 @@ def requires_second_confirmation(tool_name: str, arguments: Mapping[str, Any]) -
 
 
 def find_rejection(
-    history: Sequence[Mapping[str, Any]], fingerprint: str
+    history: Sequence[Mapping[str, Any]], fingerprint: str, *, run_id: str
 ) -> Mapping[str, Any] | None:
-    """按指纹找拒绝记录：换一个 ``tool_call_id`` 也不能绕过。
+    """按指纹找**本轮**的拒绝记录：换一个 ``tool_call_id`` 也不能绕过。
 
-    与批准（:func:`find_approval`，按轮次隔离）不同，拒绝**故意不按轮次隔离**：
-    被拒绝过的动作指纹在后续轮次仍会被拦下。这是"拒绝后不再重复打扰用户"的兜底，
-    对应开发文档 T10 验收与 v0.1b 阶段演示的"拒绝后文件未删且不再次弹窗"。
-    代价：用户若在下一轮仍然想执行**完全相同**的动作，不会被静默执行，也不会再次弹窗。
+    2026-10-14 修正：原来拒绝**不按轮次隔离**（原话是"被拒绝过的动作指纹在后续轮次仍会被拦下"）。
+    后果很坏：用户拒绝过一次 ``time /t`` 之后，**"现在几点"这个问题此后永远失败、连审批卡都不再弹**
+    ——实证就是用户反复撞上的"又是这个安全策略拦截，一直在这里报错"。现在与批准
+    （:func:`find_approval`）同样按轮次隔离：**同一轮内**不重复打扰（T10 的验收仍成立），
+    下一轮可以再问一次。
     """
     for record in reversed(list(history)):
-        if record.get("decision") == "reject" and record.get("action_fingerprint") == fingerprint:
+        if record.get("decision") != "reject":
+            continue
+        if str(record.get("run_id") or "") != run_id:
+            continue
+        if record.get("action_fingerprint") == fingerprint:
             return record
     return None
 

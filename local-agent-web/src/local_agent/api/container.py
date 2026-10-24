@@ -9,32 +9,38 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
+from typing import Any
 
 from filelock import FileLock, Timeout
 from langchain_core.language_models import BaseChatModel
 
+from local_agent import app_paths
 from local_agent import config as config_module
 from local_agent.application.jobs import JobRuntime
 from local_agent.application.service import ApplicationService
 from local_agent.attachments import AttachmentStore
 from local_agent.capabilities import switchable_capabilities
-from local_agent import app_paths
 from local_agent.config import AppConfig, ConfigError, LlmConfig
 from local_agent.graph import builder
 from local_agent.llm import factory
-from local_agent.model_settings.attachments_oss import OssKeyStore
+from local_agent.mcp.config import DEFAULT_MCP_PATH
 from local_agent.model_settings import (
     SettingsDatabase,
     import_legacy_llm,
     open_credential_store,
     open_settings_database,
 )
+from local_agent.model_settings.attachments_oss import OssKeyStore
 from local_agent.persistence import checkpoint as checkpoint_module
 from local_agent.persistence.checkpoint import ChatDatabase
+from local_agent.persistence.file_changes import FileChangeStore
 from local_agent.persistence.job_store import JobStore
 from local_agent.persistence.request_ledger import RequestLedger
 
@@ -60,10 +66,15 @@ class ApiRuntime:
     #: 模型连接设置库；`None` = 打不开（已经降级为"按旧配置运行"，页面会看到原因）。
     settings: SettingsDatabase | None = None
     lock: FileLock | None = field(default=None, repr=False)
+    #: MCP 连接管理器（2026-10-20）：关掉运行时必须一并收掉它的后台线程与子进程。
+    mcp_manager: Any = field(default=None, repr=False)
 
     def close(self) -> None:
         """释放单实例锁并关闭数据库连接（测试与一次性脚本用；服务进程不需要调用）。"""
         self.service.close_tool_sessions()
+        self.service.close_user_terminals()
+        self.service.close_mcp()
+        self.mcp_manager = None
         if self.lock is not None:
             self.lock.release()
             self.lock = None
@@ -202,6 +213,8 @@ def open_runtime(
     database_path = resolve_under(base_dir, app_config.memory.short_term.path)
     lock = acquire_instance_lock(database_path) if instance_lock else None
     settings: SettingsDatabase | None = None
+    #: MCP 连接管理器（2026-10-20）。装配失败时也要关掉：它已经起了后台线程。
+    mcp_manager: Any = None
     try:
         workspace_root = resolve_under(base_dir, app_config.workspace.root)
         # 图内节点直接按配置里的路径开记忆库，所以在这里先钉到 base_dir 上（§8）。
@@ -210,7 +223,11 @@ def open_runtime(
         app_config = resolve_skill_paths(app_config, base_dir)
         database = checkpoint_module.open_database(database_path, workspace_root=workspace_root)
         settings = _open_settings(app_config, base_dir=base_dir)
+        # MCP（2026-10-20；契约 §6.13）：开关关着时返回 None，`mcp` 能力因此不进能力集。
+        mcp_manager = build_mcp_manager(app_config, base_dir=base_dir, settings=settings,
+                                        state_lock=database.checkpointer.lock)
         service = ApplicationService(
+            timing_path=base_dir / "data" / "metrics" / "turn-timings.jsonl",
             graph=builder.build_chat_graph(database.checkpointer),
             app_config=app_config,
             model_adapter=model,
@@ -229,6 +246,11 @@ def open_runtime(
             web_search=None if settings is None else settings.web_search,
             # 技能的用户级禁用表（技能管理页，2026-10-16）：与能力开关同源，没有库时整组为 None。
             skills=None if settings is None else settings.skills,
+            # MCP 的开关存储与连接管理器（2026-10-20）：两者都可能为 None（没库 / 总开关关着）。
+            mcp=None if settings is None else settings.mcp,
+            mcp_manager=mcp_manager,
+            # 重载与错误回报都要读这份文件；位置与 config.yaml 同目录。
+            mcp_config_path=base_dir / DEFAULT_MCP_PATH,
             # 附件存储（2026-10-16）：内容落 `data/attachments/年/月/日/会话/`——与三个库同处、
             # 同样按 `base_dir` 定位，换台机器解压到哪都能用。
             attachments=AttachmentStore.under(base_dir),
@@ -236,6 +258,13 @@ def open_runtime(
             oss_keys=None if settings is None else OssKeyStore(settings.credentials),
             # 任务索引与**会话索引、Checkpoint 同库同连接**（§17.1）；worker 只在
             # `jobs.background=true` 时才起，默认路径与 v0.5 一致。
+            # 文件变更账本（2026-10-21）：与 Checkpoint 同库同锁（工具在 executor 线程里写，
+            # 与快照必须串行），基线原文落在 `data/file-changes/<会话>/`。
+            file_changes=partial(
+                FileChangeStore.under(base_dir).ledger,
+                database.connection,
+                lock=database.checkpointer.lock,
+            ),
             jobs=JobRuntime(
                 # 与 Checkpoint **同一把锁**：worker 线程与会话索引、Checkpoint 共用一条连接，
                 # 跨线程不串行会踩掉彼此的事务（见 `persistence/job_store.py` 的模块 docstring）。
@@ -249,10 +278,15 @@ def open_runtime(
             # 库唯一的服务进程"，索引里剩下的非终态任务必然是上一次进程留下的。拿不到锁说明另一个
             # 进程正占着这个库（`open_runtime` 会直接抛错），那些任务可能是它正在跑的活。
             service.recover_interrupted_jobs()
+        if mcp_manager is not None:
+            mcp_manager.start()
     except BaseException:
         # 装配失败不能留下"锁被一个不存在的服务占着"的状态。
         if lock is not None:
             lock.release()
+        if mcp_manager is not None:
+            # 管理器已经起了预热/回收线程与子进程；装配在这里失败时必须收掉。
+            mcp_manager.close()
         if settings is not None:
             settings.connection.close()
         raise
@@ -270,7 +304,61 @@ def open_runtime(
         model_name="" if app_config.llm is None else app_config.llm.model,
         settings=settings,
         lock=lock,
+        mcp_manager=mcp_manager,
     )
+
+
+def _mcp_switch_on(app_config: AppConfig, settings: SettingsDatabase | None) -> bool:
+    """MCP 总开关：**设置库优先**，``config.yaml`` 只是出厂默认（与 §16.1 同一口径）。"""
+    if settings is not None:
+        return bool(settings.capabilities.switches().get("mcp"))
+    return bool(app_config.mcp.enabled)
+
+
+def build_mcp_manager(
+    app_config: AppConfig,
+    *,
+    base_dir: Path,
+    settings: SettingsDatabase | None,
+    state_lock: Any = None,
+) -> Any:
+    """按 ``mcp.json`` 建连接管理器；容器装配完成后再启动后台预热。
+
+    三个刻意的选择：
+
+    - **开关关着时完全不建**：``mcp`` SDK 的导入要 0.5–1 秒，默认配置下不该付这笔钱。
+    - 配置文件与 ``config.yaml`` 同目录（``base_dir``）：源码形态就是仓库里的 ``mcp.json``，
+      冻结形态是 ``%LOCALAPPDATA%/chaiai/mcp.json``。
+    - 解析失败**不阻断启动**：``mcp.json`` 是手写文件，一个逗号错就让整个应用打不开的话，
+      用户连改它的入口都没有。这里记警告并当作"没有 server"；错误详情由读取接口回报
+      （那里的报错能直接展示给人看）。
+
+    Returns:
+        ``McpManager``；开关关着或配置不可读时返回 ``None``。
+    """
+    if not _mcp_switch_on(app_config, settings):
+        return None
+    # 延迟导入：这两条路径（``mcp.config`` 可以，``mcp.manager`` 不行）会拉 SDK。
+    from local_agent.mcp.config import DEFAULT_MCP_PATH, load_mcp_servers
+    from local_agent.mcp.manager import McpManager
+
+    try:
+        servers = load_mcp_servers(base_dir / DEFAULT_MCP_PATH)
+    except ConfigError as exc:
+        logging.getLogger(__name__).warning("MCP 配置无效，本次不加载任何 server：%s", exc)
+        return None
+    def provider() -> Any:
+        # 与页面的 _sqlite_access 共用锁，不能只锁 MCP store 自己。
+        with (state_lock if state_lock is not None else nullcontext()):
+            return {} if settings is None else settings.mcp.states()
+
+    manager = McpManager(
+        servers,
+        config=app_config.mcp,
+        state_provider=provider,
+        cache_path=base_dir / "data" / "mcp_catalog.sqlite",
+    )
+    return manager
 
 
 def _open_settings(app_config: AppConfig, *, base_dir: Path) -> SettingsDatabase | None:

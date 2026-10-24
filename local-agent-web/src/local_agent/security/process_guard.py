@@ -15,6 +15,11 @@
 "已经跑起来的进程怎么结束"。启动前那一句"令牌已取消就不启动"是**进程生命周期**的一部分
 （它是关闭"门已通过 → 取消发生 → 进程照样启动"这个窗口的唯一位置），不参与准入判定。
 
+**唯一出口**（v0.9 T76，§20.1）：``src/local_agent`` 里**所有**子进程都从本模块出去——``run_shell``、
+``git`` 的默认 runner、按需检索的 ``rg``、目录选择器。除本模块自身（含它调用的 ``taskkill``）之外，
+不得直接调用 ``subprocess.run`` / ``subprocess.Popen``：否则超时只会杀掉直接子进程，而"取消"根本够不着它。
+模块级入口 :func:`run_process` 给没有登记的调用方（目录选择器）一个一次性登记表。
+
 **如实记录**：终止的手段与系统返回一律写进说明，退出码只写 ``returncode`` 的真实值，
 **不伪造"已停止"**。
 """
@@ -26,14 +31,49 @@ import logging
 import os
 import signal
 import subprocess
+import sys
 import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from local_agent.cancellation import CancellationToken
+from local_agent.security import win_sandbox
+from local_agent.security.process_command import windows_command_line
+from local_agent.security.process_output import read_available
 
 logger = logging.getLogger(__name__)
+
+
+def open_terminal_process(argv: list[str], *, cwd: Path, env: dict[str, str],
+                          sandbox: SandboxRequest, cols: int, rows: int) -> Any:
+    """Open a user-approved PTY using the same token and IPC protection as shell tools.
+
+    The terminal manager owns its independent job and must close it on shutdown.
+    There is deliberately no sandbox=None variant.
+    """
+    from local_agent.security.windows_pty import WindowsPty
+
+    return WindowsPty(argv, cwd=cwd, env=_sandbox_environment(env, sandbox),
+                      writable_sids=sandbox.writable_sids, cols=cols, rows=rows)
+
+
+def _sandbox_environment(env: dict[str, str] | None, sandbox: SandboxRequest) -> dict[str, str]:
+    """Shell tools and user terminals share the sealed IPC cleanup helpers."""
+    from local_agent.security.win_ipc import prepare_bundle
+
+    base = dict(os.environ) if env is None else dict(env)
+    base.update(dict(sandbox.extra_env))
+    path_key = next((key for key in base if key.upper() == "PATH"), "PATH")
+    base[path_key] = str(prepare_bundle()) + os.pathsep + base.get(path_key, "")
+    base["CHAIAI_CLEANUP_EXECUTABLE"] = (
+        sys.executable if getattr(sys, "frozen", False)
+        else getattr(sys, "_base_executable", sys.executable)
+    )
+    base["CHAIAI_CLEANUP_MODULE"] = str(Path(__file__).with_name("process_cleanup.py"))
+    return base
 
 #: 终止后等它真正退出的宽限（秒）。POSIX 先 ``SIGTERM``、宽限后 ``SIGKILL``。
 GRACE_SECONDS = 3.0
@@ -66,6 +106,44 @@ class ProcessOutcome:
     cancelled: bool = False
     #: 终止说明：被谁终止、用了什么手段、系统返回了什么；`None` = 没有终止过。
     termination: str | None = None
+    #: 已按用户请求**转后台**（2026-10-21）：进程仍在跑，调用方不能让结果看起来像"已结束"。
+    detached: bool = False
+
+
+@dataclass(frozen=True)
+class SandboxRequest:
+    """「这条命令要在**写侧沙箱**里跑」的请求（v0.9 增量 4，**默认不启用**）。
+
+    ``writable_sids`` 是当前可写根的 SID（逐根派生，见
+    :func:`local_agent.security.win_sandbox.workspace_sid_text`）；空元组 = 只挡写、不额外授权。
+
+    新目录**立即继承可写**（根上一条可继承 ACE）；其他兼容性与 ACL 边界见 win_sandbox 模块说明。
+    """
+
+    writable_sids: tuple[str, ...] = ()
+    #: 追加给子进程的环境变量（`TMP`/`TEMP` 一类）：沙箱有自己的可写临时目录，命令要写临时文件就得
+    #: 被指到那里。用元组而不是 dict——本类型是 frozen 的，元组能和它一起保持不可变。
+    extra_env: tuple[tuple[str, str], ...] = ()
+    #: 物化时**被跳过**的目录（权限不足，写不进去）：与 `writable_sids` 一起来自
+    #: `grant_write`。跳过不是失败——那些目录本来就不该被授权写入——但必须如实告诉用户，
+    #: 所以这一项随请求一路带出去（`run_shell` 的 note）。
+    skipped: tuple[win_sandbox.SkippedDirectory, ...] = ()
+
+
+def sandboxed_argv(command: list[str], sandbox: SandboxRequest) -> list[str]:
+    """把命令包成"经写侧沙箱 runner 启动"的形式——**只换"怎么起"**。
+
+    工具契约、结果形状、退出码语义都不变（§20.1）；被拒的写由沙箱如实反映在命令自身的退出码/错误里。
+    **不在这里做准入判定**：能不能跑仍由两道门决定。
+
+    Raises:
+        SandboxUnavailable: 当前平台没有实现或 Win32 库取不到——**fail-closed**，不静默裸跑。
+    """
+    if not win_sandbox.is_supported():
+        raise win_sandbox.SandboxUnavailable(
+            "当前平台没有写侧沙箱实现（fail-closed：不允许静默裸跑）"
+        )
+    return win_sandbox.runner_argv(command, writable_sids=sandbox.writable_sids)
 
 
 @dataclass
@@ -106,30 +184,50 @@ class ProcessRegistry:
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
         platform: str | None = None,
+        creationflags: int = 0,
+        sandbox: SandboxRequest | None = None,
+        interactive: bool = False,
     ) -> RunningProcess:
         """启动并登记一个子进程。
 
+        Args:
+            creationflags: Windows 的 ``CreateProcess`` 标志，**只在非 0 时透传**（v0.9 T76，§20.1）。
+                目前只有目录选择器用它保留 ``CREATE_NO_WINDOW``；POSIX 上该参数没有意义，调用方给的
+                一律是 0。
+            sandbox: 给了它就把 argv 前置成沙箱 runner 调用（"怎么起"变了，命令本身不变）；
+                ``None`` = 直接起（默认）。
+
         Raises:
             ProcessCancelledError: 启动**前**本轮已取消——不启动，也不谎称执行过。
+            SandboxUnavailable: 要了沙箱但当前平台没有实现（fail-closed，不静默裸跑）。
             OSError: 进程启动失败（调用方按"命令无法启动"如实上报）。
+
+        说明：登记表里的 ``argv`` 记的是**实际启动的那条命令**（要了沙箱时就是带 runner 前缀的那条），
+        因为诊断要看的是"真的起了什么"。
         """
         command = [str(item) for item in argv]
         if not command:
             msg = "spawn 需要非空 argv"
             raise ValueError(msg)
+        if sandbox is not None:
+            command = sandboxed_argv(command, sandbox)
+            env = _sandbox_environment(env, sandbox)
         if self.cancelled:
             raise ProcessCancelledError(self._cancel_text())
 
         name = resolve_platform_name(platform)
+        kwargs = _spawn_kwargs(name)
+        if creationflags:
+            kwargs["creationflags"] = creationflags
         handle: subprocess.Popen[bytes] = subprocess.Popen(
-            command,
+            windows_command_line(command) if name == PLATFORM_WINDOWS else command,
             cwd=None if cwd is None else str(cwd),
             env=env,
             shell=False,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if interactive else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            **_spawn_kwargs(name),
+            **kwargs,
         )
         process = RunningProcess(handle=handle, argv=tuple(command))
         with self._lock:
@@ -145,31 +243,85 @@ class ProcessRegistry:
         *,
         cwd: str | Path | None = None,
         env: dict[str, str] | None = None,
-        timeout_seconds: float,
+        timeout_seconds: float | None,
         platform: str | None = None,
+        creationflags: int = 0,
+        sandbox: SandboxRequest | None = None,
+        on_output: Callable[[str, bytes], None] | None = None,
+        on_idle: Callable[[], None] | None = None,
+        detach_event: threading.Event | None = None,
+        on_detached: Callable[[RunningProcess, dict[str, bytes]], None] | None = None,
     ) -> ProcessOutcome:
-        """启动、等待；超时或取消时**按进程树**终止，并如实返回结果。"""
-        process = self.spawn(argv, cwd=cwd, env=env, platform=platform)
+        """启动、等待；超时或取消时按进程树终止，并如实返回结果。
+
+        ``on_idle`` 在每次轮询后调用，供输出解码器按时刷新尚未换行的文本。
+
+        ``detach_event`` 是"转后台"信号（2026-10-21）：置位后**不终止进程**，而是把进程与
+        已读输出交给 ``on_detached`` 继续接管，返回值标记 ``detached=True``。这是唯一一条
+        "等待结束但进程还活着"的路径，调用方必须如实说明。
+        """
+        process = self.spawn(
+            argv,
+            cwd=cwd,
+            env=env,
+            platform=platform,
+            creationflags=creationflags,
+            sandbox=sandbox,
+        )
+        streams = {"stdout": process.handle.stdout, "stderr": process.handle.stderr}
+        chunks: dict[str, list[bytes]] = {name: [] for name in streams}
+        deadline = time.monotonic() + timeout_seconds if timeout_seconds is not None else None
+        timed_out = False
+
+        def collect() -> bool:
+            received = False
+            for name, stream in streams.items():
+                if stream is not None:
+                    data = read_available(stream)
+                    if data:
+                        chunks[name].append(data)
+                        received = True
+                        if on_output is not None:
+                            on_output(name, data)
+            return received
+
+        detached = False
         try:
-            try:
-                stdout, stderr = process.handle.communicate(timeout=timeout_seconds)
-            except subprocess.TimeoutExpired:
-                note = self.terminate(
-                    process,
-                    reason=f"超过 {timeout_seconds:g} 秒未结束",
-                    platform=platform,
-                )
-                stdout, stderr, extra = _drain(process)
-                return _outcome(
-                    process,
-                    stdout=stdout,
-                    stderr=stderr,
-                    timed_out=True,
-                    termination=_join_note(note, extra),
-                )
-            return _outcome(process, stdout=stdout, stderr=stderr)
+            while True:
+                collect()
+                if on_idle is not None:
+                    on_idle()
+                # 等待的是启动进程，不是继承管道的所有后代。先检查退出，避免把退出码 0 报成超时。
+                if process.handle.poll() is not None:
+                    break
+                # 转后台：**不杀进程**，把流交给接管方继续读（2026-10-21）。
+                if detach_event is not None and detach_event.is_set():
+                    detached = True
+                    break
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out = True
+                    self.terminate(process, reason=f"超过 {timeout_seconds:g} 秒未结束",
+                                   platform=platform)
+                    break
+                time.sleep(0.02)
+            if detached:
+                if on_detached is not None:
+                    on_detached(process, {name: b"".join(chunks[name]) for name in chunks})
+                return _outcome(process, stdout=b"".join(chunks["stdout"]),
+                                stderr=b"".join(chunks["stderr"]), timed_out=False,
+                                detached=True)
+            drain_deadline = time.monotonic() + DRAIN_SECONDS
+            while collect() and time.monotonic() < drain_deadline:
+                pass
+            return _outcome(process, stdout=b"".join(chunks["stdout"]),
+                            stderr=b"".join(chunks["stderr"]), timed_out=timed_out)
         finally:
-            self.forget(process)
+            # 转后台时流与进程都归接管方：这里关闭流会让后台读线程立刻读到 EOF。
+            if not detached:
+                for stream in streams.values():
+                    if stream is not None:
+                        stream.close()
+                self.forget(process)
 
     def terminate(
         self,
@@ -183,24 +335,26 @@ class ProcessRegistry:
         with self._lock:
             if process.termination is not None:
                 return process.termination
-        note = _terminate_tree(
-            process, reason=reason, platform=resolve_platform_name(platform)
-        )
+            # **先写原因**（v0.9 实测修正）：终止这件事在进入本方法时就已经决定了，而它可能由
+            # **另一个线程**发起（取消令牌的钩子就是一个）——此刻 `communicate()` 可能已经因为
+            # 进程刚被杀而返回，主线程正在收口。原因若等到杀完再写，"被取消"这个事实就会在结果里
+            # 凭空消失。机制与系统返回随后补上（那一句要等系统回答）。
+            process.termination = reason
+            process.cancelled = cancelled
+        detail = _terminate_tree(process, platform=resolve_platform_name(platform))
+        # 终止机制属于**诊断**，不属于工具结果（§20.1）：也写进服务端日志。
+        logger.info("终止子进程：%s：%s", reason, detail)
         with self._lock:
-            if process.termination is None:
-                process.termination = note
-                process.cancelled = cancelled
-            else:  # pragma: no cover - 两个线程同时终止：先用者为准
-                note = process.termination
+            if process.termination == reason:
+                process.termination = f"{reason}：{detail}"
+            note = process.termination
         return note
 
     def terminate_all(self, reason: str) -> list[str]:
         """终止所有在跑进程（取消路径），返回每一条的说明。"""
         with self._lock:
             live = list(self._live)
-        return [
-            self.terminate(process, reason=reason, cancelled=True) for process in live
-        ]
+        return [self.terminate(process, reason=reason, cancelled=True) for process in live]
 
     def forget(self, process: RunningProcess) -> None:
         """把已结束的进程移出登记表。"""
@@ -224,6 +378,50 @@ class ProcessRegistry:
         return token.refusal_reason() if token is not None else "本轮已取消，命令未启动"
 
 
+def run_process(
+    argv: list[str] | tuple[str, ...],
+    *,
+    cwd: str | Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout_seconds: float,
+    registry: ProcessRegistry | None = None,
+    platform: str | None = None,
+    creationflags: int = 0,
+    sandbox: SandboxRequest | None = None,
+) -> ProcessOutcome:
+    """**统一执行出口**（架构 §20.1）：跑一次子进程，超时/取消按**进程树**终止。
+
+    为什么要有这一层：四条子进程路径（`run_shell` / `git` / `rg` / 目录选择器）各自直连
+    ``subprocess.run`` 时，超时只杀直接子进程、取消够不着，"已启动的进程怎么结束"就得在
+    四处各写一遍。收到这里之后，终止手段只有一套（Windows ``taskkill /F /T``、POSIX ``killpg``）。
+
+    Args:
+        registry: 本轮的登记表（``SecurityPolicy.processes``，与取消令牌同源）——``git`` 与 ``rg``
+            传它，于是取消与超时走同一条路径。**目录选择器不传**：它是页面的一次本机动作，
+            既不属于任何一轮执行、也没有取消令牌，这里给它一个**一次性登记表**（无令牌）——
+            取消不适用于它（如实写在 §20.1 里），拿到的仍是同一套树终止与如实记录。
+        sandbox: 给了它就把命令放进写侧沙箱（默认 ``None`` = 不用；见 :class:`SandboxRequest`）。
+
+    Returns:
+        退出码是真实值，终止手段写在 ``termination`` 里；被终止时 ``timed_out`` / ``cancelled``
+        如实置位，**不伪造"已停止"**。
+
+    Raises:
+        ProcessCancelledError: 启动**前**本轮已取消（仅当传了已取消的登记表）。
+        OSError: 进程启动失败。
+    """
+    active = registry if registry is not None else ProcessRegistry()
+    return active.run(
+        argv,
+        cwd=cwd,
+        env=env,
+        timeout_seconds=timeout_seconds,
+        platform=platform,
+        creationflags=creationflags,
+        sandbox=sandbox,
+    )
+
+
 def resolve_platform_name(platform: str | None = None) -> str:
     """终止策略用哪一套：显式给 ``windows`` / ``posix``，否则按当前系统。"""
     if platform:
@@ -244,16 +442,16 @@ def _spawn_kwargs(platform: str) -> dict[str, Any]:
     return {"start_new_session": True}
 
 
-def _terminate_tree(process: RunningProcess, *, reason: str, platform: str) -> str:
-    """终止进程树；返回**如实**的说明（含手段与系统返回）。"""
+def _terminate_tree(process: RunningProcess, *, platform: str) -> str:
+    """终止进程树；返回**如实**的"手段与系统返回"（原因由调用方在前面写好，§20.4）。"""
     handle = process.handle
     if handle.poll() is not None:
-        return f"{reason}：进程已自行结束（退出码 {handle.returncode}），无需终止"
+        return f"进程已自行结束（退出码 {handle.returncode}），无需终止"
     if platform == PLATFORM_WINDOWS:
         note = _taskkill_tree(handle)
     else:
         note = _killpg_tree(handle)
-    return f"{reason}：{_join_note(note, _reap(handle))}"
+    return _join_note(note, _reap(handle))
 
 
 def _taskkill_tree(handle: subprocess.Popen[bytes]) -> str:
@@ -355,6 +553,7 @@ def _outcome(
     stderr: bytes,
     timed_out: bool = False,
     termination: str | None = None,
+    detached: bool = False,
 ) -> ProcessOutcome:
     return ProcessOutcome(
         exit_code=process.handle.returncode,
@@ -363,6 +562,7 @@ def _outcome(
         timed_out=timed_out,
         cancelled=process.cancelled,
         termination=termination if termination is not None else process.termination,
+        detached=detached,
     )
 
 

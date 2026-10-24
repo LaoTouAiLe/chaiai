@@ -10,8 +10,8 @@
    :func:`_assert_safe` 兜底扫描，防止以后有人把模型输入拼进参数位。
 3. **缺 ``git`` 就明确失败**：构造期用 ``shutil.which`` 判定（见 :func:`git_availability`）；缺失时工具
    **不绑定给模型**（能力不进有效集合），能力状态里给出"缺什么、怎么装"的可照做提示。
-4. **提交必须人工审批**：审批由安全门（``security.policy``）判定，本模块只负责"叫得动 git 并如实汇报"；
-   在 ``main`` / ``master`` 上提交需要显式确认；提交**不加** ``--no-verify``（尊重仓库自身 hook），
+4. **工作区提交免审批**：包括 ``main`` / ``master``，不再要求额外确认；
+   提交**不加** ``--no-verify``（尊重仓库自身 hook），
    hook 失败按"提交未成功"如实报告，不重试、不绕过。
 
 子进程走**可注入的 runner**（默认是真实实现）：测试因此完全不依赖机器上装没装 git，也不碰真实仓库。
@@ -22,9 +22,9 @@
 from __future__ import annotations
 
 import shutil
-import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from langchain_core.tools import BaseTool
@@ -34,6 +34,11 @@ from pydantic import BaseModel, Field
 from local_agent.exceptions import SecurityError
 from local_agent.security.path_guard import resolve_within_workspace
 from local_agent.security.policy import SecurityPolicy
+from local_agent.security.process_guard import (
+    ProcessCancelledError,
+    ProcessRegistry,
+    run_process,
+)
 
 #: 单次 git 调用的默认超时（秒）。超时按"失败"如实报告，不重试。
 DEFAULT_TIMEOUT_SECONDS = 20.0
@@ -131,32 +136,46 @@ def _decode(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def run_git(args: Sequence[str], cwd: Path, timeout_seconds: float) -> GitRun:
-    """默认 runner：``git -C <cwd> <args>``，``shell=False``，超时即终止。"""
+def run_git(
+    args: Sequence[str],
+    cwd: Path,
+    timeout_seconds: float,
+    *,
+    registry: ProcessRegistry | None = None,
+) -> GitRun:
+    """默认 runner：``git -C <cwd> <args>``，``shell=False``，超时**按进程树**终止（§20.1）。
+
+    走**统一执行出口**（:func:`~local_agent.security.process_guard.run_process`）而不是
+    ``subprocess.run``：后者超时只杀直接子进程——git 自己拉起的钩子（`pre-commit` 里的格式化、
+    跑测试）会留在后台继续跑，而"取消"完全够不着它。``registry`` 是**本轮**的登记表
+    （:func:`build_git_tools` 从 `policy.processes` 传进来），取消与超时因此走同一条终止路径。
+
+    返回与错误口径与从前**逐字一致**：超时仍是 ``stderr="超时：N 秒内没有结束"`` 的失败
+    （**不是**空结果，也**不许**被读成"没有改动"），起不来仍是 :class:`GitError`。
+    """
     argv = ["git", "--literal-pathspecs", "-C", str(cwd), *args]
     try:
-        completed = subprocess.run(
-            argv,
-            cwd=str(cwd),
-            shell=False,
-            check=False,
-            capture_output=True,
-            timeout=timeout_seconds,
+        outcome = run_process(
+            argv, cwd=cwd, timeout_seconds=timeout_seconds, registry=registry
         )
-    except subprocess.TimeoutExpired as exc:
-        partial = exc.stdout or b""
+    except ProcessCancelledError as exc:
+        # 门已通过、取消同时发生：**不启动，也不谎称执行过**（与 run_shell 同一口径，§20.1）。
+        raise SecurityError(str(exc)) from exc
+    except OSError as exc:
+        raise GitError(f"无法启动 git：{type(exc).__name__}: {exc}") from exc
+    if outcome.timed_out:
         return GitRun(
             exit_code=-1,
-            stdout=_decode(partial),
+            stdout=_decode(outcome.stdout),
             stderr=f"超时：{timeout_seconds:g} 秒内没有结束",
             timed_out=True,
         )
-    except OSError as exc:
-        raise GitError(f"无法启动 git：{type(exc).__name__}: {exc}") from exc
     return GitRun(
-        exit_code=completed.returncode,
-        stdout=_decode(completed.stdout),
-        stderr=_decode(completed.stderr),
+        # 退出码只写真实值。登记表在"终止后仍读不到输出"这种极端情形下给 `None`，
+        # 那时退回既有的 -1 哨兵（= 没有可报告的退出码），不编一个 0。
+        exit_code=outcome.exit_code if outcome.exit_code is not None else -1,
+        stdout=_decode(outcome.stdout),
+        stderr=_decode(outcome.stderr),
     )
 
 
@@ -523,18 +542,6 @@ def commit(
         ["rev-parse", "--abbrev-ref", "HEAD"], git.workspace_root, git.timeout_seconds
     )
     branch = branch_run.stdout.strip() or None
-    if branch in DEFAULT_BRANCHES and not confirm_on_default_branch:
-        return GitCommitResult(
-            branch=branch,
-            committed=False,
-            files=[],
-            requires_confirmation=True,
-            note=(
-                f"当前在默认分支 `{branch}` 上：这会改动主分支历史。"
-                "请先向用户说明「要提交到哪个分支、包含哪些文件」，得到确认后再以 "
-                "confirm_on_default_branch=true 重试。本次**没有执行任何 git 写操作**。"
-            ),
-        )
 
     relatives = [git.relative(item) for item in paths]
     git.call("add", "--", *relatives)
@@ -577,9 +584,9 @@ _LOG_DOC = (
 )
 _COMMIT_DOC = (
     "把**显式列出**的工作区内路径提交到当前分支（不支持 git add -A，也不会推送）。"
-    "必须提供 `paths` 与 `message`；在 main/master 上提交会先返回"
-    "“需要额外确认”，得到用户同意后再以 `confirm_on_default_branch=true` 重试。"
-    "提交是否执行由人工审批决定，未获批准时不要反复重发。"
+    "必须提供 `paths` 与 `message`；工作区提交无需人工审批。"
+    "主分支无需额外确认。"
+    "根据用户任务自主完成提交。"
 )
 
 
@@ -596,7 +603,11 @@ def build_git_tools(
     "能不能用"由三处决定——``git.enabled``（关闭时能力不进有效集合）、``git`` 可执行文件是否存在
     （见 :func:`git_availability`，缺失时能力同样不进有效集合）与 Profile 的 ``git_read`` / ``git_write``。
     """
-    call_runner = run_git if runner is None else runner
+    # 默认 runner 绑**本轮**的登记表（§20.1）：于是取消与超时都按进程树终止，而不是只杀
+    # 直接子进程。测试注入的 runner 照旧原样使用（它们本来就不起真进程）。
+    call_runner: GitRunner = (
+        partial(run_git, registry=policy.processes) if runner is None else runner
+    )
 
     def _state_kwargs() -> dict[str, object]:
         return {
@@ -624,7 +635,7 @@ def build_git_tools(
     def git_commit(
         paths: list[str], message: str, confirm_on_default_branch: bool = False
     ) -> str:
-        """提交显式列出的文件（需要人工审批）。"""
+        """提交显式列出的工作区文件（无需人工审批）。"""
         return commit(
             policy,
             paths=paths,

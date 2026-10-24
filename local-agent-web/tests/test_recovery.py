@@ -25,6 +25,7 @@ from local_agent.application.recovery import (
     classify_interrupted_job,
 )
 from local_agent.persistence.job_store import (
+    JOB_STATE_CANCELLED,
     JOB_STATE_COMPLETED,
     JOB_STATE_FAILED,
     JOB_STATE_NEEDS_REVIEW,
@@ -130,7 +131,7 @@ def test_live_interrupt_of_another_run_is_not_this_task_s() -> None:
 
 @pytest.mark.parametrize(
     ("turn_state", "target"),
-    [("completed", JOB_STATE_COMPLETED), ("failed", JOB_STATE_FAILED)],
+    [("completed", JOB_STATE_COMPLETED), ("failed", JOB_STATE_FAILED), ("cancelled", JOB_STATE_CANCELLED)],
 )
 def test_terminal_turn_with_a_matching_run_proves_the_outcome(turn_state: str, target: str) -> None:
     verdict = classify_interrupted_job(
@@ -177,7 +178,7 @@ def test_needs_review_is_terminal_and_never_rewritten() -> None:
 
 
 def test_terminal_states_are_exactly_what_we_can_prove() -> None:
-    assert TASK_TERMINAL_STATUSES == {"completed", "failed"}
+    assert TASK_TERMINAL_STATUSES == {"completed", "failed", "cancelled"}
 
 
 def test_a_terminal_task_is_a_programming_error() -> None:

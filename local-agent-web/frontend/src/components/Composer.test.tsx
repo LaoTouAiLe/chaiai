@@ -199,7 +199,7 @@ describe('Composer 图片（2026-10-16）', () => {
     // 实测缺陷：一轮进行中 / 提交在飞时回车，`onSend` 静默拒绝，但图片已被清空——
     // 用户看到"问题没发出去、文字还在、图片没了"。队列只有在对方**接受**后才清。
     const attach = vi.fn(async () => ({ id: 'kept', previewUrl: 'blob:kept' }))
-    const onSend = vi.fn((_ids: readonly string[]) => false)
+    const onSend = vi.fn(() => false)
     const { container } = renderWired(onSend, attach)
 
     const box = screen.getByRole('textbox', { name: '给智能体发消息' })

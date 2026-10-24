@@ -1,0 +1,110 @@
+/* 会话左侧的问题刻度条（2026-10-19）。
+   贴到会话区最左边（12px），刻度从左往右长（不再右对齐往左长）；窄窗由 JS 标记 compact，
+   整体压短、再往左收，避免盖住正文。
+   未选中：所有刻度同长同色；当前提问那一根向右加长变深。
+   动画只动 `transform` 与颜色（合成层），不再改宽度——改宽度每帧都要重排，滚动时不够顺。 */
+
+.rail {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  /* 只留选中态的长度：未选中靠 scaleX 缩到约一半。 */
+  width: 20px;
+  transform: translateY(-50%);
+}
+
+.railCompact {
+  left: 2px;
+  width: 14px;
+}
+
+.slot {
+  position: relative;
+  display: flex;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+/* 刻度本身只有 2px 高，按钮给到 12px 的点击带；单纯 2px 的目标点起来太费劲。 */
+.tick {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+  height: 12px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+/* 从左往右长：未选中缩到一半（约 10px），选中拉到满长；只动 transform，滚起来更顺。 */
+.tick span {
+  display: block;
+  width: 100%;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--law-border-l3);
+  transform: scaleX(0.5);
+  transform-origin: left center;
+  transition:
+    transform 0.3s cubic-bezier(0.22, 0.61, 0.36, 1),
+    background-color 0.3s ease;
+  will-change: transform;
+}
+
+.tick:hover span {
+  background: var(--law-text-secondary);
+}
+
+.tick:focus-visible {
+  outline: 2px solid var(--law-button-primary-fill);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* 只有当前提问加长加深；其余保持同一长度与颜色。 */
+.tickActive span {
+  transform: scaleX(1);
+  background: var(--law-text-primary);
+}
+
+.preview {
+  position: absolute;
+  top: 50%;
+  left: calc(100% + 12px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 280px;
+  overflow: hidden;
+  padding: 6px 10px;
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-md);
+  background: var(--law-bg-layer-1);
+  box-shadow: var(--law-shadow-lv2);
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.preview strong {
+  overflow: hidden;
+  color: var(--law-text-primary);
+  font-size: var(--law-text-xs);
+  font-weight: var(--law-weight-medium);
+  line-height: var(--law-leading-sm);
+  text-overflow: ellipsis;
+}
+
+.preview small {
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xs);
+}
+

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import stat
 import sys
@@ -14,10 +15,11 @@ from pathlib import Path
 import pytest
 
 from local_agent.config import DEFAULT_SHELL_TIMEOUT_SECONDS, AppConfig
-from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
+from local_agent.exceptions import FileOperationError, SecurityError, WorkspaceBoundaryError
 from local_agent.security import shell_guard
 from local_agent.security.approval import action_fingerprint
 from local_agent.security.diff_guard import parse_patch
+from local_agent.security.file_system import _create_new_file
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools import file_tools, search_tools
 from local_agent.tools.file_tools import (
@@ -29,11 +31,16 @@ from local_agent.tools.file_tools import (
     read_file_content,
     write_file_content,
 )
+from local_agent.tools.result_spill import offload_tool_result
 from local_agent.tools.shell_tools import build_shell_tools, run_shell_command
 
 
 @pytest.fixture
 def policy(tmp_path: Path, app_config: AppConfig) -> SecurityPolicy:
+    # 这组恢复用例显式启用可选文件审批；产品默认免审批由 test_autonomy_policy 覆盖。
+    app_config.security.require_approval.delete_file = True
+    app_config.security.require_approval.overwrite_existing_file = True
+    app_config.security.require_approval.large_batch_edit = True
     return SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
 
 
@@ -43,9 +50,11 @@ def _config_with_workspace(app_config: AppConfig, **overrides: object) -> AppCon
     return AppConfig.model_validate(data)
 
 
-def _config_with_large_edit(app_config: AppConfig, max_changed_lines: int) -> AppConfig:
+def _config_with_large_edit(app_config: AppConfig, max_files: int) -> AppConfig:
+    """把"一轮内免审可改几个文件"调成指定值（0 = 第一个新文件就需要审批）。"""
     data = app_config.model_dump()
-    data["security"]["large_edit"]["max_changed_lines_without_approval"] = max_changed_lines
+    data["security"]["require_approval"]["large_batch_edit"] = True
+    data["security"]["large_edit"]["max_files_without_approval"] = max_files
     return AppConfig.model_validate(data)
 
 
@@ -193,6 +202,8 @@ def test_search_tools_are_registered_as_read_only() -> None:
 
     assert "grep" in READ_ONLY_TOOLS and "glob" in READ_ONLY_TOOLS
     assert "grep" in KNOWN_TOOLS and "glob" in KNOWN_TOOLS
+    # 合并入口（2026-10-22）：同一组工具、同一只读门。
+    assert "search_files" in READ_ONLY_TOOLS and "search_files" in KNOWN_TOOLS
 
 
 # --------------------------------------------------------------------------- list_dir
@@ -255,7 +266,7 @@ def test_list_dir_rejects_parent_traversal(tmp_path: Path, policy: SecurityPolic
 def test_list_dir_rejects_file_target(tmp_path: Path, policy: SecurityPolicy) -> None:
     (tmp_path / "a.txt").write_text("x", encoding="utf-8")
 
-    with pytest.raises(SecurityError):
+    with pytest.raises(FileOperationError):
         list_dir_entries("a.txt", policy=policy)
 
 
@@ -326,7 +337,7 @@ def test_read_file_reports_unknown_encoding(tmp_path: Path, policy: SecurityPoli
     assert "无法按 UTF-8 解码" in (result.note or "")
 
 
-def test_read_file_respects_max_file_size(tmp_path: Path, app_config: AppConfig) -> None:
+def test_read_file_is_independent_of_write_size_budget(tmp_path: Path, app_config: AppConfig) -> None:
     policy = SecurityPolicy.from_config(
         _config_with_workspace(app_config, max_file_size_bytes=4),
         workspace_root=tmp_path,
@@ -336,9 +347,8 @@ def test_read_file_respects_max_file_size(tmp_path: Path, app_config: AppConfig)
 
     result = read_file_content("a.txt", policy=policy)
 
-    assert result.truncated
-    assert result.content == "0123"
-    assert "超过" in (result.note or "")
+    assert not result.truncated
+    assert result.content == "0123456789"
     assert result.sha256 == _sha256(tmp_path / "a.txt")
 
 
@@ -528,7 +538,7 @@ def test_delete_hard_rejected_target_does_not_scan_or_fingerprint(
     tmp_path: Path, app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """T14C 复审：硬拒绝的删除立即失败——不算动作指纹、不描述目标（两者都会遍历目录）。"""
-    config = _config_with_workspace(app_config, external_paths={"mode": "allow"})
+    config = _config_with_workspace(app_config, external_paths={"mode": "danger-full-access"})
     policy = SecurityPolicy.from_config(config, workspace_root=tmp_path, environ={})
     calls: list[str] = []
     monkeypatch.setattr(
@@ -553,14 +563,14 @@ def test_read_file_rejects_outside_path(tmp_path: Path, policy: SecurityPolicy) 
 
 
 def test_read_file_reports_missing_file(tmp_path: Path, policy: SecurityPolicy) -> None:
-    with pytest.raises(SecurityError):
+    with pytest.raises(FileOperationError):
         read_file_content("nope.txt", policy=policy)
 
 
-def test_external_paths_allow_mode_keeps_hard_constraints(
+def test_external_paths_danger_mode_keeps_hard_constraints(
     tmp_path: Path, app_config: AppConfig
 ) -> None:
-    """T38：``allow`` 档只放行**显式绝对路径**，且不放宽四项硬约束。
+    """「完全放行」档只放行**显式绝对路径**，且不放宽四项硬约束。
 
     "读写授权视同工作区内"改变的是常规小改动是否逐次询问；覆盖已有文件、删除文件、
     破坏性 Shell、大范围编辑仍然必须人工批准（架构 §1.5）。
@@ -571,7 +581,7 @@ def test_external_paths_allow_mode_keeps_hard_constraints(
     outside.mkdir()
     note = outside / "note.txt"
     note.write_text("外部内容", encoding="utf-8")
-    config = _config_with_workspace(app_config, external_paths={"mode": "allow"})
+    config = _config_with_workspace(app_config, external_paths={"mode": "danger-full-access"})
     policy = SecurityPolicy.from_config(config, workspace_root=workspace, environ={})
 
     # 只读：绝对路径的外部目标放行，并且能被识别为"外部"
@@ -584,32 +594,46 @@ def test_external_paths_allow_mode_keeps_hard_constraints(
         with pytest.raises(WorkspaceBoundaryError):
             policy.resolve_path(raw)
 
-    # 读写档下的常规动作：新建外部文件不再逐次询问
+    # 这一档只放开读：新建外部文件同样是**硬拒绝**（理由指向"去授权那个目录"），
+    # 不是"不再逐次询问"——收窄前那一条比 codex / dsh 都宽（2026-10-14）。
     created = policy.classify_tool(
         "write_file", {"path": str(outside / "new.txt"), "content": "新"}
     )
-    assert created.allowed and not created.requires_approval
+    assert not created.allowed and not created.requires_approval
+    assert "只允许读" in created.reason
 
-    # 硬约束一：覆盖已有文件仍然必须人工审批（reason 不再以"工作区外"为由，但改不了这一条）
-    decision = policy.classify_tool(
+    # 硬约束在**已授权读写**的外部目标上照样生效（工作区外视同工作区内判，四项一条不放）
+    from local_agent.security.path_guard import ExternalPathPolicy, normalize_grant_path
+
+    writable = SecurityPolicy.from_config(
+        config,
+        workspace_root=workspace,
+        environ={},
+        external_policy=ExternalPathPolicy(
+            mode="danger-full-access", grants={normalize_grant_path(outside): "read_write"}
+        ),
+    )
+
+    # 硬约束一：覆盖已有文件必须人工审批
+    decision = writable.classify_tool(
         "write_file", {"path": str(note), "content": "改", "overwrite": True}
     )
     assert decision.requires_approval and not decision.allowed
     assert "覆盖已有文件" in decision.reason
 
-    # 硬约束二：删除文件仍然必须人工审批
-    removed = policy.classify_tool("delete_file", {"path": str(note)})
+    # 硬约束二：删除文件必须人工审批
+    removed = writable.classify_tool("delete_file", {"path": str(note)})
     assert removed.requires_approval and not removed.allowed
 
     # 受保护目标（当前用户主目录）即使批准也不执行
     with pytest.raises(SecurityError):
-        policy.resolve_writable_path(str(Path.home()))
+        writable.resolve_writable_path(str(Path.home()))
 
-    # 出厂默认（``whitelist`` + 空白名单）下同一个绝对外部路径直接拒绝，提示指向设置页
+    # 默认档位可直接读取同一外部路径，但没有目录写授权时仍拒绝写入。
     strict = SecurityPolicy.from_config(app_config, workspace_root=workspace, environ={})
-    with pytest.raises(WorkspaceBoundaryError) as excinfo:
-        strict.resolve_path(str(note))
-    assert "设置" in str(excinfo.value) and "权限" in str(excinfo.value)
+    assert strict.resolve_path(str(note)) == note.resolve()
+    with pytest.raises(SecurityError):
+        strict.resolve_writable_path(str(note))
 
 
 # --------------------------------------------------------------------------- 工具包装
@@ -625,9 +649,16 @@ def test_built_tools_match_architecture_signatures(policy: SecurityPolicy) -> No
         "write_file",
         "delete_file",
         "run_shell",
+        # 2026-10-21：转后台之后的两条查询/结束工具（追加在末尾，前六个顺序不变）。
+        "read_command",
+        "stop_command",
+        # 2026-10-22：一次调用跑完"写脚本 → 执行 → 清理"的入口。
+        "execute_code",
     ]
     assert list(tools["list_dir"].args) == ["path", "recursive", "include_hidden", "max_entries"]
-    assert list(tools["read_file"].args) == ["path", "start_line", "end_line", "max_chars"]
+    assert list(tools["read_file"].args) == [
+        "path", "start_line", "end_line", "max_chars", "start_char", "expected_sha256", "encoding",
+    ]
     assert list(tools["edit_file"].args) == [
         "path",
         "old_text",
@@ -636,10 +667,21 @@ def test_built_tools_match_architecture_signatures(policy: SecurityPolicy) -> No
         "replace_all",
         "expected_sha256",
         "reason",
+        "encoding",
     ]
     assert list(tools["write_file"].args) == ["path", "content", "overwrite", "reason"]
     assert list(tools["delete_file"].args) == ["path", "recursive", "reason"]
-    assert list(tools["run_shell"].args) == ["command", "cwd", "timeout_seconds", "env_keys"]
+    # 2026-10-14：新增 `escalate_sandbox`（运行中提权）——**追加在末尾**，前四个参数的顺序不变。
+    assert list(tools["run_shell"].args) == [
+        "command",
+        "cwd",
+        "timeout_seconds",
+        "env_keys",
+        "escalate_sandbox",
+    ]
+    assert list(tools["read_command"].args) == ["command_id", "cursor", "max_chars"]
+    assert list(tools["stop_command"].args) == ["command_id"]
+    assert list(tools["execute_code"].args) == ["code", "cwd", "timeout_seconds"]
 
 
 def test_tool_invocation_returns_json(tmp_path: Path, policy: SecurityPolicy) -> None:
@@ -687,19 +729,17 @@ def test_edit_file_replaces_and_reports_diff(tmp_path: Path, policy: SecurityPol
     assert result.path == "a.py"
 
 
-def test_edit_file_requires_expected_sha256(tmp_path: Path, policy: SecurityPolicy) -> None:
-    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8", newline="")
-
-    with pytest.raises(SecurityError) as excinfo:
-        edit_file_content("a.py", policy=policy, old_text="x = 1", new_text="x = 2")
-
-    assert "expected_sha256" in str(excinfo.value)
+def test_edit_file_accepts_missing_expected_sha256(tmp_path: Path, policy: SecurityPolicy) -> None:
+    target = tmp_path / "a.py"
+    target.write_text("x = 1\n", encoding="utf-8", newline="")
+    edit_file_content("a.py", policy=policy, old_text="x = 1", new_text="x = 2")
+    assert target.read_text() == "x = 2\n"
 
 
 def test_edit_file_rejects_stale_hash(tmp_path: Path, policy: SecurityPolicy) -> None:
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8", newline="")
 
-    with pytest.raises(SecurityError) as excinfo:
+    with pytest.raises(FileOperationError) as excinfo:
         edit_file_content(
             "a.py", policy=policy, old_text="x = 1", new_text="x = 2", expected_sha256="0" * 64
         )
@@ -714,13 +754,14 @@ def test_edit_file_rejects_missing_and_ambiguous_match(
     target.write_text("alpha\nbeta\nalpha\n", encoding="utf-8", newline="")
     sha = _sha256(target)
 
-    with pytest.raises(SecurityError) as missing:
+    with pytest.raises(FileOperationError) as missing:
         edit_file_content(
             "a.py", policy=policy, old_text="gamma", new_text="x", expected_sha256=sha
         )
-    assert "没有精确匹配" in str(missing.value)
+    # 文案已改为"没有匹配：已按 CRLF/LF 归一化重试仍找不到"（2026-10-22）。
+    assert "没有匹配" in str(missing.value)
 
-    with pytest.raises(SecurityError) as ambiguous:
+    with pytest.raises(FileOperationError) as ambiguous:
         edit_file_content(
             "a.py", policy=policy, old_text="alpha", new_text="x", expected_sha256=sha
         )
@@ -746,28 +787,19 @@ def test_edit_file_replace_all_rewrites_every_match(
     assert target.read_text(encoding="utf-8") == "omega\nbeta\nomega\n"
 
 
-def test_edit_file_rejects_whole_file_replacement(tmp_path: Path, policy: SecurityPolicy) -> None:
+def test_edit_file_accepts_whole_file_replacement(tmp_path: Path, policy: SecurityPolicy) -> None:
     content = "x = 1\ny = 2\n"
     target = tmp_path / "a.py"
     target.write_text(content, encoding="utf-8", newline="")
-
-    with pytest.raises(SecurityError) as excinfo:
-        edit_file_content(
-            "a.py",
-            policy=policy,
-            old_text=content,
-            new_text="z = 3\n",
-            expected_sha256=_sha256(target),
-        )
-
-    assert "整份文件" in str(excinfo.value)
+    edit_file_content("a.py", policy=policy, old_text=content, new_text="z = 3\n")
+    assert target.read_text() == "z = 3\n"
 
 
 def test_edit_file_rejects_identical_text(tmp_path: Path, policy: SecurityPolicy) -> None:
     target = tmp_path / "a.py"
     target.write_text("x = 1\n", encoding="utf-8", newline="")
 
-    with pytest.raises(SecurityError) as excinfo:
+    with pytest.raises(FileOperationError) as excinfo:
         edit_file_content(
             "a.py",
             policy=policy,
@@ -783,7 +815,7 @@ def test_edit_file_rejects_binary_sensitive_and_outside(
     tmp_path: Path, policy: SecurityPolicy
 ) -> None:
     (tmp_path / "blob.bin").write_bytes(b"\x00\x01")
-    with pytest.raises(SecurityError):
+    with pytest.raises(FileOperationError):
         edit_file_content(
             "blob.bin",
             policy=policy,
@@ -809,25 +841,53 @@ def test_edit_file_rejects_binary_sensitive_and_outside(
         )
 
 
-def test_edit_file_rejects_large_change(tmp_path: Path, app_config: AppConfig) -> None:
+def test_edit_file_counts_touched_files_not_lines(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """大范围编辑按**本轮改过的文件数**判，不按行数（2026-10-15）。
+
+    这条同时钉住两个方向：① 单次改 500 行**不再**要审批（原来 200 行就拦，实证里
+    "重写一个函数"被逐次弹卡）；② 额度用完后再改**新**文件才要审批。
+    """
     policy = SecurityPolicy.from_config(
-        _config_with_large_edit(app_config, max_changed_lines=2),
+        _config_with_large_edit(app_config, max_files=2),
         workspace_root=tmp_path,
         environ={},
     )
     target = tmp_path / "a.py"
     target.write_text("line\n", encoding="utf-8", newline="")
+    target_b = tmp_path / "b.py"
+    target_b.write_text("line\n", encoding="utf-8", newline="")
+    target_c = tmp_path / "c.py"
+    target_c.write_text("line\n", encoding="utf-8", newline="")
 
+    # 一次改 500 行：在免审额度内就照做，不再按行数拦。
+    edit_file_content(
+        "a.py",
+        policy=policy,
+        old_text="line",
+        new_text="\n".join(f"l{index}" for index in range(500)),
+        expected_sha256=_sha256(target),
+    )
+    assert policy.edited_file_count() == 1
+
+    edit_file_content(
+        "b.py", policy=policy, old_text="line", new_text="x", expected_sha256=_sha256(target_b)
+    )
+    # 用满额度（2 个）之后，第三个**新**文件需要一次人工批准。
     with pytest.raises(SecurityError) as excinfo:
         edit_file_content(
-            "a.py",
-            policy=policy,
-            old_text="line",
-            new_text="\n".join(f"l{index}" for index in range(20)),
-            expected_sha256=_sha256(target),
+            "c.py", policy=policy, old_text="line", new_text="x", expected_sha256=_sha256(target_c)
         )
-
     assert "大范围修改" in str(excinfo.value)
+    assert target_c.read_text(encoding="utf-8") == "line\n"  # 没批就不动文件
+
+    # 同一轮内批准一次之后不再逐个问（`note_large_edit_approved` 的语义）。
+    policy.note_large_edit_approved()
+    edit_file_content(
+        "c.py", policy=policy, old_text="line", new_text="x", expected_sha256=_sha256(target_c)
+    )
+    assert target_c.read_text(encoding="utf-8") == "x\n"
 
 
 def test_edit_file_preserves_crlf_line_endings(tmp_path: Path, policy: SecurityPolicy) -> None:
@@ -855,7 +915,7 @@ def _patch_text(*lines: str) -> str:
 
 def test_parse_patch_rejects_a_blank_patch() -> None:
     """空 Patch 在解析层直接拒绝（工具层的互斥判定会先给出更通用的缺参提示）。"""
-    with pytest.raises(SecurityError) as excinfo:
+    with pytest.raises(FileOperationError) as excinfo:
         parse_patch("   \n")
 
     assert "patch 为空" in str(excinfo.value)
@@ -1000,7 +1060,7 @@ def test_edit_patch_rejects_conflict_and_keeps_the_file(
     target.write_text("x = 1\ny = 2\n", encoding="utf-8", newline="")
     before = _sha256(target)
 
-    with pytest.raises(SecurityError) as excinfo:
+    with pytest.raises(FileOperationError) as excinfo:
         edit_file_content(
             "a.py",
             policy=policy,
@@ -1018,7 +1078,7 @@ def test_edit_patch_rejects_out_of_range_hunk(tmp_path: Path, policy: SecurityPo
     target.write_text("x = 1\n", encoding="utf-8", newline="")
     before = _sha256(target)
 
-    with pytest.raises(SecurityError) as excinfo:
+    with pytest.raises(FileOperationError) as excinfo:
         edit_file_content(
             "a.py",
             policy=policy,
@@ -1036,7 +1096,7 @@ def test_edit_patch_rejects_overlapping_hunks(tmp_path: Path, policy: SecurityPo
     target.write_text("a\nb\nc\n", encoding="utf-8", newline="")
     before = _sha256(target)
 
-    with pytest.raises(SecurityError) as excinfo:
+    with pytest.raises(FileOperationError) as excinfo:
         edit_file_content(
             "a.py",
             policy=policy,
@@ -1073,7 +1133,7 @@ def test_edit_patch_rejects_bad_structure_and_unsupported_forms(
     }
 
     for name, (patch, expected) in cases.items():
-        with pytest.raises(SecurityError) as excinfo:
+        with pytest.raises(FileOperationError) as excinfo:
             edit_file_content("a.py", policy=policy, patch=patch, expected_sha256=before)
         assert expected in str(excinfo.value), name
         assert _sha256(target) == before, name
@@ -1087,7 +1147,7 @@ def test_edit_patch_rejects_a_file_header_for_another_file(
     target.write_text("x = 1\n", encoding="utf-8", newline="")
     before = _sha256(target)
 
-    with pytest.raises(SecurityError) as excinfo:
+    with pytest.raises(FileOperationError) as excinfo:
         edit_file_content(
             "a.py",
             policy=policy,
@@ -1105,7 +1165,7 @@ def test_edit_patch_rejects_an_unchanged_result(tmp_path: Path, policy: Security
     target.write_text("x = 1\n", encoding="utf-8", newline="")
     before = _sha256(target)
 
-    with pytest.raises(SecurityError) as excinfo:
+    with pytest.raises(FileOperationError) as excinfo:
         edit_file_content(
             "a.py",
             policy=policy,
@@ -1126,15 +1186,13 @@ def test_edit_patch_requires_expected_sha256_and_rejects_stale_hash(
     before = _sha256(target)
     patch = _patch_text("@@ -1 +1 @@", "-x = 1", "+x = 9")
 
-    with pytest.raises(SecurityError) as missing:
-        edit_file_content("a.py", policy=policy, patch=patch)
-    assert "expected_sha256" in str(missing.value)
-
-    with pytest.raises(SecurityError) as stale:
+    with pytest.raises(FileOperationError) as stale:
         edit_file_content("a.py", policy=policy, patch=patch, expected_sha256="0" * 64)
     assert "不一致" in str(stale.value)
 
     assert _sha256(target) == before
+    edit_file_content("a.py", policy=policy, patch=patch)
+    assert target.read_text() == "x = 9\n"
 
 
 def test_edit_rejects_mixed_or_missing_input_modes(
@@ -1145,7 +1203,7 @@ def test_edit_rejects_mixed_or_missing_input_modes(
     target.write_text("x = 1\n", encoding="utf-8", newline="")
     before = _sha256(target)
 
-    with pytest.raises(SecurityError) as mixed:
+    with pytest.raises(FileOperationError) as mixed:
         edit_file_content(
             "a.py",
             policy=policy,
@@ -1156,22 +1214,24 @@ def test_edit_rejects_mixed_or_missing_input_modes(
         )
     assert "不能同时使用" in str(mixed.value)
 
-    with pytest.raises(SecurityError) as neither:
+    with pytest.raises(FileOperationError) as neither:
         edit_file_content("a.py", policy=policy, expected_sha256=before)
     assert "old_text 与 new_text" in str(neither.value)
 
     # 只有空白的 patch 视为"没有给 patch"，落到同一个缺参提示（不会当成空 Patch 执行）
-    with pytest.raises(SecurityError) as blank:
+    with pytest.raises(FileOperationError) as blank:
         edit_file_content("a.py", policy=policy, patch="   \n", expected_sha256=before)
     assert "old_text 与 new_text" in str(blank.value)
 
     assert _sha256(target) == before
 
 
-def test_edit_patch_over_limit_requires_approval(tmp_path: Path, app_config: AppConfig) -> None:
-    """patch 模式的改动行数同样走大范围修改审批（架构 §6.3）。"""
+def test_edit_patch_over_the_file_limit_requires_approval(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """patch 模式走同一条大范围审批（判据是本轮改过的文件数，不是补丁行数）。"""
     policy = SecurityPolicy.from_config(
-        _config_with_large_edit(app_config, max_changed_lines=2),
+        _config_with_large_edit(app_config, max_files=0),
         workspace_root=tmp_path,
         environ={},
     )
@@ -1223,7 +1283,7 @@ def test_read_then_write_round_trip_keeps_crlf_bytes(tmp_path: Path, policy: Sec
 def test_write_file_refuses_existing_file(tmp_path: Path, policy: SecurityPolicy) -> None:
     (tmp_path / "exists.txt").write_text("old", encoding="utf-8", newline="")
 
-    with pytest.raises(SecurityError) as excinfo:
+    with pytest.raises(FileOperationError) as excinfo:
         write_file_content("exists.txt", policy=policy, content="new")
 
     message = str(excinfo.value)
@@ -1241,11 +1301,28 @@ def test_write_file_refuses_overwrite_flag(tmp_path: Path, policy: SecurityPolic
     assert "审批" in str(excinfo.value)
 
 
-def test_write_file_refuses_bad_targets(tmp_path: Path, policy: SecurityPolicy) -> None:
-    with pytest.raises(SecurityError) as parent:
-        write_file_content("no/such/dir/f.txt", policy=policy, content="x")
-    assert "父目录不存在" in str(parent.value)
+def test_write_file_creates_missing_parent_directories(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """父目录缺失时**自动创建并如实报告**（2026-10-15）。
 
+    原来这里直接拒绝，于是"产出一个文件"要绕成"先跑一条 `mkdir` 命令 → 人工审批 → 沙箱"，
+    实证中一次普通任务就在这里原地失败。建目录不覆盖、不删除，主流 Agent 也是默认允许的。
+    """
+    result = write_file_content("site/assets/css/main.css", policy=policy, content="body{}")
+
+    assert result.path == "site/assets/css/main.css"
+    assert result.created_directories == ["site", "site/assets", "site/assets/css"]
+    assert result.note is not None and "顺带新建了 3 个目录" in result.note
+    # 由外到内创建，且内容真的落盘
+    assert (tmp_path / "site" / "assets" / "css" / "main.css").read_text(encoding="utf-8") == "body{}"
+
+    # 父目录已存在时不报"新建"（结果字段恒定，不制造第二种形状）
+    again = write_file_content("site/second.txt", policy=policy, content="x")
+    assert again.created_directories == [] and again.note is None
+
+
+def test_write_file_refuses_bad_targets(tmp_path: Path, policy: SecurityPolicy) -> None:
     with pytest.raises(SecurityError):
         write_file_content(".env", policy=policy, content="A=1")
 
@@ -1253,8 +1330,27 @@ def test_write_file_refuses_bad_targets(tmp_path: Path, policy: SecurityPolicy) 
         write_file_content("../x.txt", policy=policy, content="x")
 
     (tmp_path / "adir").mkdir()
-    with pytest.raises(SecurityError):
+    with pytest.raises(FileOperationError):
         write_file_content("adir", policy=policy, content="x")
+
+
+def test_write_file_never_creates_protected_or_sensitive_parent_directories(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """自动建目录**不是**放开受保护目标与密钥位置：中间层逐级判，判不过就整条拒绝。
+
+    这是自动创建这条捷径唯一的风险面，所以单独钉住：`.git/`、`.ssh/` 这类中间目录一个都不许建。
+    """
+    root = tmp_path / ".git"
+    root.mkdir()
+    with pytest.raises(SecurityError):
+        write_file_content(".git/objects/aa/bb.txt", policy=policy, content="x")
+    # 判据是**副作用**：受保护目标的中间层一个都不该被建出来（错误文案由别的用例负责）。
+    assert not (root / "objects").exists(), "受保护目录的中间层一个都不该被建出来"
+
+    with pytest.raises(SecurityError):
+        write_file_content("nested/.ssh/id_rsa", policy=policy, content="x")
+    assert not (tmp_path / "nested").exists(), "判不过的整条链都不该留下半截目录"
 
 
 def test_write_file_enforces_size_limit(tmp_path: Path, app_config: AppConfig) -> None:
@@ -1264,7 +1360,7 @@ def test_write_file_enforces_size_limit(tmp_path: Path, app_config: AppConfig) -
         environ={},
     )
 
-    with pytest.raises(SecurityError) as excinfo:
+    with pytest.raises(FileOperationError) as excinfo:
         write_file_content("big.txt", policy=policy, content="12345")
 
     assert "超过上限" in str(excinfo.value)
@@ -1396,18 +1492,27 @@ def test_run_shell_truncates_output(tmp_path: Path, app_config: AppConfig) -> No
     assert result.note is not None and "截断" in result.note
 
 
-def test_run_shell_refuses_non_whitelisted_command(
+def test_run_shell_does_not_ask_for_a_non_whitelisted_command(
     tmp_path: Path, app_config: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """不在白名单的命令**不再逐条问**（2026-10-15 权限模型重构）。
+
+    旧模型里"不在白名单 ⇒ 需要审批"是主要摩擦源。白名单仍在 `prepare_shell` 里做分类
+    （`test_security.py` 按层各自验），但不再影响放行。
+    """
     policy = _shell_policy(tmp_path, app_config, whitelist=[_entry("--version")])
-    # 固定解析结果：这条断言只关心"不在白名单 → 需要审批"，不该依赖启动方式（PATH）
+    # 固定解析结果：这条断言只关心"在不在白名单"，不该依赖启动方式（PATH）
     monkeypatch.setattr(shell_guard.shutil, "which", lambda name: str(tmp_path / name))
 
-    with pytest.raises(SecurityError) as excinfo:
-        # 可解析但不在白名单（参数与白名单不一致）→ 需要审批
-        run_shell_command("python -V", policy=policy)
+    # `prepare_shell` 层：可解析、但参数与白名单不一致 → 仍标"需要审批"，理由里带着白名单
+    plan = shell_guard.prepare_shell(
+        "python -V", config=policy.security.shell, workspace_root=tmp_path
+    )
+    assert plan.requires_approval and "白名单" in plan.reason
 
-    assert "白名单" in str(excinfo.value)
+    # 判定层：不再因此弹审批（常规命令免审）。
+    decision = policy.classify_tool("run_shell", {"command": "python -V"})
+    assert decision.allowed and not decision.requires_approval
 
 
 def test_run_shell_does_not_inherit_api_key(
@@ -1433,10 +1538,10 @@ def test_run_shell_does_not_inherit_api_key(
 def test_new_file_creation_is_atomic_and_never_overwrites(tmp_path: Path) -> None:
     """原子新建：目标已存在时必须失败，绝不覆盖（架构 §6.4）。"""
     target = tmp_path / "note.txt"
-    file_tools._create_new_file(target, b"first")  # 直接验证原子创建语义
+    _create_new_file(target, b"first")  # 直接验证原子创建语义
 
-    with pytest.raises(SecurityError):
-        file_tools._create_new_file(target, b"second")
+    with pytest.raises(FileOperationError):
+        _create_new_file(target, b"second")
 
     assert target.read_bytes() == b"first"
 
@@ -1455,7 +1560,7 @@ def test_write_file_refuses_file_created_after_existence_check(
 
     monkeypatch.setattr(Path, "exists", fake_exists)
 
-    with pytest.raises(SecurityError) as excinfo:
+    with pytest.raises(FileOperationError) as excinfo:
         write_file_content("note.txt", policy=policy, content="我的内容")
 
     assert "文件已存在" in str(excinfo.value)
@@ -1487,17 +1592,413 @@ def test_run_shell_uses_config_default_timeout(
     assert result.exit_code == 0
 
 
-def test_run_shell_refuses_shell_syntax_without_approval(
+def test_shell_syntax_is_not_an_approval_trigger_at_the_judgment_layer(
     tmp_path: Path, app_config: AppConfig
 ) -> None:
-    """管道类命令即使不在白名单也不能直接执行，必须走人工审批（架构 §6.6）。"""
+    """含 Shell 语法的命令**不再自动升级为审批**（2026-10-15 权限模型重构）。
+
+    危险的是"命令做了什么"（破坏性 / 提权 / 工作区外 cwd），不是"有没有管道"；这三类各有专门分支。
+    `prepare_shell` 层照旧标它需要审批（未命中白名单），判定层不再因此弹卡。
+    """
     policy = _shell_policy(tmp_path, app_config, whitelist=[])
     command = "echo hi | findstr hi" if os.name == "nt" else "echo hi | grep hi"
 
-    with pytest.raises(SecurityError) as excinfo:
-        run_shell_command(command, policy=policy)
+    plan = shell_guard.prepare_shell(
+        command, config=policy.security.shell, workspace_root=tmp_path
+    )
+    assert plan.requires_approval
+    assert plan.shell_syntax is not None, "确实是 Shell 语法那条分支"
 
-    assert "Shell 语法" in str(excinfo.value)
+    decision = policy.classify_tool("run_shell", {"command": command})
+    assert decision.allowed and not decision.requires_approval
+
+
+def test_platform_builtin_is_not_refused_as_missing_executable(tmp_path: Path) -> None:
+    """平台内建命令（`time` / `date` / `dir`…）**不是"环境不可用"**：改由适配器执行。
+
+    2026-10-14 实测修正：它们没有独立可执行文件，argv 模式下 `resolve_executable` 必然解析不到，
+    以前因此被硬拒、**连审批入口都不给**（用户视角就是"查个时间被拦两次"）。
+    """
+    if os.name != "nt":
+        pytest.skip("内建命令表按平台区分，这条只验 Windows 的 cmd 内建")
+
+    from local_agent.config import ShellSecurityConfig
+    from local_agent.security.shell_guard import build_shell_invocation, prepare_shell
+
+    # 只读安全清单里的内建（`time /t`）：2026-10-14 起**直接免审**，但仍是"经适配器执行"，
+    # 不是"找不到可执行文件"。
+    safe = prepare_shell(
+        "time /t", config=ShellSecurityConfig(), workspace_root=tmp_path, platform="windows"
+    )
+    assert safe.safe_read_only is True and safe.allowed is True
+    assert safe.environment_unavailable is False
+    assert safe.executor != "argv", "内建必须经适配器执行"
+
+    # 不在清单里的内建（`dir`）：口径**没有放宽**，仍然要审批。
+    plan = prepare_shell(
+        "dir", config=ShellSecurityConfig(), workspace_root=tmp_path, platform="windows"
+    )
+    assert plan.requires_approval is True and plan.allowed is False
+    assert plan.environment_unavailable is False, "内建 ≠ 环境不可用"
+    assert plan.executor == "cmd"
+    assert plan.executable_path is not None, "适配器自身必须解析得到（cmd.exe）"
+    invocation = build_shell_invocation(plan)
+    assert invocation[:4] == [plan.executable_path, "/d", "/s", "/c"]
+    assert invocation[4] == "dir", "原始命令必须原样交给适配器"
+
+
+def _tier_policy(tmp_path: Path, mode: str, grants: dict[str, str] | None = None):
+    """按档位构造策略（与设置页的三档同名：``read-only`` / ``workspace-write`` / ``danger-full-access``）。"""
+    from local_agent.config import SecurityConfig, WorkspaceConfig
+    from local_agent.security.path_guard import ExternalPathPolicy
+    from local_agent.security.policy import SecurityPolicy
+
+    return SecurityPolicy(
+        workspace_root=tmp_path,
+        security=SecurityConfig(),
+        workspace=WorkspaceConfig(),
+        external_policy=ExternalPathPolicy(mode=mode, grants=grants or {}),  # type: ignore[arg-type]
+    )
+
+
+def test_danger_tier_skips_shell_approval_for_ordinary_commands(tmp_path: Path) -> None:
+    """「完全放行」档 = 常规命令**免审批**：这正是"选了最宽的一档还什么都要问"的修复（2026-10-14）。
+
+    档位的设计意图本来就写着"决定常规小改动是否需要逐次询问"，但在此之前 Shell 判定完全没读过
+    档位——于是这一档下 `echo hi > note.txt` 也要点一次批准。
+    """
+    decision = _tier_policy(tmp_path, "danger-full-access").classify_tool(
+        "run_shell", {"command": "echo hi > note.txt"}
+    )
+
+    assert decision.allowed is True
+    assert decision.requires_approval is False
+
+
+def test_danger_tier_ordinary_command_reaches_execution(tmp_path: Path) -> None:
+    policy = _tier_policy(tmp_path, "danger-full-access")
+    result = run_shell_command("echo REVIEW_OK > review.txt", policy=policy)
+    assert result.exit_code == 0, result.stderr
+    assert (tmp_path / "review.txt").read_text(encoding="utf-8").strip() == "REVIEW_OK"
+
+
+@pytest.mark.parametrize("mode", ["read-only", "workspace-write"])
+def test_safe_command_escalation_requires_approval(tmp_path: Path, mode: str) -> None:
+    """提权仍要人工批准——**只在沙箱真的生效的两档**（2026-10-15 起沙箱由档位派生）。
+
+    「完全放行」档不套沙箱，带 `escalate_sandbox` 是**直接拒绝**（没有边界就没有"退出边界"），
+    那条由 `test_escalation_is_refused_when_no_sandbox_is_active` 守。
+    """
+    policy = _tier_policy(tmp_path, mode)
+    decision = policy.classify_tool("run_shell", {
+        "command": "echo REVIEW_OK", "escalate_sandbox": True,
+    })
+    assert not decision.allowed
+    assert decision.requires_approval
+    with pytest.raises(SecurityError, match="人工审批"):
+        run_shell_command("echo REVIEW_OK", policy=policy, escalate_sandbox=True)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="cmd 单引号规则")
+def test_echo_single_quotes_cannot_hide_cmd_operators(tmp_path: Path) -> None:
+    """`echo` 的"只读安全"身份不能被单引号夹带的写操作偷走（cmd 不认单引号）。
+
+    2026-10-15 起这条的边界由**只读档的沙箱**兜：命令不再被硬拒绝（常规命令一律免审），
+    但它写不进工作区——判据从"抛 SecurityError"换成"副作用没有发生"。
+    """
+    command = "echo 'x & echo REVIEW > readonly-bypass.txt & rem '"
+    policy = _tier_policy(tmp_path, "read-only")
+    plan = shell_guard.prepare_shell(command, config=policy.security.shell, workspace_root=tmp_path)
+    assert not plan.safe_read_only
+    assert plan.requires_approval
+
+    # 判据只看**副作用有没有发生**：cmd 对失败的写重定向仍可能回 0，退出码在这里不是好判据。
+    run_shell_command(command, policy=policy)
+    assert not (tmp_path / "readonly-bypass.txt").exists()
+
+
+@pytest.mark.parametrize("executor,command", [
+    ("pwsh", 'echo "$(New-Item marker.txt)"'),
+    ("sh", 'pwd "$(touch marker.txt)"'),
+])
+def test_double_quoted_expansion_never_gets_read_only_immunity(
+    tmp_path: Path, monkeypatch, executor: str, command: str,
+) -> None:
+    from local_agent.config import ShellSecurityConfig
+
+    monkeypatch.setattr(shell_guard, "resolve_executable", lambda *_args, **_kwargs: "/adapter")
+    plan = shell_guard.prepare_shell(
+        command, config=ShellSecurityConfig(executor=executor), workspace_root=tmp_path,
+        platform="windows" if executor == "pwsh" else "posix",
+    )
+    assert not plan.safe_read_only
+    assert plan.requires_approval
+
+
+def test_missing_shell_adapter_is_an_environment_failure(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(shell_guard, "resolve_executable", lambda *_args, **_kwargs: None)
+    decision = _tier_policy(tmp_path, "workspace-write").classify_tool(
+        "run_shell", {"command": "echo hi > marker.txt"},
+    )
+    assert not decision.allowed
+    assert not decision.requires_approval
+    assert decision.reason_kind == "environment"
+
+
+def test_danger_tier_opens_external_reads_but_never_external_writes(tmp_path: Path) -> None:
+    """「完全放行」档**只放开读**：写仍然只由逐条授权决定（2026-10-14 收窄，对齐 codex / dsh）。
+
+    两家在"放开"这件事上是同一句：**读不受限、写由可写根围栏**（codex 的 `workspace-write`、
+    dsh 的"每个模式都允许读，写由 `writableRoots` 管"）。收窄前我们那一档是"外部一律读写"，比两家都宽。
+    现在的四格：
+
+    - 外部目标**可读**（不必逐目录授权）——这才是这一档真正放开的；
+    - 外部**写**（新建与覆盖都算）→ **硬拒绝**（不是"等批准"），理由指向"去授权那个目录"；
+    - 授权为**读写**之后写得进去（授权压过档位）；
+    - **受保护目标**任何时候都不给写，连审批入口都没有。
+    """
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    outside.mkdir()
+    target = outside / "note.txt"
+    target.write_text("existing", encoding="utf-8")
+    policy = _tier_policy(tmp_path, "danger-full-access")
+
+    assert policy.resolve_target(str(target)).access == "read", "放行档的读是无条件的"
+
+    for args in (
+        {"path": str(target), "content": "hi"},
+        {"path": str(target), "content": "hi", "overwrite": True},
+    ):
+        denied = policy.classify_tool("write_file", args)
+        assert denied.allowed is False, args
+        assert denied.requires_approval is False, "写外部不是'等批准'，是要先去授权"
+        assert "只允许读" in denied.reason
+
+    from local_agent.security.path_guard import normalize_grant_path
+
+    granted = _tier_policy(
+        tmp_path, "danger-full-access", {normalize_grant_path(str(outside)): "read_write"}
+    )
+    newly = granted.classify_tool(
+        "write_file", {"path": str(outside / "new.txt"), "content": "hi"}
+    )
+    assert newly.allowed is True, "逐条授权为读写之后，放行档也写得进去"
+
+    protected = policy.classify_tool(
+        "write_file", {"path": str(Path.home() / ".git" / "config"), "content": "x"}
+    )
+    assert protected.allowed is False
+    assert protected.requires_approval is False, "受保护目标连审批入口都不给"
+
+
+def test_escalation_asks_in_every_tier_even_for_whitelisted_commands(tmp_path: Path) -> None:
+    """运行中提权（escalation）：不管哪一档、命令本身是否在白名单里，都要人工批准。
+
+    用**白名单命令**做判据是关键：它在三档下本来都免审，带上 `escalate_sandbox` 之后必须转为
+    审批——这才证明拦下来的是"提权"这件事，而不是那条命令本身的风险。
+    """
+    from local_agent.config import (
+        SecurityConfig,
+        ShellSecurityConfig,
+        ShellWhitelistEntry,
+        WorkspaceConfig,
+    )
+    from local_agent.security.path_guard import ExternalPathPolicy
+    from local_agent.security.policy import SecurityPolicy
+
+    def policy_for(mode: str):
+        return SecurityPolicy(
+            workspace_root=tmp_path,
+            security=SecurityConfig(
+                shell=ShellSecurityConfig(
+                    whitelist=[
+                        ShellWhitelistEntry(
+                            platform=["windows", "posix"], executable="python", args=["--version"]
+                        )
+                    ],
+                )
+            ),
+            workspace=WorkspaceConfig(),
+            external_policy=ExternalPathPolicy(mode=mode),  # type: ignore[arg-type]
+        )
+
+    # 沙箱生效的两档：提权一律要人工批准。
+    for mode in ("read-only", "workspace-write"):
+        # 对照：不带提权的白名单命令本来就免审（证明这条命令本身不是被拦的原因）
+        plain = policy_for(mode).classify_tool("run_shell", {"command": "python --version"})
+        assert plain.allowed is True and plain.requires_approval is False, mode
+
+        decision = policy_for(mode).classify_tool(
+            "run_shell", {"command": "python --version", "escalate_sandbox": True}
+        )
+        assert decision.allowed is False, mode
+        assert decision.requires_approval is True, mode
+        assert "退出写侧沙箱" in decision.reason, mode
+
+
+def test_safe_read_only_commands_skip_approval_in_every_tier(tmp_path: Path) -> None:
+    """`echo` 这类只读安全命令**三档都免审**——连「只读」档也不拦。
+
+    它是代码层清单（不是用户白名单）：用户没配任何白名单时，"看一眼就走"的读命令也不该被拦。
+    """
+    for mode in ("read-only", "workspace-write", "danger-full-access"):
+        decision = _tier_policy(tmp_path, mode).classify_tool("run_shell", {"command": "echo hi"})
+        assert decision.allowed is True, mode
+        assert decision.requires_approval is False, mode
+
+
+def test_escalation_is_refused_when_no_sandbox_is_active(tmp_path: Path) -> None:
+    """沙箱没开时带 `escalate_sandbox` 被**直接拒绝**，不静默忽略。
+
+    没有边界就没有"退出边界"这回事；静默忽略会让模型以为自己拿到了更宽的执行环境。
+    「完全放行」档正是"不套沙箱"的那一档。
+    """
+    decision = _tier_policy(tmp_path, "danger-full-access").classify_tool(
+        "run_shell", {"command": "python --version", "escalate_sandbox": True}
+    )
+
+    assert decision.allowed is False
+    assert decision.requires_approval is True
+    assert "退出写侧沙箱" in decision.reason
+
+
+def test_destructive_commands_still_ask_in_every_tier(tmp_path: Path) -> None:
+    """破坏性命令**任何档位**都要人工批准——包括「放行」（四项硬约束，靠代码层底线保证）。
+
+    底线必须由代码给：``security.shell.blocked_patterns`` 出厂是空列表，没有底线的话
+    "破坏性命令要问"在默认配置下等于没落地，放行档一开 `format C:` 就会直接执行。
+    """
+    from local_agent.config import ShellSecurityConfig
+    from local_agent.security.shell_guard import prepare_shell
+
+    assert ShellSecurityConfig().blocked_patterns == [], "出厂配置确实一个模式都没配"
+
+    plan = prepare_shell(
+        "rmdir build", config=ShellSecurityConfig(), workspace_root=tmp_path, platform="windows"
+    )
+    assert plan.destructive is True, "底线要认出删除类命令（`rmdir`）"
+
+    for mode in ("read-only", "workspace-write", "danger-full-access"):
+        decision = _tier_policy(tmp_path, mode).classify_tool(
+            "run_shell", {"command": "rmdir build"}
+        )
+        assert decision.allowed is False, mode
+        assert decision.requires_approval is True, mode
+
+
+def test_no_tier_asks_just_because_the_whitelist_missed(tmp_path: Path) -> None:
+    """三档都**不再**因为"命令不在白名单里"而逐条问（2026-10-15 权限模型重构）。
+
+    旧模型里「手动审批」档连白名单命中也问、其余档"不在白名单就问"；现在"问不问"只由
+    提权 / 破坏性 / 工作区外 cwd 三件事决定，档位只回答"能写到哪"。白名单命中与否仍会被
+    `prepare_shell` 分类（那条在 `test_security.py` 里按层各自验），只是不再影响审批。
+    """
+    from local_agent.config import (
+        SecurityConfig,
+        ShellSecurityConfig,
+        ShellWhitelistEntry,
+        WorkspaceConfig,
+    )
+    from local_agent.security.path_guard import ExternalPathPolicy
+    from local_agent.security.policy import SecurityPolicy
+
+    def policy_for(mode: str):
+        return SecurityPolicy(
+            workspace_root=tmp_path,
+            security=SecurityConfig(
+                shell=ShellSecurityConfig(
+                    whitelist=[ShellWhitelistEntry(executable="python", args=["--version"])]
+                )
+            ),
+            workspace=WorkspaceConfig(),
+            external_policy=ExternalPathPolicy(mode=mode),  # type: ignore[arg-type]
+        )
+
+    for mode in ("read-only", "workspace-write", "danger-full-access"):
+        # 命中白名单的那条
+        hit = policy_for(mode).classify_tool("run_shell", {"command": "python --version"})
+        assert hit.allowed is True and hit.requires_approval is False, mode
+        # 没命中白名单的那条：结果一样——白名单不再是审批开关。
+        miss = policy_for(mode).classify_tool("run_shell", {"command": "python --version --help"})
+        assert miss.allowed is True and miss.requires_approval is False, mode
+
+
+def test_environment_unavailable_is_not_a_policy_refusal(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """判定层把"**环境不可用**"与"策略拒绝"分开：前者不该被当成策略拦截（2026-10-14）。
+
+    两者的建议完全不同：环境不可用 → 换一条等价命令；策略拒绝 → 改请求或走人工审批。
+    """
+    if os.name != "nt":
+        pytest.skip("这条用 cmd 内建做对照，只在 Windows 上有意义")
+
+    from local_agent.security.policy import SecurityPolicy
+
+    policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+
+    missing = policy.classify_tool("run_shell", {"command": "definitely-not-a-real-tool-xyz"})
+    assert missing.allowed is False and missing.requires_approval is False
+    assert missing.reason_kind == "environment", "环境里没有这个命令 ≠ 策略拦截"
+
+    builtin = policy.classify_tool("run_shell", {"command": "dir"})
+    assert builtin.reason_kind == "policy", "内建命令能跑，只是不在白名单里 → 仍走策略口径"
+    # 2026-10-15：这一档下"不在白名单"不再触发审批，所以这条命令直接免审执行。
+    assert builtin.allowed is True and builtin.requires_approval is False
+
+    # 只读安全清单里的内建是例外：2026-10-14 起直接免审（`time /t` 正是用户问时间走的命令）。
+    readonly = policy.classify_tool("run_shell", {"command": "time /t"})
+    assert readonly.allowed is True and readonly.requires_approval is False
+
+
+def test_unknown_external_command_is_still_refused_without_approval(tmp_path: Path) -> None:
+    """真正解析不到的外部命令仍是"环境不可用"：如实拒绝、**不给审批入口**（批准了也起不来）。"""
+    from local_agent.config import ShellSecurityConfig
+    from local_agent.security.shell_guard import prepare_shell
+
+    plan = prepare_shell(
+        "definitely-not-a-real-tool-xyz --version",
+        config=ShellSecurityConfig(),
+        workspace_root=tmp_path,
+        platform="windows",
+    )
+
+    assert plan.allowed is False and plan.requires_approval is False
+    assert "找不到可执行文件" in plan.reason
+    assert plan.executor == "argv"
+
+
+def test_whitelisted_builtin_actually_runs_through_the_adapter(tmp_path: Path) -> None:
+    """内建命令能进白名单免审，而且**真的跑得起来**。
+
+    这条也是 `del` / `rd` 那类"既命中破坏性模式、又永远执行不了"的命令的回归：以前批准了也起不来。
+    """
+    if os.name != "nt":
+        pytest.skip("内建命令表按平台区分，这条只验 Windows 的 cmd 内建")
+
+    from local_agent.config import (
+        SecurityConfig,
+        ShellSecurityConfig,
+        ShellWhitelistEntry,
+        WorkspaceConfig,
+    )
+    from local_agent.security.policy import SecurityPolicy
+
+    policy = SecurityPolicy(
+        workspace_root=tmp_path,
+        security=SecurityConfig(
+            shell=ShellSecurityConfig(
+                whitelist=[ShellWhitelistEntry(executable="time", args=["/t"])]
+            )
+        ),
+        workspace=WorkspaceConfig(),
+    )
+
+    result = run_shell_command("time /t", policy=policy)
+
+    assert result.exit_code == 0, result.stderr
+    assert result.argv[1:4] == ["/d", "/s", "/c"], "经 cmd 适配器执行"
+    assert result.stdout.strip(), "内建命令的执行结果必须真的返回（以前根本起不来）"
 
 
 def test_run_shell_executes_approved_shell_syntax_command(
@@ -1526,9 +2027,13 @@ def test_run_shell_executes_approved_shell_syntax_command(
 
 
 def test_run_shell_approval_is_one_shot(tmp_path: Path, app_config: AppConfig) -> None:
-    """批准是一次性的：撤销后同一条命令重新被拒（架构 §6.5 的“恰好执行一次”）。"""
+    """批准是一次性的：撤销后同一条命令重新被拒（架构 §6.5 的“恰好执行一次”）。
+
+    2026-10-15 起常规命令免审，所以判据换成**破坏性命令**——那类任何档位都要人工批准，
+    "批准一次"这件事仍然必须是一次性的。
+    """
     policy = _shell_policy(tmp_path, app_config, whitelist=[])
-    command = "echo hi | findstr hi" if os.name == "nt" else "echo hi | grep hi"
+    command = "rmdir build" if os.name == "nt" else "rm -rf build"
     fingerprint = _fingerprint(policy, command)
 
     policy.grant(fingerprint)
@@ -1538,22 +2043,18 @@ def test_run_shell_approval_is_one_shot(tmp_path: Path, app_config: AppConfig) -
         run_shell_command(command, policy=policy)
 
 
-def test_run_shell_approved_absolute_path_runs_that_path(
+def test_run_shell_absolute_path_runs_the_resolved_path(
     tmp_path: Path, app_config: AppConfig
 ) -> None:
-    """带路径的命令批准后按解析出的 argv 执行，免审白名单不参与放行。"""
+    """带路径的命令按**解析出的 argv** 执行：执行对象就是判定对象（架构 §5.3、§6.6）。
+
+    2026-10-15 起"带路径"不再单独触发人工批准（常规命令一律免审），所以这条只守
+    "跑起来的确实是解析出的那个绝对路径"，不再守审批。
+    """
     policy = _shell_policy(tmp_path, app_config, whitelist=[])
     command = f'"{sys.executable}" --version'
-    fingerprint = _fingerprint(policy, command)
 
-    with pytest.raises(SecurityError):
-        run_shell_command(command, policy=policy)
-
-    policy.grant(fingerprint)
-    try:
-        result = run_shell_command(command, policy=policy)
-    finally:
-        policy.revoke(fingerprint)
+    result = run_shell_command(command, policy=policy)
 
     assert result.exit_code == 0
     assert "Python" in result.stdout
@@ -1564,10 +2065,13 @@ def test_run_shell_approved_absolute_path_runs_that_path(
 def test_run_shell_approval_is_bound_to_the_command(
     tmp_path: Path, app_config: AppConfig
 ) -> None:
-    """批准绑在动作指纹上：换一条命令不能复用同一份批准。"""
+    """批准绑在动作指纹上：换一条命令不能复用同一份批准。
+
+    判据用两条**破坏性命令**（都要人工批准）：批准了删 `build` 不等于能删 `dist`。
+    """
     policy = _shell_policy(tmp_path, app_config, whitelist=[])
-    approved = "echo hi | findstr hi" if os.name == "nt" else "echo hi | grep hi"
-    other = "echo bye | findstr bye" if os.name == "nt" else "echo bye | grep bye"
+    approved = "rmdir build" if os.name == "nt" else "rm -rf build"
+    other = "rmdir dist" if os.name == "nt" else "rm -rf dist"
 
     policy.grant(_fingerprint(policy, approved))
     try:
@@ -1575,3 +2079,144 @@ def test_run_shell_approval_is_bound_to_the_command(
             run_shell_command(other, policy=policy)
     finally:
         policy.revoke(_fingerprint(policy, approved))
+
+
+def test_read_file_dedupes_the_same_range_within_one_turn(
+    tmp_path: Path, policy: SecurityPolicy,
+) -> None:
+    """同一轮里重复读同一段、文件未变：不再回传原文（2026-10-22，对齐 hermes 的 read 去重）。"""
+    (tmp_path / "a.txt").write_text("第一行\n第二行\n", encoding="utf-8")
+
+    first = file_tools.read_file_content("a.txt", policy=policy)
+    # 不断言换行：Windows 上 `write_text` 会把 \n 落成 \r\n，这里只关心"读到没读到"。
+    assert "第一行" in first.content and "第二行" in first.content
+    assert "已经读过" not in (first.note or "")
+
+    second = file_tools.read_file_content("a.txt", policy=policy)
+    assert second.content == ""
+    assert "已经读过" in (second.note or "")
+    # 行区间/总行数照旧给出，模型据此决定下一步，而不是重读。
+    assert second.line_count == first.line_count
+    assert second.sha256 == first.sha256
+
+    # 换参数不命中：模型要原文时永远有出口。
+    third = file_tools.read_file_content("a.txt", policy=policy, start_line=2)
+    assert "第二行" in third.content
+
+
+def test_read_file_dedupe_is_invalidated_by_a_content_change(
+    tmp_path: Path, policy: SecurityPolicy,
+) -> None:
+    """文件一变 sha 就不同：去重不能把新内容也挡掉。"""
+    target = tmp_path / "b.txt"
+    target.write_text("v1\n", encoding="utf-8")
+    assert "v1" in file_tools.read_file_content("b.txt", policy=policy).content
+
+    target.write_text("v2\n", encoding="utf-8")
+    again = file_tools.read_file_content("b.txt", policy=policy)
+    assert "v2" in again.content
+
+
+def test_tool_result_budget_accumulates_and_flags_only_the_overflow(
+    policy: SecurityPolicy,
+) -> None:
+    """轮级结果预算（2026-10-22）：只记账、只置标记，**不截断**。"""
+    assert policy.result_budget_used == 0
+    assert policy.result_budget_exceeded is False
+
+    policy.note_tool_result(120_000)
+    assert policy.result_budget_used == 120_000
+    assert policy.result_budget_exceeded is False
+
+    policy.note_tool_result(90_000)
+    assert policy.result_budget_used == 210_000
+    assert policy.result_budget_exceeded is True
+
+    # 空结果不占预算。
+    policy.note_tool_result(0)
+    assert policy.result_budget_used == 210_000
+
+
+def test_edit_file_tolerates_crlf_and_keeps_the_original_line_endings(
+    tmp_path: Path, policy: SecurityPolicy,
+) -> None:
+    """文件是 CRLF、模型用 \\n 拼 old_text：归一化后要能改中，且不能把整个文件改成 LF。"""
+    target = tmp_path / "c.txt"
+    target.write_bytes(b"alpha\r\nbeta\r\ngamma\r\n")
+
+    result = file_tools.edit_file_content(
+        "c.txt", policy=policy, old_text="alpha\nbeta", new_text="alpha\nBETA"
+    )
+
+    data = target.read_bytes()
+    assert b"BETA" in data
+    assert data.count(b"\r\n") == 3, data          # 换行风格没被改掉
+    assert b"\r\n" in data and data.replace(b"\r\n", b"").count(b"\n") == 0
+    assert "已按 CRLF/LF" not in (result.note or "")  # 归一化成功不算失败
+
+
+def test_edit_file_escalates_after_three_misses(
+    tmp_path: Path, policy: SecurityPolicy,
+) -> None:
+    """同一文件连续失败到第 3 次：错误信息要明确“不要换写法重试”（2026-10-22）。"""
+    (tmp_path / "d.txt").write_text("hello\n", encoding="utf-8")
+    messages: list[str] = []
+    for _ in range(3):
+        with pytest.raises(FileOperationError) as exc:
+            file_tools.edit_file_content("d.txt", policy=policy, old_text="nope", new_text="x")
+        messages.append(str(exc.value))
+
+    assert "不要再换一种写法重试" not in messages[0]
+    assert "不要再换一种写法重试" not in messages[1]
+    assert "不要再换一种写法重试" in messages[2]
+
+
+def test_offload_tool_result_spills_the_longest_field_only(
+    tmp_path: Path, policy: SecurityPolicy, app_config: AppConfig,
+) -> None:
+    """超预算的正文落盘，换成"预览 + locator"；小结果与非可写策略原样返回（2026-10-22）。"""
+    body = "行" * 5000  # 5000 字符，超过 4000 的落盘门槛
+    content = json.dumps(
+        {"path": "a.txt", "content": body, "sha256": "abc"}, ensure_ascii=False
+    )
+
+    out = offload_tool_result(content, policy=policy, tool_name="read_file")
+    assert isinstance(out, str)
+    payload = json.loads(out)
+    assert payload["spilled"] is True
+    assert payload["path"] == "a.txt"           # 其它字段原样保留
+    assert "完整内容已保存到" in payload["content"]
+    assert len(payload["content"]) < len(body)  # 正文确实变短了
+
+    spill = tmp_path / payload["spill_path"]
+    assert spill.is_file()
+    assert body in spill.read_text(encoding="utf-8", errors="replace")
+
+    # 小结果不落盘：4000 字符以下原样返回。
+    small = json.dumps({"content": "短内容"}, ensure_ascii=False)
+    assert offload_tool_result(small, policy=policy, tool_name="read_file") == small
+
+    # 只读子策略不能写盘：原样返回，不假装保存。
+    strict = SecurityPolicy.from_config(
+        app_config, workspace_root=tmp_path, environ={}, allow_result_spill=False
+    )
+    assert offload_tool_result(content, policy=strict, tool_name="read_file") == content
+
+
+def test_search_files_covers_both_modes(tmp_path: Path, policy: SecurityPolicy) -> None:
+    """合并入口（2026-10-22）：同一个工具既能搜内容，也能按名字找。"""
+    (tmp_path / "a.py").write_text("hit\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("hit\n", encoding="utf-8")
+    tools = {tool.name: tool for tool in search_tools.build_search_tools(policy)}
+
+    content = json.loads(
+        tools["search_files"].invoke({"pattern": "hit", "glob": "*.py"})
+    )
+    assert content["mode"] == "content"
+    assert [hit["path"] for hit in content["hits"]] == ["a.py"]
+
+    files = json.loads(
+        tools["search_files"].invoke({"pattern": "*.txt", "mode": "files"})
+    )
+    assert files["mode"] == "files"
+    assert files["files"] == ["b.txt"]

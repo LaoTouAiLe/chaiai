@@ -3,8 +3,8 @@
 检索只把**命中位置附近**的一小段代码送进 Prompt，绝不整文件注入：片段的字符数、行数
 （由 ``rag.context_lines`` 决定）与单文件字节数都有上限，超限即截断并如实标注。
 
-路径与敏感文件判定复用 :class:`SecurityPolicy`（工作区边界 + 密钥文件拦截），与文件工具
-是同一套口径——检索结果里不会出现工作区外或敏感的路径。
+自动 RAG 单独保持工作区边界，敏感文件判定复用 :class:`SecurityPolicy`；
+普通文件工具允许显式外部读取，不会扩大自动检索的范围。
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from local_agent.config import RagConfig
-from local_agent.exceptions import SecurityError
+from local_agent.exceptions import FileOperationError, SecurityError
+from local_agent.security.path_guard import resolve_within_workspace
 from local_agent.security.policy import SecurityPolicy
 
 #: 判断"二进制文件"的 NUL 探测窗口（与 ``read_file`` 同一口径）。
@@ -56,8 +57,9 @@ def read_snippet(
         （调用方据此丢弃这条候选，不猜内容）。
     """
     try:
-        resolved = policy.resolve_readable_file(str(path))
-    except SecurityError:
+        bounded = resolve_within_workspace(str(path), base_dir=policy.workspace_root, workspace_root=policy.workspace_root)
+        resolved = policy.resolve_readable_file(str(bounded))
+    except (FileOperationError, SecurityError):
         return None
     try:
         size = resolved.stat().st_size

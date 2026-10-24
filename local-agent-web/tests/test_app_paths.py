@@ -16,10 +16,10 @@ from local_agent import app_paths
 from local_agent.api import __main__ as api_main
 
 
-def test_source_mode_keeps_the_original_relative_paths(
+def test_source_mode_uses_the_project_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """源码形态完全沉默：不产生第二套路径，也不因为机器上有 LOCALAPPDATA 就改道。"""
+    """源码配置固定在项目目录，不随 CWD 或 LOCALAPPDATA 漂移。"""
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
 
@@ -27,8 +27,8 @@ def test_source_mode_keeps_the_original_relative_paths(
     assert app_paths.resource_dir() is None
     assert app_paths.data_dir() is None
     assert app_paths.bundled_static_dir() is None
-    assert app_paths.default_config_path() == Path("config.yaml")
-    assert app_paths.default_env_path() == Path(".env")
+    assert app_paths.default_config_path() == Path(__file__).resolve().parents[1] / "config.yaml"
+    assert app_paths.default_env_path() == Path(__file__).resolve().parents[1] / ".env"
 
 
 def test_frozen_mode_puts_user_data_under_local_appdata(
@@ -128,3 +128,10 @@ def test_frozen_mode_finds_the_bundled_skills(monkeypatch: pytest.MonkeyPatch, t
 
     monkeypatch.setattr(sys, "frozen", False, raising=False)
     assert app_paths.bundled_skills_dir() is None, "源码形态不引入第二套路径"
+
+
+def test_source_mcp_path_is_stable_after_changing_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    expected = app_paths.default_config_path().with_name("mcp.json")
+    monkeypatch.chdir(tmp_path)
+    assert app_paths.default_config_path().with_name("mcp.json") == expected

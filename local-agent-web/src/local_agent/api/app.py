@@ -8,10 +8,14 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any, Final
 
 from fastapi import FastAPI, Request
 from fastapi.encoders import jsonable_encoder
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
@@ -21,6 +25,8 @@ from local_agent.api.schema_extras import merge_event_schemas
 from local_agent.api.security import LocalBoundaryMiddleware
 from local_agent.api.sse import build_events_router
 from local_agent.api.static import mount_frontend
+from local_agent.api.terminals import build_terminal_router
+from local_agent.application.cron import CronScheduler
 from local_agent.application.errors import ApplicationError
 
 #: OpenAPI 里的接口版本：跟着 v0.4 的契约走（不是包版本）。
@@ -52,9 +58,29 @@ async def _application_error(_request: Request, exc: Exception) -> Response:
 
 def create_app(runtime: ApiRuntime) -> FastAPI:
     """按一套运行时装出可服务的应用。"""
+    # 定时任务的调度线程随应用启停（§21.5）。**不**放在 ApplicationService 构造里：
+    # 每个测试都会新建 service，那样每建一个就泄漏一个后台线程。
+    scheduler = CronScheduler(runtime.service)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        runtime.service.cron_scheduler = scheduler
+        terminals = runtime.service.user_terminals()
+        try:
+            scheduler.start()
+            terminals.start()
+            yield
+        finally:
+            try:
+                terminals.close()
+            finally:
+                scheduler.stop()
+                runtime.service.cron_scheduler = None
+
     app = FastAPI(
         title="local-agent-web",
         version=API_VERSION,
+        lifespan=lifespan,
         description=DESCRIPTION,
         openapi_url="/api/openapi.json",
         # 交互文档不挂在本服务上：本机无鉴权的调试页面没有价值，只会扩大暴露面。
@@ -82,8 +108,23 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
     )
 
     app.add_exception_handler(ApplicationError, _application_error)
+    async def validation_error(request: Request, exc: Exception) -> Response:
+        if not isinstance(exc, RequestValidationError):
+            raise exc
+        if request.url.path.startswith("/api/mcp"):
+            return JSONResponse(status_code=422, content={"detail": [
+                {"loc": error["loc"], "type": error["type"], "msg": "字段格式不合法"}
+                for error in exc.errors()
+            ]})
+        response = await request_validation_exception_handler(request, exc)
+        if request.url.path.startswith("/api/terminals"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    app.add_exception_handler(RequestValidationError, validation_error)
     app.include_router(build_router(runtime))
     app.include_router(build_events_router(runtime))
+    app.include_router(build_terminal_router(runtime))
     mount_frontend(app, runtime.static_dir)
 
     # SSE 事件面不在路由的 `response_model` 里，但在**装配点**补进文档：这样真实服务的

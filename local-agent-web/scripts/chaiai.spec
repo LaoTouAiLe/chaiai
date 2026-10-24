@@ -13,9 +13,10 @@
    里**不应该**出现 config.yaml / .env / *.sqlite，构建脚本会扫描并拦截。
 2. **不收集 Streamlit 界面**：``local_agent/web.py`` 与 ``local_agent/ui/*`` 不在 FastAPI 入口
    链上，显式排除；不排就会把 pandas / pyarrow / altair 一起拖进来。
-3. **可选记忆依赖暂不随包**（2026-10-08 决定）：``chromadb`` / ``fastembed`` / ``onnxruntime``
-   属于 ``memory`` extra，调用点都是惰性导入，缺依赖时走既有的"降级 + 如实提示"路径。先让包小、
-   先跑通核心流程；要用向量记忆再加，并重新量体积。
+3. **中期记忆的向量库随包，本地 ONNX 不随包**（2026-10-19 调整）：带 ``chromadb`` 本体与它的
+   Rust 绑定，这样"中期记忆 + 兼容 API 的 Embedding"开箱可用；``fastembed`` / ``onnxruntime`` /
+   ``huggingface_hub`` 仍然排除——它们只服务本地 ONNX（含权重下载），体积大且首次使用还要联网。
+   缺依赖时仍走既有的"降级 + 如实提示"路径，不因为这次改动改变降级语义。
 
 构建请走 ``scripts/build_windows_package.py``（它负责先构建前端、再调本文件、最后做敏感数据
 扫描与清单校验），不要直接手敲 pyinstaller 命令。
@@ -23,7 +24,7 @@
 
 from pathlib import Path
 
-from PyInstaller.utils.hooks import copy_metadata
+from PyInstaller.utils.hooks import collect_all, copy_metadata
 
 PROJECT_ROOT = Path(SPECPATH).resolve().parent  # noqa: F821 - SPECPATH 由 PyInstaller 注入
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
@@ -31,6 +32,12 @@ ENTRY_SCRIPT = PROJECT_ROOT / "src" / "local_agent" / "startup.py"
 UI_ICON = PROJECT_ROOT / "frontend" / "public" / "chaiai.ico"  # 目前不存在，见下面的注释
 
 datas = [(str(FRONTEND_DIST), "frontend/dist")]
+NATIVE_SOURCE = PROJECT_ROOT / "src/local_agent/native/windows"
+datas += [(str(path), "local_agent/native/windows") for pattern in ("*.c", "*.h")
+          for path in NATIVE_SOURCE.glob(pattern)]
+datas += [(str(NATIVE_SOURCE / "bin" / name), "local_agent/native/windows/bin")
+          for name in ("manifest.json", "ipc-compat-x64.dll", "ipc-compat-x86.dll",
+                       "ipc-loader-x64.exe", "ipc-loader-x86.exe")]
 
 # langchain / langgraph 家族在运行时用 importlib.metadata 读自己的版本；不带上 .dist-info
 # 时，冻结产物里会拿不到版本信息。逐个调用并容忍缺失：这些包的可选子包在不同环境里不一定装。
@@ -50,30 +57,66 @@ for _distribution in (
     except Exception:  # noqa: BLE001 - 没装就不带，不影响启动
         pass
 
+binaries: list = []
+hiddenimports = [
+    # 目录选择器的 tkinter 在**函数内**延迟导入（directory_picker._ask_directory），
+    # 显式登记，避免静态分析漏掉之后"点选择目录没反应"。
+    "tkinter",
+    "tkinter.filedialog",
+    # uvicorn 按字符串动态加载这些实现模块，静态分析看不到。
+    "uvicorn.logging",
+    "uvicorn.loops",
+    "uvicorn.loops.auto",
+    "uvicorn.protocols",
+    "uvicorn.protocols.http",
+    "uvicorn.protocols.http.auto",
+    "uvicorn.protocols.http.h11_impl",
+    "uvicorn.protocols.websockets",
+    "uvicorn.protocols.websockets.auto",
+    "uvicorn.lifespan",
+    "uvicorn.lifespan.on",
+    "uvicorn.lifespan.off",
+]
+
+# 中期记忆的向量库（2026-10-19）：只带 chromadb 本体与它的 Rust 绑定。
+# 不带的三个仍是可选项——fastembed / onnxruntime 是**本地 ONNX**路径（含权重下载），
+# huggingface_hub 只服务那两条；中期记忆改用「兼容 API」的 Embedding 即可。
+# 用 collect_all 而不是逐个 hiddenimports：chromadb 有 migrations/日志配置/sqlite 实现
+# 与大量运行期动态导入，漏一个的表现是"启动正常、一开记忆就 ImportError"。
+for _package in ("chromadb", "chromadb_rust_bindings"):
+    try:
+        _data, _bin, _hidden = collect_all(_package)
+    except Exception:
+        continue
+    datas += _data
+    binaries += _bin
+    hiddenimports += [name for name in _hidden if not name.startswith("chromadb.test")]
+
+# 桌面窗口（2026-10-23）：pywebview 的 Windows 后端是"按平台字符串导入"的
+# （`webview.platforms.winforms` / `edgechromium`），静态分析看不到；它自带的
+# WebView2 程序集（Microsoft.Web.WebView2.*.dll、WebBrowserInterop.*.dll）也在 `webview/lib/` 下，
+# 必须整包带上，否则冻结后表现为"窗口打不开、退回浏览器"。
+# 没装 pywebview 时保持无窗口（源码形态、CI 都不需要它）。
+for _package in ("webview",):
+    try:
+        _data, _bin, _hidden = collect_all(_package)
+    except Exception:
+        continue
+    datas += _data
+    binaries += _bin
+    hiddenimports += _hidden
+hiddenimports += [
+    "webview.platforms.winforms",
+    "webview.platforms.edgechromium",
+]
+
+
 a = Analysis(
     [str(ENTRY_SCRIPT)],
     pathex=[str(PROJECT_ROOT / "src")],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
-    hiddenimports=[
-        # 目录选择器的 tkinter 在**函数内**延迟导入（directory_picker._ask_directory），
-        # 显式登记，避免静态分析漏掉之后"点选择目录没反应"。
-        "tkinter",
-        "tkinter.filedialog",
-        # uvicorn 按字符串动态加载这些实现模块，静态分析看不到。
-        "uvicorn.logging",
-        "uvicorn.loops",
-        "uvicorn.loops.auto",
-        "uvicorn.protocols",
-        "uvicorn.protocols.http",
-        "uvicorn.protocols.http.auto",
-        "uvicorn.protocols.http.h11_impl",
-        "uvicorn.protocols.websockets",
-        "uvicorn.protocols.websockets.auto",
-        "uvicorn.lifespan",
-        "uvicorn.lifespan.on",
-        "uvicorn.lifespan.off",
-    ],
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -86,8 +129,8 @@ a = Analysis(
         "matplotlib",
         "IPython",
         "pytest",
-        # 可选记忆依赖（见文件头第 3 条）。
-        "chromadb",
+        # 本地 ONNX Embedding（见文件头第 3 条）：权重不随包，改用兼容 API。
+        # chromadb 本体**不排除**（2026-10-19），见下面的 collect_all。
         "fastembed",
         "onnxruntime",
         "huggingface_hub",

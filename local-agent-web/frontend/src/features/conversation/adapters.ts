@@ -8,8 +8,10 @@
 // 编一个值出来。少数不可避免的降级（契约有、视图模型没有的取值）在下面逐条写明。
 
 import type { components } from '../../api/schema.gen'
+import { attachmentUrl } from '../../api/client'
 import type {
   ApprovalView,
+  CompressionRowView,
   ContextMeterView,
   ErrorNoticeView,
   FileDiffView,
@@ -17,6 +19,7 @@ import type {
   MessageView,
   ModelCallView,
   PlanView,
+  TraceEventView,
   RetrievalSourceView,
   RetrievalView,
   SessionSummaryView,
@@ -103,7 +106,9 @@ export function durationLabel(elapsedMs: number | null | undefined): string {
  * 与 `durationLabel` 的分工：那个是"一次工具调用花了多久"（毫秒/秒精度），这个是"这一轮跑了多久"
  * （秒起步、要能读成"3 分 12 秒"）。负数按 0 处理：时钟回拨或时间戳在未来时不能显示 "-2 秒"。
  */
-export function elapsedLabel(elapsedMs: number): string {
+export function elapsedLabel(elapsedMs: number | null | undefined): string {
+  // 与 `durationLabel` 同一口径：拿不到就返回空串，页面显示"未知"，不伪造 0 秒。
+  if (elapsedMs === null || elapsedMs === undefined) return ''
   const seconds = Math.max(0, Math.floor(elapsedMs / 1_000))
   if (seconds < 60) return `${seconds} 秒`
   const minutes = Math.floor(seconds / 60)
@@ -186,6 +191,7 @@ function outcomeCard(tool: ToolUse, outcome: ToolOutcome): ToolCardView {
         stdout: outcome.stdout ?? undefined,
         stderr: outcome.stderr ?? undefined,
         timedOut: outcome.timed_out ?? undefined,
+        background: outcome.background ?? undefined,
         // 服务端把输出截断过就如实说（§19.3）——此前页面对"这份 stdout 只是有界预览"只字未提。
         truncated: outcome.truncated,
         collapsedLines: 0,
@@ -203,6 +209,23 @@ function outcomeCard(tool: ToolUse, outcome: ToolOutcome): ToolCardView {
         target: outcome.target ?? '',
         summary: outcome.summary ?? '',
         body: outcome.text ?? '',
+        truncated: outcome.truncated,
+      }
+    }
+    case 'delegation': {
+      // §18.7：自主委派。子任务的结局由**服务端**结构化成一行行（`children`），页面不解析报告文本；
+      // 报告正文只作有界预览摆在同一张卡里。
+      return {
+        kind: 'delegation',
+        children: (outcome.children ?? []).map((child) => ({
+          scope: child.scope,
+          status: child.status === 'completed' ? 'completed' : 'failed',
+          toolCalls: child.tool_calls ?? 0,
+          modelCalls: child.model_calls ?? 0,
+          evidenceCount: child.evidence_count ?? 0,
+          error: child.error ?? null,
+        })),
+        report: outcome.text ?? '',
         truncated: outcome.truncated,
       }
     }
@@ -261,18 +284,24 @@ export function mapTool(tool: ToolUse): ToolRowView {
     status: TOOL_STATUS[tool.status],
     durationLabel: durationLabel(tool.elapsed_ms),
     // 归一化目标来自结构化结果；没有结果时保持 `null`，不从参数里猜它是哪个字段。
-    target: outcome?.target ?? null,
+    target: outcome?.target ?? (tool.tool_name === 'run_shell' ? tool.redacted_arguments?.command ?? null : null),
     // 展开态是**界面状态**，由容器注入；适配层给"折叠"（默认紧凑）。
     expanded: false,
     // 轨迹视图与对话行看的是同一次调用：这里把契约里有、卡片用不到的字段如实带上，
     // 免得轨迹再去别处拼一份可能对不上的数据。
     toolCallId: tool.tool_call_id,
+    // 运行中的行要"已跑多久"：给原始时间戳，页面按本地时钟算，而不是只拿一个排好版的时长。
+    startedAt: tool.started_at ?? undefined,
     parameters,
     resultPreview: preview,
     resultTruncated: tool.truncated === true,
     resultDigest: null,
     startedLabel: timeLabel(tool.started_at),
     finishedLabel: timeLabel(tool.finished_at),
+    webSources: (tool.web_sources ?? []).map(source => ({
+      title: source.title, url: source.url, kind: source.kind, retrievedAt: source.retrieved_at,
+      sourceId: source.source_id, cited: source.cited, publishedAt: source.published_at, provider: source.provider,
+    })),
     evidence:
       tool.evidence === null || tool.evidence === undefined
         ? null
@@ -282,7 +311,17 @@ export function mapTool(tool: ToolUse): ToolRowView {
           verified: tool.evidence.verified,
         },
     card:
-      outcome === null
+      outcome === null && tool.tool_name === 'run_shell'
+        ? {
+          kind: 'terminal',
+          command: tool.redacted_arguments?.command ?? '命令未记录',
+          cwd: tool.redacted_arguments?.cwd ?? '.',
+          exitCode: null,
+          signal: null,
+          output: preview,
+          collapsedLines: 0,
+        }
+        : outcome === null
         ? {
           kind: 'generic',
           headline: toolLabel(tool.tool_name),
@@ -385,16 +424,44 @@ function hasCompleteAssistant(snapshot: Snapshot, messageId: string): boolean {
  */
 export function mapMessages(snapshot: Snapshot, tail: StreamTail | null = null): MessageView[] {
   const mapped: MessageView[] = []
+  // 上下文压缩落在哪一轮（2026-10-16）：压缩发生在**这一轮的开头**（上下文到线才压，压完才开始干活），
+  // 所以它挂在那一轮的用户消息之后——与 Think、工具行同一条时间线。依据是那一轮的 `events`
+  // 里的 compaction 记录（落 Checkpoint，刷新可读），不是猜。
+  const compactionByUser = new Map<string, CompressionRowView>()
+  for (const turn of snapshot.turn_usages ?? []) {
+    const compaction = (turn.events ?? []).find((event) => event.kind === 'compaction')
+    if (compaction === undefined) continue
+    compactionByUser.set(turn.user_message_id, {
+      running: false,
+      foldedMessages: compaction.folded_messages ?? null,
+      tokensBefore: compaction.tokens_before ?? null,
+      tokensAfter: compaction.tokens_after ?? null,
+    })
+  }
   for (const message of snapshot.messages ?? []) {
     switch (message.kind) {
-      case 'user':
+      case 'user': {
         mapped.push({
           kind: 'user',
           id: message.message_id,
           text: message.text ?? '',
           at: timeLabel(message.created_at),
+          // 随消息发出的图片（2026-10-16）：契约只回**引用**（相对路径），这里换成可取的地址。
+          // 空表 = 没图（也兼容旧 Checkpoint：那时没有这组引用）。
+          attachments: (message.attachments ?? []).map((id) =>
+            attachmentUrl(snapshot.session_id, id),
+          ),
         })
+        const compression = compactionByUser.get(message.message_id)
+        if (compression !== undefined) {
+          mapped.push({
+            kind: 'compression',
+            id: `compression:${message.message_id}`,
+            compression,
+          })
+        }
         break
+      }
       case 'assistant':
         mapped.push({
           kind: 'assistant',
@@ -436,6 +503,21 @@ export function mapMessages(snapshot: Snapshot, tail: StreamTail | null = null):
       reasoning: tail.reasoning, reasoningTruncated: tail.reasoningTruncated,
       streaming: true, reasoningRunning: tail.channel === 'reasoning' })
   }
+  // 进程内**正在**压缩：它还没有 Checkpoint 记录（完成才写），所以只能放在流尾——"就在现在这一步"。
+  // 已完成的那个走上面按轮的插入，两条路径不会重复（`running` 只有实时状态有）。
+  const running = snapshot.context?.compression
+  if (running?.state === 'running') {
+    mapped.push({
+      kind: 'compression',
+      id: `compression:running:${running.operation_id}`,
+      compression: {
+        running: true,
+        foldedMessages: null,
+        tokensBefore: null,
+        tokensAfter: null,
+      },
+    })
+  }
   return mapped
 }
 
@@ -446,6 +528,7 @@ export function mapContext(snapshot: Snapshot): ContextMeterView {
     usedTokens: context?.used_tokens ?? null,
     windowTokens: context?.window_tokens ?? null,
     scope: context?.scope ?? 'unknown',
+    ...(context?.compression == null ? {} : { compression: context.compression.state }),
   }
 }
 
@@ -489,7 +572,39 @@ export function mapCall(call: TransportCall): ModelCallView {
     elapsedLabel: durationLabel(call.model_elapsed_ms),
     // 供应商/服务端没记录就是 `null`（页面写"未知"），不编一个指纹出来。
     schemaFingerprint: null,
+    // 逐次调用的缓存账目与推理 token、首字延迟（2026-10-16）：契约里就有，之前没搬。
+    cacheReadTokens: call.actual_cache_read_tokens ?? null,
+    cacheWriteTokens: call.actual_cache_write_tokens ?? null,
+    reasoningTokens: call.actual_reasoning_tokens ?? null,
+    firstTokenLabel: durationLabel(call.time_to_first_token_ms),
+    // 原始时刻（2026-10-16）：轨迹页的时间轴据此把一次调用切成"等首字"与"解码"两截。
+    startedAt: call.started_at ?? '',
+    firstTokenAt: call.first_token_at ?? '',
+    finishedAt: call.finished_at ?? '',
   }
+}
+
+/**
+ * 契约的事件 → 轨迹页的事件（2026-10-16；工具 / 审批 / 压缩）。
+ *
+ * 只搬运，不推断：时刻原样带（ISO 字符串，缺失就是空串），等待时长用契约给的 `wait_ms`
+ * ——不在这里自己减时间（两个时刻的时区/缺失处理是契约的事）。`label` 已经是脱敏过的一句。
+ */
+export function mapTraceEvents(
+  events: readonly components['schemas']['TraceEventView'][],
+): TraceEventView[] {
+  return events.map((event) => ({
+    kind: event.kind,
+    id: event.event_id,
+    at: event.at ?? '',
+    finishedAt: event.finished_at ?? '',
+    label: event.label,
+    status: event.status ?? null,
+    waitMs: event.wait_ms ?? null,
+    foldedMessages: event.folded_messages ?? null,
+    tokensBefore: event.tokens_before ?? null,
+    tokensAfter: event.tokens_after ?? null,
+  }))
 }
 
 /**
@@ -520,10 +635,12 @@ function mapUsage(
     // 而且只在那一支用 `estimated` 标记，估算值不会被当成供应商实际量。
     inputTokens: recorded ? (usage.actual_uncached_input_tokens ?? null) : (usage.estimated_prompt_tokens ?? null),
     outputTokens: output,
-    elapsedLabel: durationLabel(usage.turn_elapsed_ms),
+    // 整轮/模型/工具用**人读**格式（2026-10-22）：超过 60 秒写"1 分 24 秒"，不再是 "84.0s"。
+    // 首 token 保留毫秒/一位小数精度——它常常不到 1 秒，用"0 秒"会把信息抹掉。
+    elapsedLabel: elapsedLabel(usage.turn_elapsed_ms),
     // 耗时三项与首 token 直接来自契约，不做二次计算；缺失留空串 → 页面显示"未知"。
-    modelElapsedLabel: durationLabel(usage.model_elapsed_ms),
-    toolElapsedLabel: durationLabel(usage.tool_elapsed_ms),
+    modelElapsedLabel: elapsedLabel(usage.model_elapsed_ms),
+    toolElapsedLabel: elapsedLabel(usage.tool_elapsed_ms),
     firstTokenLabel: durationLabel(usage.time_to_first_token_ms),
     // 吞吐只在两个数都是**实际量**时才算：缺一个就不猜（§15.6 "未上报 ≠ 0"）。
     throughput:
@@ -531,6 +648,10 @@ function mapUsage(
         ? Math.round(output / (modelElapsedMs / 1000))
         : null,
     cacheReported: usage.cache_metrics_reported ?? false,
+    // 上下文占用与终态（2026-10-16）：轨迹页要按轮显示"这一轮把上下文用到了多少"。
+    contextUsedTokens: usage.context_used_tokens ?? null,
+    contextWindowTokens: usage.context_window_tokens ?? null,
+    finalState: usage.final_state ?? null,
     estimated: !recorded,
     calls: calls.map(mapCall),
   }
@@ -559,6 +680,8 @@ export function mapTurnStats(snapshot: Snapshot, messages: readonly MessageView[
       afterMessageId: end.id,
       stats: mapUsage(turn.usage, turn.model_calls ?? [], turn.usage.run_id === snapshot.usage?.run_id
         ? (snapshot.plan?.steps ?? []).length : 0),
+      // 本轮的事件流水（工具/审批/压缩，2026-10-16）：轨迹页拿它画顺序与时间轴。
+      events: mapTraceEvents(turn.events ?? []),
     }]
   })
 }

@@ -267,6 +267,50 @@ function TodoCard({ card }: { card: Extract<ToolCardView, { kind: 'todo' }> }) {
   )
 }
 
+/**
+ * 自主委派（§18.7）：每个子 Agent 一行，下面是它核对过的原文。
+ *
+ * 摆法照参照实现的任务面板（成员 / 状态 / 工具调用次数 / token），而不是把工具返回的 JSON
+ * 原样摊开——用户要判断的是"哪一路查到了、花了多少、哪一路没成"，这些必须是字段，不是一句话。
+ */
+function DelegationCard({ card }: { card: Extract<ToolCardView, { kind: 'delegation' }> }) {
+  const done = card.children.filter((child) => child.status === 'completed').length
+  const lines = card.report === '' ? [] : card.report.split('\n')
+  const lineWindow = useLineWindow(lines.length)
+  return (
+    <CardShell
+      label="委派只读调查"
+      title="委派只读调查"
+      meta={`${String(done)}/${String(card.children.length)} 个子任务已完成`}
+    >
+      <ul className={styles.delegations}>
+        {card.children.map((child, index) => (
+          <li key={`${String(index)}:${child.scope}`} className={styles.delegation}>
+            <span className={styles.delegationMark} aria-hidden="true">
+              {child.status === 'completed' ? <Check /> : null}
+            </span>
+            <span className={styles.delegationScope}>{child.scope}</span>
+            <span className={styles.delegationMeta}>
+              {child.status === 'completed'
+                // 只给用户能据以判断的三项（证据、工具次数、状态）。**不写"预留 token"**：那是切出来的
+                // 上限、每路几乎一样，摆在这里会被读成"这一路花了多少"（2026-10-13 裁定）。
+                ? `已完成 · 证据 ${String(child.evidenceCount)} · 工具 ${String(child.toolCalls)} 次`
+                : `未完成 · ${child.error ?? '原因未记录'}`}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {lines.length === 0
+        ? null
+        : <pre className={styles.terminal}>{windowOf(lines, lineWindow.shown).join('\n')}</pre>}
+      <MoreLines lineWindow={lineWindow} />
+      {card.truncated ? (
+        <p className={styles.note}>内容较长，页面里是服务端给的有界预览；完整原文仍在本地工具事件中。</p>
+      ) : null}
+    </CardShell>
+  )
+}
+
 function GenericCard({ card }: { card: Extract<ToolCardView, { kind: 'generic' }> }) {
   const lines = card.detail.split('\n')
   const lineWindow = useLineWindow(lines.length)
@@ -297,6 +341,8 @@ export function ToolCard({ card }: { card: ToolCardView }) {
       return <ResultCard card={card} />
     case 'todo':
       return <TodoCard card={card} />
+    case 'delegation':
+      return <DelegationCard card={card} />
     case 'generic':
       return <GenericCard card={card} />
     /* v8 ignore next 2 -- file mutations render through DiffCard in ToolRow */

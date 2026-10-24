@@ -32,13 +32,13 @@ describe('useSubmitMessage session boundary', () => {
     const { result, rerender } = renderHook(({ pattern }) => useSubmitMessage('s1', {
       workflow: { name: 'readonly_research', request: { pattern } },
     }), { initialProps: { pattern: 'docs/*.md' }, wrapper })
-    act(() => result.current.mutate('核对原文'))
+    act(() => result.current.mutate({ text: '核对原文' }))
     await waitFor(() => expect(result.current.isError).toBe(true))
-    act(() => result.current.mutate('核对原文'))
+    act(() => result.current.mutate({ text: '核对原文' }))
     await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(result.current.isError).toBe(true))
     rerender({ pattern: 'src/*.py' })
-    act(() => result.current.mutate('核对原文'))
+    act(() => result.current.mutate({ text: '核对原文' }))
     await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(3))
     expect(mock.submit.mock.calls.map((call) => call[2])).toEqual(['req-1', 'req-1', 'req-2'])
     expect(mock.submit.mock.calls[2]?.[3].workflow.request.pattern).toBe('src/*.py')
@@ -50,12 +50,12 @@ describe('useSubmitMessage session boundary', () => {
     const { result, rerender } = renderHook(({ id }) => useSubmitMessage(id), {
       initialProps: { id: 's1' }, wrapper,
     })
-    act(() => result.current.mutate('同样的文字'))
+    act(() => result.current.mutate({ text: '同样的文字' }))
     await waitFor(() => expect(result.current.isPending).toBe(true))
 
     rerender({ id: 's2' })
     expect(result.current.isPending).toBe(false)
-    act(() => result.current.mutate('同样的文字'))
+    act(() => result.current.mutate({ text: '同样的文字' }))
     await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(2))
     expect(mock.submit.mock.calls.map((call) => [call[0], call[2]])).toEqual([
       ['s1', 'req-1'], ['s2', 'req-2'],
@@ -67,9 +67,9 @@ describe('useSubmitMessage session boundary', () => {
     mock.submit.mockRejectedValueOnce(new Error('network interrupted'))
     mock.submit.mockResolvedValueOnce({ status: 'completed' })
     const { result } = renderHook(() => useSubmitMessage('s1'), { wrapper })
-    act(() => result.current.mutate('同一条'))
+    act(() => result.current.mutate({ text: '同一条' }))
     await waitFor(() => expect(result.current.isError).toBe(true))
-    act(() => result.current.mutate('同一条'))
+    act(() => result.current.mutate({ text: '同一条' }))
     await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(2))
     expect(mock.submit.mock.calls.map((call) => call[2])).toEqual(['req-1', 'req-1'])
   })
@@ -79,17 +79,17 @@ describe('useSubmitMessage session boundary', () => {
     const { result, rerender } = renderHook(({ checkpoint, branch }) => useSubmitMessage('s1', {
       parent_turn_id: 'u1', expected_branch_id: branch, expected_snapshot_id: checkpoint,
     }), { initialProps: { checkpoint: 'cp1', branch: 'main' }, wrapper })
-    act(() => result.current.mutate('历史追问'))
+    act(() => result.current.mutate({ text: '历史追问' }))
     await waitFor(() => expect(result.current.isError).toBe(true))
     rerender({ checkpoint: 'cp2', branch: 'main' })
-    act(() => result.current.mutate('历史追问'))
+    act(() => result.current.mutate({ text: '历史追问' }))
     await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(2))
     expect(mock.submit.mock.calls[1]?.slice(2)).toEqual(['req-1', {
       parent_turn_id: 'u1', expected_branch_id: 'main', expected_snapshot_id: 'cp1',
     }])
     await waitFor(() => expect(result.current.isPending).toBe(false))
     rerender({ checkpoint: 'cp3', branch: 'b1' })
-    act(() => result.current.mutate('历史追问'))
+    act(() => result.current.mutate({ text: '历史追问' }))
     await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(3))
     expect(mock.submit.mock.calls[2]?.[2]).toBe('req-2')
   })
@@ -99,10 +99,10 @@ describe('useSubmitMessage session boundary', () => {
     const { result, rerender } = renderHook(({ checkpoint }) => useSubmitMessage('s1', {
       expected_branch_id: 'main', expected_snapshot_id: checkpoint,
     }), { initialProps: { checkpoint: 'cp1' }, wrapper })
-    act(() => result.current.mutate('追问'))
+    act(() => result.current.mutate({ text: '追问' }))
     await waitFor(() => expect(result.current.isError).toBe(true))
     rerender({ checkpoint: 'cp2' })
-    act(() => result.current.mutate('追问'))
+    act(() => result.current.mutate({ text: '追问' }))
     await waitFor(() => expect(mock.submit).toHaveBeenCalledTimes(2))
     expect(mock.submit.mock.calls[1]?.slice(2)).toEqual(['req-2', {
       expected_branch_id: 'main', expected_snapshot_id: 'cp2',

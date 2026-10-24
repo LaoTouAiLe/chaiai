@@ -9,7 +9,7 @@
 
 打包形态（T40）只换**路径来源**，不换流程：``--config`` / ``--env`` 默认落在用户数据目录
 （``%LOCALAPPDATA%\\chaiai``），前端产物从只读资源目录（``sys._MEIPASS``）取。口径与理由见
-:mod:`local_agent.app_paths`；源码形态下这两项都是原来的相对路径，行为不变。
+:mod:`local_agent.app_paths`；源码形态的默认配置固定在源码项目目录，显式路径优先。
 
 服务就绪后默认用本机默认浏览器打开页面（:mod:`local_agent.browser_open`）：没参与开发的人双击
 exe 时唯一期望就是"页面自己出来"，而不是先复制一段地址。自动化场景用 ``--no-open-browser`` 关掉。
@@ -28,7 +28,7 @@ from pathlib import Path
 
 import uvicorn
 
-from local_agent import app_paths, browser_open, directory_picker
+from local_agent import app_paths, browser_open, desktop_window, directory_picker
 from local_agent import config as config_module
 from local_agent.api.app import create_app
 from local_agent.api.container import open_runtime
@@ -50,23 +50,36 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--config",
         default=str(app_paths.default_config_path()),
-        help="配置文件路径（源码默认 config.yaml；打包后默认用户数据目录里的 config.yaml）",
+        help="配置文件路径（源码默认项目目录的 config.yaml；打包后默认用户数据目录里的 config.yaml）",
     )
     parser.add_argument(
         "--env",
-        default=str(app_paths.default_env_path()),
+        default=None,
         help=".env 路径（只用来取 API Key；默认与 --config 同目录）",
     )
     parser.add_argument(
         "--no-open-browser",
         action="store_true",
-        help="启动后不用默认浏览器打开页面（自动化、只想看日志时用）",
+        help="启动后不显示任何界面（不开窗口、不开浏览器；自动化与只看日志时用）",
     )
+    parser.add_argument(
+        "--window",
+        action="store_true",
+        help="用桌面窗口显示页面（打包形态默认开；源码形态默认用浏览器，便于刷新调试）",
+    )
+    parser.add_argument("--diagnose", action="store_true", help="诊断配置与环境，不启动服务或读取密钥")
     args = parser.parse_args(argv)
     config_path = Path(args.config)
 
+    if args.diagnose:
+        from local_agent.diagnostics import print_diagnosis
+
+        return print_diagnosis(config_path)
+
     try:
-        config_module.load_dotenv_file(Path(args.env))
+        config_module.load_dotenv_file(
+            config_path.with_name(".env") if args.env is None else Path(args.env)
+        )
         # 没有 config.yaml 也照常起来（§15.9 的初始设置模式）：设置页可用，提交会给出可执行提示。
         app_config = config_module.load_config(config_path, allow_missing=True)
         # **启动不再要求模型 Key**（§15.9）：客户端在提交边界按连接构造，缺连接或缺 Key 时
@@ -109,7 +122,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"\n{frontend}{data_hint}{setup_hint}",
         flush=True,
     )
-    if not args.no_open_browser:
+    show_ui = not args.no_open_browser
+    # 窗口优先：打包形态（双击 exe 的人）默认开窗口，源码形态默认浏览器（开发时刷新、看 devtools 更方便）。
+    # 依赖缺失时 `window_available()` 返回 False，这里会自然落到下面浏览器那条路。
+    want_window = show_ui and (args.window or app_paths.is_frozen())
+    if want_window and desktop_window.window_available():
+        try:
+            return desktop_window.run(
+                create_app(runtime),
+                host=web.host,
+                port=web.port,
+                keepalive_seconds=web.keepalive_seconds,
+            )
+        finally:
+            # 窗口关掉才算"服务结束"：这里与下面浏览器分支的收尾口径一致。
+            runtime.close()
+
+    if show_ui:
         # 后台线程等端口真的可连再打开：抢在服务就绪之前打开会得到一张连接失败的页面。
         probe_host, page_url = browser_open.page_target(web.host, web.port)
         print(f"正在用本机默认浏览器打开：{page_url}", flush=True)

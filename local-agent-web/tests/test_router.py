@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 import threading
 import time
@@ -17,6 +18,7 @@ from typing import Any
 
 import pytest
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from pydantic import ValidationError
 
 from local_agent import scope
 from local_agent.application import errors as app_errors
@@ -43,11 +45,17 @@ from local_agent.llm.models import (
     ModelCapabilities,
     probe_capabilities,
 )
-from local_agent.llm.protocol import StructuredOutputError, call_structured
+from local_agent.llm.protocol import (
+    StructuredOutputError,
+    call_structured,
+    describe_parse_failure,
+    extract_json,
+)
 from local_agent.memory import long_term, medium_term
 from local_agent.memory.medium_term import MediumTermHit
 from local_agent.memory.schemas import MemoryReference
 from local_agent.reflection import reflector
+from local_agent.workflow_contracts import ReadonlyResearchRequest
 
 ModelFactory = Callable[..., object]
 
@@ -357,6 +365,7 @@ def test_graph_nodes_match_plan() -> None:
         "safety_gate_node",
         "approval_interrupt_node",
         "tool_execution_node",
+        "tool_feedback_node",
         "reflection_node",
         "completion_router",
         "memory_write_node",
@@ -395,7 +404,8 @@ def test_fixed_chat_session_reads_a_file_without_write_tools(
     )
 
     assert result["mode"] == "chat"
-    assert model.bound_tools == ["list_dir", "read_file"]
+    # 2026-10-14：闲聊也绑联网工具（它只查资料、不改本机），写类工具照旧一个都没有。
+    assert model.bound_tools == ["list_dir", "read_file", "web_search", "web_fetch"]
     assert [event.tool_name for event in result["tool_events"]] == ["read_file"]
     assert result["tool_results"][0]["status"] == "ok"
     assert result["final_response"] == "文件写着：已核实的内容"
@@ -423,7 +433,7 @@ def test_fixed_chat_session_rejects_a_hallucinated_write_call(
 def test_tool_call_is_executed_and_verified(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
-    """完整工具闭环：模型提出调用 → 安全门放行 → 执行 → 机械校验 → 模型据此回答。"""
+    """当前闭环保留真实读取结果，由主模型声明完成，不生成旧机械证据。"""
     (tmp_path / "note.txt").write_text("文件内容甲", encoding="utf-8")
     model = model_factory(
         decision="tool",
@@ -436,16 +446,15 @@ def test_tool_call_is_executed_and_verified(
     )
 
     assert result["mode"] == "tool"
-    # T17：反思判完成后走 finish，最终回答由反射节点那次不绑定工具的合成调用给出，
-    # 不再回到 planner 再取一次决策（因此只有 1 轮工具循环）
     assert result["loop_count"] == 2
-    assert [event.status for event in result["tool_events"]] == ["ok"]
+    assert [(event.tool_name, event.status) for event in result["tool_events"]] == [
+        ("read_file", "ok"), ("task_control", "ok"),
+    ]
     assert result["tool_results"][0]["status"] == "ok"
     assert "文件内容甲" in result["tool_results"][0]["output_preview"]
-    assert result["reflection_result"].result_trust == "verified"
-    # T17 起完成度由 LLM 反思判定，但以机械证据为准：这里证据是 verified，允许判完成
+    assert result["reflection_result"].result_trust == "uncertain"
     assert result["reflection_result"].goal_achieved is True
-    assert [evidence.verified for evidence in result["final_evidence"]] == [True]
+    assert result["final_evidence"] == []
     # 工具结果确实回填给了模型
     assert any("文件内容甲" in prompt for prompt in model.seen_prompts)
     assert any(isinstance(message, ToolMessage) for message in result["messages"])
@@ -500,13 +509,81 @@ def test_denied_tool_is_reported_back_to_model(
     )
 
     assert result["tool_results"][0]["status"] == "denied"
-    assert result["reflection_result"].result_trust == "failed"
-    assert result["final_evidence"][0].verified is False
+    # 被拒的调用**没有执行**，因此不再算"证据失败"（2026-10-14）：信任度落到 `uncertain`。
+    # 这条用例的意图没变——"反思不得声称完成"仍然成立（`uncertain != verified`），
+    # 区别只在于页面不再为一次"没执行的调用"挂"机械校验未通过"的红卡。
+    assert result["reflection_result"].result_trust != "verified"
+    # 没有执行的调用**不产生证据引用**（2026-10-14）：以前的写法是"一条 verified=False 的证据"，
+    # 那会把"未执行"记成"执行了但不可信"。拒绝的事实仍在下一条（`error_events`）里如实记录。
+    assert result["final_evidence"] == []
     denial_messages = [
         message.text for message in result["messages"] if isinstance(message, ToolMessage)
     ]
     assert any("已拒绝执行" in text for text in denial_messages)
     assert result["final_response"] == "好的，我无法执行该操作"
+
+
+@pytest.mark.parametrize("failure", ["http", "policy", "loop_limit"])
+def test_web_failure_or_security_denial_reaches_the_model_and_produces_an_answer(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, monkeypatch, failure: str,
+) -> None:
+    from local_agent.tools import web_tools
+
+    config = app_config.model_copy(deep=True)
+    if failure == "loop_limit":
+        config.agent.max_tool_loops = 1
+    reply = "本次没有取得可用网页内容，无法核实最新信息；可以根据已有资料说明。"
+    is_policy = failure == "policy"
+    model = model_factory(decision="tool", reply=reply, task_control_action="need_input", tool_calls=[{
+        "name": "web_fetch" if is_policy else "web_search",
+        "args": {"url": "http://127.0.0.1/private"} if is_policy else {"query": "FastMCP"},
+        "id": "web-failure",
+    }])
+
+    def fail(*_args, **_kwargs):
+        raise web_tools.WebAccessError("搜索端点返回 HTTP 403")
+
+    monkeypatch.setattr(web_tools, "_default_transport", fail)
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "请联网核实最新信息"}, context=_context_with(tmp_path, model, config),
+    )
+    assert result["tool_results"][0]["status"] == ("denied" if is_policy else "error")
+    marker = "拒绝访问本机" if is_policy else "HTTP 403"
+    assert any(marker in prompt for prompt in model.seen_prompts[1:])
+    if failure == "loop_limit":
+        assert result["final_response"] == f"{routers.LOOP_LIMIT_REPLY}\n\n{reply}"
+        assert result["task_status"] == "failed"
+        assert nodes.LOOP_LIMIT_FEEDBACK_INSTRUCTION in model.seen_prompts[-1]
+    else:
+        assert result["final_response"] == reply
+        assert result["task_status"] == "blocked"
+
+
+def test_exhausted_tool_retries_end_with_a_model_explanation(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig, monkeypatch,
+) -> None:
+    from local_agent.tools import web_tools
+
+    config = app_config.model_copy(deep=True)
+    config.agent.max_retries_per_step = 0
+    reply = "搜索服务暂时拒绝访问，没有取得结果。"
+    model = model_factory(decision="tool", reply=reply, task_control_action="need_input", tool_calls=[{
+        "name": "web_search", "args": {"query": "FastMCP"}, "id": "failed-search",
+    }])
+
+    def fail(*_args, **_kwargs):
+        raise web_tools.WebAccessError("搜索服务 HTTP 403")
+
+    monkeypatch.setattr(web_tools, "_default_transport", fail)
+    result = builder.build_chat_graph().invoke(
+        {"user_input": "搜索 FastMCP"}, context=_context_with(tmp_path, model, config),
+    )
+    assert [(item["tool_name"], item["status"]) for item in result["tool_results"]] == [
+        ("web_search", "error"), ("task_control", "ok"),
+    ]
+    assert result["task_status"] == "blocked"
+    assert result["final_response"] == reply
+    assert any("HTTP 403" in prompt for prompt in model.seen_prompts[1:])
 
 
 def test_a_policy_denied_read_is_reported_as_blocked_not_failed(
@@ -549,7 +626,7 @@ def test_loop_limit_blocks_continue_on_the_last_round(
     config = _config_with_agent(app_config, max_tool_loops=1)
     model = model_factory(
         decision="tool",
-        reply="不该走到这里",
+        reply="已列出目录内容，后续操作尚未执行。",
         tool_calls=[{"name": "list_dir", "args": {"path": "."}, "id": "call_1"}],
         reflection={"goal_achieved": False, "next_action": "continue"},
     )
@@ -560,7 +637,9 @@ def test_loop_limit_blocks_continue_on_the_last_round(
 
     assert result["loop_count"] == 1
     assert result["task_status"] == "failed"
-    assert result["final_response"] == routers.LOOP_LIMIT_REPLY
+    assert result["final_response"] == (
+        f"{routers.LOOP_LIMIT_REPLY}\n\n已列出目录内容，后续操作尚未执行。"
+    )
 
 
 def test_loop_limit_does_not_block_finish_on_the_last_round(
@@ -678,10 +757,16 @@ def test_final_synthesis_stays_within_budget_with_large_tool_output(
     # 这条路径（提示词变长会挤掉它）；连固定部分都放不下时改走确定性摘要，那条路径另有用例。
     # 方案 1 加长稳定前缀后，2K 窗口连固定部分都放不下（必定 PromptBudgetExceeded），
     # 因此把窗口抬到"前缀 + 有界证据 + 指令"够放、但整段工具输出仍放不下的区间。
+    # 2026-10-14：运行环境段落（时间 / 工作区 / 工作区外档位 / 联网状态）进了快照，再加 512 保住同一
+    # 区间；整段 8000 字工具输出仍远放不下，下面两条断言继续守着"走有界证据"这条路径。
+    # 2026-10-16：「输出要求与证据」补“单点事实只给事实本身”与“不抄命令原文/退出码”两处，
+    # 固定前缀又长了一截，同样抬 512 保住同一区间。
+    # 2026-10-16（当天第二处）：新增「命令行的用法」段落（有 shell 才出现），前缀再长约 300 字，
+    # 再抬 512——否则固定部分就把窗口吃满，这条用例会从"走有界证据"掉到确定性摘要那条路（实测）。
     config = app_config.model_copy(
         update={
             "llm": app_config.llm.model_copy(
-                update={"context_window_tokens": 6144, "max_tokens": 512}
+                update={"context_window_tokens": 7680, "max_tokens": 512}
             )
         }
     )
@@ -1395,6 +1480,7 @@ def _task_fragment_model(model_factory: ModelFactory) -> Any:
 
 
 def test_medium_write_failure_does_not_block_long_term_write(
+    legacy_loop,
     tmp_path: Path,
     model_factory: ModelFactory,
     app_config: AppConfig,
@@ -1423,6 +1509,7 @@ def test_medium_write_failure_does_not_block_long_term_write(
 
 
 def test_long_store_failure_does_not_block_medium_write(
+    legacy_loop,
     tmp_path: Path,
     model_factory: ModelFactory,
     app_config: AppConfig,
@@ -1454,6 +1541,7 @@ def test_long_store_failure_does_not_block_medium_write(
 
 
 def test_partial_write_is_not_marked_complete(
+    legacy_loop,
     tmp_path: Path,
     model_factory: ModelFactory,
     app_config: AppConfig,
@@ -1827,7 +1915,7 @@ def test_answer_without_tool_calls_has_no_evidence(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
     """模型没有调用工具时不得凭空产生工具证据（哪怕它自称读过文件）。"""
-    model = model_factory(decision="tool", reply="我已经读过你的文件了")
+    model = model_factory(decision="tool", reply="我已经读过你的文件了", explicit_task_control=False)
 
     result = builder.build_chat_graph().invoke(
         {"user_input": "读取 README"}, context=_context_with(tmp_path, model, app_config)
@@ -1843,7 +1931,7 @@ def test_answer_without_tool_calls_has_no_evidence(
 def test_edit_tool_loop_records_diff_evidence(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
-    """编辑闭环：改文件 → 反思校验 Hash 变化与 diff → 产出 diff 类证据。"""
+    """当前编辑闭环保留实际 diff 和 Hash，结束由主模型声明。"""
     target = tmp_path / "note.py"
     target.write_text("value = 1\n", encoding="utf-8", newline="")
     sha = hashlib.sha256(target.read_bytes()).hexdigest()
@@ -1870,17 +1958,22 @@ def test_edit_tool_loop_records_diff_evidence(
 
     assert target.read_text(encoding="utf-8") == "value = 2\n"
     assert result["tool_results"][0]["status"] == "ok"
-    assert result["reflection_result"].result_trust == "verified"
-    evidence = result["final_evidence"][0]
-    assert evidence.evidence_type == "diff"
-    assert evidence.verified is True
+    payload = json.loads(next(message.content for message in result["messages"]
+                              if isinstance(message, ToolMessage) and message.name == "edit_file"))
+    assert "-value = 1" in payload["diff"]
+    assert "+value = 2" in payload["diff"]
+    assert payload["old_sha256"] == sha
+    assert payload["new_sha256"] == hashlib.sha256(target.read_bytes()).hexdigest()
+    assert result["final_evidence"] == []
+    assert result["task_status"] == "completed"
     assert result["final_response"] == "已把 value 改为 2"
 
 
 def test_delete_request_pauses_for_approval(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
-    """删除属于强制审批动作：图暂停等待确认，且不产生任何删除（架构 §5.3、§6.5）。"""
+    """显式开启删除审批时，暂停前不产生删除。"""
+    app_config.security.require_approval.delete_file = True
     target = tmp_path / "note.txt"
     target.write_text("保留我", encoding="utf-8", newline="")
     model = model_factory(
@@ -1906,7 +1999,13 @@ def test_delete_request_pauses_for_approval(
 def test_large_edit_pauses_for_approval(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
-    """大范围修改需要人工审批：文件保持不变，图停在审批节点。"""
+    """大范围修改需要人工审批：文件保持不变，图停在审批节点。
+
+    阈值调成 0 来强制进入这条路：判定依据是"本轮改过几个**文件**"（2026-10-15 起），
+    与单次改动多大无关——所以这里靠配置把额度清零，而不是靠"写 500 行"。
+    """
+    app_config.security.require_approval.large_batch_edit = True
+    app_config.security.large_edit.max_files_without_approval = 0
     target = tmp_path / "note.py"
     target.write_text("value = 1\n", encoding="utf-8", newline="")
     sha = hashlib.sha256(target.read_bytes()).hexdigest()
@@ -1969,6 +2068,26 @@ def test_system_prompt_contains_mode_workspace_and_rules(
     assert tmp_path.as_posix() in prompt.system_prompt
     assert "先调用 list_dir 或 read_file 取证" in prompt.system_prompt
     assert prompt.estimated_tokens > 0
+
+
+def test_output_rules_do_not_let_the_model_recite_raw_tool_invocations(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
+) -> None:
+    """2026-10-16：输出要求里"只写结果意味着什么、不抄命令原文/退出码"必须常驻。
+
+    行为本身（模型有没有照做）只能靠真实模型抽查——替身模型的回答是脚本写死的；这条守的是**规则在不在**，
+    以及收尾指令里不再另写一份与它冲突的许可（原来的"或具体命令与其输出"）。
+    """
+    context = _context(tmp_path, model_factory, app_config)
+
+    prompt = prompt_context.build_stable_system_prompt(mode="tool", context=context).system_prompt
+
+    assert "单点事实（时间、版本号、一行输出）也只给事实本身" in prompt
+    assert "命令原文、退出码、工具名与参数不抄进回答" in prompt
+    # 例外那半句与"别误伤改文件叙述"那半句都要在：缺了前者，工具被拒时模型说不清被拒的动作。
+    assert "工具被拒时例外，要说清被拒的动作" in prompt
+    assert "文件改动仍要说清改了哪个文件、范围与结果是否已核对" in prompt
+    assert "具体命令与其输出" not in nodes.FINAL_ANSWER_INSTRUCTION
 
 
 def test_probe_detects_capabilities(model_factory: ModelFactory) -> None:
@@ -2075,6 +2194,26 @@ def test_structured_output_error_does_not_leak_raw_text(model_factory: ModelFact
     message = str(excinfo.value)
     assert "RouteDecision" in message
     assert "这不是 JSON" not in message
+
+
+def test_parse_failure_reason_keeps_field_and_kind_without_raw_text() -> None:
+    """解析失败的原因必须能自查（字段 + 失败类型），但**不回显模型原文**（2026-10-14）。
+
+    线上故障里委派子任务的计划解析失败被折叠成 ``ValidationError`` 这个类型名，于是整条委派只有
+    一句"子执行异常（ValidationError）"、完全无法定位；而直接把 ``str(exc)`` 搬出去又会带上
+    pydantic 的 ``input_value``（就是模型原始输出）。
+    """
+    with pytest.raises(ValidationError) as excinfo:
+        ReadonlyResearchRequest.model_validate({"pattern": "..", "note": "模型原文在这里"})
+
+    reason = describe_parse_failure(excinfo.value)
+    assert "pattern" in reason
+    assert "模型原文在这里" not in reason
+
+    # 非校验类失败（输出里根本没有 JSON 对象）也要有可读原因，同样不回显原文。
+    with pytest.raises(ValueError) as value_error:
+        extract_json("这是一段没有 JSON 的模型输出")
+    assert describe_parse_failure(value_error.value)
 
 
 def test_system_prompt_without_agents_file_says_so(
@@ -2470,6 +2609,7 @@ def test_historical_completed_steps_do_not_leak_into_a_new_task() -> None:
 
 
 def test_unconfirmed_side_effect_asks_the_user_to_verify(
+    legacy_loop,
     tmp_path: Path,
     model_factory: ModelFactory,
     app_config: AppConfig,

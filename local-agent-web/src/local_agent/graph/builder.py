@@ -20,6 +20,7 @@ from uuid import uuid4
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -36,13 +37,6 @@ from local_agent.graph.delegated_workflow import (
     make_delegation_runner,
 )
 from local_agent.graph.edges import ChatStateGraph, add_minimal_chat_edges
-from local_agent.media import (
-    MAX_IMAGE_EDGE,
-    MAX_UPLOAD_IMAGE_BYTES,
-    detect_image_media_type,
-    image_dimensions,
-)
-from local_agent.message_flags import DEFAULT_IMAGE_CONTEXT_TURNS
 from local_agent.graph.nodes import (
     AGENT_DECISION_NODE,
     APPROVAL_INTERRUPT_NODE,
@@ -102,8 +96,19 @@ from local_agent.llm.usage_recording import (
     use_model_purpose,
     use_model_recorder,
 )
+from local_agent.mcp.binding import McpBinding, McpManagerLike
+from local_agent.mcp.catalog import ToolEntry, ToolExposure
+from local_agent.media import (
+    MAX_IMAGE_EDGE,
+    MAX_UPLOAD_IMAGE_BYTES,
+    detect_image_media_type,
+    image_dimensions,
+)
+from local_agent.message_flags import DEFAULT_IMAGE_CONTEXT_TURNS
+from local_agent.performance import timed_node
 from local_agent.security.path_guard import ExternalPathPolicy
 from local_agent.security.policy import SecurityPolicy
+from local_agent.tools.mcp_tools import build_mcp_tools
 from local_agent.tools.tool_registry import ToolRegistry
 from local_agent.workflow_contracts import CODE_CHANGE, DELEGATED_RESEARCH, READONLY_RESEARCH
 
@@ -309,7 +314,9 @@ def _usage_aware(name: str, node: Callable[..., Any]) -> Callable[..., Any]:
         return result
 
     wrapped.__name__ = getattr(node, "__name__", name)
-    return wrapped
+    context_nodes = {PREPARE_CONTEXT, LOAD_AGENTS, RECALL_MEMORY, RETRIEVE_CODE_NODE, COMPRESSION_NODE}
+    stage = "context_build" if name in context_nodes else "tool" if name == TOOL_EXECUTION_NODE else "node"
+    return timed_node(wrapped, stage=stage, operation=name)
 
 
 def _build_turn_record(state: Mapping[str, Any], recorder: ModelCallRecorder) -> TurnRecord:
@@ -427,6 +434,19 @@ def _make_image_reader(
     return read
 
 
+def _mcp_search_provider(
+    manager: McpManagerLike, registry_holder: list[ToolRegistry],
+) -> Callable[[], Sequence[ToolEntry]]:
+    """检索时同步当前目录，后台新连上的工具也能在同次任务内调用。"""
+    def _provider() -> Sequence[ToolEntry]:
+        entries = tuple(row.entry for row in manager.snapshot().rows
+                        if row.exposure != ToolExposure.HIDDEN)
+        if registry_holder:
+            registry_holder[0].replace_mcp_tools(build_mcp_tools(entries, manager))
+        return entries
+    return _provider
+
+
 def build_runtime_context(
     *,
     app_config: RunConfig,
@@ -463,6 +483,9 @@ def build_runtime_context(
     #: 出站请求保留图片的最近轮数（含当前轮）。设置里的「图片上下文轮数」落到这里。
     image_context_turns: int = DEFAULT_IMAGE_CONTEXT_TURNS,
     session_scope: str | None = None,
+    #: MCP 绑定（2026-10-20；契约 §6.13）。``None`` 表示这次运行不碰 MCP——与"开关关着"等价，
+    #: 但**不加载** ``mcp`` SDK：委托子图与多数测试走的就是这条路径。
+    mcp: McpBinding | None = None,
 ) -> RuntimeContext:
     """构造单次调用的运行上下文（架构 §4.1）。
 
@@ -522,6 +545,26 @@ def build_runtime_context(
     def _delegate(tasks: Sequence[Mapping[str, str]], concurrency: int) -> str:
         return make_delegation_runner(holder[0])(tasks, concurrency)
 
+    # MCP 外部工具（2026-10-20；契约 §6.13）：只在本轮 ``mcp`` 能力开着、且调用方没注入注册表时装配。
+    # 目录取连接管理器的**当轮快照**——装配本身不发起连接（未连上的 server 只是暂时没有工具）。
+    mcp_registry_holder: list[ToolRegistry] = []
+    mcp_tools: list[BaseTool] = []
+    mcp_direct: list[str] = []
+    mcp_search_provider: Callable[[], Sequence[ToolEntry]] | None = None
+    if mcp is not None and tool_registry is None and switches.get("mcp", False):
+        snapshot = mcp.manager.snapshot()
+        entries = tuple(row.entry for row in snapshot.rows if row.exposure != ToolExposure.HIDDEN)
+        mcp_tools = build_mcp_tools(entries, mcp.manager)
+        known = {entry.canonical_name for entry in entries}
+        mcp_direct = [name for name in snapshot.direct if name in known]
+        # 本会话已经检索到过的工具继续可用：它们可能超出当轮 Direct 配额，所以单独补进来。
+        # 这会让"搜索过工具之后"的系统前缀与本会话早先的轮次不同——**有意的**，
+        # 与 Codex 的 deferred→visible 同一个代价。
+        for name in mcp.discovered:
+            if name in known and name not in mcp_direct:
+                mcp_direct.append(name)
+        mcp_search_provider = _mcp_search_provider(mcp.manager, mcp_registry_holder)
+
     registry = tool_registry or ToolRegistry.build(
         policy,
         web_access=app_config.web_access,
@@ -536,7 +579,12 @@ def build_runtime_context(
         vision_available=vision_available,
         # 注入的注册表（测试/脚本）自带它自己的委派入口或明确的失败，这里不覆盖。
         delegate=_delegate,
+        mcp_tools=mcp_tools,
+        mcp_direct=mcp_direct,
+        mcp_search_provider=mcp_search_provider,
+        mcp_search_limit=app_config.mcp.max_search_results,
     )
+    mcp_registry_holder.append(registry)
     capabilities = model_capabilities or probe_capabilities(
         model_adapter, provider_name=provider_name or app_config.llm.model
     )
@@ -552,6 +600,9 @@ def build_runtime_context(
         agent_capabilities=enabled_capabilities(
             switches, git_available=registry.git_available, vision_available=vision_available,
             browser_available=registry.browser_available,
+            # 这次运行没接 MCP 基础设施（CLI、委派子图、多数测试）时，``mcp`` 不进能力集：
+            # 免得模型拿到一个搜不到任何东西的检索工具。
+            mcp_available=mcp is not None,
         ),
         # 用户禁用的技能：随上下文带到执行侧，清单与 `skill_load` 因此看到同一份事实。
         disabled_skills=frozenset(str(name) for name in disabled_skills),

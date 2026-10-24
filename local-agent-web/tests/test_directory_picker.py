@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import sys
 from types import SimpleNamespace
 from typing import Any
@@ -16,13 +15,23 @@ import pytest
 
 from local_agent import directory_picker
 from local_agent.api import __main__ as api_main
+from local_agent.security.process_guard import ProcessOutcome
 
 
-def _completed(
-    stdout: str = "", *, returncode: int = 0, stderr: str = ""
-) -> subprocess.CompletedProcess[str]:
-    """伪造子进程结果：`subprocess.run` 的返回值形状。"""
-    return subprocess.CompletedProcess(args=[], returncode=returncode, stdout=stdout, stderr=stderr)
+def _outcome(
+    stdout: str = "", *, exit_code: int = 0, stderr: str = "", timed_out: bool = False
+) -> ProcessOutcome:
+    """伪造统一执行出口的返回值（``run_process`` 的 ``ProcessOutcome`` 形状）。
+
+    v0.9 T76（§20.1）：目录选择器不再直连 ``subprocess.run``，而是走**统一执行出口**；
+    用例因此伪造出口本身——于是"它到底有没有走出口"这件事也被钉住了。
+    """
+    return ProcessOutcome(
+        exit_code=exit_code,
+        stdout=stdout.encode("utf-8"),
+        stderr=stderr.encode("utf-8"),
+        timed_out=timed_out,
+    )
 
 
 # ---- 子进程协议 -------------------------------------------------------------
@@ -126,11 +135,11 @@ def test_pick_directory_uses_the_module_entry_in_source_mode(monkeypatch: pytest
     seen: list[list[str]] = []
     monkeypatch.setattr(directory_picker.sys, "frozen", False, raising=False)
 
-    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        seen.append(command)
-        return _completed("D:\\projects\\demo\n")
+    def fake_run(command: list[str], **_kwargs: Any) -> ProcessOutcome:
+        seen.append(list(command))
+        return _outcome("D:\\projects\\demo\n")
 
-    monkeypatch.setattr(directory_picker.subprocess, "run", fake_run)
+    monkeypatch.setattr(directory_picker, "run_process", fake_run)
 
     assert directory_picker.pick_directory() == r"D:\projects\demo"
     assert seen == [[sys.executable, "-m", "local_agent.api", directory_picker.PICK_DIRECTORY_FLAG]]
@@ -143,27 +152,49 @@ def test_pick_directory_spawns_the_frozen_exe_with_the_flag(
     seen: list[list[str]] = []
     monkeypatch.setattr(directory_picker.sys, "frozen", True, raising=False)
 
-    def fake_run(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        seen.append(command)
-        return _completed("D:\\projects\\demo\n")
+    def fake_run(command: list[str], **_kwargs: Any) -> ProcessOutcome:
+        seen.append(list(command))
+        return _outcome("D:\\projects\\demo\n")
 
-    monkeypatch.setattr(directory_picker.subprocess, "run", fake_run)
+    monkeypatch.setattr(directory_picker, "run_process", fake_run)
 
     assert directory_picker.pick_directory() == r"D:\projects\demo"
     assert seen == [[sys.executable, directory_picker.PICK_DIRECTORY_FLAG]]
 
 
+def test_pick_directory_goes_through_the_shared_execution_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """选择器走**统一执行出口**（v0.9 T76，§20.1），而且两条选项都对。
+
+    ① 保留 ``CREATE_NO_WINDOW``：否则开发模式下每次选目录都会弹出一个控制台黑窗；
+    ② **不传本轮登记表**：它没有在跑的任务、也没有取消令牌，用一次性登记表——
+    "取消不适用于它"这件事必须写在代码里，而不是靠读者猜。
+    """
+    calls: list[dict[str, Any]] = []
+
+    def fake_run(_command: list[str], **kwargs: Any) -> ProcessOutcome:
+        calls.append(kwargs)
+        return _outcome("D:\\projects\\demo\n")
+
+    monkeypatch.setattr(directory_picker, "run_process", fake_run)
+
+    assert directory_picker.pick_directory() == r"D:\projects\demo"
+    assert calls[0]["creationflags"] == directory_picker._NO_WINDOW
+    assert calls[0].get("registry") is None
+
+
 def test_pick_directory_maps_a_blank_line_to_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(directory_picker.subprocess, "run", lambda *a, **k: _completed("\n"))
+    monkeypatch.setattr(directory_picker, "run_process", lambda *a, **k: _outcome("\n"))
 
     assert directory_picker.pick_directory() is None
 
 
 def test_pick_directory_raises_on_a_failed_child(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        directory_picker.subprocess,
-        "run",
-        lambda *a, **k: _completed("", returncode=1, stderr="目录选择器不可用：RuntimeError\n"),
+        directory_picker,
+        "run_process",
+        lambda *a, **k: _outcome("", exit_code=1, stderr="目录选择器不可用：RuntimeError\n"),
     )
 
     with pytest.raises(directory_picker.DirectoryPickerError, match="RuntimeError"):
@@ -171,12 +202,13 @@ def test_pick_directory_raises_on_a_failed_child(monkeypatch: pytest.MonkeyPatch
 
 
 def test_pick_directory_raises_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """超时兜底：对话框可以无限期开着，所以请求侧不设超时，但子进程侧必须有一个。"""
+    """超时兜底：对话框可以无限期开着，所以请求侧不设超时，但子进程侧必须有一个。
 
-    def timeout(*_args: Any, **_kwargs: Any) -> Any:
-        raise subprocess.TimeoutExpired(cmd=[], timeout=1.0)
-
-    monkeypatch.setattr(directory_picker.subprocess, "run", timeout)
+    超时由**出口**报告（``timed_out``），出口自己按进程树终止后才会返回——用例只钉"如实上报"。
+    """
+    monkeypatch.setattr(
+        directory_picker, "run_process", lambda *a, **k: _outcome(timed_out=True)
+    )
 
     with pytest.raises(directory_picker.DirectoryPickerError, match="超时"):
         directory_picker.pick_directory()
@@ -184,7 +216,7 @@ def test_pick_directory_raises_on_timeout(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_pick_directory_raises_on_unparsable_output(monkeypatch: pytest.MonkeyPatch) -> None:
     """子进程一个字都没输出：宁可报错，也不把空结果当成"用户取消"。"""
-    monkeypatch.setattr(directory_picker.subprocess, "run", lambda *a, **k: _completed(""))
+    monkeypatch.setattr(directory_picker, "run_process", lambda *a, **k: _outcome(""))
 
     with pytest.raises(directory_picker.DirectoryPickerError, match="没有返回"):
         directory_picker.pick_directory()
@@ -196,7 +228,7 @@ def test_pick_directory_survives_a_spawn_failure(monkeypatch: pytest.MonkeyPatch
     def boom(*_args: Any, **_kwargs: Any) -> Any:
         raise OSError("cannot spawn")
 
-    monkeypatch.setattr(directory_picker.subprocess, "run", boom)
+    monkeypatch.setattr(directory_picker, "run_process", boom)
 
     with pytest.raises(directory_picker.DirectoryPickerError, match="无法启动"):
         directory_picker.pick_directory()

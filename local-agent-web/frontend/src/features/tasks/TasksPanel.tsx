@@ -1,4 +1,4 @@
-// 「任务中心」面板（v0.6 T62；契约 §17.6）。
+﻿// 「任务中心」面板（v0.6 T62；契约 §17.6）。
 //
 // 这个面板要回答三件事：**有哪些任务**、**它们到哪一步了**、**现在能做什么**。三条硬规矩：
 //   1. **只读**——页面不是授权真源；这里没有"改任务状态"的入口，状态只由提交 / 取消 / 重启收口产生；
@@ -27,6 +27,8 @@ interface TasksPanelProps {
   errorText?: string | null
   /** 打开某个会话（恢复入口：三类判定的文案都指向"去会话里处理"）。 */
   onOpenSession: (sessionId: string) => void
+  /** 人工核对结案（§17.1 唯一例外）：不传就不渲染结案按钮（原型与测试保持纯展示）。 */
+  onCloseReview?: (taskId: string, outcome: 'completed' | 'cancelled') => void
   /** 关闭面板；不传就是纯展示（测试与原型用）。 */
   onClose?: () => void
 }
@@ -55,7 +57,7 @@ const ROW_NOTE: Partial<Record<TaskState, string>> = {
   needs_review: '不自动重跑：核对后重新提交就是新任务。',
 }
 
-export function TasksPanel({ view, errorText = null, onOpenSession, onClose }: TasksPanelProps) {
+export function TasksPanel({ view, errorText = null, onOpenSession, onClose, onCloseReview }: TasksPanelProps) {
   const [filter, setFilter] = useState<TaskFilter>('all')
   const [now, setNow] = useState(Date.now)
   const counts = view === null ? null : taskFilterCounts(view)
@@ -149,6 +151,20 @@ export function TasksPanel({ view, errorText = null, onOpenSession, onClose }: T
                     >
                       {OPEN_LABEL[row.state]}
                     </button>
+                    {/* 人工结案（§17.1 唯一例外，2026-10-23）：`needs_review` 是终态，
+                        以前没有任何出口，任务会把会话永远钉在侧栏的「需人工核对」上。 */}
+                    {row.state !== 'needs_review' || onCloseReview === undefined ? null : (
+                      <>
+                        <button type="button" className={styles.open}
+                          onClick={() => onCloseReview(row.taskId, 'completed')}>
+                          我核对过，已完成
+                        </button>
+                        <button type="button" className={styles.open}
+                          onClick={() => onCloseReview(row.taskId, 'cancelled')}>
+                          我核对过，未完成
+                        </button>
+                      </>
+                    )}
                   </li>
                 ))}
               </ul>

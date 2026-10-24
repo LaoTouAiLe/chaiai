@@ -399,6 +399,48 @@ class _FakeContext:
     workspace_root = Path("/ws")
     current_cwd = Path("/ws")
     app_config = _FakeAppConfig()
+    #: 用户在设置里禁用的技能（2026-10-16）：与 `RuntimeContext` 同名字段对齐，
+    #: 否则"技能清单要不要过滤"这条语义在快照用例里根本走不到。
+    disabled_skills: frozenset[str] = frozenset()
+
+
+def test_skills_listing_hides_the_skills_the_user_disabled(tmp_path: Path) -> None:
+    """用户在「设置 → 技能」里禁用的技能不进清单（2026-10-16；§16.5）。
+
+    与 `skill_load` 共用同一个判定点（`skills_loader.apply_skill_overrides`）：只过滤清单、正文还能取，
+    等于用户以为关掉了其实没关——那一半在 `test_skill_tools.py` 里有对应用例，这里钉清单这一半。
+    """
+    from local_agent.graph import nodes
+
+    root = tmp_path / "skills-root"
+    for name in ("keep-me", "drop-me"):
+        directory = root / name
+        directory.mkdir(parents=True)
+        (directory / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: 做一件事\n---\n正文\n", encoding="utf-8"
+        )
+
+    skills = _FakeSkillsConfig()
+    skills.user_dirs = (str(root),)  # type: ignore[assignment]
+    config = _FakeAppConfig()
+    config.skills = skills  # type: ignore[assignment]
+
+    context = _FakeContext()
+    context.workspace_root = tmp_path
+    context.current_cwd = tmp_path
+    context.app_config = config  # type: ignore[assignment]
+    context.agent_capabilities = ("files_read", "skill")  # type: ignore[attr-defined]
+
+    before = nodes._skills_listing(context)  # type: ignore[arg-type]
+    assert before is not None and "keep-me" in before and "drop-me" in before
+
+    context.disabled_skills = frozenset({"drop-me"})
+    after = nodes._skills_listing(context)  # type: ignore[arg-type]
+    assert after is not None and "keep-me" in after and "drop-me" not in after
+
+    # 全禁掉之后没有清单可言：不该在快照里留一段空标题。
+    context.disabled_skills = frozenset({"keep-me", "drop-me"})
+    assert nodes._skills_listing(context) is None  # type: ignore[arg-type]
 
 
 def test_snapshot_has_no_skills_section_by_default() -> None:
@@ -410,6 +452,90 @@ def test_snapshot_has_no_skills_section_by_default() -> None:
 
     assert "## 可用技能" not in text
     assert ",skills" not in text
+
+
+def test_environment_section_appears_only_when_given() -> None:
+    """运行环境段落（2026-10-14）：**传了才出现**，抬头把 `env` 计入来源；不传时正文保持既有口径。"""
+    from local_agent.context import prompt_context
+
+    without = prompt_context.build_context_snapshot_text(context=_FakeContext())  # type: ignore[arg-type]
+    assert "## 运行环境" not in without
+    assert ",env" not in without
+
+    with_env = prompt_context.build_context_snapshot_text(  # type: ignore[arg-type]
+        context=_FakeContext(),
+        environment_text="当前时间：2026-10-14（周三）· 本地 UTC+08:00\n",
+    )
+    assert "## 运行环境" in with_env
+    assert ",env" in with_env
+    assert "当前时间：2026-10-14" in with_env
+
+
+def test_environment_text_states_time_boundary_and_network() -> None:
+    """三条边界事实由**运行环境**给出，而不是让模型试探（2026-10-14 的三个实证问题）。"""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from local_agent.context import prompt_context
+
+    def _context(*, capabilities: tuple[str, ...], mode: str) -> object:
+        return SimpleNamespace(
+            current_time=datetime(2026, 10, 14, 2, 38, tzinfo=timezone.utc),
+            # 中立路径（原来是开发机上的真实路径）：这条断言要能在**任何机器**上跑，
+            # 写死盘符与目录名的用例换台机器就红（2026-10-16 修）。
+            workspace_root=Path("/ws"),
+            agent_capabilities=capabilities,
+            security_policy=SimpleNamespace(external_policy=SimpleNamespace(mode=mode)),
+        )
+
+    text = prompt_context.build_environment_text(  # type: ignore[arg-type]
+        context=_context(capabilities=("files_read", "web"), mode="danger-full-access")
+    )
+    # 日期按**本地时区**渲染：断言用同一套换算，避免测试机时区不同就挂。
+    expected = datetime(2026, 10, 14, 2, 38, tzinfo=timezone.utc).astimezone()
+    assert f"当前时间：{expected:%Y-%m-%d}" in text
+    # **2026-10-16 补时分**：这一段原来只渲染到日期，标签却写着"当前时间"——用户问"现在几点"时，
+    # 模型看到标签以为有时间、实际只有日期，于是去调命令取时钟（还因此撞过审批），拿到结果后又把
+    # 命令抄进正文。给到分钟既够用，又不破坏"同一轮逐字节相同"（时钟是本轮冻结的）。
+    assert f"当前时间：{expected:%Y-%m-%d %H:%M}" in text
+    assert "本轮开始时冻结" in text
+    assert "工作区根目录：/ws" in text
+    assert "允许本机显式绝对路径的读取、列目录和搜索" in text
+    assert "可用（web_search" in text
+
+    closed = prompt_context.build_environment_text(  # type: ignore[arg-type]
+        context=_context(capabilities=("files_read",), mode="read-only")
+    )
+    assert "不可用" in closed
+    assert "允许本机显式绝对路径的读取、列目录和搜索" in closed
+    assert "写类操作一律拒绝" in closed
+    # 2026-10-16：图像输入这一行必须如实（它决定"截图自检"走不走得通）。这组假能力里没有
+    # `image_read`，所以是"不可用"并带上文本替代手段——不说清，模型会反复试截图。
+    assert "图像输入：不可用" in closed
+    assert "snapshot" in closed
+
+    # 档位名认不出时按**最保守**的一档说（不是"允许"）——这是模型的行动依据，宁可说窄。
+    unknown = prompt_context.build_environment_text(  # type: ignore[arg-type]
+        context=_context(capabilities=("files_read",), mode="yolo")
+    )
+    assert "未记录" in unknown
+
+
+def test_environment_without_frozen_clock_is_explicit_and_stable(
+    tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig,
+) -> None:
+    """缺失时间不能导致快照失败，也不能用读取时刻冒充本轮冻结时间。"""
+    workspace = _workspace(tmp_path)
+    context = _context(workspace, model_factory(), app_config)
+    context.current_time = None
+
+    text = prompt_context.build_environment_text(context=context)
+
+    assert text.startswith("当前时间：未记录（本轮未提供冻结时钟）\n")
+    assert f"工作区根目录：{workspace.as_posix()}" in text
+    assert "联网：" in text and "图像输入：" in text
+    assert prompt_context.build_environment_text(context=context) == text
 
 
 def test_snapshot_lists_skills_only_when_given() -> None:
@@ -711,6 +837,8 @@ def test_approval_resume_keeps_the_snapshot_rebuildable(
     """审批挂起 + 重启恢复之后，快照仍在 State 里且可重建（T35 不破坏 T10 路径）。"""
     from langgraph.types import Command
 
+    # 本用例验证显式开启审批时的恢复；工作区删除默认免审批。
+    app_config.security.require_approval.delete_file = True
     workspace = _workspace(tmp_path)
     model = model_factory(
         decision="tool",

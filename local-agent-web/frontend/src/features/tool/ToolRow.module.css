@@ -1,7 +1,42 @@
 .wrapper {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--law-space-md);
+}
+
+/* 有"转后台"按钮时给行尾留出位置，避免按钮压在耗时上。 */
+.rowWithAction {
+  padding-right: 84px;
+}
+
+/* 转后台：贴着行右侧的小按钮；点了之后原地变成状态文本，不再有第二个入口。 */
+.detach {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  z-index: 1;
+  height: 20px;
+  padding: 0 var(--law-space-md);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-pill);
+  background: var(--law-bg-layer-1);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xxs);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.detach:hover:not(:disabled) {
+  border-color: var(--law-border-l3);
+  color: var(--law-text-primary);
+}
+
+.detach:disabled {
+  cursor: default;
+  border-color: transparent;
+  background: transparent;
+  color: var(--law-text-caption);
 }
 
 .row {
@@ -122,6 +157,56 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--law-font-mono);
+  color: var(--law-text-tertiary);
+}
+
+/* 单次改动的行数：与 diff 卡片同一套配色，位置紧挨耗时。 */
+.delta {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: var(--law-space-sm);
+  margin-left: var(--law-space-sm);
+  font-size: var(--law-text-xxs);
+  font-variant-numeric: tabular-nums;
+}
+
+.add {
+  color: var(--law-diff-add-text);
+}
+
+.del {
+  color: var(--law-diff-del-text);
+}
+
+/* 状态标签：超时与"后台运行中"是两件不同的事，颜色也不同（warn / info）。 */
+.badge {
+  flex: 0 0 auto;
+  padding: 0 var(--law-space-sm);
+  border-radius: var(--law-radius-pill);
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.badgeInfo {
+  background: var(--law-state-info-subtle);
+  color: var(--law-state-info);
+}
+
+.badgeWarn {
+  background: var(--law-state-warn-subtle);
+  color: var(--law-state-warn-label);
+}
+
+/* 运行中的最后一行输出：缩进对齐行内容，不换行、不抢行高。 */
+.liveLine {
+  margin: -4px 0 0;
+  padding-left: 28px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xxs);
   color: var(--law-text-tertiary);
 }
 

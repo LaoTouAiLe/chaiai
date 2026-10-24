@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>会话地图与分支追问 · 操作手册 · chaiai</title>
+<meta name="description" content="chaiai 会话地图：平移缩放、搜索、从任意一轮继续提问、分支整理与回滚边界。" />
+<meta name="color-scheme" content="light" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="../../site.html" aria-label="chaiai 官网">
+      <svg class="brand__mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <defs>
+          <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#F8B65C"/><stop offset="1" stop-color="#E77737"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="18" fill="url(#chaiaiWarm)"/>
+        <path d="m16 27-1-13c-.4-3 1.2-4 3.3-2.2l8.7 7.4a16 16 0 0 1 10 0l8.7-7.4c2.1-1.8 3.7-.8 3.3 2.2l-1 13c3 3.2 4 7.2 4 11 0 8.4-8.2 14-20 14-2.4 0-4.7-.2-7-.7L15 55l2.3-10.2C13.9 42.4 12 39.4 12 36c0-3.5 1.4-6.7 4-9Z" fill="#FFF7E9"/>
+        <path d="m19.3 16.8.8 8.4 5.1-3.5Zm25.4 0-.8 8.4-5.1-3.5Z" fill="#BF6A37"/>
+        <path d="M24 32.5v2M40 32.5v2" fill="none" stroke="#633E2B" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M29.2 38.1c-.7-.8-.2-2.1.9-2.1h3.8c1.1 0 1.6 1.3.9 2.1L33 40a1.4 1.4 0 0 1-2 0Z" fill="#633E2B"/>
+        <path d="M26.5 42.2c1.5 1.7 3.3 1.7 5.5-.3 2.2 2 4 2 5.5.3" fill="none" stroke="#633E2B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>chaiai</span>
+      <span class="brand__divider" aria-hidden="true"></span>
+      <span class="brand__label">文档</span>
+    </a>
+    <nav class="topnav" aria-label="站点导航">
+      <a href="../index.html">文档首页</a>
+      <a href="index.html" aria-current="page">操作手册</a>
+      <a href="../internals/index.html">技术实现</a>
+      <a class="topnav__out" href="../../site.html">返回官网</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout layout--plain">
+  <nav class="sidebar" aria-label="文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="index.html">手册首页</a>
+      <a href="01-install.html">01 安装与第一次启动</a>
+      <a href="02-model.html">02 连接一个模型</a>
+      <a href="03-permissions.html">03 权限三档与目录授权</a>
+      <a href="04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="05-map.html" aria-current="page">05 会话地图与分支追问</a>
+      <a href="06-data.html">06 数据中台</a>
+      <a href="07-settings.html">07 设置项与生效时机</a>
+      <a href="08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="../internals/index.html">概览</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+
+  <main class="doc">
+    <p class="kicker">MANUAL · 第 5 章</p>
+    <h1>会话地图与分支追问</h1>
+    <p class="lead">地图把对话画成一棵树：想从哪一轮岔出去，就从那里继续问，原路径不会被覆盖。</p>
+
+    <div class="prose">
+      <h2>看地图</h2>
+      <p>从会话顶部打开「会话地图」。父节点在左，卡片向右展开，每张卡是一轮问答。</p>
+      <ul>
+        <li>拖动画布空白处平移，滚轮缩放；底部控制条有「缩小」「当前百分比」「放大」「适应全图」「定位当前分支」。</li>
+        <li>卡片右下角的「查看详情 ↗」打开本轮详情，右侧有「问题与回答」与「执行链路」两个页签。</li>
+        <li>顶部搜索框可以搜问题或回答；命中时地图保留祖先节点，方便看清路径。</li>
+        <li>右下角图例区分「当前路径」与「其他分支」；卡片可以折叠后续轮次，便于看整体。</li>
+      </ul>
+
+      <h2>从某一轮继续提问</h2>
+      <ol>
+        <li>点开要接着问的那张卡片。</li>
+        <li>在详情里点「基于此轮继续提问」，右侧会打开「地图追问」面板。</li>
+        <li>直接提交问题：回答显示在地图内，地图随快照更新；关闭面板或按 Escape 回到地图，分支与草稿都保留。</li>
+        <li>想回到主对话，点「回到聊天位置」。</li>
+      </ol>
+
+      <figure>
+        <img src="../assets/img/map-branches-20261019.svg" alt="会话地图分支示意：父节点在左，末端追问延续当前路径，中间追问新增子分支" width="820" height="340" loading="lazy" />
+        <figcaption>分支怎么长出来的：末端追问延续当前路径；中间追问新增一条子分支，原来的后续路径完整保留（实线为当前路径，虚线为其他分支）。</figcaption>
+      </figure>
+
+      <p>
+        追问继承会话开头到本轮的历史；在末端追问会延续当前分支，在中间追问会新增一条子分支。
+        工作区文件与共享记忆仍使用当前状态——它们不随分支回滚。
+      </p>
+      <p>
+        该轮尚未结束、历史检查点缺失，或会话正在运行 / 等待审批时，追问入口会被禁用，并写明原因。
+      </p>
+
+      <h2>整理分支</h2>
+      <p>
+        点「整理分支」可以给分支改名，并把同层分支上移 / 下移。改名与顺序只影响显示，不改历史内容，
+        也不改父子关系。
+      </p>
+
+      <h2>边界</h2>
+      <ul>
+        <li>文件与共享记忆不随分支回滚；地图是阅读与追问的入口，不是「时间机器」。</li>
+        <li>当前不支持自由布局、改父关系、智能分类、历史重生成和分支删除。</li>
+      </ul>
+    </div>
+
+    <nav class="pager" aria-label="翻页">
+      <a href="04-rounds.html">
+        <span class="pager__hint">上一篇</span>
+        <span class="pager__title">← 04 聊天、Agent 与一轮任务</span>
+      </a>
+      <a class="pager__next" href="06-data.html">
+        <span class="pager__hint">下一篇</span>
+        <span class="pager__title">06 数据中台 →</span>
+      </a>
+    </nav>
+
+    <p class="pagefoot">最后更新 2026-10-19 · 适用版本 v1.0</p>
+  </main>
+</div>
+
+</body>
+</html>

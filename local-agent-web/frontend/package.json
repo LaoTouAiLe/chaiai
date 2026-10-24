@@ -16,19 +16,24 @@
     "test:e2e": "playwright test",
     "test:live": "playwright test -c playwright.live.config.ts",
     "test:live:streaming": "playwright test -c playwright.streaming.config.ts",
+    "test:live:background": "playwright test -c playwright.background.config.ts",
+    "test:live:compression": "playwright test -c playwright.compression.config.ts",
     "test:live:variants": "playwright test -c playwright.variants.config.ts",
     "test:live:approval": "playwright test -c playwright.approval.config.ts",
     "build": "npm run typecheck && vite build",
     "preview": "vite preview",
-    "generate:api": "openapi-typescript ../docs/api/openapi.json -o src/api/schema.gen.ts",
+    "generate:api": "openapi-typescript ../../docs/api/openapi.json -o src/api/schema.gen.ts",
     "check:api": "node scripts/check-api-drift.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.104.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
+    "shiki": "^4.5.0",
     "zustand": "^5.0.15"
   },
   "devDependencies": {

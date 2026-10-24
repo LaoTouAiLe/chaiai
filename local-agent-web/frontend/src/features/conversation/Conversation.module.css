@@ -1,3 +1,11 @@
+/* 消息区 + 左侧问题刻度条：刻度条浮在消息列的左外边距上，不随滚动移动。 */
+.wrap {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .scroll {
   flex: 1 1 auto;
   overflow-y: auto;
@@ -7,17 +15,21 @@
 .turn {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-xl);
+  /* 轮内间距（2026-10-22 重排）：与轮间形成 12 / 32 的对比。
+     之前轮内 20、轮间 24，两者几乎相同，眼睛分不出"这一轮从哪开始"。 */
+  gap: var(--law-space-lg);
 }
 
 .column {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-xl);
+  /* 轮间距（24，2026-10-22 V3 由 32 收紧）> 轮内间距（12）：先按"问答"分组，再按段落分组。
+     1440 屏上 32 会让两轮之间空出一整屏的呼吸感，正文反而显得零散。 */
+  gap: var(--sp-6);
   width: 100%;
   max-width: var(--law-conversation-max-width);
   margin: 0 auto;
-  padding: 0 var(--law-space-2xl);
+  padding: 0 var(--sp-5);
 }
 
 .userRow {
@@ -29,12 +41,17 @@
 
 .userBubble {
   max-width: 76%;
-  padding: var(--law-space-md) var(--law-space-lg);
-  border-radius: var(--law-radius-xl);
-  background: var(--law-surface-bubble);
-  font-size: var(--law-text-md);
-  line-height: var(--law-leading-md);
-  color: var(--law-text-primary);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-panel);
+  background: var(--c-bubble);
+  font-size: var(--fs-chat);
+  line-height: var(--lh-chat);
+  color: var(--c-text-1);
+  /* 用户消息里可能整段没有断点（实测：一条带 utm 参数的链接把气泡撑破、文字溢出到列外）。
+     `max-width` 只限制**盒子**，没有断点的话文字照样溢出来。用 `overflow-wrap: anywhere` 而不是
+     `break-word`：前者同时缩小 min-content，flex（`.userRow` 是 column + align-items: flex-end）
+     下气泡才能正常收窄。`.assistantText` 早就有对应兜底，这里原本漏了（2026-10-16）。 */
+  overflow-wrap: anywhere;
 }
 
 .userTime {
@@ -43,13 +60,175 @@
   line-height: var(--law-leading-xs);
 }
 
+/* 复制 / 编辑（2026-10-21）：默认不出现，悬停或键盘聚焦时才显形——气泡本身是主角。
+   也正因为它默认隐藏，`focus-within` 这条不能省：只用键盘的人否则永远看不到这两个按钮。 */
+.userActions {
+  display: flex;
+  gap: var(--law-space-xxs);
+  opacity: 0;
+  transition: opacity var(--law-duration-base) var(--law-ease);
+}
+
+.userRow:hover .userActions,
+.userRow:focus-within .userActions {
+  opacity: 1;
+}
+
+.userAction {
+  padding: 0 var(--law-space-xxs);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  color: var(--law-text-caption);
+  background: transparent;
+  border: none;
+  border-radius: var(--law-radius-sm);
+  cursor: pointer;
+}
+
+.userAction:hover {
+  color: var(--law-text-primary);
+  background: var(--law-bg-layer-2);
+}
+
+/* 就地编辑（2026-10-21）：整块是一张卡片——灰底、圆角、内边距；输入区本身透明，
+   按钮压在卡片右下角。出现时淡入并轻微位移，避免"啪"地跳出来。 */
+.userEditBox {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xs);
+  width: min(76%, 720px);
+  padding: var(--law-space-sm) var(--law-space-md);
+  background: var(--law-bg-layer-2);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-lg);
+  animation: editIn var(--law-duration-base) var(--law-ease);
+}
+
+@keyframes editIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 减少动态偏好下不做任何动画：这些用户要的是"不晃"，不是"慢一点晃"。 */
+@media (prefers-reduced-motion: reduce) {
+  .userEditBox {
+    animation: none;
+  }
+}
+
+.userEditInput {
+  width: 100%;
+  padding: 0;
+  font-family: inherit;
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  color: var(--law-text-primary);
+  background: transparent;
+  border: none;
+  resize: vertical;
+}
+
+/* 输入区自己不画焦点框（2026-10-21）：灰底卡片里再套一圈系统蓝框非常刺眼。
+   单独写 `:focus` / `:focus-visible` 而不是只在类上写 `outline: none`——后者会被
+   浏览器给 `:focus-visible` 的默认样式在某些组合下盖回来。 */
+.userEditInput:focus,
+.userEditInput:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* 焦点提示就交给"整块变成编辑态"这件事本身：灰底卡片 + 两个按钮已经把状态说清楚了，
+   再加一层边框只会重复。按钮自己的 `:focus-visible` 仍然保留（键盘用户 Tab 过去时看得见）。 */
+
+.userEditNote {
+  margin: 0;
+  font-size: var(--law-text-xs);
+  color: var(--law-text-caption);
+}
+
+.userEditActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--law-space-xs);
+}
+
+.editCancel,
+.editSend {
+  padding: var(--law-space-xxs) var(--law-space-md);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  border-radius: var(--law-radius-sm);
+  cursor: pointer;
+}
+
+.editCancel {
+  color: var(--law-text-secondary);
+  background: var(--law-bg-layer-1);
+  border: 1px solid var(--law-border-l2);
+}
+
+.editCancel:hover {
+  color: var(--law-text-primary);
+}
+
+.editSend {
+  color: var(--law-text-on-brand);
+  background: var(--law-button-primary-fill);
+  border: 1px solid transparent;
+}
+
+.editSend:hover:not(:disabled) {
+  background: var(--law-button-primary-hover);
+}
+
+.editSend:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
 .assistantRow {
   display: flex;
   flex-direction: column;
   gap: var(--law-space-sm);
 }
 
+/* 助手身份行（2026-10-21）：说明"这段是谁说的"。
+   图标 + 产品名，不引入头像——模型是随时可切的，换头像等于换一张皮。 */
+.identity {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  /* 身份行属于**它下面那段**内容，不属于上一段：把与下一条的间距从 20 收到 8。
+     不这么做时，它会悬在上一轮与下一段正中间，看起来像一条独立的分隔说明。 */
+  margin-bottom: calc(-1 * var(--law-space-lg));
+}
+
+.identityMark {
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+
+.identityName {
+  color: var(--law-text-primary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  font-weight: var(--law-weight-medium);
+}
+
 .assistantText {
+  /* 正文与工具行错开一档：同左边界时，长回答和工具列表会连成一堵墙。 */
+  padding-left: var(--law-space-lg);
+  /* 不再用 `ch` 限宽（2026-10-22）：`ch` 是数字 0 的宽度，中文正文下 72ch 只有约 600px，
+     列宽放到 960 之后正文仍缩在左边，看起来像被"腰斩"。阅读宽度交给列宽本身控制。 */
+  max-width: 100%;
   font-size: var(--law-text-base);
   line-height: var(--law-leading-lg);
   white-space: pre-wrap;
@@ -59,8 +238,29 @@
 .actions {
   display: flex;
   align-items: center;
-  gap: var(--law-space-md);
+  /* 时间/动作行属于轮尾收口，与正文再近一档（2026-10-22）。 */
+  gap: var(--law-space-sm);
   color: var(--law-text-caption);
+}
+
+/* 轮尾一行（2026-10-22）：记录在左、动作在右；动作默认透明，悬停或键盘聚焦才显形。
+   这样它既不会和正文抢注意力，也不会因为隐藏而让键盘用户找不到。 */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--law-space-md);
+  min-height: 22px;
+}
+
+.footer .actions {
+  opacity: 0;
+  transition: opacity var(--law-duration-fast) var(--law-ease);
+}
+
+.turn:hover .footer .actions,
+.footer:focus-within .actions {
+  opacity: 1;
 }
 
 .action {
@@ -89,37 +289,280 @@
 .errorSlot {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-md);
+  /* 脚手架内部收紧（2026-10-22）：连续工具/错误属于同一段执行过程，不该和正文用同一个间距。 */
+  gap: var(--law-space-sm);
 }
 
 .memorySlot {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-md);
+  gap: var(--law-space-sm);
 }
 
-/* Empty state. Fixed min-height keeps the capture independent of viewport size. */
-.empty {
+/* 连续只读工具的分组（2026-10-22）：一行摘要 + 展开后的逐条。 */
+.toolGroup {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: var(--law-space-sm);
-  min-height: 320px;
-  text-align: center;
 }
 
+.toolGroupHead {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  width: 100%;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.toolGroupHead:hover {
+  color: var(--law-text-primary);
+}
+
+.toolGroupChevron {
+  width: 12px;
+  flex: none;
+  color: var(--law-text-caption);
+}
+
+.toolGroupLabel {
+  font-variant-numeric: tabular-nums;
+}
+
+.toolGroupRunning {
+  color: var(--law-state-info);
+  font-size: var(--law-text-xxs);
+}
+
+.toolGroupFailed {
+  color: var(--law-state-warn-label);
+  font-size: var(--law-text-xxs);
+}
+
+/* 展开后的逐条：左侧一根细线，明确"这些都属于上面那一组"。 */
+.toolGroupBody {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-sm);
+  margin: var(--law-space-xs) 0 0 6px;
+  padding-left: var(--law-space-md);
+  border-left: 1px solid var(--law-border-l1);
+}
+
+/* 空态（2026-10-22 重设计）：一张左对齐的「工作台简报」。
+   不再沿用参考产品的「居中大标题 + 圆角卡片 + 右侧卡通插图」构图：标题下压一根
+   短强调条，能力说明是细线分隔的编号清单，插图退成右上角的线稿水印；底纹、水印
+   都只是装饰，窄屏整块收起。 */
+.empty {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: clamp(340px, 54vh, 540px);
+  padding: var(--law-space-4xl) 0;
+  text-align: left;
+}
+
+/* 图纸底纹：44px 一格的极淡网格，向左下淡出，避免压住正文。 */
+.emptyGrid {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-image:
+    linear-gradient(to right, var(--law-border-l1) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--law-border-l1) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(120% 100% at 28% 38%, #000 0%, transparent 76%);
+  mask-image: radial-gradient(120% 100% at 28% 38%, #000 0%, transparent 76%);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+.emptyBoard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-2xl);
+  width: 100%;
+  max-width: 620px;
+}
+
+/* 顶部状态行：等宽字体 + 一枚状态点，右侧拉一条细线收尾。 */
+.emptyMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  margin: 0;
+  color: var(--law-text-caption);
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-xxs);
+  letter-spacing: 0.1em;
+}
+
+.emptyMetaDot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--law-accent-500);
+  box-shadow: 0 0 0 3px var(--law-accent-100);
+}
+
+.emptyMetaRule {
+  flex: 0 0 56px;
+  height: 1px;
+  background: var(--law-border-l2);
+}
+
+/* 标题：纯色、左对齐，靠下沿一根 44px 的强调条做节奏；不再用渐变字。 */
 .emptyTitle {
-  font-size: var(--law-text-xl);
-  line-height: var(--law-leading-xl);
+  margin: 0;
+  padding-bottom: var(--law-space-lg);
+  color: var(--law-text-primary);
+  font-size: clamp(calc(26px * var(--law-font-scale)), 3vw, calc(34px * var(--law-font-scale)));
+  line-height: 1.2;
   font-weight: var(--law-weight-semibold);
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+  background: linear-gradient(var(--law-accent-500), var(--law-accent-500)) left bottom / 44px 2px no-repeat;
 }
 
 .emptyText {
-  max-width: 460px;
+  margin: 0;
+  color: var(--law-text-secondary);
+  font-size: calc(15px * var(--law-font-scale));
+  line-height: calc(25px * var(--law-font-scale));
+}
+
+/* 能力清单：小标题旁拉一条渐隐细线，下面是编号 + 细线分隔的三行。 */
+.emptyBrief {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-lg);
+}
+
+.emptyBriefHead {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-md);
+  color: var(--law-text-tertiary);
+}
+
+.emptyBriefMark {
+  display: inline-flex;
+  color: var(--law-state-warn-secondary);
+}
+
+.emptyBriefTitle {
+  margin: 0;
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xs);
+  font-weight: var(--law-weight-semibold);
+  letter-spacing: 0.06em;
+}
+
+.emptyBriefRule {
+  flex: 1 1 auto;
+  height: 1px;
+  background: linear-gradient(90deg, var(--law-border-l2), transparent);
+}
+
+.emptyList {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--law-border-l2);
+}
+
+.emptyItem {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--law-space-md);
+  padding: var(--law-space-lg) 0;
+  border-bottom: 1px solid var(--law-border-l1);
+}
+
+.emptyIndex {
+  color: var(--law-accent-500);
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-xxs);
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+}
+
+.emptyItemText {
   color: var(--law-text-secondary);
   font-size: var(--law-text-sm);
-  line-height: var(--law-leading-md);
+  line-height: var(--law-leading-sm);
+}
+
+/* 底部提示：一枚短横线起头，不再居中。 */
+.emptyHint {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--law-space-md);
+  margin: 0;
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.emptyHint::before {
+  content: '';
+  flex: 0 0 auto;
+  width: 18px;
+  height: 1px;
+  margin-top: calc(var(--law-leading-xs) / 2 - 1px);
+  background: currentColor;
+  opacity: 0.55;
+}
+
+/* 线稿水印：只占右上角的留白，不盖正文。 */
+.emptyArt {
+  position: absolute;
+  top: -6px;
+  right: 4px;
+  width: 196px;
+  height: 163px;
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+.emptyArtTrace {
+  animation: emptyTraceDrift 9s linear infinite;
+}
+
+@keyframes emptyTraceDrift {
+  to { stroke-dashoffset: -36; }
+}
+
+/* 窄屏：底纹与线稿收起，编号列收窄。 */
+@media (max-width: 720px) {
+  .empty {
+    min-height: 0;
+    padding: var(--law-space-2xl) 0;
+  }
+
+  .emptyTitle {
+    font-size: calc(24px * var(--law-font-scale));
+  }
+
+  .emptyItem {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .emptyGrid,
+  .emptyArt {
+    display: none;
+  }
 }
 
 /* Loading state. The skeleton has no animation: baselines stay deterministic. */
@@ -255,4 +698,66 @@
 @keyframes cursor { 50% { opacity: .2; } }
 @media (prefers-reduced-motion: reduce) {
   .assistantText[data-streaming='true']::after { animation: none; }
+}
+
+/* 随消息发出的图片（2026-10-16）：刷新之后也要看得见"我发的图去哪了"。
+   缩略图有上限高度，免得一张竖图把整屏占掉；点开原图交给浏览器（同一个 `<img>`）。 */
+.userImages {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm);
+  margin: var(--law-space-sm) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.userImage img {
+  display: block;
+  max-width: 220px;
+  max-height: 160px;
+  border-radius: var(--law-radius-md, 10px);
+  border: 1px solid var(--law-border-l1);
+  object-fit: contain;
+  background: var(--law-bg-layer-1);
+}
+
+/* 缩略图是**按钮**（2026-10-16）：点开看原图。重置按钮外观，只留"可以点"的提示。 */
+.userImageButton {
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: zoom-in;
+}
+
+.userImageButton:focus-visible {
+  outline: 2px solid var(--law-surface-selector);
+  outline-offset: 2px;
+  border-radius: var(--law-radius-md, 10px);
+}
+
+/* 侧聊首轮的上下文（§21.7）：默认折起，展开后限高滚动——它可能有一两千字。 */
+.userContext {
+  margin-bottom: var(--sp-2);
+  padding-left: var(--sp-2);
+  border-left: 2px solid var(--c-line);
+}
+
+.userContextSummary {
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  cursor: pointer;
+}
+
+.userContextBody {
+  max-height: 240px;
+  margin: var(--sp-1) 0 0;
+  overflow: auto;
+  color: var(--c-text-3);
+  font-family: var(--font-mono-code);
+  font-size: var(--fs-caption);
+  line-height: 18px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }

@@ -1,63 +1,68 @@
-"""回收站（2026-10-20）：删除变成"移动"，且能按清单找回。
+"""回收站（2026-10-21 改为**系统回收站**）。
 
-钉四件事：文件被移走而不是删掉、目录结构原样保留、清单可读、目标不存在时如实报错。
+早先的版本把文件移进自建的 ``data/trash`` 并写 manifest 清单，结果是"删了、提示可找回，
+但用户在资源管理器里找不到"。现在直接进系统回收站，测试因此只钉三件事：
+
+1. 原位置**真的空了**（否则等于没删）；
+2. 失败时**原位置还在**（绝不回退成直接删除——那等于把安全删除静默关掉）；
+3. 目标不存在时如实报错，而不是静默成功。
+
+"是否真进了系统回收站"无法在纯单元测试里可靠断言（要经 COM 查 `$RECYCLE.BIN`，
+会污染运行测试那台机器的回收站），这一条靠手工实测覆盖：删一个文件后，
+目标出现在 `E:\\$RECYCLE.BIN\\S-1-5-...\\` 下。
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from local_agent.exceptions import FileOperationError
-from local_agent.trash import MANIFEST_NAME, move_to_trash
+from local_agent.trash import move_to_trash
 
 
-def test_moves_a_file_into_a_dated_slot_and_records_it(tmp_path: Path) -> None:
-    source = tmp_path / "work" / "note.txt"
-    source.parent.mkdir()
+def test_file_is_gone_from_its_original_location(tmp_path: Path) -> None:
+    source = tmp_path / "note.txt"
     source.write_text("keep me", encoding="utf-8")
-    root = tmp_path / "trash"
 
-    moved = move_to_trash(source, root=root)
+    move_to_trash(source)
 
-    assert not source.exists(), "安全删除不能把原文件留在原地"
-    assert moved.read_text(encoding="utf-8") == "keep me"
-    # 回收站结构：root/年-月-日/时间-短id/文件名
-    assert moved.parent.parent.parent == root
-    lines = (root / MANIFEST_NAME).read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    record = json.loads(lines[0])
-    assert record["原路径"] == str(source)
-    assert record["回收路径"] == str(moved)
+    assert not source.exists(), "安全删除至少要把原文件从原位置移走"
 
 
-def test_moves_a_directory_without_flattening(tmp_path: Path) -> None:
+def test_directory_is_moved_as_a_whole(tmp_path: Path) -> None:
+    # 目录必须整体移走：逐个删除会在失败时留下半个目录。
     source = tmp_path / "pkg"
     (source / "sub").mkdir(parents=True)
     (source / "sub" / "a.txt").write_text("a", encoding="utf-8")
 
-    moved = move_to_trash(source, root=tmp_path / "trash")
+    move_to_trash(source)
 
-    assert (moved / "sub" / "a.txt").read_text(encoding="utf-8") == "a"
+    assert not source.exists()
 
 
-def test_two_deletions_never_overwrite_each_other(tmp_path: Path) -> None:
-    root = tmp_path / "trash"
-    first = tmp_path / "same.txt"
-    first.write_text("one", encoding="utf-8")
-    moved_first = move_to_trash(first, root=root)
-    second = tmp_path / "same.txt"
-    second.write_text("two", encoding="utf-8")
+def test_failure_keeps_the_file_instead_of_deleting_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """回收站不可用（网络盘、权限不足）时**必须报错并保留文件**。
 
-    moved_second = move_to_trash(second, root=root)
+    这是这条路径最要紧的一条：静默回退成 ``unlink`` 会让"安全删除"看起来生效、东西却没了。
+    """
+    source = tmp_path / "note.txt"
+    source.write_text("keep me", encoding="utf-8")
 
-    assert moved_second != moved_first, "同名文件先后被删时不能用同一个槽位"
-    assert moved_first.read_text(encoding="utf-8") == "one"
-    assert moved_second.read_text(encoding="utf-8") == "two"
+    def _refuse(_path: str) -> None:
+        raise OSError("该位置不支持回收站")
+
+    monkeypatch.setattr("local_agent.trash.send2trash", _refuse)
+
+    with pytest.raises(FileOperationError, match="没有被删除"):
+        move_to_trash(source)
+
+    assert source.exists(), "失败之后文件必须还在原位置"
 
 
 def test_missing_target_is_reported_instead_of_silently_succeeding(tmp_path: Path) -> None:
     with pytest.raises(FileOperationError, match="目标不存在"):
-        move_to_trash(tmp_path / "nope", root=tmp_path / "trash")
+        move_to_trash(tmp_path / "nope")

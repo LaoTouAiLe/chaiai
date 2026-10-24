@@ -76,7 +76,9 @@
   --c-panel:         #f7f8fa;  /* 侧栏、右栏、顶栏 */
   --c-raised:        #ffffff;  /* 浮层、下拉、弹窗表面 */
   --c-sunken:        #f1f3f6;  /* 输入框、代码块、只读区 */
-  --c-hover:         #eef0f4;  /* hover 实色替代 alpha */
+  --c-hover:         #eaedf2;  /* hover 实色替代 alpha（比 sunken 深一档） */
+  --c-active:        #dfe3ea;  /* 选中/按下 */
+  --c-bubble:        #eef4ff;  /* 用户消息气泡 */
 
   /* 边界：只有一条默认 hairline */
   --c-line:          #e3e6eb;
@@ -108,13 +110,16 @@
 ```css
 :root[data-theme='dark'] {
   --c-canvas:        #111318;
-  --c-panel:         #16181d;
-  --c-raised:        #1c1f25;
+  /* panel 与 canvas 的明度差要够看出三栏分区；#16181d 截图复核时糊成一片，已提亮 */
+  --c-panel:         #1a1d23;
+  --c-raised:        #20242b;
   --c-sunken:        #0d0f13;
-  --c-hover:         #22262e;
+  --c-hover:         #262b34;
+  --c-active:        #2f3540;
+  --c-bubble:        #1e2a42;
 
-  --c-line:          #262a31;
-  --c-line-strong:   #333842;
+  --c-line:          #2e333c;
+  --c-line-strong:   #3b414c;
 
   --c-text-1:        #e9ecf1;  /* 15.3:1 */
   --c-text-2:        #a8b0bc;  /*  8.0:1 */
@@ -137,9 +142,9 @@
 #### 深浅切换策略（2026-10-22 拍板）
 
 - **默认跟随系统**：`prefers-color-scheme` 为 `dark` 时挂 `data-theme="dark"`，否则 `data-theme="light"`。
-- **手动覆盖优先**：用户在设置里显式选择浅色/深色后，写入 `localStorage`（沿用现有偏好存储），此后不再跟随系统；选择"跟随系统"则清除该覆盖。
+- **手动覆盖优先**：用户在设置里选浅色/深色后，偏好保存在**服务端设置库**（`PUT /api/preferences`，与其它偏好同一路径），此后不再跟随系统；选「跟随系统」恢复跟随。
+- **首屏防闪**：偏好真源在服务端，React 挂载前取不到，所以 `index.html` 内联一段最小脚本，读 `localStorage` 里的**上次解析结果**（`chaiai.theme` / `chaiai.motion`）先猜一次；`PreferencesProvider` 拿到服务端值后校正并回写。**该缓存不是偏好真源**，清掉只会退回按系统判定。
 - 切换不得触发整页重载；`color-scheme` 属性随 `data-theme` 同步，保证原生滚动条、输入框、日期控件一致。
-- 首次渲染前需在 `index.html` 内联一段最小脚本设置 `data-theme`，避免亮色闪一帧（FOUC）。
 
 **Alpha 的合法用途**（R3 的唯一例外，且必须叠在不透明底上）：
 - 遮罩 `--c-scrim`
@@ -603,17 +608,957 @@
 
 | 阶段 | 内容 | 依赖 | 估计 |
 |---|---|---|---|
-| **V0** | Token 迁移（§2 全量替换 `tokens.css`，保留旧变量名做别名一版） | 无 | 0.5 天 |
-| **V1** | 骨架调整：顶栏 56 + 三段式、hairline、中栏分层、侧栏重排（§3、§4.1、§4.2） | V0 | 1 天 |
+| **V0** | Token 迁移（§2 全量替换 `tokens.css`，保留旧变量名做别名一版） | 无 | **已完成 2026-10-22**，见下方实施记录 |
+| **V1** | 骨架调整：顶栏 56 + 三段式、hairline、中栏分层、侧栏重排（§3、§4.1、§4.2） | V0 | **已完成 2026-10-22**，见 §9.2 |
 | **V2** | 原语层：Button / Badge / SearchField / EmptyState / ConfirmDialog / ListRow / SegmentedControl（§7） | V0 | 1.5 天 |
-| **V3** | 对话流与输入区（§5.1、§5.2）+ 审批卡（§5.8） | V2 | 1.5 天 |
-| **V4** | 设置去框改主从（§5.3） | V2 | 1 天 |
-| **V5** | 能力中心页（§5.4），含内部键名清理 | V2 | 1 天 |
-| **V6** | 其余页面统一（数据中台 / 任务中心 / 轨迹 / 地图 / 空态，§5.9、§5.10） | V2 | 1.5 天 |
-| **V7** | 规划模块：产物并入数据中台（§5.5）、命令面板（§5.7）、定时任务（§5.6） | 产物/命令面板依赖 V6；定时任务额外依赖 `ARCHITECTURE.md` 先记录 §5.6 的审批口径 | 产物 1 天 / 命令面板 1.5 天 / 定时任务 3 天（含后端） |
+| **V3** | 对话流与输入区（§5.1、§5.2）+ 审批卡（§5.8） | V2 | **已完成 2026-10-22**，见 §9.5 |
+| **V4** | 设置去框改主从（§5.3） | V2 | **已完成 2026-10-22**：去框见 §9.4，行展开见 §9.12 |
+| **V5** | 能力中心页（§5.4），含内部键名清理 | V2 | **已完成 2026-10-22**，见 §9.6 |
+| **V6** | 其余页面统一（数据中台 / 任务中心 / 轨迹 / 地图 / 空态，§5.9、§5.10） | V2 | **数据中台 + 任务中心已完成 2026-10-22**；轨迹/地图/图标未做，见 §9.7 |
+| **V7** | 规划模块：产物并入数据中台（§5.5）、命令面板（§5.7）、定时任务（§5.6） | 产物/命令面板依赖 V6；定时任务额外依赖图层的审批语义改造 | **全部完成 2026-10-22**：产物 §9.9、命令面板 §9.10、定时任务 J1 §9.11、J2 §9.11 |
 | **V8** | 右栏视觉规格落地（§4.4） | `WORK_PANEL_PLAN.md` P0 | 按该计划 |
 
 > V0–V4 是"止血"区间：做完就该有肉眼可见的质变。V5 之后是"补齐"。
+
+### 9.1 V0 实施记录（2026-10-22）
+
+实际执行时把"§2 全量替换"拆成三层，原因写在 `tokens.css` 文件头：
+
+| 层 | 内容 | 本批是否切换 |
+|---|---|---|
+| 新体系 | `--c-*` / `--fs-*` / `--sp-*` / `--r-*` / `--sh-*` / `--dur-*` / `--ease-*` | 新增，供新代码使用 |
+| 旧名别名 | 颜色、边界、圆角、阴影映射到新体系 | **是**，深色只需覆盖 `--c-*` |
+| 未迁移 | 字号、行高、间距、按钮色、diff 配色、调色板 | **否**，见下 |
+
+未迁移的理由（不是遗漏）：
+
+- **间距**：`--law-space-md` 被引用 128 次、`sm` 115 次、`lg` 87 次。把 6px 档改成 8px 会让大量固定高度的容器溢出，必须与 V1 骨架调整同批做。
+- **字号/行高**：`--law-text-xs` 136 次。且实测发现助手 markdown 正文走 `--law-text-base`（16px/28），与消息正文 14px 不一致，统一要在 V3 的对话流重构里做。
+- **按钮色**：V2 建 `Button` 原语时接管，现在换会导致主按钮由近黑变蓝，与"未建成原语"的现状冲突。
+- **diff 配色**：2026-10-21 刚按 Codex 口径对齐，本次不动（对应 §12.1 C）。
+
+同批完成的其它改动：
+
+- `index.html` 内联首屏防闪脚本（读上次解析结果，非偏好真源）。
+- `PreferencesProvider` 回写解析结果到 `localStorage`。
+- 主题默认值 `light → system`，前后端各一处（`preferences.py` / `preferencesContext.ts`），并重新导出受控 OpenAPI（`openapi.json` 只此一行变化）。
+- 顶栏 `--law-header-height` 63 → 56。
+
+**顺带补了一笔既有欠账**：`schema.gen.ts` 重新生成后 diff 很大（新增 `/api/mcp`、`detach` 等一整批端点）。核对过 HEAD 的 `openapi.json` 里并没有 `/api/mcp`，而工作区里有——说明此前导出过 OpenAPI 但没有重新生成前端类型。因为改 `theme` 默认值必须重跑 `generate:api`，这笔欠账被一并补上了，`check:api` 现已通过。**不是本次改动引入的。**
+
+**已知中间态**：圆角已收敛到 4/6/10，但设置页等处的卡片边框还在，所以这一版会比目标"更硬"一些；边框清理在 V1/V4。
+
+#### 验证结果（2026-10-22）
+
+| 检查 | 结果 |
+|---|---|
+| `npm run typecheck` | 通过 |
+| `npm run build` | 通过（2.1s，仅既有的 chunk >500kB 警告） |
+| `npx vitest run`（全量） | **49 文件 / 469 用例通过** |
+| `uv run pytest tests/test_preferences.py` | 12 通过 |
+| `npm run check:api` | 通过（生成类型与受控 OpenAPI 一致） |
+| 截图复核 | 浅色 / 深色各一张，见下 |
+
+未验证：真实会话下的长对话、多工具卡、错误态、审批卡与空态的同屏效果（只用了 `?state=shell` 的固定 fixture）。
+
+#### 截图复核（2026-10-22）
+
+用 `vite preview` + `?state=shell` 截 1440×900 复核，据此回调了两个值：
+
+| 问题 | 原值 | 调整为 |
+|---|---|---|
+| 侧栏选中行几乎不可见（`--c-active` 在 `--c-panel` 上差 4 级但视觉无感） | `#e4e7ec` | `#dfe3ea` |
+| hover 反馈太弱 | `#eef0f4` | `#eaedf2` |
+| 用户气泡太淡，分不清发言方 | `#f3f7ff` | `#eef4ff` |
+| 深色三栏糊成一片（`--c-panel` 与 `--c-canvas` 明度差过小） | `#16181d` | `#1a1d23`，hairline 同步 `#262a31 → #2e333c` |
+
+深色调参后分区感仍偏弱，**不再继续微调**：深色分层要在 V1 骨架（去掉卡片边框、改用留白分区）落定后才看得准，届时一并校。
+
+**同时发现一个会影响后续验收的事实**：`e2e/__screenshots__/1440x900/shell.png` 这张旧基线里有「任务中心 / 数据中台」两个底部入口和顶栏「改动」按钮，但当前 `src/fixtures/` 里**没有传入** `onOpenTasks` / `onOpenDataCenter` / `onToggleChanges` 这三个 prop（`Sidebar.tsx:288-302`、`TopBar.tsx:67` 都是"传了才渲染"）。
+
+所以新渲染的 shell 少了两个入口，**这不是样式回归，是基线过期**——与 `HANDOFF_2026-10-22.md:63` 记录的"prototype.spec.ts 有非空态截图断言失败"是同一件事。
+
+结论：**§10.1 的截图比对不能在 V1 之前直接跑**，否则会把过期基线当成回归。V1 落地时应先重建基线一次，再启用比对。
+
+### 9.2 V1 实施记录（2026-10-22）
+
+改动集中在两个组件，未动业务逻辑与数据流。
+
+**顶栏（`TopBar.tsx` / `TopBar.module.css` 重写）**
+
+结构从"标题靠左、页签贴右"改为三段式：
+
+```
+[ 工作区 / 标题 ] [ 对话 | 轨迹 | 会话地图 ] ............ [ 面板开关 ]
+└──────────── lead（可压缩）────────────┘   └─ right（不压缩）─┘
+```
+
+- 页签移入左段、紧跟标题 16px，不再占据右边缘；`.left` 限宽 46% + 省略号，长标题只压缩自己。
+- 页签改为分段控件形态：容器 `--c-sunken` + `--r-control`，选中项 `--c-raised` + `--sh-menu`，项高 28。
+- 顶栏显式 `background: var(--c-canvas)`，与灰底侧栏形成第一层分区。
+- hover 当帧生效、离开 100ms 回退（`--dur-hover-out`）。
+
+**侧栏（`Sidebar.module.css`）**
+
+| 元素 | 改前 | 改后 |
+|---|---|---|
+| 容器内边距 / 间距 | 12 8 8 / gap 12 | 8 8 12 / gap 8 |
+| 品牌行高 | 28 | 44（顶部 8 + 44 ≈ 顶栏 56 的标题行） |
+| 品牌字 | 16px / 650 / 字距 -.4 | 15px / 600 / 无字距 |
+| 新建会话按钮 | 高 38 / 圆角 6 / 描边 l2 / 字号 14 | 高 34 / 圆角 4 / 描边 l1 / 字号 13 |
+| 搜索框 | 高 30 / 白底 / 1px 描边 | 高 32 / 无描边 / **白底**（见下） |
+| 工作区标题行 | padding 6 8 / 13px | 高 28 / 13px 500 |
+| 会话行 | 14px / 圆角 6 | 13px / 圆角 4 |
+| 当前会话 | 仅 `--c-active` 底色 | 底色 + 左侧 2px `--c-accent` 竖条 |
+| 展示更多 | 左对齐文本 | 高 28 居中文字按钮，带 hover |
+| 底部入口 | 高 42 / 圆角 6 | 高 36 / 圆角 4 + 顶部分隔 hairline |
+
+**偏差说明（1 处）**：§4.1 写搜索框用 `--c-sunken`，实际用了 `--c-raised`。原因是侧栏底本身是 `#f7f8fa`，`--c-sunken`（`#f1f3f6`）与它几乎同色，截图复核时输入框完全看不出边界。白底靠"白 vs 灰"区分更可靠。
+
+**本批未做**（不属 V1 验收项，留到对应阶段）：
+
+- 底部第 4 个入口「能力中心」——等 V5 建页后加。
+- 搜索框的清除按钮、`⌘K`、服务端搜索——§5.7 与后端相关。
+- 会话行「运行中」的旋转指示——现用 warn 色点 + 状态文字，V3 一并处理。
+- `title=` 原生提示换成 `Tooltip` 原语——等 V2 建原语。
+
+**验证**：`npm run build` 通过；`npx vitest run` **49 文件 / 469 用例通过**；1440×900 截图复核（浅色）。深色随 V0 的 token 生效，未单独重拍。
+
+### 9.3 V2 第一批：原语层（2026-10-22）
+
+新建 `frontend/src/components/ui/`，**纯新增，未改动任何现有调用点**：
+
+| 文件 | 内容 |
+|---|---|
+| `primitives.module.css` | 四个原语的共享样式（一个文件，避免四个近似重复的 css） |
+| `Button.tsx` | 6 个 variant（primary / secondary / ghost / danger / text / icon）× 3 个 size，默认 `type="button"` |
+| `Badge.tsx` | 5 个 tone（neutral / success / warn / danger / accent），高 20、字 12 |
+| `SearchField.tsx` | 受控输入 + 可选清除按钮，无边框、白底、聚焦描边 |
+| `EmptyState.tsx` | 普通 / `compact` 两档，必须给标题与说明 |
+| `ui.test.tsx` | 9 条契约测试：默认 type、禁用不触发、受控取值、清除回调、空态渲染 |
+
+**为什么这批不替换现有组件**：仓库里同一类控件有 5 处以上各写各的（Badge 有 `DataCenter` / `SettingsDialog` / `TasksPanel` / `ToolRow` / `ApprovalCard` / `Sidebar` 六种），
+一次性全替换会牵动 6 个组件的 JSX 与测试；分到 V3（对话/审批）、V4（设置）、V6（其余页面）按屏替换，每屏可独立验收，
+避免出现"一半新一半旧"的中间态。**新页面（V5 能力中心）直接使用原语，不等替换。**
+
+**与 §7 的两处偏差**：
+
+1. `SearchField` 用 `--c-raised`（白）而非 §7.3 写的 `--c-sunken` —— 与 §9.2 同一原因（落在 panel 上时底槽色看不出边界）。§7.3 应以本节为准。
+2. `Button` 的 hover 深色用 `color-mix(in srgb, var(--c-accent) 88%, #000)`，没有新增 `--c-accent-hover` token。`color-mix` 的**结果是不透明实色**，不违反 R3。
+
+**尚未建**：`ConfirmDialog`、`ListRow`、`SegmentedControl`——第二批的核实结论见 §9.4（前两个没有真实替换面，已放弃；`SegmentedControl` 已建并接入）。
+
+**验证**：`npm run typecheck` 通过；`npm run build` 通过；`src/components/ui` 9 条用例通过；全量 `npx vitest run` 无新增失败（含 469 条既有用例）。
+
+### 9.4 V2 第二批 + V4 去框第一步（2026-10-22）
+
+原计划这一批建三个原语（`ConfirmDialog` / `ListRow` / `SegmentedControl`）并同批替换。核实后**只做了 `SegmentedControl`**，另两个放弃，理由如下——不是偷懒，是它们没有真实替换面：
+
+| 原语 | 结论 | 依据 |
+|---|---|---|
+| `SegmentedControl` | **建 + 接入** | 顶栏页签是真实的分段选择 |
+| `ConfirmDialog` | **不建** | 全仓 `window.confirm` 命中 0 处；唯一的"确认删除"是连接卡**就地展开**（`SettingsDialog.tsx:200-220`）且已有测试断言就地出现按钮。换成弹窗会退化成打断式交互 |
+| `ListRow` | **不建** | 设置页字段行已经是统一结构（`PreferenceSection.tsx:197-212` 的 `styles.field`），替换收益接近零、风险是动到 14 个分区的渲染 |
+
+**SegmentedControl 接入**（`TopBar.tsx`）：
+
+- 页签改为 `<SegmentedControl options value onChange ariaLabel="会话视图">`，`onSelectTab`/`onOpenMap` 都缺省时传 `undefined`，组件进入只读态（原型基线行为不变）。
+- 「会话地图」不是并列页签而是"打开另一块视图"，在 `select()` 里单独分派给 `onOpenMap`。
+- 右栏「改动」开关改用 `Button`（`variant` 随展开状态切 secondary/ghost）。
+- 删除 `TopBar.module.css` 里的 `.tabs` / `.tab` / `.tabActive`（约 37 行死样式）。
+
+**设置页去框（V4 第一步，纯 CSS）**（`SettingsDialog.module.css`）：
+
+| 元素 | 改前 | 改后 |
+|---|---|---|
+| 弹窗圆角 / 阴影 | 24px / `--law-shadow-lv3` | 10px / `--sh-overlay` |
+| 连接卡 | 白底 + 1px 描边 + 圆角 12 | **无描边**，`--c-panel` 灰底 + 圆角 6 |
+| 卡片间距 | 12 | 8 |
+| 能力徽章 | 1px 描边 + 圆角 4 | 无描边，`--c-sunken` 底 |
+
+弹窗底是白色、卡片是灰色，靠明度差区分，不再需要每张卡一条框线。截图复核：一屏可见的连接卡从 2.5 张增加到 3 张。
+
+**V4 未做**（下一步）：模型连接从"卡片"改成"列表行 + 展开详情"（需要改 `SettingsDialog.tsx` 的结构与 13 条测试）、「添加连接」「删除」按钮换成原语、左侧分区导航从 208px 列表改主从。
+
+**验证**：`npm run build` 通过；`npx vitest run` **50 文件 / 481 用例通过**（新增 3 条 SegmentedControl 用例）；1440×900 截图复核 `?state=settings-models`。
+
+### 9.5 V3 对话流与审批卡（2026-10-22）
+
+**审批卡重做**（`ApprovalCard.module.css`）——这是"当前视觉最差的一块"：
+
+| 元素 | 改前 | 改后 |
+|---|---|---|
+| 卡片底 | 整块粉红（warn-subtle）/ 浅红（error-subtle）+ 红描边 | **白底浮起**（`--c-raised` + `--sh-overlay`），无描边 |
+| 风险等级 | 靠整卡底色表达 | **左侧 3px 语义色条**（普通=warn，高风险=danger） |
+| 动作名 / 风险标签 | 白底 + 1px 描边的等宽小方块 | 徽章形态：动作名 `--c-sunken` 底、风险 `--c-danger-soft` 底，无描边 |
+| 目标 / 影响 | dt 36px、dd 13px 次级灰 | dt 40px 12px 三级灰、dd 13px 正文色（`--c-text-1`） |
+| 按钮 | 高 32 / 圆角 6 / 主按钮近黑 | 高 34 / 圆角 4 / 主按钮 `--c-accent` |
+| 收起态 | padding 8/20 | 8/12/8/16，间距收紧 |
+
+改完的语义变化：从"报错警告块"变成"一张等待决策的卡片"——颜色只用来标风险等级，内容和两个按钮才是视觉重心。
+
+**对话流**（`Conversation.module.css`）：
+
+| 元素 | 改前 | 改后 |
+|---|---|---|
+| 轮间距 | 32 | **24**（1440 屏上 32 会让两轮之间空出一整屏的呼吸感） |
+| 用户气泡 | 圆角 16 / padding 8·12 / 字号 14·22 | 圆角 6 / padding 12·16 / 字号 14·21（走 `--fs-chat`） |
+| 气泡底色 | `--law-surface-bubble` | `--c-bubble`（`#eef4ff`，V0 已调淡） |
+| 对话列内边距 | 20 | 20（`--sp-5`，值未变，只是换 token） |
+
+**两处刻意没做**：
+
+1. **助手 markdown 正文仍是 16px/28**（`Conversation.module.css:231-232`），没有按 §2.3 收到 `--fs-chat` 的 14/21。
+   原因：16→14 是 12.5% 的缩小，在 1440 屏上观感变化很大；而"正文到底多大"是产品口径，不该在重构里顺手砍。
+   现状是**同一段对话里助手 16px、用户 14px**，不一致属实——这一条列为待拍板项（§12.1 D）。
+2. **工具行的耗时没有改成"跟随内容列右边界"**。§5.1 曾把它列为"对齐断层"，实际看下来，耗时右对齐到整列是列表式布局的常规做法，
+   改成紧跟文字反而每次都落在不同位置、更难扫读。判定为设计选择，不是缺陷。
+
+**验证**：`npm run build` 通过；`npx vitest run` **50 文件 / 481 用例通过**；截图复核 `?state=approval` 与 `?state=shell`。
+
+### 9.6 V5 能力中心（2026-10-22）
+
+**这一批撤销了一条既有裁定，先记录下来**：`Sidebar.tsx:60` 原注释写着「**「能力」不再有独立入口（2026-10-19）：它已经并进设置，避免同一件事两个说法**」。
+2026-10-22 按 §12 决策 3 改判为独立成页，理由是能力开关属于**高频日常操作**（今天能不能联网、能不能提交代码），
+埋在 14 个设置分区里每次要多两步。原来的注释已改写为记录这次反转，不是删掉了事。
+
+**新增整页**（`features/capabilities/CapabilitiesCenter.tsx` + `.module.css`）：
+
+```
+[ 能力与工具 / 能力中心 / 一句说明 ]              [ 返回会话 ]
+[ 能力 | 技能 | MCP 外部工具 ]  ← SegmentedControl
+──────────────────────────────────────────
+  <CapabilitiesSection embedded />  |  <SkillsSection />  |  <McpSection />
+```
+
+三个分区组件**原样复用**，没有复制实现；换的只是外壳。
+
+**接线**：
+
+| 文件 | 改动 |
+|---|---|
+| `app/LiveApp.tsx` | 新增 `capabilitiesOpen` state；main 分支改为「数据中台 → 能力中心 → 正常会话」三选一；四个入口（设置/数据中台/任务中心/能力中心）互相关闭 |
+| `components/Sidebar.tsx` | `SidebarActions` 新增可选 `onOpenCapabilities`；底部入口区新增「能力中心」（可选传入，原型不传则不渲染） |
+| `features/settings/SettingsDialog.tsx` | `SECTIONS` 删除 skills / capabilities / mcp 三项；`SECTION_GROUPS` 同步；类型 `SettingsSection` 的三个 id 保留，避免其它调用方断裂 |
+| `features/settings/ModelSettingsDialog.tsx` | 删除三块 `extraSections` 注入与三个 import |
+
+**两处未完成/未验证**：
+
+1. **能力中心没有视觉验证**。它的入口由 `LiveApp` 传入，而 `?state=` 的 fixture 宿主不传 `onOpenCapabilities`，
+   所以静态截图里根本没有这个入口。要看到它必须启动真实后端服务。当前只有 typecheck / build / 单测三重保证。
+2. **新入口的图标是内联 `<svg>`（18px / viewBox 24）**，与侧栏底部另外两处内联图标一致，但与 §7.7 要求的
+   "统一 16px / viewBox 24 / 线宽 1.5"仍不一致——`icons.tsx` 里 13 个图标还是 12/14px 的老网格。图标统一留到 V6。
+
+**内部键名清理**：核实后确认**不需要做**。`CapabilitiesPanel.tsx` 当前文案里已没有 `profiles.active` / `profiles.custom`，
+两处 `config.yaml` 是权限分区里"出厂默认来自配置文件"的必要说明（`PermissionSection.tsx:159`），属于用户需要知道的事实，不是泄漏。
+§5.4 那条"文案红线"针对的是 `capabilities.png` 这张**过期基线**，不是现行代码。
+
+**验证**：`npm run typecheck` 通过；`npm run build` 通过；`npx vitest run` **50 文件 / 481 用例通过**（设置相关 6 个测试文件全过）。
+
+### 9.7 V6 第一批：数据中台与任务中心（2026-10-22）
+
+这两页原来是独立长出来的一套值，与 token 体系并行。本批**只换值，不动结构**。
+
+**数据中台**（`DataCenter.module.css` 全量重写，67 行）：
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 页面底 | `--law-surface-code`（底槽） | `--c-panel`，卡片 `--c-raised` 浮在上面 |
+| 大标题 | 24px / 650 | `--fs-heading` 18px / 600 |
+| 卡片圆角 | 12px | `--r-panel` 6px |
+| 卡片边框 | 1px `--law-border-l1` | **无边框** |
+| 页签 | 下划线式（`border-bottom: 2px`） | **分段控件形态**（容器 `--c-sunken`、选中 `--c-raised` + 阴影） |
+| 表格字号 | 12px | `--fs-body` 13px |
+| 指标数字 | 25px | `--fs-display` 26px |
+| 筛选输入框 | 有描边 + 圆角 7 | 无描边、白底、圆角 4，聚焦才出描边 |
+| 抽屉阴影 | `-8px 0 30px #00000012` | `--sh-overlay` |
+| 间距 | 26/32/20/24/14/18… 字面量 | `--sp-*` 或 `clamp(20px, 4vw, 64px)` |
+
+**任务中心**（`TasksPanel.module.css`）：弹窗去描边 + `--sh-overlay` + 圆角 10；任务行从"1px 描边 + 圆角 6"改为"`--c-panel` 灰底块 + 圆角 6"。
+
+**这一批有两个明确缺口**：
+
+1. **数据中台没有视觉验证**。`src/fixtures/scenarios.ts` 里**没有 data-center 场景**（有 `shell` / `tasks` / `trace` / `capabilities` 等 20 多个，唯独没有它），
+   所以 `?state=` 截不到这一页。改动只有 `npm run build` 与 481 条单测保证语法与逻辑，**观感未经确认**。
+   要验证必须启动真实后端服务后点侧栏「数据中台」。
+2. **轨迹页与会话地图未动**。轨迹页已在用 token（`--law-space-*` 35 处），只剩 1 处字面量；
+   会话地图仍有 31 处（`ConversationMapPanel.module.css`），是最多的一处，留待下一批。
+
+**图标统一仍未做**：`components/icons.tsx` 的 13 个图标仍是 `viewBox="0 0 12 12"` / 默认 12px，而侧栏底部有几处内联 `18px / viewBox 24`。
+两套网格并存的问题在 §7.7 写过，但改动会波及所有调用点的视觉尺寸，需要单独一批 + 逐屏截图，不宜和页面改造混在一起。
+
+### 9.8 V6 收尾：会话地图与轨迹核查（2026-10-22）
+
+**会话地图**（`ConversationMapPanel.module.css` 全量重写，57 行）：
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 字号 | 14 / 13 / 12 / 11 / 22 五种字面量 | `--fs-ui` / `--fs-body` / `--fs-meta` / `--fs-caption` / `--fs-heading` |
+| 圆角 | 6 / 8 | `--r-control` / `--r-panel` |
+| 按钮与输入框 | 描边 + 透明底 | **保留描边**，底色统一 `--c-raised`，高 30 |
+| 抽屉阴影 | `-5px 0 20px #00000005` / `-8px 0 30px #00000015` | `--sh-overlay` |
+| 选中态 | `--law-surface-tip` | `--c-active` + `--c-line-strong` 边 |
+| 主动作按钮 | `accent-200/700/50` 三个调色板直引 | `--c-accent` 边 + `--c-accent-soft` 底 |
+
+**这一页刻意保留描边**：它是密集工具条 + 画布 + 抽屉，去掉描边会让输入框、按钮、下拉糊成一片。§1.2 的 R1 说的是"不要卡片套卡片"，不是"工具条上的控件也不能有边框"。
+
+**轨迹页核查结论：不用改**。`TraceView.module.css` 已经在用 token（`--law-space-*` 35 处），全文件只剩 `gap: 2px` 一处字面量，属于 2px 微调而非待迁移项。
+
+**仍未做**：
+- **图标统一**（`icons.tsx` 13 个图标 12px/viewBox 12 ↔ 侧栏内联 18px/viewBox 24）。这批会让所有调用点的图标视觉尺寸变化 33%，属于"整体位移"级改动，必须单独一批 + 逐屏截图核对，不和页面改造混做。
+- **会话地图没有视觉验证**：`fixtures/scenarios.ts` 同样没有 map 场景，`?state=` 截不到。
+
+至此 V6 的页面部分完成。**累计未做视觉验证的页面：能力中心、数据中台、会话地图**——三者都没有 fixture 场景，只能连真实服务看。
+
+### 9.9 V7 产物：契约 + 后端 + 前端（2026-10-22）
+
+**先改契约再编码**（项目规矩）：`ARCHITECTURE.md` 新增 §15.11.1，冻结点包括三路数据来源、端点签名与参数上界、扫描闸门、会话过滤、类型判定、脱敏规则与验收项。
+
+**核实后的关键事实**（决定了实现形态）：
+
+| 事实 | 影响 |
+|---|---|
+| **没有 messages 表**，正文只在 `conversation_turns`（question + answer_text 全文） | 文本抽取可以一条 SQL 覆盖 |
+| 工具返回值只有 `output_preview`（≤2000 字符），超大结果被落盘替换 | `saved_to` / `screenshot_path` 抽不全，**放弃这条**（契约里明示） |
+| 附件在 `data/attachments/年/月/日/会话/`，**无索引表** | 目录扫描，按已列会话反查，不做全盘遍历 |
+| `file_change_ops` 只记工作区内写操作，有 path/kind/created_at | 可作为"文件"类的来源 |
+| `sessions.kind` 有 `subagent` / `heartbeat` | 排除，否则父会话的产物会重复列出 |
+
+**后端**（新增 3 个文件级改动）：
+
+| 文件 | 内容 |
+|---|---|
+| `application/artifacts.py`（新） | `artifacts()` 主函数：列会话 → 过滤内部单元与时间窗 → 逐会话抽正文/文件变更 → 扫附件目录 → 去重排序分页 |
+| `application/data_center_models.py` | `ArtifactView` / `ArtifactsPageView` |
+| `application/service.py` | `get_artifacts_page()` 薄委托（与 `get_usage_page` 同形） |
+| `api/routes.py` | `GET /api/data-center/artifacts`，`kind` 三选一、`days` 1–365、`limit` ≤200 |
+
+闸门：200 会话 / 50,000 轮 / 5,000 条文件变更 / 5,000 个附件文件；任一触顶 `incomplete=true` 并写入 `notices`。
+
+**前端**：
+
+| 文件 | 内容 |
+|---|---|
+| `api/client.ts` | `ArtifactFilters` + `getArtifacts()`；`filterQuery` 扩到三种筛选类型 |
+| `api/queries.ts` | `useArtifacts()`，`days` 参与 queryKey |
+| `features/data-center/DataCenter.tsx` | 第六个 tab「产物」；筛选（工作区 / 类型 / 时间窗）；表格（名称·位置·来源会话·时间）；`external` 行加「工作区外」徽标 |
+| `DataCenter.module.css` | `.mono`（位置列等宽） |
+
+顺手修掉一处隐患：原 `memoryTab = tab !== 'overview' && tab !== 'usage'` 是**否定式**判断，新增 tab 会被误吞，改成显式列举 `tab === 'medium' | 'fact' | 'conclusion'`。
+
+**第一版的限制（都写进了页面文案，不假装有）**：
+
+- **不显示图片缩略图**。附件内容没有读取端点，逐图读文件需要再开一个接口；第一版只列名称与位置，页面底部明说。
+- **不读 Checkpoint**，所以工具返回值里的 `saved_to` 类产物抽不到（契约明示）。
+- 不做全文搜索，前端只在已取回的这一页内过滤。
+
+**验证**：
+
+- 后端 `tests/test_artifacts.py` **9 条通过**（空库、正文抽取、create/modify 保留 delete 排除、内部会话排除、归档会话包含、类型筛选与分页、工作区内转相对、工作区外标 external、时间窗过滤）。
+- `ruff` 干净（自动修了 3 处 import 排序）。
+- 受控 OpenAPI 已重新导出、`npm run check:api` 通过。
+- 前端 `npm run build` 通过；`DataCenter.test.tsx` 8 条通过；全量单测结果见下一条。
+
+**一个既有失败，与本次无关**：`tests/test_release_contracts.py::test_controlled_baseline_matches_actual_contracts` 失败，原因是 `docs/release/compatibility-baseline.json` **从来不存在**（git 里也无提交记录）。我没有用 `--write` 顺手创建它——那会把这次契约变更混进一次"基线建立"里，应该由发布流程单独决定。
+
+### 9.10 V7 命令面板（2026-10-22）
+
+**契约**：`ARCHITECTURE.md` 新增 §15.11.2 会话搜索。要点是**向后兼容扩展**——`GET /api/sessions` 加可选 `q` 与 `limit`，都不传时行为与旧实现完全一致。
+
+**为什么加在既有端点上而不是新开 `/sessions/search`**：FastAPI 按注册顺序匹配，`/sessions/{session_id}` 会先把 `search` 当成 id 吃掉。挪顺序或加新路径都要改动已冻结的路由表，扩参数最安全。
+
+**后端**：
+
+| 文件 | 内容 |
+|---|---|
+| `persistence/session_store.py` | `search_sessions()`：`title LIKE ?` 或 `EXISTS(question LIKE ?)`，`ESCAPE '\'` 把用户输入的 `%` / `_` 当字面量 |
+| `application/service.py` | `list_sessions()` 加 `query` / `limit`；有 `q` 时走搜索分支，并保留 `workspace_id` 过滤 |
+| `api/routes.py` | 端点加 `q`（≤200）与 `limit`（1–100） |
+
+只匹配 **用户提问**，不匹配助手回答：回答是长文本，`LIKE` 扫全表会随历史线性变慢，而用户找会话时记得的通常是"我问过什么"。
+
+**前端**：
+
+| 文件 | 内容 |
+|---|---|
+| `api/client.ts` | `searchSessions(q, limit)` |
+| `features/commands/CommandPalette.tsx`（新） | 输入 250ms 防抖 → 两组结果：**动作**（本地过滤）+ **会话**（服务端搜索）；↑↓ 选择、Enter 执行、Esc 关闭；首项默认选中，结果集变化后把选中项夹回范围 |
+| `features/commands/CommandPalette.module.css`（新） | 浮层统一高度（`--sh-overlay` + `--c-line` + `--r-overlay`）；输入框无边框（面板本身是边界，再加框会变盒中盒） |
+| `app/LiveApp.tsx` | `Ctrl/Cmd+K` 全局开关；六个动作（新建会话 / 设置 / 能力中心 / 数据中台 / 任务中心 / 轨迹）；会话结果复用侧栏同一套 `selectSession → openSelected` 路径 |
+
+**一个刻意的行为**：`q` 为空时**只显示动作**，不拿"最近 20 个会话"冒充搜索结果——那会让用户以为搜到了什么。
+
+**验证**：`tests/test_session_search.py` **5 条通过**（标题命中、提问命中而回答不命中、`%`/`_` 按字面、limit 生效、归档默认排除）；前端 `typecheck` / `build` 通过；全量 `npx vitest run` **50 文件 / 481 用例通过**；OpenAPI 已重导出、`check:api` 通过。
+
+**未做**：结果高亮片段、分页游标、搜索助手回答（都在 §15.11.2 里明示不做）。
+
+### 9.11 定时任务：为什么停在这里（2026-10-22）
+
+V7 只剩定时任务，核到实现层后**判定不能在当前批次继续**，原因是它不只是"加一张表 + 一个页面"：
+
+1. **没有调度器**。`session_kind` 里 `scheduled` / `heartbeat` 是预留常量，全仓没有 cron 解析、没有定时线程、没有任务表。
+2. **真正的阻塞点是审批语义**。§5.6 已拍板"越界即失败、不挂起等待"，但现在的审批是图里的 `interrupt()`——会话跑到危险动作就**挂在等待状态**，没人点就一直挂着。要兑现"越界即停"，必须给图加一条"无人值守"分支：审批节点在无人值守会话里直接返回拒绝，而不是 interrupt。这改的是 `graph/nodes.py` 的审批路径，属于执行内核，不是页面功能。
+3. **连带影响**：`interrupt` 变化会波及恢复、取消、事件投影、`awaiting_approval` 状态机与既有审批测试。这不是"顺手带过"的改动。
+4. **还需要**：任务表迁移（新 schema 版本号）、cron 表达式解析与"下次运行"计算、触发时创建 `kind=scheduled` 会话并提交消息、失败与并发保护、前端列表与表单。
+
+因此把它拆成两个独立批次，各自可验收：
+
+| 批次 | 内容 | 状态 |
+|---|---|---|
+| **J1（内核）** | 无人值守会话的审批语义（拒绝而非挂起）+ 契约条款 + 图回归 | **已完成 2026-10-22**，见下 |
+| **J2（功能）** | 任务表 + 调度器 + 端点 + 前端列表与表单 | 未开工 |
+
+#### J1 实施记录
+
+契约：`ARCHITECTURE.md` §21.4。
+
+改动面比预期小——`session_kind` 已经在 `AgentState` 里（`state.py:454`），审批节点直接读它即可，**不用动 RuntimeContext、不用改装配**：
+
+```python
+unattended = str(state.get("session_kind") or SESSION_KIND_INTERACTIVE) != SESSION_KIND_INTERACTIVE
+if unattended:
+    first = {"decision": "reject", "reason": "无人值守会话不等待审批：该动作越界，已拒绝且不会自动重试。"}
+else:
+    first = _as_mapping(interrupt(_approval_prompt(request, stage=1)))
+```
+
+关键取舍：**没有新写一条拒绝路径**，而是把"无人值守"伪装成"第一阶段就收到 reject 决策"，复用既有分支。因此 ToolMessage 补全、ToolEvent、结果记录、事件投影全部照旧——那些是 T37 踩过坑（缺 ToolMessage 导致端点 400、页面永远转圈）才补上的，复制一份必然漏。
+
+`decision_trace` 的摘要按 `unattended` 分支写成"无人值守拒绝"，不伪装成"人工决策"——审计上必须分得清谁拒的。
+
+**验证**：
+- `tests/test_unattended_approval.py` **3 条通过**（scheduled 拒绝且不挂起、被拒调用仍有成对 ToolMessage、带二阶确认也不产生第二次中断）
+- 既有审批回归 `pytest -k approval` **148 条通过**
+- 恢复链路 `tests/test_graph_resume.py` + 新测试 **78 条通过**
+- `ruff` 干净
+- **未做真实模型端到端验证**：这三条都是节点级测试，没有跑"定时会话真的执行一轮并遇到审批"的完整链路（那需要 J2 的调度器才能真正发生）。
+
+#### J2 实施记录
+
+契约：`ARCHITECTURE.md` §21.5。依赖只加了一个：`croniter`（纯 Python，6.2.4），用于 cron 解析——自己写会栽在时区与边界上。
+
+**存储**（schema v11 → v12，只新增两表）：
+
+| 表 | 关键字段 | 说明 |
+|---|---|---|
+| `cron_jobs` | `schedule` / `next_run_at` / `enabled` / `last_status` / `last_error` | 索引 `(enabled, next_run_at)` 支撑到期扫描 |
+| `cron_runs` | `job_id` / `session_id` / `status` / `started_at` / `summary` | `session_id` **不设外键**：运行记录要比会话活得久 |
+
+**一个必须改的底层行为**：`SessionStore.create()` 原来无条件 `_deactivate_all()`（新建即切换为当前会话）。定时任务如果走这条路，**每次触发都会把用户正在看的会话切走**。加了 `activate: bool = True` 参数，后台会话传 `False` 时保持 `idle`、不切换；缺省行为与原来逐字节一致。
+
+**调度**（`application/cron.py`）：
+
+- 进程内单线程，30 秒扫一次；`start/stop` 挂在 FastAPI 的 `lifespan`，不放在 service 构造里（否则每个测试新建 service 都会泄漏一个后台线程）。
+- 触发时把执行丢到独立线程：`submit_message` 是同步的，留在主循环会卡死整个调度器。
+- 同一任务上一次仍 `running` 时**跳过并记说明**，不排队（宁可少跑一次，也不要两个会话改同一批文件）。
+- 表达式失效时**自动停用**并写明原因，而不是每 30 秒报错一次。
+
+**端点**（6 个）：`GET/POST /cron/jobs`、`PATCH/DELETE /cron/jobs/{id}`、`POST /cron/jobs/{id}/run`、`GET /cron/jobs/{id}/runs`。`next_run_at` **只由服务端算**，创建/更新请求体里没有这个字段。
+
+**前端**：`features/cron/CronPanel.tsx` + `.module.css`，侧栏底部第 5 个入口。页面顶部在 `scheduler_running=false` 时直接显示"任务会保存但不会自动触发"——这是用户最容易误解的一点。运行记录可点进那次运行的会话。
+
+**验证**：
+- `tests/test_cron.py` **10 条通过**（cron 计算、非法表达式、创建校验、到期触发用 `kind=scheduled` + `activate=False`、重叠跳过、失败落记录、改排期重算、暂停后恢复推到未来、立即触发不动排期、任务不存在报 404）
+- 迁移/会话存储回归 `-k "migration or schema or session_store"` **29 条通过**
+- 审批与恢复链路 `test_session_kind / test_session_search / test_unattended_approval / test_cron` **27 条通过**
+- 前端 `typecheck` / `build` / `eslint` 通过；全量 **50 文件 / 481 用例通过**
+- 受控 OpenAPI 重新导出、`check:api` 通过
+
+**顺手修的两处脆弱测试**：`test_delegated_recovery.py:89` 把"升到最新版本"写死成 `== 10`，每次新增迁移都会误报；改为 `== migrations.CHAT_SCHEMA_VERSION`。
+
+**本版未做（都是刻意的）**：
+
+1. **`blocked` 状态当时未写入，已在 §9.20 补齐**。本轮正常结束后按结果快照与 `run_id` 回读审批记录；任一拒绝记为 `blocked`，执行失败另记 `failed`。当时发现的数据库行格式不兼容已在 §9.21 修复，并通过默认连接的 HTTP 链路回归。
+2. 自然语言转 cron（要模型调用）、外部投递通道（\(§1.3\) 不做消息平台）、脚本任务（等于绕过审批）。
+3. `CronPanel` **没有前端单测**：它是数据驱动页面，逻辑都在后端测试里覆盖；前端只有类型与构建保证。
+4. **本页未做视觉验证**：入口来自 `LiveApp`，`?state=` 的 fixture 宿主不传 `onOpenCron`，静态截图截不到。累计未视觉验证的页面已达 5 块。
+
+### 9.13 侧栏导航重构（2026-10-22，用户实机反馈后）
+
+**用户反馈**：「功能这些在左下角，左侧栏这些样式要优化，直接抄 hermes 的就好了」。
+
+这条批评是对的，而且指出了前 12 节的一个系统性偏差：**前面的改动都在 token / 组件 / 单页层面，从没动过侧栏的信息架构**。而"入口堆在左下角"恰恰是观感崩掉的主因。
+
+**对照 hermes 的真实结构**（`apps/desktop/src/app/chat/sidebar/index.tsx:1576-1627`）：
+
+- 侧栏**顶部**是 `SidebarGroup` + `navItems.map`：新建会话 / 能力 / 消息平台 / 产物 / cron / 设置，**每项一行**。
+- 行几何写在 `row-geometry.ts:25-49`：`min-h 26px`、`px 8`、`gap 6`、字号 `13px`、lead 图标 14px。
+- 底部**没有**入口堆叠。
+
+我们原来是：品牌行 → 新建会话大按钮 → 搜索 → 会话树 → **底部 5 个按钮**。
+
+**改动**（`Sidebar.tsx` / `Sidebar.module.css`）：
+
+| 项 | 改前 | 改后 |
+|---|---|---|
+| 5 个入口位置 | 贴底 `.footer`，`margin-top:auto` 推到左下角 | **顶部 `.nav` 区**，紧接品牌行 |
+| 新建会话 | 34px 白底描边大按钮 | 与其他入口同构的 nav 行（图标 + 文字） |
+| nav 行几何 | — | 高 28 / 圆角 4 / 13px / 图标 16 / gap 8 |
+| 底部 | 一条分隔线 + 5 个 36px 按钮 | **清空** |
+| 会话行高 | 34px | **28px**（`--law-session-row-height`） |
+| 图标 | 18px 内联 + 14px `icons.tsx` 混用 | nav 内统一 16px / viewBox 24 / 线宽 1.5 |
+| 「已归档会话」行 | 36px | 28px，与 nav 同高 |
+
+折叠态同步：nav 行只留图标居中，标签与角标隐藏。
+
+**为什么这才叫"抄"**：抄的是**结构**（入口在顶部、一行一个、统一几何），不是皮肤。之前我只抄了 token 和对比度，等于把家具摆整齐了但房间格局没动。
+
+**验证**：`Sidebar.test.tsx` 7 条通过（建设中的按钮文案与 aria 未变，只是位置变）；全量 `50 文件 / 481 用例通过`（并发过高时 node 曾 OOM 一次，`--maxWorkers=2` 重跑通过，与代码无关）。
+
+**一个观察口径要说明**：`?state=` 的 fixture 宿主只传 `onNewSession` 与 `onOpenSettings`，所以截图里 nav 只有 2 行。**真实页面**（`LiveApp`）会显示 6 行。用截图核对这一块会失真，必须看真机。
+
+### 9.14 产物独立 + 内容预览 + 右栏下线（2026-10-22，实机反馈后）
+
+**用户的三条反馈**：产物找不到、产物点不动、右栏的「改动」先不要、设置应进右栏。
+
+#### 1. 产物从数据中台提为独立页
+
+推翻 §12 决策 4。原判断（"侧栏入口已 4 个，别再加"）在实机上被证伪：**并入等于没有**——用户翻了页面都没找到。
+
+- 新建 `features/artifacts/ArtifactsPanel.tsx`，侧栏第 6 个 nav 入口。
+- 数据中台**移除**该 tab（`DataCenter.tsx` 30 处引用全部清掉），避免同一件事两个入口。
+
+#### 2. 产物必须"点得动"（这才是它的意义）
+
+原来的产物页只有名称 + 位置，点不开任何东西——用户的原话是"这个功能的意义是什么"。对照 hermes，产物页的价值全在**打开之后**。
+
+新增契约 `ARCHITECTURE.md` §15.11.3 + 端点 `GET /api/data-center/artifacts/preview`：
+
+| 边界 | 规则 |
+|---|---|
+| 只读工作区内 | `resolve()` 后必须仍在工作区根之下，防 `../` 与符号链接逃逸；越界 403 |
+| 有上限 | >256 KB 只回 `too_large` + 大小，不读进内存；文本截 20,000 字符 |
+| 不碰外链 | `http(s)` 直接 422，交浏览器打开——服务端代请求就是 SSRF |
+
+图片按魔数转 `data:` URL 返回（不入缓存、不落盘），文本经既有 `sanitize_text` 脱敏。
+
+前端行为：链接 → 新窗口；文件 → 就地预览；图片 → 缩略图 + 大图；每条都能回来源会话。
+
+#### 3. 右栏「改动」下线
+
+按用户要求移除：`TopBar` 的「改动」按钮、`ChangesPanel` 渲染、`changesOpen` 状态。`ChangesPanel` 组件本身保留在 `features/code-changes/`，接回即可。
+
+**一个中间态**：对话流里每轮的改动条（`TurnChanges`）还在，但点击文件只高亮、不再打开 diff——因为右栏没了。等右栏重做后再接。
+
+#### 4. 设置进右栏：**未做**，需要你确认形态
+
+这条不是搬运，是重构：现有设置是 960×760 双栏弹窗（左 208px 分区导航 + 14 个分区内容）。塞进 460px 右栏必须改成"单栏 + 分区选择器"，`SettingsDialog.module.css` 68 处 token 引用与 13 条测试都要跟着动。
+
+两种可落地的形态：
+
+| 形态 | 做法 | 成本 |
+|---|---|---|
+| A. 右栏只放**入口** | 右栏顶部一排图标（设置/文件/任务），设置仍开弹窗 | 小 |
+| B. 右栏**承载**设置内容 | 单栏化重构，右栏宽度可拖到 520px | 大（约 1 天 + 回归） |
+
+**验证**：`tests/test_artifacts.py` **15 条通过**（含 6 条预览边界：工作区内可读、越界拒绝、外链拒绝、超限不读、魔数识别图片、文件不存在 404）；前端 `typecheck`/`build`/`eslint` 通过；`check:api` 通过；全量 **50 文件 / 481 用例通过**（并发过高时 node 会 OOM，`--maxWorkers=1` 重跑通过，与代码无关）。
+
+### 9.15 设置入口移到标题栏右上角（2026-10-22）
+
+用户拿 hermes 截图指认：**设置是标题栏最右的齿轮**（窗口控制按钮左边），不在侧栏 nav 里。
+
+这条澄清很重要：我之前把它理解成"设置内容是否塞进右栏"，还开了 A/B 两种形态问用户。实际需求只是**入口搬家**，成本从"1 天重构"降到十几分钟。
+
+改动：
+
+| 文件 | 改动 |
+|---|---|
+| `components/TopBar.tsx` | 新增可选 `onOpenSettings`，渲染为右侧 `Button variant="icon"`（齿轮 16px / viewBox 24 / 1.5） |
+| `components/Sidebar.tsx` | 移除 nav 里那一行「设置」——同一件事不留两个入口 |
+| `app/LiveApp.tsx` | 传 `onOpenSettings={() => setSettingsOpen(true)}` |
+
+**为什么放最右而不是跟页签同组**：页签管的是"中间这一页"，设置管的是"整个应用"，semantics 不同；hermes 也是这么分的。
+
+`onOpenSettings` 保持**可选**：原型宿主不传就不渲染，视觉基线不受影响（所以 fixture 截图里看不到齿轮，真机才有）。
+
+**验证**：`Sidebar.test` + `features/settings` 共 **7 文件 / 66 用例通过**；类型与构建通过；eslint 干净。
+
+**仍未做**：右栏本身（多标签：文件/任务/终端…）。设置内容仍是 960×760 弹窗，这次只搬了入口。
+
+### 9.16 右栏工作面板（2026-10-22，第一批：文件 / 改动 / 任务）
+
+契约 `ARCHITECTURE.md` §21.6。三标签**全部只读**，这是硬边界不是暂缓项。
+
+**后端**（新增两个只读模块）：
+
+| 文件 | 内容 |
+|---|---|
+| `application/workspace_models.py`（新） | `WorkspaceFilesView` / `GitStatusView` / `GitDiffView` |
+| `application/workspace_view.py`（新） | `list_files()` 列一层目录；`git_status()` / `git_diff()` 走既有 `run_git`（含 `_assert_safe` 白名单与进程树超时） |
+| `api/routes.py` | `GET /api/workspace/files`、`/workspace/git/status`、`/workspace/git/diff` |
+
+三条边界与 §15.11.3 同源：**只读、只在工作区内、都有上限**（目录 500 项、diff 20 万字符、git 超时 10 秒）。文件内容读取**复用**产物预览端点，不另开一条读文件路径。
+
+两个刻意的决定：
+
+1. **噪声目录不列**（`.git` / `node_modules` / `.venv` / `__pycache__` / `dist`…），但**隐藏文件保留**——`.env.example` 正是要看的那类。
+2. **非 git 仓库不是错误**，返回 `available=false`；工作区本来就可以没有版本控制。
+
+**前端**：`features/panel/PanelShell.tsx` + `.module.css`，顶栏右侧新增面板开关（与设置并排，都在"整个应用"这一组）。三个标签：
+
+- **文件**：面包屑 + 上一级 + 一层列表；点文件就地预览（复用产物预览的文本/图片判定）。
+- **改动**：porcelain 条目列表（状态字母 + 路径）；点一条看该文件相对 `HEAD` 的 diff。
+- **任务**：`useTasks` 列表，点一条跳回它的会话。
+
+**验证**：
+- `tests/test_workspace_view.py` **7 条通过**（列一层、噪声过滤、隐藏文件保留、越界 403、目录不存在 404、非仓库 `available=false`、真实仓库 status+diff）
+- 连同产物测试 **22 条通过**；`ruff` 干净
+- 前端 `typecheck` / `build` / `eslint` 通过；OpenAPI 已重导出、`check:api` 通过
+- 全量前端用例见下一条
+
+**未做（下一批）**：多标签与多开、终端（pty + WebSocket）、浏览器（CDP）、侧边对话（分支模型改造）、文件改动监视（现在只能手动刷新）。
+
+### 9.17 右栏实机反馈修复（2026-10-22）
+
+用户实测后报三个问题，**前两个是我的实现 bug**，不是设计取舍：
+
+| 反馈 | 根因 | 修法 |
+|---|---|---|
+| 「点开都没东西」 | 预览请求**没带 `workspace_id`**：后端按"启动工作区"解析路径，而用户当前会话在别的工作区 → 必然读不到 | `ArtifactView` 增加 `workspace_id` 字段（产物跨多个工作区）；`useArtifactsDetail(path, workspaceId)` 带上它；右栏 `FilesTab` 用面板的 `workspaceId` |
+| 「有些说超上限了」 | 超过 256 KB **整份拒绝**，只回一句 `too_large`。用户点 `package-lock.json` 什么都看不到 | 文本改为**读前 256 KB 并置 `truncated`**，照常返回内容；只有**图片**超限才拒绝（整份转 data URL 会拖垮页面） |
+| 「没搞懂这个功能是什么」 | 三个标签没有任何说明 | 每个标签顶部加一句灰字：文件="当前会话工作区里的文件。点开只预览，不会修改。"；改动="未提交的改动（相对 HEAD）。只读，不会 stage 或提交。"；任务="这个工作区登记过的任务。点一条回到所属会话。" |
+
+**顺带补的搜索**：文件标签加"按文件名筛选"（当前目录内前端过滤，不发请求）；改动标签在条目 >6 时出现"按路径筛选"。
+
+**为什么产物页也一并修了**：产物列表是跨工作区聚合的，`ArtifactView` 不带 `workspace_id` 时，点开任何一条都只能碰运气命中启动工作区。这条在 §15.11.1 的契约里补了字段说明。
+
+**验证**：`tests/test_artifacts.py` 与 `tests/test_workspace_view.py` 共 **23 条通过**（新增"文本超限截断"与"图片超限拒绝"两条，替换原来笼统的 `too_large` 断言）；`ruff` 干净；前端 `typecheck` / `build` / `eslint` 通过；契约已重导出、`check:api` 通过。
+
+#### 第二轮反馈（同日）
+
+| 反馈 | 根因 | 修法 |
+|---|---|---|
+| 产物**查询特别慢、第二页出不来** | `artifacts()` **每次请求都重扫** 200 个会话的全部轮次正文；翻页 = 再来一遍 | 加**进程内缓存 60 秒**（key = service 实例 + 工作区 + 天数）；分页与类型过滤改到内存里做。`TURN_TEXT_LIMIT` 50000 → 8000 |
+| 产物页**没有返回按钮** | 忘了给整页留出口 | `ArtifactsPanel` 加 `onClose`，「刷新」旁边放「返回会话」 |
+| 文件路径**只能一级级退** | 只有「↑ 上一级」 | 改成**可点面包屑**：`工作区 / src / features`，每一级直接跳 |
+| 点对话里的**代码变更没反应** | 上一轮把 `ChangesPanel` 下线后，`TurnChanges.onSelect` 只剩 `setChangesPath`，什么都不打开 | 恢复：`onSelect` → `setPanelOpen(true)` + `setPanelFocus({ tab: 'changes', path })`；`PanelShell` 新增 `focus`，`ChangesTab` 用 `focusPath` 直接展开该文件 |
+| 右栏**太素、与整体不匹配** | 标签栏是三个裸文字；行没有层级 | 标签栏改**分段控件**（容器下沉 + 选中上浮 + 阴影，与顶栏同一套语言）；面板头背景 `--c-canvas`；目录项图标用 `--c-accent` 区分"能进"与"能看内容" |
+
+**缓存的一个副作用要记住**：新增产物最多延迟 60 秒出现。这是"翻页秒开"的代价，不是 bug；点「刷新」不会绕过缓存（要绕过需要加 `?nocache=1`，暂未做）。
+
+**验证**：后端 **23 条通过**；前端 `typecheck` / `build` / `eslint` 通过；全量用例见下一条。
+
+#### 第三轮：diff 着色丢失（同日）
+
+用户：「改动样式全没了，绿色红色，还有代码颜色，全没了」。
+
+**根因**：右栏「改动」标签是我新写的，把 git patch 塞进裸 `<pre>`——**没有红绿行、没有语法高亮**。旧的 `ChangesPanel` 用的是 `DiffCard`（`toFileDiffView` + 高亮），那套渲染我完全没复用。
+
+**修法**：
+
+1. `ChangesPanel.tsx` 把内部 `FileDiff` 导出（它封装了 `useSessionChangeDiff` + `DiffCard`）。
+2. `PanelShell` 接收 `sessionId`；「改动」标签在选中文件后**优先渲染 `FileDiff`**——拿的是「改前 → 改后」的结构化对比，红绿与代码着色都在。
+3. 只有拿不到会话上下文时才回退到 git patch 纯文本（那次是 `sessionId === null`，比如没打开任何会话）。
+
+**教训**：新写一个面板时，"数据能显示出来"不等于"显示得对"。git patch 和结构化 diff 是两种数据，前者只有文本、后者才有行级语义。以后凡是要展示 diff，一律走 `DiffCard`，不要再自己写 `<pre>`。
+
+#### 第四轮：改动与任务改为会话级（同日）
+
+用户：「改动和任务做成本次会话的，工作区的太大了」。
+
+| 标签 | 改前 | 改后 |
+|---|---|---|
+| 改动 | `useWorkspaceGitStatus()` —— 整个工作区未提交的文件 | `useSessionChanges(sessionId)` —— **本会话改过**的文件（账本内 + 无基线的 unrecorded） |
+| 任务 | `useTasks(workspaceId)` —— 工作区全部任务 | 同一份数据按 `task.session_id === sessionId` 过滤 |
+
+**为什么任务在前端过滤而不加后端参数**：`GET /api/tasks` 的 DTO 本身带 `session_id`，任务数量级是几十，前端过滤的代价可以忽略；后端加一个只在右栏用的参数，等于为局部需求扩契约。
+
+**文件标签仍是工作区级**：看文件本来就是看整个项目，收窄到会话没有意义（会话不拥有文件）。
+
+**一处随之而来的简化**：既然改动只认会话账本，那段"拿不到会话就回退到 git patch 纯文本"的分支被删掉了——没有会话时直接提示「先打开一个会话」，比给一份看不出所以然的文本更诚实。`/workspace/git/status` 与 `/diff` 两个端点保留未删（后端能力仍然可用），但前端已不再调用。
+
+#### 第五轮：把「任务」换成「步骤」（同日）
+
+用户：「现在展示这个完全没用……还展示的会话名称，列表里面所有名称一模一样。轨迹里那种「这次会话分了几个步骤」的展示就可以」。
+
+**这是个语义错误，不是样式问题**：我做的「任务」标签读的是任务中心的后台任务索引，每行只能显示 `session_title`——同一个会话派出的任务本来就没有各自的名字，所以整列看起来完全一样。它回答的是"系统在跑哪些后台任务"，而用户问的是"这次会话做了什么"。
+
+改成「步骤」：直接用 `trace`（与轨迹页同一份数据，`traceFromMessages` 派生），每行是**一轮**：
+
+```
+1  帮我把缓存换成 Redis              3 个动作
+2  再跑一下测试                       5 个动作
+```
+
+点一行跳到轨迹页看该轮的完整调用。不新增端点、不新增请求——数据本来就在手里。
+
+**连带清理**：`PanelShell` 的 `onOpenSession` 属性不再需要（原来是给任务项"回到所属会话"用的），一并删掉。
+
+**顺带说明为什么不用 `TaskCenterView` 加字段**：后台任务索引记录的是"调度单元"，不是"用户意图的步骤"；即使加 `title`，也得让每个任务自己命名，而调用方（工具层）并不知道用户想干什么。轨迹的"轮次"才是用户心里的步骤。
+
+### 9.20 侧边会话（2026-10-23，契约 §21.7）
+
+**先看 hermes 怎么做的**，再定方案——这一步省掉了大量试错。它是 `tui_gateway/methods_session_branch.py` 的 `session.branch`：
+
+```python
+def _visible_branch_history(messages) -> list:
+    """user/assistant rows with visible text, as FULL copies"""
+    return [dict(message) for message in messages or []
+            if message.get("role") in {"user", "assistant"}
+            and _coerce_message_text(message.get("content")).strip()]
+```
+
+**只复制可见文本**，不复制 state、不共用 thread。那个文件里还有一条注释记录了反例（"untagged they become bare user turns after a restart, corrupting…"），说明这个取舍是踩出来的。
+
+所以方案定了 **B（文本上下文）**，不做 A（复制 Checkpoint state）：我们的 `messages` 里 tool_call/tool_result 必须成对，`run_id`/`approval_history`/`session_id` 混进去会破坏不变量，而侧聊真正需要的只是"这段在说什么"。
+
+**为什么不做成"分支"**：`conversation_store.fork()` 第一件事是
+`UPDATE conversation_branches SET active=0 WHERE session_id=?` —— 一个会话同时只能有一个 active 分支，天然做不到"两个都活着"。改成独立会话才是最省的。
+
+**落地要点**：
+
+| 项 | 决定 |
+|---|---|
+| 血统 | `sessions` 加 `parent_session_id` / `origin_turn_id`（v13）。**不加新 `kind`**——那列有 CHECK 约束，加值要重建整张表 |
+| 种子 | 到 `origin_turn_id` 为止的问答文本，最近 20 轮 / 8000 字符，超出从**最早**丢并标注省略几轮 |
+| 注入 | **首轮提交时**拼前缀，不预写 `conversation_turns`——伪造没有 `run_id`/`checkpoint_id` 的轮次会连带搞坏投影与恢复 |
+| 分界 | `【以上为上下文，以下是我的问题】`，后端 `side_chat.INJECTION_MARKER` 与前端 `sideChat.ts` 逐字一致 |
+| 入口 | 右栏「步骤」每行 hover 出现「侧聊」——那里本来就有 `turn.id`，且"从某一步开侧聊"语义自然 |
+
+**两个兜底**：父会话被删时侧聊**退回原文**继续用（不是打不开）；标题 `主会话 · 侧聊 1` 就说明了血统，所以侧栏没加额外徽标。
+
+**前端折叠**：`question` 里存的是"上下文 + 问题"整段，直接渲染会躺着一大块噪音。`splitSideChatPrompt()` 拆开后，上下文进 `<details>`（限高 240px 滚动），复制与编辑都只针对**用户真正问的那句**。
+
+**验证**：后端 `tests/test_side_chat.py` **8 条通过**（截断到指定轮、超限标注、轮次不存在、不能嵌套、血统落库、不抢焦点、注入往返、仅首轮注入）；前端 `Conversation`/`panel` **126 条通过**、全量 **51 文件 / 485 用例通过**。
+
+**顺带修的一处**：`test_session_kind.py` 用当前的 `SessionStore.create()` 往 v7 的表写数据，加列后必然崩（`table sessions has no column named parent_session_id`）。改用原始 SQL 造旧数据——测试的本意是"模拟上一次发布的库"，本来就不该走当前代码。
+
+### 9.21 右栏五项改造（2026-10-23，实机反馈后）
+
+用户一次提了五条：宽度可拖、切会话关闭、加动画、文件和改动改成**树状**、不要点击进入下一层。
+
+| 项 | 做法 |
+|---|---|
+| 宽度可拖 | `PanelShell` 内 `useState(width)`，左边缘 6px 手柄（`role="separator"`）；范围 320–760px。拖动时禁掉 `body.userSelect`，否则整页像被框选 |
+| 切会话关闭 | `LiveApp` 的 `useEffect([activeSessionId])` 里一并 `setPanelOpen(false)`——文件树/改动/侧聊全是"这个会话"的，留着会让人以为看的是新会话 |
+| 动画 | 面板打开时 `panel-in` 160ms（位移 12px + 淡入）；目录折叠箭头 `rotate(-90deg)` 120ms |
+| 树状展示 | 后端 `GET /api/workspace/files?recursive=true` 返回**扁平列表**（组装树是展示逻辑，放前端）；新组件 `features/panel/FileTree.tsx`，**默认全展开**，点目录只折叠自己 |
+| 改动也走树 | `ChangesTab` 复用 `FileTree`——堆一堆扁平路径看不出"改了哪个目录下的哪几处" |
+
+`FileTree` 的三条实现约束：
+
+1. **扁平 → 树在前端**：后端不必造递归结构，`buildTree()` 按 `/` 分段挂节点；
+2. **目录也输出**：只给文件的话空目录在树上会消失；
+3. **目录恒排在文件前**，同级按 `localeCompare('zh')`。
+
+#### 途中发现的两个真问题
+
+**1. 树里全是运行时垃圾**
+
+首版截图里 `.agent-runtime`、`.local-agent`、`browser-*` 占了大半屏。它们是本应用的会话库/终端日志/附件，用户从不会想"打开看看"。加进 `NOISE_DIRS`。
+
+**2. 一个工作区有 6.9 万条，树被截断**
+
+排除技术噪声后仍然 `truncated=True`。实测：
+
+| 目录 | 文件数 |
+|---|---|
+| `eval`（评测语料） | **55884** |
+| `data` | 3300 |
+| `frontend` | 657 |
+| `src` | 212 |
+
+把 `eval` / `data` 也加进 `NOISE_DIRS`，上限 2000 → 4000。同一工作区变成 **1230 条、不截断**。
+
+**代价说清楚**：`data`/`eval` 这两个名字在别的项目里可能是源码目录。留了退路——**文件搜索走的是文件名匹配，不受 `NOISE_DIRS` 影响**。
+
+**验证**：`tests/test_workspace_view.py` **10 条通过**（新增"树模式跳过运行时目录"）；前端全量 **51 文件 / 485 用例通过**；真机截图 `E:\tmp\tree-final.png`。
+
+#### 提升为正式会话（同日）
+
+`POST /api/sessions/{id}/promote`：清掉 `parent_session_id` / `origin_turn_id` 即可，**不改 id、不删历史**——改 id 会让已打开的页面、运行记录里的引用全部失效。不是侧聊时返回 422（而不是静默成功）。
+
+入口放在**标题栏**：侧聊会话的标题右边出现一个 `侧聊 · 提升` 标记，点一下即提升。位置选择说明——这是"当前这个会话"的属性，不是列表项的操作；放侧栏行菜单要改 `mapSidebar` 适配器与三处类型，成本差一个量级。
+
+**验证**：后端补第 9 条用例（提升后血统清空、id 不变、父会话的侧聊列表为空）。
+
+**第六轮：步骤要能联动到对话**（同日）
+
+用户：「没有联动啊，你点击应该滑动到具体的几轮」。
+
+第一版点步骤只做了 `setTab('trace')`——跳到轨迹页，什么也没定位。改成走**会话地图已经用的那条定位路径**：
+
+```ts
+setMapChat(null); setFollowup(null)
+setFocusTurn({ sessionId: activeSessionId, turnId })
+setTab('conversation')
+```
+
+`focusTurn` 是既有机制（`Conversation` 的 `focusTurnId`），会话地图的「定位到这一轮」用的就是它。现在步骤列表与它复用同一条路径，不新增任何状态。
+
+**一个已知边界**：`focusTurnId` 只在**值变化**时触发滚动，连点同一轮第二次不会重新滚。要支持"重复点同一轮也滚"得在 `Conversation` 里加一个自增令牌，暂未做。
+
+#### 第七轮：点了不跳转（同日，实机截图反馈）
+
+用户点了第 3 步，对话没动。**根因是两个"轮次 id"不是同一样东西**：
+
+| 来源 | 值 | 说明 |
+|---|---|---|
+| `trace.turns[i].id` | 该轮**最后一条**消息的 id | 为了让 `stats` 对齐 `mapTurnStats` 的 `afterMessageId`，锚点在循环里被一路推到最后一条（`trace/adapters.ts:122-123`） |
+| 对话的 `data-turn-id` | 该轮**第一条**消息的 id | `Conversation.tsx:675` 把 `partitionTurns` 的 turn.id 挂在轮容器上 |
+
+两边都是"轮次 id"，但一个是轮尾、一个是轮首，`querySelector` 永远匹配不到——**看起来完全正确的代码，只是概念错位**。
+
+修法：`TraceTurnView` 加可选 `leadId`（轮首消息 id），`StepsTab` 用它跳转：
+
+```ts
+onClick={() => onOpenStep?.(turn.leadId ?? turn.id)}
+```
+
+`id` 保持原语义不动——轨迹页的统计聚合依赖它。
+
+**验证**：真实服务下点第 3 步，对话滚到「你是谁？」那一轮（截图 `E:\tmp\step-jump.png`）；`trace` / `conversation` / `conversation-map` 回归 **11 文件 / 128 用例通过**。
+
+**教训**：跨模块引用的 id 必须写在契约里说明是"轮首"还是"轮尾"。这次两边各自的注释都对，合起来就是错的。
+
+### 9.18 右栏文件搜索升级为全项目（2026-10-22）
+
+原来文件标签的"筛选"只过滤**当前目录已加载的条目**——要找一个 `index.ts`，得先知道它在哪一层、然后逐层点进去。这不是搜索。
+
+**后端**：新增 `GET /api/workspace/files/search?q=&workspace_id=`（`application/workspace_view.py::search_files`）。
+
+| 边界 | 值 |
+|---|---|
+| 匹配 | 文件名包含关键词，忽略大小写 |
+| 深度 | 8 层（再深多半是依赖或产物目录） |
+| 条数 | 50 条，超出置 `truncated` |
+| 跳过 | 与目录列举同一份 `NOISE_DIRS`（`node_modules` / `.venv` / `dist`…） |
+
+`WorkspaceEntryView` 增加可选 `path`：**只在搜索结果里填**，因为搜索结果散布在不同层级，只给文件名会让用户分不清是哪个 `index.ts`。
+
+**前端**：文件标签的搜索框从"过滤当前目录"改为**输入即全项目搜索**（`useSearchWorkspaceFiles`）；结果行显示完整相对路径，点击直接预览。目录浏览保持不变（清空搜索就回到逐层视图）。
+
+**验证**：`tests/test_workspace_view.py` **9 条通过**（新增：嵌套文件带相对路径、`node_modules` 不出现在结果里、大小写不敏感、空关键词 422）；`ruff` 干净；前端 `typecheck` / `build` / `eslint` 通过；`check:api` 通过。
+
+### 9.19 真实服务验收（2026-10-22，第一次连真机）
+
+用 `python -m local_agent.api --no-open-browser` 起真实服务（模型已配置，68 个真实会话），Playwright 走了一遍：首页 → 右栏三个标签 → 产物 → 点开一条图片 → 定时任务。
+
+**发现的三个真问题**（都是 fixture 截不出来的）：
+
+**1. 产物接口首次 44 秒——正则是灾难性回溯**
+
+用户说"查询特别慢、第二页压根出不来"，我先怀疑数据量，实测库只有 140 轮、126 KB 正文、18 个附件——明显不是规模问题。逐层排除后定位到 `_POSIX_PATH`：
+
+```python
+# 坏：段内允许 `/`，与末尾的 `+` 构成歧义 → 指数级回溯
+r"(?<![\w./])/(?:[^\s)\]\"'<>，。；]+/)+[^\s)\]\"'<>，。；/]+\.[A-Za-z0-9]{1,8}"
+# 好：每段排除 `/`，段数 ≤8、段长 ≤80
+r"(?<![\w./])(?:/[^\s)\]\"'<>，。；/]{1,80}){2,8}\.[A-Za-z0-9]{1,8}"
+```
+
+同一份数据：**44.58 秒 → 0.21 秒**（纯正则抽取 0.009 秒）。这条正则单独就把整页拖死了，其它优化（缓存、批量 SQL）都是次要的。
+
+**2. 附件产物点开必然失败**
+
+附件路径相对**附件根**（`data/attachments`），而预览按工作区根解析 → 404。给 `ArtifactView` 加 `scope`（`workspace` / `attachments`），预览端点接受 `scope` 参数。
+
+**3. 256 KB 的图片上限把正常截图挡在门外**
+
+实测一张 312 KB 的 PNG 直接回 `too_large`，而弹窗对 `too_large` **什么都不渲染**（空白对话框）。拆成文本 256 KB / 图片 2 MB，并补上 `too_large` / `unreadable` 的文案。
+
+**顺带发现的一个流程问题**：我改完前端没 `npm run build` 就去验收，服务托管的是旧 bundle，白查了一轮 404。**改完前端必须重建再验**。
+
+**验收结论**：首页、右栏三个标签、产物（含图片预览）、定时任务都能正常打开与交互，浏览器控制台除上述 404 外无报错。
+
+**仍未做视觉验证**：能力中心、数据中台、会话地图（fixture 无场景，这次也没逐页点）。
+
+### 9.20 定时任务审批拒绝记账（2026-10-22）
+
+**根因**：`application/cron.py` 的 `execute_job()` 丢弃 `submit_message()` 返回值，未抛异常就记 `succeeded`。无人值守审批拒绝会继续正常收尾，因此被误报成功；服务正常返回的 `failed` 与后台提交的 `running` 也被同样误判。
+
+**本次改动**：
+
+- 调度与立即运行共用 `_run_outcome()`。同步执行直接判定；后台提交先等该会话现有执行锁释放，再通过原请求台账还原结果，不重复提交、不等待其它会话。
+- 执行失败、取消、结果无法核对时记 `failed`。正常结束时读取提交结果指定的 Checkpoint，核对 `run_id`，扫描本轮全部 `approval_history`；任一 `reject` 记 `blocked`，历史拒绝不串入，后续审批不覆盖先前拒绝。
+- 运行记录、任务最近状态与说明沿用 `CronStore.finish_run()` 落库。前端已有 `blocked` 的状态与摘要展示，无需改前端、端点、生成类型或数据库结构。
+- 补回归覆盖两种触发入口、成功/拒绝/失败、历史拒绝隔离、多次审批、丢失/错轮结果、后台等待与防重叠、Graph 异常；真实应用服务 + Graph + SQLite 使用离线假模型。
+
+**独立既有缺陷，本轮只报告**：`persistence/checkpoint.py` 的 `_connect()` 返回默认 tuple 行，`CronStore` 却按列名读取。新建真实数据库后创建定时任务可复现 `TypeError: tuple indices must be integers or slices, not str`。原单测显式设置了 `sqlite3.Row`，掩盖了这一装配问题。本次集成夹具也显式设置行格式以隔离验证状态逻辑，**不代表生产装配或真实页面已验收**。
+
+**验证**（命令在 `local-agent-web` 执行）：
+
+- `python -m pytest tests/test_cron.py tests/test_unattended_approval.py tests/test_application.py tests/test_jobs.py tests/test_recovery.py -q --tb=short --basetemp=.pytest_cache/cron-regression-20261022-1`：**140 passed**。该次收集后又补了两条同步/后台 Graph 中断用例，单独执行 `python -m pytest tests/test_cron.py -k 'graph_crash or noncompleted' tests/test_session_kind.py -q --tb=short --basetemp=.pytest_cache/cron-extra-20261022-1`：**5 passed / 39 deselected**（含重验三条结果优先级用例；`test_session_kind.py` 被筛选排除，不能算已验证）。所有 pytest 使用项目 `.venv/Scripts/python.exe`，默认 `E:\tmp\pytest-of-asus` 无写权限，故临时数据放工作区缓存内。
+- 修改文件的 `ruff check src/local_agent/application/cron.py tests/test_cron.py`、`uv lock --check --offline`、本次文档 `git diff --check` 通过。
+- 全库 `ruff check .` **未通过**：3 条既有诊断，位于未修改的 `oss_storage.py` 与 `tests/test_image_tools.py`。
+- 全源码 `mypy src` **未通过**：6 个文件共 17 条诊断；包含 `cron.py` 原有 `croniter` 导入缺少类型存根，其余位于未修改的 `shell_tools.py`、`image_tools.py`、`file_tools.py`、`graph/nodes.py`、`application/artifacts.py`。未修改依赖、未压制诊断。
+- 未运行全库 pytest；前端与 API schema 未改，本轮未重建前端或重导出 OpenAPI。
+
+**本次未做**：不改审批规则、不增加自动批准、不补跑、不改调度生命周期；不修上述数据库行格式或其它全库既有问题；未调用真实模型、未做浏览器验收，未打包或发布。
+
+### 9.21 定时任务兼容默认数据库行格式（2026-10-22）
+
+**根因与复现**：`open_database()` 的共享连接默认返回 tuple，`CronStore._job()`、`_run()` 与 `finish_run()` 却使用列名下标。撤掉 §9.20 夹具中的 `sqlite3.Row` 设置后，6 条真实 Graph 用例与 2 条存储往返用例均复现同一 `TypeError`；即使首次使用 Row 连接，默认连接重开后仍会失败。
+
+**改动**：
+
+- `persistence/cron_store.py` 按 `_JOB_COLUMNS` / `_RUN_COLUMNS` 的显式列序读取，与现有会话/后台任务存储一致；`finish_run()` 的单列查询也改为位置取值。同时兼容 tuple 与已有 `sqlite3.Row`，不修改共享连接、SQL 字段或库结构。
+- `tests/test_cron.py` 撤掉两处行格式绕过，真实 Graph 夹具断言生产默认配置。增加两种行格式的创建/查询/更新/暂停/到期查询/运行收尾/分页/重开/删除检查，并确认存储操作不改变共享连接行格式。
+- `tests/test_api.py` 使用既有 `open_runtime()` 装配和真实 FastAPI 路由，验证 HTTP 创建、列表、暂停/恢复、立即运行、运行记录、关联会话、删除；分别覆盖 `succeeded` 与 `blocked`，审批拒绝后目标文件仍保留。模型为确定性离线假模型。
+
+**验证**（在 `local-agent-web` 使用 `.venv/Scripts/python.exe`）：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests/test_cron.py tests/test_api.py -k cron -q --tb=short --basetemp=.pytest_cache/cron-row-green-20261022-1
+.\.venv\Scripts\python.exe -m ruff check src/local_agent/persistence/cron_store.py tests/test_cron.py tests/test_api.py
+.\.venv\Scripts\python.exe -m mypy src/local_agent/persistence/cron_store.py
+```
+
+- pytest：**39 passed / 130 deselected**，包括全部 37 条定时任务用例和 2 条新增 HTTP 用例；1 条第三方 `BlockingPortal` 弃用警告。
+- 修改文件 Ruff、存储模块 mypy、本轮文档及已跟踪测试文件的 `git diff --check` 通过。
+- §9.20 的生产行格式阻塞已解除；本轮未运行浏览器、真实模型或全库 pytest，未重跑全库 Ruff/mypy，不覆盖上一轮已报告的全库检查问题。前端、API schema 与依赖均未改，未重建前端或打包发布。
+
+### 9.22 右栏受控终端（2026-10-23）
+
+用户确认撤销 v1.0 不做终端的限制，采用「启动时审批一次，后续手动输入不逐条审批」。具体契约冻结在 `ARCHITECTURE.md` §23，Agent 与无人值守审批不变。
+
+- 新增「终端」标签、审批卡、多终端选择、结束与重连。切换标签、关闭面板、刷新均保留进程；服务重启不恢复。
+- Windows 系统 ConPTY 直接衔接既有受限令牌、IPC 兼容层和独立 Job；没有无沙箱降级。只读档不授予写权限，其余档只授予工作区与专用临时目录，不带入外部目录授权。
+- 审批五分钟有效，绑定工作区、Shell 和权限指纹；重复批准不重复启动。上限四个终端，输出每个 2 MiB、输入队列 16 帧，空闲三十分钟自动结束。审计只存元数据。
+- 本次不做侧边对话、浏览器、任意启动命令、外部写授权、POSIX 降级、跨重启恢复、Agent 复用用户终端。
+
+验证：前端全量 **485 passed**；终端与 OpenAPI 一致性最终 **14 passed**；Windows 原生、既有进程管理、目录迁移与非 Git 工作区复测 **24 passed**；真实服务 Playwright **1 passed**，同时检查页面异常和控制台错误，复核审批/运行截图。前端类型、构建、API 生成一致性、修改模块 Ruff/mypy 通过。相关后端批次 **215 passed / 2 failed**：一项是仓库内临时目录引起的 Git 检测，仓库外复测已通过；另一项是既有 API 清单漏 13 个旧端点，本轮只加入四个新终端端点，保持严格相等断言并记录欠账。
+
+完整文件清单、复现命令、已知限制见 [终端验收记录](../audits/2026-10-23-user-terminal.md)。未做真实供应商调用、安装包发布或其他操作系统验收。
+
+### 9.23 接口清单收尾（2026-10-23）
+
+用户确认先收尾。复现并核对后，在 `tests/test_api.py::test_openapi_surface_is_controlled` 中补齐十三个已实现旧端点，保持路径集合**严格相等**，未放宽断言。只修改测试及验收记录，生产代码、接口契约与生成物不变。
+
+此前 §9.22 的接口清单失败已消除。接口清单、真实 OpenAPI 与生成文档一致性、终端十三条用例、仓库外非 Git 目录检查合计 **16 passed**；测试文件 Ruff、前端 `npm run check:api` 通过，只有第三方 `BlockingPortal` 弃用警告。本次未重跑全库或重新构建前端；完整命令与范围见 [验收记录的收尾章节](../audits/2026-10-23-user-terminal.md#接口清单收尾2026-10-23)。
+
+### 9.24 真实开发流程验收（2026-10-23）
+
+在独立数据和工作区中，用真实 `deepseek-reasoner` 完成小项目修复、测试、构建与报告；补测真实命令审批。改动面板、终端启动审批、切页与刷新重连、Ctrl+C、结束子进程、写入边界、产物预览、来源会话恢复和会话地图均取得真实证据，浏览器捕获错误为 0。
+
+确认一个结果说明问题：命令实际经过人工批准后执行，模型却回答“没有弹审批、直接生效”。当前删除审批配置也与早期交接说明不同，另有重复交付说明现象。本轮只验收和记录，未改产品代码或原配置；优先建议定位审批恢复后的模型反馈。完整范围、证据和复验步骤见 [真实流程验收记录](../audits/2026-10-23-real-workflow-acceptance.md)。
+
+### 9.12 V4 收尾：连接卡改「行 + 展开」（2026-10-22）
+
+§9.4 只做了去框（卡片从"描边"改"灰底"），卡片仍整张全展开。这一批把**详情折叠起来**。
+
+**收起行显示什么**（必须仍能回答"这是哪条、什么模型、能不能用"）：
+
+```
+[名称]  [模型 ID]  [默认]  [状态徽章]  [明文传输?]  [详情▾]        conn-a
+[编辑] [测试连接] [设为默认]                                    [删除]
+```
+
+- **状态徽章与风险标记留在收起态**——不能让人点开才发现是明文传输。
+- **按钮组不折叠**：编辑/测试/设为默认/删除仍在行内。折叠它们会让常用操作每次多一步。
+- **详情里**：端点、模型、上下文、密钥状态（四条事实）+ 能力徽章 + 状态说明 + 明文传输完整说明。
+
+**结果**：1440×900 下一屏可见的连接从 **3 张**变成 **6 张**（截图 `E:\tmp\v4-collapsed.png`）。
+
+**测试的影响**：`SettingsDialog.test.tsx` 有 5 组断言依赖详情里的内容（能力徽章、密钥状态、状态说明、明文传输说明、`pendingApply`）。
+新增 `expandCard(name)` 辅助函数先点开再断言，而不是降低断言强度——这些"不能把未检测的能力说成可用"的保证一条都没删。
+
+**仍未做**：
+- 收起行占两行（按钮组独占一行），一屏 6 张已是当前信息量下的上限；再压缩要把次要按钮收进 `…` 菜单，属于取舍，不在本批。
+- 「添加连接」按钮还是旧样式（近黑底），没换 `Button` 原语——`SettingsDialog.tsx` 里那批按钮统一替换留到下一轮。
+- 左侧分区导航仍是 208px 固定列表，`§5.3` 的主从改版只做了内容区。实际影响很小（真宿主会注入 11 个分区），故未动。
+
+**验证**：`npm run typecheck` 通过；`npm run build` 通过；`src/features/settings` **6 文件 / 59 用例通过**；截图复核收起态。
 
 ---
 
@@ -690,7 +1635,7 @@
 | 1 | 顶栏高度 | 由 63px 改为 **56px** | 接受由此产生的整屏位移，**一次性重拍全部视觉基线**，不逐张手工修补 | V1 |
 | 2 | 深浅色切换 | **默认跟随系统**（`prefers-color-scheme`），手动选择后覆盖并持久化，可切回"跟随系统" | 首屏防闪：`index.html` 内联最小脚本先写 `data-theme`；`color-scheme` 同步；切换不重载页面。细则见 §2.1 末段 | V0 |
 | 3 | 能力中心形态 | **独立成页**，放侧栏底部；设置里的"能力 / 技能 / MCP"改为跳转链接 | 原三个组件整体搬入，不复制实现；入口总数保持 4 个 | V5 |
-| 4 | 产物入口 | **并入数据中台，作第六个 tab**（不是第五个——现有已五 tab） | 不新增侧栏入口；筛选/表格/网格规格见 §5.5 | V7 |
+| 4 | 产物入口 | ~~并入数据中台作第六个 tab~~ → **2026-10-22 实机反馈后改判：独立成页** | 用户找不到（"我怎么没看到产物"）证明"并入"的可发现性不成立；现为侧栏第 6 个入口，同时从数据中台移除该 tab | V7 |
 | 5 | 定时任务审批口径 | **只执行免审范围内动作；越界即失败并记录，不挂起等待** | 属审批语义变更，**必须先写入 `ARCHITECTURE.md` 再编码**；预检、运行中越界、投递通道三种情况见 §5.6 | V7 |
 | 6 | 对话正文字号 | **保持 14px，不放大** | 只改行高（22→21）与颜色（`--c-text-1`）；若落地后仍显吃力，另行评估，不在本批次内调 | V3 |
 
@@ -701,6 +1646,7 @@
 | A | 是否引入"紧凑 / 舒适"密度切换 | V6 之后 | 不做，等真实反馈 |
 | B | 图标是否补齐到 30+ 个，还是按需增量 | V2 起持续 | 按需增量，不预先建库 |
 | C | 深色模式下 diff 配色是否重新校准 | V6 | 沿用 `tokens.css:237-244` 现有值，仅在外框改为无边框时复核一次 |
+| D | **助手 markdown 正文是否收到 14px**（现状 16px，用户气泡 14px，同一段对话两种字号） | V3 收尾 | 暂不动：16→14 是 12.5% 缩小，属于产品口径，需看过真实长回答再定 |
 
 ---
 

@@ -37,11 +37,15 @@ export function OssCredentialField() {
   const [error, setError] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
   const [testResult, setTestResult] = useState<TestResult | null>(null)
+  // 已配置时先显示两个"已配置"的只读格（接口不给密钥、连掩码都不给），
+  // 点任一格转成输入态；Key 与 Secret 必须成对重填，所以两格同时切换。
+  const [editing, setEditing] = useState(false)
 
   const update = (view: CredentialView) => {
     queryClient.setQueryData(ossCredentialQueryKey, view)
     setAccessKey('')
     setSecretKey('')
+    setEditing(false)
     setError(null)
     setSaved(true)
     setTestResult(null)
@@ -73,6 +77,7 @@ export function OssCredentialField() {
 
   const view = query.data
   const busy = save.isPending || clear.isPending || test.isPending
+  const masked = view !== undefined && view.configured && !editing
   return (
     <section className={styles.section} aria-label="对象存储凭据">
       <h4>对象存储凭据</h4>
@@ -92,43 +97,90 @@ export function OssCredentialField() {
             <div><dt>存放位置</dt><dd>{view.store ? (STORE_LABEL[view.store] ?? view.store) : '没有可用的凭据存储'}</dd></div>
           </dl>
           {view.note === null ? null : <p role="alert" className={styles.error}>{view.note}</p>}
-          <label className={styles.field}>
-            <span>
-              <strong>Access Key</strong>
-              <small>对象存储的访问密钥 ID；保存后从下一张上传的图片开始生效。</small>
-            </span>
-            <input
-              type="text"
-              aria-label="Access Key"
-              autoComplete="off"
-              disabled={busy}
-              value={accessKey}
-              onChange={event => { setAccessKey(event.target.value); setSaved(false) }}
-            />
-          </label>
-          <label className={styles.field}>
-            <span>
-              <strong>Secret Key</strong>
-              <small>只写入不回读；不确定就整对重填。</small>
-            </span>
-            <input
-              type="password"
-              aria-label="Secret Key"
-              autoComplete="off"
-              disabled={busy}
-              value={secretKey}
-              onChange={event => { setSecretKey(event.target.value); setSaved(false) }}
-            />
-          </label>
+          {masked ? (
+            <>
+              <span className={styles.field}>
+                <span className={styles.fieldText}>
+                  <strong>Access Key</strong>
+                  <small>已配置，只写入不回读。点右边任一格可以整对重填（Key 与 Secret 必须成对）。</small>
+                </span>
+                <span className={styles.control}>
+                  <input
+                    type="text"
+                    readOnly
+                    aria-label="Access Key（已配置，点击修改）"
+                    className={styles.maskedInput}
+                    value="••••••••"
+                    onClick={() => setEditing(true)}
+                    onFocus={() => setEditing(true)}
+                  />
+                </span>
+              </span>
+              <span className={styles.field}>
+                <span className={styles.fieldText}>
+                  <strong>Secret Key</strong>
+                  <small>只写入不回读。</small>
+                </span>
+                <span className={styles.control}>
+                  <input
+                    type="text"
+                    readOnly
+                    aria-label="Secret Key（已配置，点击修改）"
+                    className={styles.maskedInput}
+                    value="••••••••"
+                    onClick={() => setEditing(true)}
+                    onFocus={() => setEditing(true)}
+                  />
+                </span>
+              </span>
+            </>
+          ) : (
+            <>
+              <label className={styles.field}>
+                <span className={styles.fieldText}>
+                  <strong>Access Key</strong>
+                  <small>对象存储的访问密钥 ID；保存后从下一张上传的图片开始生效。</small>
+                </span>
+                <span className={styles.control}>
+                  <input
+                    type="text"
+                    aria-label="Access Key"
+                    autoComplete="off"
+                    disabled={busy}
+                    value={accessKey}
+                    onChange={event => { setAccessKey(event.target.value); setSaved(false) }}
+                  />
+                </span>
+              </label>
+              <label className={styles.field}>
+                <span className={styles.fieldText}>
+                  <strong>Secret Key</strong>
+                  <small>只写入不回读；不确定就整对重填。</small>
+                </span>
+                <span className={styles.control}>
+                  <input
+                    type="password"
+                    aria-label="Secret Key"
+                    autoComplete="off"
+                    disabled={busy}
+                    value={secretKey}
+                    onChange={event => { setSecretKey(event.target.value); setSaved(false) }}
+                  />
+                </span>
+              </label>
+            </>
+          )}
           <div className={styles.actions}>
-            <button
-              type="button"
-              className={styles.primary}
-              disabled={busy || accessKey.trim() === '' || secretKey.trim() === ''}
-              onClick={() => save.mutate()}
-            >
-              {save.isPending ? '正在保存…' : '保存密钥'}
-            </button>
+            {masked ? null : (
+              <button
+                type="button"
+                className={styles.primary}
+                disabled={busy || accessKey.trim() === '' || secretKey.trim() === ''}
+                onClick={() => save.mutate()}
+              >
+                {save.isPending ? '正在保存…' : '保存密钥'}
+              </button>
+            )}
             <button type="button" disabled={busy || !view.configured} onClick={() => clear.mutate()}>
               {clear.isPending ? '正在删除…' : '删除已保存密钥'}
             </button>

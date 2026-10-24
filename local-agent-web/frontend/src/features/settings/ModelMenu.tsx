@@ -1,9 +1,10 @@
-import { Check } from '../../components/icons'
+import { Check, Close } from '../../components/icons'
 import type { ConnectionStatus, ModelMenuView } from '../../fixtures/types'
 import styles from './ModelMenu.module.css'
 
 interface ModelMenuProps {
   menu: ModelMenuView
+  onClose?: () => void
   actions?: {
     busy: boolean
     onSelect: (connectionId: string) => void
@@ -30,12 +31,20 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
  * Rendered as a block above the composer rather than a floating layer, so the
  * prototype has no overlap or occlusion to reason about.
  */
-export function ModelMenu({ menu, actions }: ModelMenuProps) {
+export function ModelMenu({ menu, actions, onClose }: ModelMenuProps) {
   return (
-    <section className={styles.menu} aria-label="模型选择">
+    <section className={styles.menu} aria-label="模型选择" onKeyDown={(event) => {
+      if (event.key === 'Escape' && onClose !== undefined) {
+        event.preventDefault()
+        event.stopPropagation()
+        onClose()
+      }
+    }}>
       <div className={styles.head}>
         <span className={styles.headTitle}>会话模型</span>
         <span className={styles.headHint}>切换只影响下一次提交</span>
+        <button type="button" className={styles.close} aria-label="关闭模型选择"
+          disabled={onClose === undefined} onClick={onClose}><Close /></button>
       </div>
 
       <ul className={styles.list} aria-label="模型连接">

@@ -103,9 +103,9 @@ function PrototypeHost({ scenarioId }: { scenarioId: string | null }) {
           ? null
           : <CapabilitiesPanel
             view={scenario.capabilities}
-            /* 原型里的档位选择器是**惰性**的（同 `TasksPanel` 的"打开会话"）：截图要如实画出这个控件，
+            /* 原型里的开关是**惰性**的（同 `TasksPanel` 的"打开会话"）：截图要如实画出这个控件，
                但原型宿主没有后端可写——真宿主的接线在 `CapabilitiesSection`。 */
-            actions={{ onSelectProfile: () => undefined }}
+            actions={{ onToggle: () => undefined }}
             onClose={() => setCapabilitiesOpen(false)}
           />}
         {/* 同上（T62 的 `tasks`）：只有挂了视图模型的场景才渲染，"打开会话"在原型里是惰性的。 */}

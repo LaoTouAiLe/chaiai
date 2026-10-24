@@ -1,4 +1,4 @@
-import type { components } from '../../api/schema.gen'
+﻿import type { components } from '../../api/schema.gen'
 
 export interface MapNode {
   id: string
@@ -17,6 +17,7 @@ export interface MapBranch {
   active: boolean
   position: number
 }
+
 export interface MapData {
   nodes: MapNode[]
   branches: MapBranch[]
@@ -24,9 +25,17 @@ export interface MapData {
   matchedIds: ReadonlySet<string>
 }
 const STATUS: Record<string, string> = {
-  completed: '已完成', failed: '失败', blocked: '等待补充', running: '执行中',
+  cancelled: '已停止', completed: '已完成', failed: '失败', blocked: '等待补充', running: '执行中',
   awaiting_approval: '等待审批', unknown: '历史状态未记录',
 }
+
+/**
+ * 会话地图**只画本会话的轮次**（2026-10-23 最终裁定）。
+ *
+ * 侧聊一度被塞进树里当"分支延续"，但那张图是我们自己设计的——hermes 根本没有会话地图，
+ * 它的 `_lineage_root_id` 只用于批量操作（删会话时连带血统根、未读合并、清理 turn journal），
+ * 从不画成树。硬凑出来的分支看着别扭，撤掉。侧聊的入口只有右栏「侧边对话」页签。
+ */
 export function mapConversationMap(dto: components['schemas']['ConversationMapView']): MapData {
   return {
     activeBranchId: dto.active_branch_id,

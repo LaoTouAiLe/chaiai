@@ -18,9 +18,10 @@ import json
 import logging
 import os
 import sqlite3
+import threading
 import uuid
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -32,6 +33,7 @@ from local_agent.exceptions import (
     ModelSettingsError,
     SelectionConflict,
 )
+from local_agent.mcp.state import DEFAULT_SERVER_STATE, ServerState
 from local_agent.model_settings.credentials import (
     CredentialStore,
     DatabaseCredentialStore,
@@ -331,6 +333,130 @@ class CapabilityStore:
         return resolve_switches(self._defaults, merged)
 
 
+#: MCP Server 的开关与工具名单在 ``settings_meta`` 里的键（2026-10-20；契约 §6.13）。
+#:
+#: 与能力开关同一口径：库只记**用户动过的 server**。``mcp.json`` 里新加的 server 因此天然是关的
+#: ——"从别处整份复制配置"不会把别人的开关状态一起带过来。
+META_MCP_SERVERS = "mcp.servers"
+
+
+def _coerce_server_state(payload: object) -> ServerState | None:
+    """把库里的一行 JSON 收敛成状态；脏数据返回 ``None``（= 当作没表态 = 关）。"""
+    if not isinstance(payload, dict):
+        return None
+    enabled = payload.get("enabled")
+    if not isinstance(enabled, bool):
+        # 缺这一位就没法判断"用户到底开没开"，按关处理比按开处理安全。
+        return None
+    raw_allow = payload.get("enabled_tools")
+    allowed: tuple[str, ...] | None
+    if raw_allow is None:
+        allowed = None
+    elif isinstance(raw_allow, list) and all(isinstance(item, str) for item in raw_allow):
+        allowed = tuple(raw_allow)
+    else:
+        return None
+    raw_deny = payload.get("disabled_tools")
+    if raw_deny is None:
+        denied: tuple[str, ...] = ()
+    elif isinstance(raw_deny, list) and all(isinstance(item, str) for item in raw_deny):
+        denied = tuple(raw_deny)
+    else:
+        return None
+    return ServerState(enabled=enabled, enabled_tools=allowed, disabled_tools=denied)
+
+
+@dataclass
+class McpServerStore:
+    """每台 MCP Server 的开关与工具白/黑名单（2026-10-20；契约 §6.13）。
+
+    **开关不写进 ``mcp.json``**：那份文件描述"怎么连"，这份库记录"用户要不要连"。
+    分开的直接好处是 `mcp.json` 可以从 CodeBuddy 整份复制而不改一字。
+
+    读的时候对**配置文件里的每台 server** 都返回一行（没记录的就是默认关），这样页面不必
+    自己补默认值；库里残留但配置里已删除的 server 也会返回，页面据此显示"配置已删除"。
+    """
+
+    _connection: sqlite3.Connection
+    #: 这个 store 会被**两个线程**用：主线程（页面读写）与 MCP 预热/回收线程
+    #: （`McpManager.state_provider` → `states()`）。共用同一条 sqlite 连接时，CPython 的
+    #: sqlite3 虽然在 serialized 模式下能扛住并发，但"能扛住"不是"我们验证过"——
+    #: 用一把自己的锁把它变成串行，代价是微秒级，收益是这条风险不再存在。
+    _lock: threading.RLock = field(default_factory=threading.RLock)
+
+    def states(self, known: Sequence[str] = ()) -> dict[str, ServerState]:
+        """server 名 → 状态；``known`` 里没记录的补默认关。"""
+        with self._lock:
+            return self._states_unlocked(known)
+
+    def _states_unlocked(self, known: Sequence[str] = ()) -> dict[str, ServerState]:
+        stored = self._read_unlocked()
+        states = {name: stored.get(name, DEFAULT_SERVER_STATE) for name in known}
+        for name, state in stored.items():
+            states.setdefault(name, state)
+        return states
+
+    def put(self, name: str, state: ServerState) -> ServerState:
+        """写入一台 server 的完整状态（读-改-写合并，不覆盖别的 server）。"""
+        with self._lock:
+            stored = self._read()
+            stored[str(name)] = state
+            self._write(stored)
+        return state
+
+    def forget(self, name: str) -> None:
+        """删掉一台 server 的记录（配置文件里已删除它时用）。"""
+        with self._lock:
+            stored = self._read()
+            if stored.pop(str(name), None) is not None:
+                self._write(stored)
+
+    def _read(self) -> dict[str, ServerState]:
+        with self._lock:
+            return self._read_unlocked()
+
+    def _read_unlocked(self) -> dict[str, ServerState]:
+        row = self._connection.execute(
+            "SELECT value FROM settings_meta WHERE key = ?", (META_MCP_SERVERS,)
+        ).fetchone()
+        if row is None:
+            return {}
+        try:
+            parsed = json.loads(str(row[0]))
+        except ValueError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        result: dict[str, ServerState] = {}
+        for name, payload in parsed.items():
+            state = _coerce_server_state(payload)
+            if state is not None:
+                result[str(name)] = state
+        return result
+
+    def _write(self, states: Mapping[str, ServerState]) -> None:
+        with self._lock:
+            self._write_unlocked(states)
+
+    def _write_unlocked(self, states: Mapping[str, ServerState]) -> None:
+        payload = {
+            name: {
+                "enabled": state.enabled,
+                "enabled_tools": (
+                    None if state.enabled_tools is None else list(state.enabled_tools)
+                ),
+                "disabled_tools": list(state.disabled_tools),
+            }
+            for name, state in states.items()
+        }
+        self._connection.execute(
+            "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (META_MCP_SERVERS, json.dumps(payload, sort_keys=True), now_iso()),
+        )
+        self._connection.commit()
+
+
 @dataclass
 class SkillStore:
     """技能的用户级禁用表（技能管理页，2026-10-16；契约 §16.5）。
@@ -447,6 +573,8 @@ class SettingsDatabase:
     web_search: WebSearchKeyStore
     #: 技能的用户级禁用表（技能管理页，2026-10-16）。
     skills: SkillStore
+    #: 每台 MCP Server 的开关与工具名单（2026-10-20）。
+    mcp: McpServerStore
     #: 打开时用的凭据存储（2026-10-20）：对象存储密钥与模型连接共用这一份。
     credentials: Any = None
 
@@ -502,6 +630,7 @@ def open_settings_database(
         ),
         web_search=WebSearchKeyStore(credentials),
         skills=SkillStore(connection),
+        mcp=McpServerStore(connection),
         # 对象存储密钥与模型连接共用同一份凭据存储（2026-10-20）。
         credentials=credentials,
     )

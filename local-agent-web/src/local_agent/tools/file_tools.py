@@ -11,17 +11,19 @@ from __future__ import annotations
 
 import codecs
 import hashlib
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 from langchain_core.tools import BaseTool, tool
 
-from local_agent.exceptions import FileOperationError, SecurityError
+from local_agent.exceptions import FileOperationError, SecurityError, WorkspaceBoundaryError
 from local_agent.security.approval import action_fingerprint
 from local_agent.security.diff_guard import (
     apply_patch,
     build_unified_diff,
     count_changed_lines,
+    count_diff_lines,
     edit_input_mode,
     parse_patch,
 )
@@ -41,6 +43,38 @@ from local_agent.tools.result_types import (
 
 #: 递归列目录的最大深度（架构 §6.1：限制递归深度）。
 MAX_RECURSIVE_DEPTH = 5
+
+#: 删除时统计"删了多少行"的上限：超过它的文件不按行计（二进制/超大文件按行数没有意义）。
+#: 与变更账本的基线上限同口径（512 KB），避免页面上出现"删除 26903 行"这种数字。
+COUNTED_LINES_MAX_BYTES = 512 * 1024
+
+
+def _is_pure_crlf(text: str) -> bool:
+    """是否"每一行都是 CRLF"（2026-10-22）。
+
+    只有纯 CRLF 才在归一化写回时还原——混合换行（部分 LF、部分 CRLF）强行统一，会改动
+    根本没有触及的那些行。
+    """
+    return "\r\n" in text and text.count("\n") == text.count("\r\n")
+
+
+def _edit_miss_message(policy: SecurityPolicy, resolved: Path, detail: str) -> str:
+    """编辑未命中时的错误文本：按文件累计次数，第 3 次起给升级路径（2026-10-22，抄 hermes）。
+
+    为什么要有计数：模型会用"换个写法再试一次"来应对匹配失败，实测连试 3 次仍失败，
+    最后自己改走脚本——那条路绕过了账本。计数到 3 就把"别再重试"写成明确指令。
+    """
+    key = str(resolved)
+    count = policy.edit_failures.get(key, 0) + 1
+    policy.edit_failures[key] = count
+    message = detail
+    if count >= 3:
+        message += (
+            f"\n同一文件已连续失败 {count} 次：不要再换一种写法重试。"
+            "要么重新读这个文件核对当前内容，要么用更长、更唯一的锚点（带上下文行），"
+            "要么整份重读后改用 write_file 替换。"
+        )
+    return message
 
 #: 工具输出进入 State 的预览长度（架构 §11.2：工具输出截断）。
 OUTPUT_PREVIEW_CHARS = 2000
@@ -73,6 +107,8 @@ def list_dir_entries(
     resolved = policy.files.directory(path)
 
     candidates: list[Path] = []
+    #: 非递归分支的 ``DirEntry``：带上它，`_dir_entry` 就不必再对每个条目做一次 realpath。
+    scanned: dict[str, os.DirEntry[str]] = {}
     depth_limited = False
     truncated = False
     if recursive:
@@ -85,7 +121,7 @@ def list_dir_entries(
             raw, stream_stopped = policy.files.children(current, max_entries - len(candidates))
             if stream_stopped:
                 truncated = True  # 目录里还有没读的条目：结果不完整，必须如实标注
-            for child in sorted(raw):
+            for child in sorted((Path(item.path) for item in raw), key=lambda path: path.name):
                 if not include_hidden and child.name.startswith("."):
                     continue
                 if policy.files.is_directory(child) and depth + 1 > MAX_RECURSIVE_DEPTH:
@@ -110,27 +146,32 @@ def list_dir_entries(
                 stack.append((child, depth + 1))
     else:
         raw, stream_stopped = policy.files.children(resolved, max_entries)
-        candidates = [
-            candidate
-            for candidate in sorted(raw)
-            if include_hidden or not candidate.name.startswith(".")
+        visible = [
+            item for item in raw if include_hidden or not item.name.startswith(".")
         ]
+        visible.sort(key=lambda item: item.name)
+        candidates = [Path(item.path) for item in visible]
+        scanned = {str(Path(item.path)): item for item in visible}
         if stream_stopped:
             truncated = True
 
     total = len(candidates)
     entries = [
-        _dir_entry(candidate, policy)
+        _dir_entry(candidate, policy, dirent=scanned.get(str(candidate)))
         for candidate in candidates[:max_entries]
     ]
 
     notes: list[str] = []
     if truncated:
         notes.append(
-            f"结果已截断：已达上限，只返回前 {max_entries} 项，未继续遍历剩余目录"
+            f"结果已截断：已达上限，只返回按名称排序的前 {max_entries} 项，未继续遍历剩余目录；"
+            "要看更多：把 path 指到具体子目录，或提高 max_entries"
         )
     elif total > max_entries:
-        notes.append(f"结果已截断：共 {total} 项，只返回前 {max_entries} 项")
+        notes.append(
+            f"结果已截断：共 {total} 项，只返回按名称排序的前 {max_entries} 项；"
+            "要看更多：把 path 指到具体子目录，或提高 max_entries"
+        )
     if depth_limited:
         notes.append(f"递归深度超过 {MAX_RECURSIVE_DEPTH} 层的条目已省略")
 
@@ -149,7 +190,7 @@ def read_file_content(
     policy: SecurityPolicy,
     start_line: int | None = None,
     end_line: int | None = None,
-    max_chars: int = 20000,
+    max_chars: int = 100000,
     start_char: int | None = None,
     expected_sha256: str | None = None,
     encoding: str = "utf-8-sig",
@@ -170,6 +211,30 @@ def read_file_content(
     _, file_sha256, _ = policy.files.read_prefix_and_sha256(resolved, 0)
     if expected_sha256 and expected_sha256.lower() != file_sha256:
         raise FileOperationError("expected_sha256 与当前文件不一致：文件已变化，请重新读取")
+    # 轮级去重（2026-10-22，对齐 hermes 的 read 去重）：同一轮里用**同一组参数**重复读同一段、
+    # 且文件 sha 没变，就不再返回原文。模型反复读同一段是常见空转，一次就是一次模型往返。
+    # 文件一改 sha 就不同，不会命中；需要原文时换个范围或改 max_chars 即可绕过。
+    cache_key = (str(resolved), file_sha256, start_line, end_line, start_char, max_chars, encoding)
+    cached = policy.read_cache.get(cache_key)
+    if cached is not None:
+        first_line, last_line, has_more, next_start_line, next_start_char, line_count = cached
+        return ReadFileResult(
+            path=_display_path(resolved, policy.workspace_root),
+            encoding="utf-8" if encoding == "utf-8-sig" else encoding,
+            sha256=file_sha256,
+            line_count=line_count,
+            content="",
+            note=(
+                "这段内容在本次任务中已经读过、文件也没有变化（sha256 前 8 位 "
+                f"{file_sha256[:8]}），因此没有重复返回原文。"
+                "确实需要再看一遍时，换一个范围（start_line/start_char）或改 max_chars 重新读取。"
+            ),
+            first_line=first_line,
+            last_line=last_line,
+            has_more=has_more,
+            next_start_line=next_start_line,
+            next_start_char=next_start_char,
+        )
     chunks: list[str] = []
     offset = 0
     number = 1
@@ -227,17 +292,26 @@ def read_file_content(
     next_char = actual_start + count
     has_more = decoded and bool(content) and next_char < offset
     truncated = has_more and count == max_chars
+    next_start_line = (last_line if last_line in partial else last_line + 1) if has_more else None
     if truncated:
         notes.append(f"内容已截断到 {max_chars} 字符")
     if has_more:
         notes.append(f"后续内容传 start_char={next_char} 和 expected_sha256={file_sha256}；也可按行定点读取")
+    # 记入轮级去重表：下一次相同参数、同一 sha 的读取直接返回"已读过"，不再返回原文。
+    if decoded and content:
+        if len(policy.read_cache) >= 64:
+            policy.read_cache.clear()
+        policy.read_cache[cache_key] = (
+            first_line, last_line, has_more, next_start_line,
+            next_char if has_more else None, line_count,
+        )
     return ReadFileResult(
         path=_display_path(resolved, policy.workspace_root),
         encoding=("utf-8" if encoding == "utf-8-sig" else encoding) if decoded else None,
         sha256=file_sha256, line_count=line_count, content=content, is_binary=is_binary,
         truncated=truncated, note="；".join(notes) if notes else None,
         first_line=first_line, last_line=last_line, has_more=has_more,
-        next_start_line=(last_line if last_line in partial else last_line + 1) if has_more else None,
+        next_start_line=next_start_line,
         partial_lines=sorted(partial), start_char=actual_start,
         next_start_char=next_char if has_more else None,
     )
@@ -336,14 +410,34 @@ def edit_file_content(
         # 架构 §6.3：不接受用整份文件内容做替换。单行文件例外——那一行本身就是最小的唯一锚点，
         # 否则会出现"文件只有一行就没法改"的怪现象。
 
+        raw_original = original
         occurrences = original.count(old_text)
+        normalized = False
+        if occurrences == 0:
+            # 换行归一化重试（2026-10-22）：文件是 CRLF、模型用 `\n` 拼 old_text，是最常见的
+            # "内容明明写对了却匹配不上"。只在精确匹配失败时启用；命中后仍按原风格写回。
+            normalized_original = original.replace("\r\n", "\n").replace("\r", "\n")
+            normalized_old = old_text.replace("\r\n", "\n").replace("\r", "\n")
+            occurrences = normalized_original.count(normalized_old)
+            if occurrences:
+                normalized = True
+                original = normalized_original
+                old_text = normalized_old
+                new_text = new_text.replace("\r\n", "\n").replace("\r", "\n")
         if occurrences == 0:
             raise FileOperationError(
-                "old_text 在文件中没有精确匹配：请核对空格、缩进与换行（Windows 文件可能是 CRLF）"
+                _edit_miss_message(
+                    policy, resolved,
+                    "old_text 在文件中没有匹配：已按 CRLF/LF 归一化重试仍找不到，"
+                    "请核对空格、缩进与内容",
+                )
             )
         if occurrences > 1 and not replace_all:
             raise FileOperationError(
-                f"old_text 匹配到 {occurrences} 处：请提供更长的唯一片段，或显式设置 replace_all=true"
+                _edit_miss_message(
+                    policy, resolved,
+                    f"old_text 匹配到 {occurrences} 处：请提供更长的唯一片段，或显式设置 replace_all=true",
+                )
             )
 
         updated = (
@@ -352,6 +446,9 @@ def edit_file_content(
             else original.replace(old_text, new_text, 1)
         )
         replaced_count = occurrences if replace_all else 1
+        if normalized and _is_pure_crlf(raw_original):
+            # 原文件是纯 CRLF：把归一化后的结果还原成 CRLF，避免一次替换改掉整个文件的换行。
+            updated = updated.replace("\n", "\r\n")
 
     diff = build_unified_diff(original, updated, path=resolved.name)
     if not diff.strip():
@@ -361,11 +458,23 @@ def edit_file_content(
     # 否则一次普通文本替换会静默改变文件格式。
     output_encoding = "utf-8" if encoding == "utf-8-sig" and not data.startswith(codecs.BOM_UTF8) else encoding
     new_data = updated.encode(output_encoding)
+    # 变更账本（2026-10-21）：写盘前留一份原文，写成功后记一条账。放在这里而不是事件层，
+    # 是因为只有这里同时知道"这一次改了什么"（diff）与"改前是什么"（original）。
+    policy.capture_file_baseline(resolved)
     resolved = policy.files.replace_file("edit_file", arguments, new_data, expected_sha256=current_sha256)
     # 改了就得记账（2026-10-15）：`security.large_edit` 现在按**本轮改过的不同文件数**判，
     # 计数由这里产生。放在写盘**之后**——判定失败、指纹不符、内容没变的调用都不该计数，
     # 否则"改三个文件"会因为几次失败尝试而提前触发批量审批。
     policy.note_edited(resolved)
+    # 成功即清零：失败计数只用于"连续失败"的判断，跨成功不该累计。
+    policy.edit_failures.pop(str(resolved), None)
+    added, removed = count_diff_lines(diff)
+    policy.note_file_change(
+        tool="edit_file", resolved=resolved, kind="modify",
+        additions=added, deletions=removed,
+        before_sha256=current_sha256,
+        after_sha256=hashlib.sha256(new_data).hexdigest(),
+    )
     if decision.large_edit and granted:
         # 这次执行靠的正是"大范围修改"那次批准：记住它，本轮后面的文件不再逐个问。
         policy.note_large_edit_approved()
@@ -439,10 +548,23 @@ def write_file_content(
             f"内容 {len(data)} 字节超过上限 {policy.workspace.max_file_size_bytes} 字节，已拒绝写入"
         )
 
+    policy.capture_file_baseline(resolved)
     if overwriting:
+        original_text = policy.files.read_bytes(resolved).decode("utf-8", errors="replace")
         resolved = policy.files.replace_file("write_file", arguments, data)
     else:
+        original_text = ""
         resolved, created = policy.files.create_file(arguments, data)
+    # `write_file` 的 diff 以前根本不存在（只有字节数与行数），于是对话里"写入文件"这张卡
+    # 永远没有变更信息、右栏也点不开内容（2026-10-21 用户实测）。这里算一次：新建 = 整份新增，
+    # 覆盖 = 与原文比较。同一份文本既用于记账，也随结果返回给页面。
+    diff_text = build_unified_diff(original_text, content, path=resolved.name)
+    added, removed = count_diff_lines(diff_text)
+    policy.note_file_change(
+        tool="write_file", resolved=resolved, kind="modify" if overwriting else "create",
+        additions=added, deletions=removed,
+        after_sha256=hashlib.sha256(data).hexdigest(),
+    )
 
     return WriteFileResult(
         path=_display_path(resolved, policy.workspace_root),
@@ -450,6 +572,7 @@ def write_file_content(
         sha256=hashlib.sha256(data).hexdigest(),
         size_bytes=len(data),
         line_count=len(content.splitlines()),
+        diff=diff_text,
         created_directories=created,
         note=f"顺带新建了 {len(created)} 个目录：{'、'.join(created)}" if created else None,
     )
@@ -489,7 +612,30 @@ def delete_file_target(
             f"{decision.reason}。目标：{resolved_for_message.as_posix()}（{target}）{detail}"
         )
 
+    # 变更账本（2026-10-21）：删除也要留一份原文，否则"删掉了什么"永远看不回来。
+    target: Path | None
+    try:
+        target = policy.resolve_path(path)
+    except (SecurityError, WorkspaceBoundaryError, FileOperationError):
+        target = None
+    removed_lines = 0
+    if target is not None:
+        policy.capture_file_baseline(target)
+        if target.is_file():
+            # 只对**文本**数行：二进制文件（图片、压缩包）按行数统计没有意义，
+            # 一张 27 MB 的图会被算成两万多行删除，把总览的数字直接搞乱（实测）。
+            try:
+                if target.stat().st_size <= COUNTED_LINES_MAX_BYTES:
+                    payload = target.read_bytes()
+                    if b"\x00" not in payload[:4096]:
+                        removed_lines = len(payload.decode("utf-8", errors="replace").splitlines())
+            except OSError:
+                removed_lines = 0
     deleted = policy.files.delete(arguments)
+    if target is not None:
+        policy.note_file_change(
+            tool="delete_file", resolved=target, kind="delete", deletions=removed_lines,
+        )
 
     return DeleteFileResult(
         path=_display_path(deleted.path, policy.workspace_root),
@@ -499,7 +645,6 @@ def delete_file_target(
         removed_dirs=deleted.directories,
         reason=reason,
         trashed=deleted.trashed,
-        trash_path=deleted.trash_path,
     )
 
 
@@ -538,7 +683,7 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
         path: str,
         start_line: int | None = None,
         end_line: int | None = None,
-        max_chars: int = 20000,
+        max_chars: int = 100000,
         start_char: int | None = None,
         expected_sha256: str | None = None,
         encoding: str = "utf-8-sig",
@@ -549,7 +694,8 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
             path: 工作区相对路径或本机外部绝对路径；敏感文件仍禁止读取。
             start_line: 1 基起始行，含。
             end_line: 1 基结束行，含。
-            max_chars: 本页字符预算，默认 20000，可按任务增加。
+            max_chars: 本页字符预算，默认 100000（2026-10-22 由 20000 上调：一次能覆盖更大文件，
+                减少"同一个文件读三四次"的往返），可按任务增加或减小。
             start_char: 全文件解码后 0 基字符位置，不能与行区间同传。
                 has_more 为真时，传 next_start_char 续读，超长单行也能推进。
             expected_sha256: 续读传上页 sha256，文件变化会明确报错。
@@ -624,8 +770,9 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
     def delete_file(path: str, recursive: bool = False, reason: str = "") -> str:
         """删除文件或目录；工作区内无需审批，外部按目录授权和策略执行。
 
-        开启「安全删除」时目标会**移入回收站**（不是彻底删除），返回里 `trashed` 为 true、
-        `trash_path` 是它现在的位置——向用户说明"可以找回"，不要说成"已彻底删除"。
+        开启「安全删除」时目标会**移入系统回收站**（资源管理器里那个，不是彻底删除），
+        返回里 `trashed` 为 true——向用户说明"在系统回收站里，可以还原到原位置"。
+        不要说成"已彻底删除"，也不要编造磁盘路径：回收站里的文件已被改名存放，那个路径用户点不开。
 
         Args:
             path: 相对路径以当前工作区为根；外部须显式本机绝对路径及目录写授权，工作区内删除无需审批，外部仍按授权和策略判定。
@@ -677,8 +824,16 @@ def _select_lines(text: str, *, start_line: int | None, end_line: int | None) ->
     return "".join(lines[start_index:end_index])
 
 
-def _dir_entry(path: Path, policy: SecurityPolicy) -> DirEntry:
-    kind, info = policy.files.entry(path)
+def _dir_entry(
+    path: Path,
+    policy: SecurityPolicy,
+    *,
+    dirent: os.DirEntry[str] | None = None,
+) -> DirEntry:
+    # 有 scandir 的结果就直接用它（不再 realpath）；递归分支没有传，退回原来的严格解析。
+    kind, info = (
+        policy.files.entry_from_scan(dirent) if dirent is not None else policy.files.entry(path)
+    )
     size: int | None = None
     modified: str | None = None
     if info is not None:

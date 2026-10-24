@@ -30,7 +30,11 @@ embedding:
   enabled: false
   provider: "onnx_local"           # onnx_local（本地 ONNX，默认）| openai_compatible
   model: "BAAI/bge-small-zh-v1.5"  # onnx_local 用 FastEmbed 模型名；openai_compatible 用 API 模型名
-  cache_dir: "E:/hf-cache/local-agent-web"   # onnx_local 必填：本机绝对路径
+  # onnx_local 必填：**本机可写绝对路径**。示例故意留空——模板里写一个别人的盘符（原来写的
+  # 是开发机的盘符）会让朋友照抄到自己的机器上，然后困惑"为什么下不动模型"。
+  # 打开 embedding 之前把它换成你自己的目录，例如 Windows 的 `C:/Users/你/.chaiai/models`
+  # 或 POSIX 的 `/home/你/.chaiai/models`。
+  cache_dir: ""
   local_files_only: false          # true：禁止下载，只从 cache_dir 加载（缺模型即失败）
   # 改用 OpenAI 兼容 Embedding API 时，把上面四行换成下面三行（provider 决定可用字段）：
   # provider: "openai_compatible"
@@ -39,6 +43,17 @@ embedding:
 
 workspace:
   root: "."
+  # 权限档位（2026-10-15 起换成"能写到哪"的三档，**出厂默认 workspace-write**）：
+  # 三档均允许显式本机外部绝对路径的读取、列目录与搜索；敏感文件仍受限。
+  #   read-only          = 工作区只读：新建/修改/删除文件一律拒绝；命令经无写授权令牌运行（Windows）
+  #   workspace-write    = 工作区可写；外部写只允许「设置 → 权限」里添加的可写目录
+  #   danger-full-access = 工作区可写；工作区外一律可读，**写仍只按逐条授权**
+  # 界面上的档位存在设置库里（改完下一轮生效），这里只是新安装与旧配置的起点。
+  # 旧值自动归一：deny / whitelist → workspace-write，allow → danger-full-access。
+  external_paths:
+    mode: "workspace-write"
+  # 旧键（T14C）：true 归一为 danger-full-access（旧写法 allow）。只作快捷方式；
+  # 用了它就**不要再**在 external_paths 里另写档位——两个键同时出现会被判成语义冲突。
   allow_external_paths: false
   max_file_size_bytes: 2000000
 
@@ -113,29 +128,52 @@ memory:
     summary_max_chars: 12000
 
 security:
-  # 四项必须为 true：代码层强制审批策略，不能由配置关闭。
+  # 工作区文件操作默认免审批；破坏性 Shell 分类仍需审批。
   require_approval:
-    delete_file: true
+    delete_file: false
     destructive_shell: true
-    large_batch_edit: true
-    overwrite_existing_file: true
+    large_batch_edit: false
+    overwrite_existing_file: false
 
   large_edit:
+    # 大范围编辑的免审额度：**一轮内可改几个文件**（2026-10-15 生效口径）。
+    # 仅 require_approval.large_batch_edit=true 时启用；默认关闭，新建文件不计。
     max_files_without_approval: 3
+    # 已不参与判定（保留字段只为旧配置不报错）：2026-10-15 起不再按改动行数判——
+    # 那个量级恰好是"重写一个函数"的常态，实证里把正常重构变成了逐次弹卡。
     max_changed_lines_without_approval: 200
 
   shell:
     platform: "auto"
+    # 已不参与判定（保留字段只为旧配置不报错）：2026-10-15 起写侧沙箱不是独立开关，
+    # 各档位在 Windows 上均约束写入；read-only 不授予写权限，
+    # 其余档位的可写根为工作区、专属临时目录、显式读写授权目录；
+    # 凭据子目录受保护；根上一条可继承 ACE，新目录立即继承可写。读侧/网络不隔离，
+    # Everyone/登录 SID 的已有写权限、硬链接和并发改名仍有边界；各机器兼容性需实际验证。
+    # 非 Windows 照常运行，只是没有 OS 级写边界（不再失败闭合）。
+    sandbox: false
     # 执行器偏好（架构 §6.6）：
     #   argv_preferred = 能 argv 就 argv；命令含 Shell 语法时用平台默认适配器
     #                    （Windows→cmd.exe /d /s /c、POSIX→/bin/sh -c）
     #   cmd / pwsh / sh = 显式指定 Shell 语法命令交给哪个适配器执行；
     #                     适配器与运行平台不匹配时直接拒绝（失败闭合）
     executor: "argv_preferred"
-    default_timeout_seconds: 60
+    default_timeout_seconds: null
+    # 单条命令的**超时上限**（秒）。**默认不设上限**（`null`）：慢命令（冷启动浏览器、装依赖、
+    # 真实构建）由模型按需传更大的 `timeout_seconds`，不再被一个隐含的 60 秒天花板拦下。
+    # 需要收紧的部署写个数字即可（例如 300）；任务的**总时长**另有 `jobs.max_task_seconds` 管。
+    max_timeout_seconds: null
     max_output_chars: 30000
-    # 白名单按 平台 + 可执行名（归一化大小写与 .exe/.cmd 后缀）+ 参数结构（exact）+ 可选 cwd 匹配。
-    # match: exact 表示参数必须完全一致：pytest 带任意测试参数、git diff 带额外参数都不会免审。
+    # **已不参与放行判定**（2026-10-15）：命令的审批只由"破坏性 / 提权"触发，
+    # 档位与沙箱负责边界；这张表仍会被解析并用于命令分类与审计文案，但改它不会让某条命令
+    # 变得要审批或免审批。保留字段只为旧配置不报错。
+    # 白名单按 平台 + 可执行名（归一化大小写与 .exe/.cmd 后缀）+ 参数结构 + 可选 cwd 匹配。
+    # match: exact  = 参数必须完全一致（默认）：pytest 带任意测试参数、git diff 带额外参数都不会免审。
+    # match: prefix = 条目参数是实际参数的**前缀**，允许后面跟任意参数：
+    #                 例如 args: ["run", "build"] 能命中 `npm run build -- --watch`。
+    #                 prefix 只用在"参数怎么变都不改变副作用范围"的命令上；**解释器类不要用**
+    #                 （`python -c "…"` 的后续参数就是任意代码）。prefix 至少要写一个参数——
+    #                 空参数前缀等于把整个可执行文件放行，配置校验会直接拒绝。
     # 不写 cwd 表示不限目录；写了则只在那个工作目录（相对 workspace.root）下免审。
     whitelist:
       - platform: ["windows", "posix"]
@@ -151,6 +189,10 @@ security:
         args: ["status"]
         match: "exact"
       - platform: ["windows", "posix"]
+        executable: "npm"
+        args: ["run", "build"]
+        match: "prefix"   # `npm run build -- --watch` 这类带额外参数的调用也免审
+      - platform: ["windows", "posix"]
         executable: "git"
         args: ["diff"]
         match: "exact"
@@ -164,8 +206,7 @@ security:
       - "format "
       - "shutdown"
       - "chmod"
-      - "curl "
-      - "wget "
+    # curl/wget 下载不自动归为破坏性命令；写入边界仍由权限档位与沙箱执行。
 
   secrets:
     redact_environment_values: true
@@ -196,32 +237,52 @@ rag:
   section_chars: 4000
 
 agent:
-  max_tool_loops: 20
+  max_tool_loops: null
   max_retries_per_step: 2
-  require_evidence_for_completion: true
+  require_evidence_for_completion: false
 
-# Agent Profile（v0.5 T50，契约 §16.1）：决定**模型能看见哪些工具**。
-# 可见性不是授权——写类工具与 Shell 照旧要过安全门与人工审批（架构 §6.9）。
-# 内置三档（名字固定）：coder（v0.4 工具集 + Git 读写，默认）| researcher（只读 + 计划 + Web + Git 只读）|
-# reviewer（只读）。新增能力一律**追加在末尾**：前面的字节不变，前缀缓存的前半段仍可复用。
+# Agent 能力档位（v0.5 T50，契约 §16.1；2026-10-13 起**只给出厂默认**）。
+#
+# 现在决定"模型能看见哪些工具"的是**页面上的逐能力开关**（「能力」面板，存在设置库里，改完下一轮生效、
+# 不用重启服务）。这一节只决定**出厂默认开关表**：用户没在页面改过任何开关时，就用它算出来的那一组。
+# 页面改过的项以设置库为准，**不会被这里覆盖**；要回到出厂默认就再点一次开关。
+#
+# 出厂默认的合成规则：五个基础能力（plan / files_read / code_search / files_write / shell）取自
+# `active` 声明的那一档；git_read / git_write / skill 取下面各段开关**与**档位声明的交集——
+# 与 v0.5 的"档位 ∩ 配置开关"逐项等价，所以一份没改过的配置上升级前后行为一致。
+# **联网（web）恒定打开**（2026-10-14 起常态能力，见下），不受档位与开关影响。
+#
+# 内置三档（名字固定）：coder（v0.4 工具集 + 联网 + Git 读写，默认）| researcher（只读 + 计划 + 联网 + Git 只读）|
+# reviewer（只读 + 联网）。新增能力一律**追加在末尾**：前面的字节不变，前缀缓存的前半段仍可复用。
 # custom 用于不改代码地定义自己的组合；不能覆盖内置名，能力名必须是架构 §6.9 闭集里的，
 # 写错会在启动时失败并列出可选项（不静默退回默认档）。
+#
+# 三个能力**不可关闭**（files_read / code_search / web）：前两个是闲聊与两类工作流的硬依赖，
+# web 是**常态能力**——"问一句简单的事只能拿训练数据答"不算能用的助手。想开"只读会话"，
+# 就在页面上关掉「修改工作区文件」与「执行命令」。
 profiles:
   active: "coder"
   custom: {}
   # custom:
   #   docs: ["files_read", "code_search"]
 
-# 外部访问（v0.5 T53，契约 §16.3）。**默认关闭**：本机 Agent 一旦能联网，攻击面就从"用户自己的文件"
-# 扩到互联网，打开它应当是显式决定。关闭时 web 能力完全不可见（工具不绑定、提示也不提）。
-# 只有 researcher 档声明了 web 能力（coder / reviewer 不含），所以要先改 profiles.active 才有用。
-# 安全边界（§6.10）：只允许 http/https，拒绝本机与内网地址，并且**重定向后再次校验**（防 SSRF）。
+# 外部访问（v0.5 T53，契约 §16.3）。**2026-10-14 起联网是常态能力**：出厂即开、且不可关闭
+# （"问一句简单的事，模型只能凭训练数据答"不算能用的助手）。因此 `enabled` 这个键**已退出决策链**——
+# 它只剩"运行期由服务回灌"这一个身份，写 false 也关不掉联网；键保留是为了旧配置能原样加载。
+# 想真正关掉联网，目前要在代码里同时放开 `capabilities.LOCKED_CAPABILITIES` 与
+# `AppConfig.capability_default_layer` 里那一行（两处必须一起动）。
+# 安全边界（§6.10）不靠这道开关，而靠：只允许 http/https、拒绝本机与内网地址、**重定向后再次校验**
+# （防 SSRF）；外部内容按不可信数据处理；结果有界并如实说明截断。
 web_access:
-  enabled: false
-  # 免密钥的 HTML 检索，二选一（不是自动回退）：bing_html（默认）| duckduckgo_html
-  # 默认值来自 2026-10-08 本机实测：DuckDuckGo 被 DNS 污染到 Meta 的地址段并超时，Bing 0.5 秒返回。
-  # 换网络环境后可以重新测一次再决定用哪个；两个都不可达时工具会如实报失败。
-  provider: "bing_html"
+  enabled: true
+  # auto：配置搜索密钥时用 Tavily，否则用 Bing HTML 兼容搜索；故障不隐式切换收费服务。
+  # 可显式选择 tavily / bing_html / duckduckgo_html。HTML 兼容搜索不支持精确时间筛选。
+  provider: "auto"
+  tavily_api_key_env: "TAVILY_API_KEY"
+  # 每轮硬上限；失败也消耗尝试次数，刷新和恢复不会重置。足够回答时应提前结束。
+  max_search_calls: null
+  max_read_pages: null
+  max_reads_per_page: null
   timeout_seconds: 15
   max_results: 5
   max_chars: 8000
@@ -229,6 +290,7 @@ web_access:
 
 # Git 能力（v0.5 T54，契约 §16.4、工具定义 §6.11）。**默认关闭**：打开它等于让 Agent 能读仓库历史
 # （以及经审批后提交），应当是显式决定；关闭时 git_read / git_write 完全不可见（工具不绑定、提示也不提）。
+# 同样只是**出厂默认**：页面上可以分别打开「查看 Git 状态与差异」与「提交到 Git」，改完不用重启服务。
 # 本机找不到 git 可执行文件时同样不可见（能力不进有效集合），此时工具会如实说明"缺什么、怎么装"。
 # 边界：作用域是**工作区**（仓库在上一层时结果只覆盖工作区）；参数是闭集，任何路径都不出现 push；
 # 提交必须人工审批，main/master 上还要额外确认；只 add 显式列出的路径（不支持 git add -A）。
@@ -250,9 +312,38 @@ git:
 skills:
   enabled: false
   include_user_skills: true
-  user_dirs: []
+  # 相对路径按**本文件所在目录**展开（2026-10-16）：包里的 `skills/` 因此"解压到哪个盘都能用"，
+  # 不需要让使用者手改绝对路径。绝对路径照旧可用；`~` 仍然拒绝（§16.5）。
+  user_dirs: ["skills"]
   max_skill_chars: 20000
   max_list_chars: 8000
+
+# MCP 客户端（2026-10-20，架构 §6.13）。**默认关闭**：关闭时不连任何 server、mcp 能力不出现，
+# 行为与接入前逐字节一致。
+#
+# 这里**只有运行参数，没有 server 列表**：server 的连接方式写在同目录的 `mcp.json`（顶层 mcpServers，
+# 与 CodeBuddy 同格式，可以整份粘过来），server 的开关与工具白/黑名单是**用户状态**、存设置库。
+# 三份东西分开的理由：部署配置、用户状态、运行参数的生命周期不同，混在一起升级时会互相牵连。
+#
+# 规模口径（四个不等于）：配置 N 个 ≠ 连 N 个；连 N 个 ≠ 给模型 N×K 个；给模型 N×K 个 ≠ 每轮都发；
+# 每轮都发 ≠ 全量进提示。落到参数上就是下面的 max_connected_servers / max_direct_tools /
+# max_tool_schema_bytes 三道闸，其余工具走检索（mcp_tool_search）。
+mcp:
+  enabled: false
+  # 直接绑定给模型的工具上限；其余进检索。0 表示全部走检索（工具很多时可这么设）。
+  max_direct_tools: 20
+  # 同时在连的 server 数。50 个 npx+node 常驻会吃掉数 GB 内存，必须排队。
+  max_connected_servers: 4
+  # 空闲多久断开子进程（秒）。0 = 不回收，只在内存充裕的机器上这么设。
+  idle_timeout_seconds: 600
+  # 启动（握手）超时：`npx -y` 首次要下载包，给足 30 秒。
+  startup_timeout_seconds: 30
+  # 单次 tools/call 超时；超时按失败如实报告，不重试。
+  call_timeout_seconds: 60
+  # 单条工具定义（描述 + 参数 schema）的字节上限，超限的工具不可见。
+  max_tool_schema_bytes: 8192
+  # 单次检索返回的条数。
+  max_search_results: 8
 
 # ---- 后台任务与长时间运行（v0.6，架构 §17.2）--------------------------------
 # 这里**不是能力开关**：它不是"关掉就不可用"，而是"这一轮在哪里跑"。
@@ -283,31 +374,47 @@ web:
   dev_origins:
     - "http://127.0.0.1:5173"
     - "http://localhost:5173"
-  max_body_bytes: 1000000          # 请求体上限；超限 413，不进入业务逻辑
+  # 请求体上限；超限 413，不进入业务逻辑。
+  # 别调到 1 MB 以下：聊天里上传图片走 base64 的 JSON（4 MB 的图约 5.3 MB），低于这个就传不了图。
+  max_body_bytes: 8000000
   static_dir: "frontend/dist"      # 相对配置文件所在目录；不存在时只提供 API
   sse_heartbeat_seconds: 15        # SSE 心跳间隔：死连接不能一直占着订阅
   sse_idle_timeout_seconds: 300    # SSE 空闲上限：超过则关闭该连接（不取消任务）
   sse_max_pending_events: 200      # 单次排空超过它就判定客户端落后：结束订阅并要求重连
   keepalive_seconds: 15            # HTTP keep-alive 超时（uvicorn timeout_keep_alive）
 
-# 确定性只读调查工作流（v0.7 T65，架构 §18.2）。
+# 确定性工作流（v0.7 T65–T67，架构 §18.2/§18.3/§18.5）与自主委派（§18.7）。
+#
+# 这一段同时是**自主委派**的资源上限（`max_children` / `max_concurrency` / `child_timeout_seconds` 等）：
+# 那个能力由页面上的「自主委派调查」开关控制（默认关），**不**受下面的 `enabled` 影响——`enabled` 只管
+# 显式图入口（脚本与评测跑器用 `POST .../messages` 的 `workflow` 字段发起的那条路）。
+# 打开自主委派 = 允许主 Agent 自己决定派只读子 Agent，每个子任务会多花一次模型调用。
+#
+# 2026-10-13 起**页面不再提供入口**：三类工作流（只读调查 / 代码修改与验证 / 委派只读调查）从输入区撤下，
+# 它们是离线编排与评测用的工程资产，不面向日常使用。撤下的是界面，不是能力——`POST .../messages` 的可选
+# `workflow` 字段、请求契约与审批/快照投影都不变，脚本与评测跑器照旧可用。
+# 只读的工作流状态投影保留：通过 API 发起的工作流仍会在页面上如实呈现阶段、计数与失败原因。
 workflows:
-  enabled: false                  # T65–T67 显式图入口；网页接入在 T69
-  max_tool_calls: 16
-  max_steps: 32
-  max_source_files: 8
-  max_evidence_chars: 16000
-  max_report_chars: 20000
-  max_model_tokens: 16000          # T66 模型调用前的保守总预留，不是供应商实际量
-  max_model_output_tokens: 2048
-  max_children: 3                 # T67 共用上述总额度，预先均分；不能再次委派
-  max_concurrency: 2              # 输入默认串行，仅显式允许只读并发
-  child_timeout_seconds: 30
+  enabled: false                  # 关掉时工作流请求一律失败并说明"未启用"，不静默改跑自由循环
+  max_tool_calls: 256
+  max_steps: 512
+  max_source_files: 128
+  max_evidence_chars: 256000
+  max_report_chars: 256000
+  max_model_tokens: 1048576 # T66 模型调用前的保守总预留，不是供应商实际量
+  max_model_output_tokens: 16384
+  max_children: 8 # T67 共用上述总额度，预先均分；不能再次委派
+  max_concurrency: 4 # 输入默认串行，仅显式允许只读并发
+  child_timeout_seconds: 900
 
-# 可视化模型连接设置（T29A，契约 §6.8）。
-# 非秘密设置（连接、默认与会话选择、能力检测结果）存在这个**独立**库里；
-# 密钥永远不进这个库：Windows 存系统凭据存储，其它平台只在本进程内有效（重启后需重新录入）。
+# 可视化模型连接设置（T29A，契约 §6.8；2026-10-13 起密钥也落这里）。
+# 设置（连接、默认与会话选择、能力检测结果、能力开关）存在这个**独立**库里。
+# 密钥存在同一库的 settings_meta（键 credentials.<引用>）——**明文**：
+# 代价是把设置库连同密钥一起备份/导出/发给别人等于交出密钥；
+# 收益是"保存即持久、重启仍在"在**所有**机器上行为一致（此前依赖 Windows 凭据管理器，
+# 分发形态下它会在别人的机器上因服务或策略失败，表现为"重启后密钥没了"，用户无从判断）。
+# 密钥仍然**不进**任何 DTO、日志、错误消息、导出与截图（脱敏照旧生效）。
 # 已有 config.yaml 时，首次启动会把上面的 llm 段**幂等导入**成一条默认连接，之后以页面为准。
 model_settings:
   path: "data/model_settings.sqlite"
-  credential_store: "auto"         # auto（Windows 用系统凭据存储）| memory（强制临时模式）
+  credential_store: "auto"         # auto（默认：密钥存本库 settings_meta）| memory（只在进程内，重启需重录）

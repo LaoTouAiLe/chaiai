@@ -1,26 +1,41 @@
+/* 错误提示（T26）——2026-10-16 收窄成**一行**。
+   原来它是"标题 + 原因 + 下一步 + 重试口径 + 诊断信息"一整块，还铺一层红底：一屏里两条就把对话
+   顶掉半屏（用户实拍原话："不用这么大红弹窗显示"）。现在默认只有一行标题（可点开看全部内容），
+   严重程度改由**左边线 + 图标色**表达，底色不再抢注意力。 */
+
 .notice {
   display: flex;
   flex-direction: column;
   gap: var(--law-space-sm);
-  padding: var(--law-space-lg) var(--law-space-xl);
+  padding: var(--law-space-sm) var(--law-space-md);
   border: 1px solid transparent;
-  border-radius: var(--law-radius-lg);
+  border-left-width: 3px;
+  border-radius: var(--law-radius-md);
 }
 
 .error {
-  background: var(--law-state-error-subtle);
-  border-color: var(--law-state-error-secondary);
+  border-left-color: var(--law-state-error);
 }
 
 .warning {
-  background: var(--law-state-warn-subtle);
-  border-color: var(--law-state-warn-secondary);
+  border-left-color: var(--law-state-warn-label);
 }
 
 .head {
   display: flex;
   align-items: center;
-  gap: var(--law-space-md);
+  gap: var(--law-space-sm);
+}
+
+/* 标题行就是展开控件：整行可点，箭头表示还有内容。 */
+.toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  background: none;
+  text-align: left;
 }
 
 .icon {
@@ -37,25 +52,45 @@
   color: var(--law-state-warn-label);
 }
 
+.chevron {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--law-text-tertiary);
+}
+
+.chevron[data-open='true'] {
+  transform: rotate(90deg);
+}
+
+/* 这几条（加上 `.notRetryable`）渲染的是**后端给的任意文本**：hint 里常带路径、
+   blockedReason 里常带具体原因。`overflow-wrap: anywhere` 对"本来就放得下"的文本**没有任何影响**，
+   只给没有断点的长串（路径、链接）一个断点——否则它会像用户气泡那样溢出卡片（2026-10-16 同类加固）。 */
 .title {
   flex: 1 1 auto;
   min-width: 0;
-  font-size: var(--law-text-md);
-  line-height: var(--law-leading-md);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
   font-weight: var(--law-weight-medium);
   color: var(--law-text-primary);
+  overflow-wrap: anywhere;
 }
 
 .message {
   color: var(--law-text-primary);
-  font-size: var(--law-text-md);
-  line-height: var(--law-leading-md);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  overflow-wrap: anywhere;
 }
+
+.close { flex-shrink: 0; width: 28px; height: 28px; border-radius: var(--law-radius-md); font-size: 20px; color: var(--law-text-secondary); }
+.close:hover { background: var(--law-button-ghost-hover); }
+.dismissed { font-size: var(--law-text-xs); color: var(--law-text-caption); text-align: left; }
 
 .hint {
   color: var(--law-text-secondary);
   font-size: var(--law-text-sm);
   line-height: var(--law-leading-sm);
+  overflow-wrap: anywhere;
 }
 
 .foot {
@@ -77,6 +112,7 @@
   color: var(--law-text-tertiary);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
+  overflow-wrap: anywhere;
 }
 
 .diagnostics {

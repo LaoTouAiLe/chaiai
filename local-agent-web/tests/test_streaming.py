@@ -298,24 +298,22 @@ def test_streaming_keeps_tool_events_and_final_answer_identical(
     plain = _run_graph(tmp_path, _tool_scenario(app_config, streaming=False), build(False))
     streamed = _run_graph(tmp_path, _tool_scenario(app_config, streaming=True), build(True))
 
-    assert len(streamed["tool_events"]) == len(plain["tool_events"]) == 1
-    assert len(streamed["tool_results"]) == len(plain["tool_results"]) == 1
-    assert [str(item["tool_name"]) for item in streamed["tool_results"]] == ["read_file"]
-    assert streamed["final_response"] == plain["final_response"]
-    # Checkpoint 里只多出**一条**最终回答（不是每个增量块一条）
-    answers = [
-        message.content
-        for message in streamed["messages"]
-        if isinstance(message, AIMessage) and str(message.content).strip()
-    ]
-    assert answers.count(str(streamed["final_response"])) == 1
-    assert len(answers) == len(
-        [
-            message.content
-            for message in plain["messages"]
-            if isinstance(message, AIMessage) and str(message.content).strip()
+    assert len(streamed["tool_events"]) == len(plain["tool_events"]) == 2
+    assert len(streamed["tool_results"]) == len(plain["tool_results"]) == 2
+    for result in (plain, streamed):
+        assert [(item["tool_name"], item["status"]) for item in result["tool_results"]] == [
+            ("read_file", "ok"), ("task_control", "ok"),
         ]
-    )
+    assert streamed["final_response"] == plain["final_response"]
+    # 主模型在 task_control 参数中交付回答；增量不能被存成多条最终消息。
+    def answers(result):
+        return [call["args"]["message"] for message in result["messages"]
+                if isinstance(message, AIMessage) for call in message.tool_calls
+                if call["name"] == "task_control" and call["args"]["action"] == "complete"]
+
+    assert answers(streamed) == answers(plain) == [streamed["final_response"]]
+    assert not any(isinstance(message, AIMessage) and str(message.content).strip()
+                   for message in streamed["messages"])
     assert not streamed.get("error_events")
 
 

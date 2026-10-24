@@ -107,6 +107,8 @@ export type ToolCardView =
     stdout?: string
     stderr?: string
     timedOut?: boolean
+    /** 命令仍在后台运行（用户点了"转后台"，2026-10-21）：不是超时，进程还活着。 */
+    background?: boolean
     /**
      * The server clipped the streams for display (§15.8). Optional so prototype
      * fixtures are unaffected; when true the card must say the body is a bounded
@@ -186,6 +188,11 @@ export interface ToolRowView {
   status: 'pending' | 'running' | 'succeeded' | 'failed' | 'uncertain'
   /** Pre-formatted duration; measuring timings is T34's job. */
   durationLabel: string
+  /**
+   * 这次调用的开始时刻（ISO）。运行中的行据此算"已跑多久"；
+   * 省略时页面只显示已排版好的 `durationLabel`（原型 fixture 走这一支）。
+   */
+  startedAt?: string
   target: string | null
   expanded: boolean
   card: ToolCardView
@@ -414,6 +421,14 @@ export interface TraceRowView {
 export interface TraceTurnView {
   /** 轮次键：该轮**最后一条消息**的 id（与 `mapTurnStats` 的 `afterMessageId` 一致）。 */
   id: string
+  /**
+   * 该轮**第一条消息**的 id（2026-10-22）。
+   *
+   * 对话视图的 `data-turn-id` 挂的是轮首消息，而 `id` 是轮尾消息——两者不同。
+   * 从「步骤」跳回对话里某一轮时必须用这个值，否则 `querySelector` 永远匹配不到。
+   * 可选：原型 fixture 不填，页面退回 `id`。
+   */
+  leadId?: string
   /** 第几轮（1 基，仅用于显示）。 */
   index: number
   /** 该轮的提问（截断；空串 = 契约没给）。 */
@@ -825,6 +840,12 @@ export interface MemoryRowView {
 export interface EmptyStateView {
   title: string
   description: string
+  /** 欢迎卡片的标题；与 `highlights` 同时给出时才渲染卡片。 */
+  highlightsTitle?: string
+  /** 欢迎卡片的要点（这项产品能做什么），每条一行。 */
+  highlights?: readonly string[]
+  /** 空态底部的补充提示（例如「先去左侧新建会话」），不参与标题层级。 */
+  hint?: string
 }
 
 /** Loading state for a conversation whose events are still being read. */

@@ -1,0 +1,33 @@
+/* 文件图标（2026-10-23）：只靠颜色区分类别，十几像素下比多色细图更容易扫 */
+
+.icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--c-text-3);
+}
+
+.code {
+  color: #4b7bec;
+}
+
+.data {
+  color: #b7791f;
+}
+
+.doc {
+  color: #3b82f6;
+}
+
+.image {
+  color: #8b5cf6;
+}
+
+.archive {
+  color: #a16207;
+}
+
+.text {
+  color: var(--c-text-3);
+}

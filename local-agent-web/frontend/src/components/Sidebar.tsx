@@ -1,7 +1,7 @@
 import { useState } from 'react'
 
 import type { SessionSummaryView } from '../fixtures/types'
-import { ChevronLeft, ChevronRight, Doc } from './icons'
+import { ChevronLeft, ChevronRight } from './icons'
 import styles from './Sidebar.module.css'
 import { SidebarItemMenu } from './SidebarItemMenu'
 
@@ -52,19 +52,22 @@ export interface SidebarActions {
   onOpenSettings: () => void
   onOpenDataCenter?: () => void
   /**
-   * 打开「能力与档位」面板（v0.5 T56；§16.6）。
-   *
-   * **可选**：不传就不渲染入口。原型宿主（`app/App.tsx`）不传，因此原型与视觉基线的 DOM、
-   * 截图一字不变——新增的产品面不该悄悄改动已有基线。
-   */
-  onOpenCapabilities?: () => void
-  /**
    * 打开「任务中心」面板（v0.6 T62；§17.6）。
    *
-   * 与 `onOpenCapabilities` 同样**可选**：原型宿主不传，入口就不渲染，因此原型与视觉基线的
-   * DOM 与截图一字不变。
+   * **可选**：原型宿主（`app/App.tsx`）不传，入口就不渲染，因此原型与视觉基线的 DOM
+   * 与截图一字不变。
+   *
+   * 入口历史：「能力」2026-10-19 并进设置（当时理由：同一件事不该两个说法）；
+   * **2026-10-22 改判为独立成页**——能力开关是高频日常操作，埋在 14 个设置分区里每次都要多两步。
+   * 三块能力/技能/MCP 已从设置移出，只由 {@link onOpenCapabilities} 这个入口提供。
    */
   onOpenTasks?: () => void
+  /** 打开「能力中心」整页（2026-10-22 V5，规范 §5.4）。同样可选：不传则不渲染入口。 */
+  onOpenCapabilities?: () => void
+  /** 打开「定时任务」整页（2026-10-22 J2，契约 §21.5）。可选：不传则不渲染入口。 */
+  onOpenCron?: () => void
+  /** 打开「产物」整页（2026-10-22 从数据中台提出，契约 §15.11.1/§15.11.3）。 */
+  onOpenArtifacts?: () => void
   /**
    * "等你处理"的任务数（在等审批 + 需要人工核对）；为 0 或未传时不显示角标。
    *
@@ -129,6 +132,7 @@ function statusClass(status: SessionSummaryView['status']): string {
  */
 export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, management }: SidebarProps) {
   const [search, setSearch] = useState('')
+  const [expandedWorkspaces, setExpandedWorkspaces] = useState<ReadonlySet<string>>(new Set())
   const [restoring, setRestoring] = useState<string | null>(null)
   const [restoreError, setRestoreError] = useState<string | null>(null)
   const query = search.trim().toLocaleLowerCase()
@@ -163,16 +167,68 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
         )}
       </div>
 
+      {/* 功能入口在顶部，对齐 hermes 的侧栏 nav 行（2026-10-22）：
+          以前这五个堆在左下角，等于把最常用的跳转放在离视线最远的地方。 */}
+      <nav className={styles.nav} aria-label="功能入口">
+        <button type="button" className={styles.navRow} onClick={() => actions?.onNewSession()}
+          aria-label="新建会话" title={collapsed ? '新建会话' : undefined}>
+          <span className={styles.navIcon} aria-hidden="true">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 5v14M5 12h14" /></svg>
+          </span>
+          <span className={styles.navLabel}>新建会话</span>
+        </button>
+        {actions?.onOpenTasks ? (
+          <button type="button" className={styles.navRow} onClick={actions.onOpenTasks}
+            aria-label={(actions.pendingTasks ?? 0) > 0 ? `任务中心（${actions.pendingTasks} 个等你处理）` : '任务中心'}
+            title={collapsed ? '任务中心' : undefined}>
+            <span className={styles.navIcon} aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M4 7h16M4 12h16M4 17h9" /><circle cx="18" cy="17" r="2" /></svg>
+            </span>
+            <span className={styles.navLabel}>任务中心</span>
+            {(actions.pendingTasks ?? 0) > 0 ? <span className={styles.navBadge} aria-hidden="true">{actions.pendingTasks}</span> : null}
+          </button>
+        ) : null}
+        {actions?.onOpenDataCenter ? (
+          <button type="button" className={styles.navRow} onClick={actions.onOpenDataCenter}
+            aria-label="数据中台" title={collapsed ? '数据中台' : undefined}>
+            <span className={styles.navIcon} aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M4 5h11l4 4v10H4z" /><path d="M8 11h7M8 15h5" /></svg>
+            </span>
+            <span className={styles.navLabel}>数据中台</span>
+          </button>
+        ) : null}
+        {actions?.onOpenArtifacts ? (
+          <button type="button" className={styles.navRow} onClick={actions.onOpenArtifacts}
+            aria-label="产物" title={collapsed ? '产物' : undefined}>
+            <span className={styles.navIcon} aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 3 3 8l9 5 9-5-9-5Z" /><path d="m3 13 9 5 9-5" /></svg>
+            </span>
+            <span className={styles.navLabel}>产物</span>
+          </button>
+        ) : null}
+        {actions?.onOpenCapabilities ? (
+          <button type="button" className={styles.navRow} onClick={actions.onOpenCapabilities}
+            aria-label="能力中心" title={collapsed ? '能力中心' : undefined}>
+            <span className={styles.navIcon} aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" /></svg>
+            </span>
+            <span className={styles.navLabel}>能力中心</span>
+          </button>
+        ) : null}
+        {actions?.onOpenCron ? (
+          <button type="button" className={styles.navRow} onClick={actions.onOpenCron}
+            aria-label="定时任务" title={collapsed ? '定时任务' : undefined}>
+            <span className={styles.navIcon} aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2" /></svg>
+            </span>
+            <span className={styles.navLabel}>定时任务</span>
+          </button>
+        ) : null}
+        {/* 设置不在这里：2026-10-22 起按 hermes 放到标题栏右上角齿轮。 */}
+      </nav>
+
       {collapsed ? (
         <>
-          <button
-            type="button"
-            className={styles.railButton}
-            aria-label="新建会话"
-            onClick={() => actions?.onNewSession()}
-          >
-            <span aria-hidden="true">＋</span>
-          </button>
           <button
             type="button"
             className={styles.railButton}
@@ -185,11 +241,6 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
         </>
       ) : (
         <>
-          <button type="button" className={styles.newSession} onClick={() => actions?.onNewSession()}>
-            <span aria-hidden="true">＋</span>
-            新建会话
-          </button>
-
           <label className={styles.search}>
             <span className="visually-hidden">搜索会话</span>
             <input placeholder="搜索会话…" type="search" value={search} onChange={(event) => setSearch(event.target.value)} />
@@ -211,6 +262,7 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
           {addWorkspace?.error == null ? null : (
             <p className={styles.treeError} role="status">{addWorkspace.error}</p>
           )}
+          <div className={styles.sessionScroll}>
           <nav aria-label="会话">
             {visibleWorkspaces.map((workspace) => (
               <div key={workspace.id} className={styles.workspace}>
@@ -228,7 +280,7 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
                   onRemove={() => management.removeWorkspace(workspace.id)} />}
                 </div>
                 <ul>
-                  {workspace.sessions.map((session) => (
+                  {workspace.sessions.filter((session, index) => query !== '' || expandedWorkspaces.has(workspace.id) || index < 5 || session.selected).map((session) => (
                     <li key={session.id} aria-current={session.selected ? 'true' : undefined}>
                       <div className={styles.managedRow}>
                       <button
@@ -252,6 +304,12 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
                     </li>
                   ))}
                 </ul>
+                {query !== '' || !workspace.sessions.some((session, index) => index >= 5 && !session.selected) ? null : <button type="button" className={styles.showMore}
+                  aria-label={`${workspace.title}${expandedWorkspaces.has(workspace.id) ? '收起会话' : '展示更多会话'}`}
+                  aria-expanded={expandedWorkspaces.has(workspace.id)}
+                  onClick={() => setExpandedWorkspaces((previous) => {
+                    const next = new Set(previous); if (!next.delete(workspace.id)) next.add(workspace.id); return next
+                  })}>{expandedWorkspaces.has(workspace.id) ? '收起' : `展示更多（${workspace.sessions.filter((session, index) => index >= 5 && !session.selected).length}）`}</button>}
               </div>
             ))}
             {query !== '' && visibleWorkspaces.length === 0 ? <p className={styles.noResults}>没有匹配的会话</p> : null}
@@ -277,36 +335,10 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
               </div>)}
             </>}
           </section>}
+          </div>
         </>
       )}
 
-      <div className={styles.footer}>
-        {actions?.onOpenCapabilities ? <button type="button" className={styles.footerButton} onClick={actions.onOpenCapabilities} aria-label="能力与档位" title={collapsed ? '能力与档位' : undefined}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-            <rect x="4" y="5" width="16" height="14" rx="2" /><path d="M8 10h8M8 14h5" />
-          </svg>{collapsed ? null : <span>能力与档位</span>}
-        </button> : null}
-        {actions?.onOpenTasks ? <button type="button" className={styles.footerButton}
-          onClick={actions.onOpenTasks}
-          aria-label={(actions.pendingTasks ?? 0) > 0 ? `任务中心（${actions.pendingTasks} 个等你处理）` : '任务中心'}
-          title={collapsed ? '任务中心' : undefined}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-            <path d="M4 7h16M4 12h16M4 17h9" /><circle cx="18" cy="17" r="2" />
-          </svg>
-          {collapsed ? null : <span>任务中心</span>}
-          {(actions.pendingTasks ?? 0) > 0 ? (
-            <span className={styles.footerBadge} aria-hidden="true">{actions.pendingTasks}</span>
-          ) : null}
-        </button> : null}
-        {actions?.onOpenDataCenter ? <button type="button" className={styles.footerButton} onClick={actions.onOpenDataCenter} aria-label="数据中台" title={collapsed ? '数据中台' : undefined}>
-          <Doc size={18} />{collapsed ? null : <span>数据中台</span>}
-        </button> : null}
-        <button type="button" className={styles.footerButton} onClick={() => actions?.onOpenSettings()} aria-label="设置" title={collapsed ? '设置' : undefined}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-            <path d="M4 6h16M4 12h16M4 18h16" /><circle cx="8" cy="6" r="2" /><circle cx="16" cy="12" r="2" /><circle cx="10" cy="18" r="2" />
-          </svg>{collapsed ? null : <span>设置</span>}
-        </button>
-      </div>
     </aside>
   )
 }

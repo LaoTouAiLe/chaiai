@@ -1,67 +1,83 @@
-.page { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; position: relative; background: var(--law-surface-code); color: var(--law-text-primary); }
+/**
+ * 数据中台（2026-10-22 V6 统一）。
+ *
+ * 这一页原来是独立长出来的一套值：标题 24px、表格 12px、圆角 8/7/12/5 混用、
+ * 间距全是字面量。本批把它拉到与其它页同一套 token 上——**结构没动**，
+ * 只把字号、圆角、间距、边框、阴影换成 `--fs-* / --r-* / --sp-* / --c-* / --sh-*`。
+ */
+.page { flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: column; position: relative; background: var(--c-panel); color: var(--c-text-1); }
 .page button { cursor: pointer; }
 .page button:disabled { cursor: default; opacity: .45; }
-.page button:focus-visible, .page input:focus-visible, .page select:focus-visible { outline: 2px solid var(--law-state-info); outline-offset: 2px; }
-.header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 26px 32px 20px; background: var(--law-bg-layer-1); }
-.header h1 { font-size: 24px; font-weight: 650; margin: 4px 0; }
-.header p { margin: 0; font-size: 13px; color: var(--law-text-secondary); }
-.eyebrow { color: var(--law-state-info); font-size: 12px; }
-.actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.actions button, .filters button, .pagination button { padding: 8px 12px; border: 1px solid var(--law-border-l2); border-radius: 8px; background: var(--law-bg-layer-1); font-size: 13px; }
-.tabs { display: flex; gap: 6px; padding: 0 28px; border-bottom: 1px solid var(--law-border-l1); background: var(--law-bg-layer-1); overflow-x: auto; flex-shrink: 0; }
-.tabs button { padding: 14px 12px; font-size: 14px; white-space: nowrap; border-bottom: 2px solid transparent; color: var(--law-text-secondary); }
-.tabs button[aria-current] { border-bottom-color: var(--law-state-info); color: var(--law-state-info); font-weight: 600; }
-.filters { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; padding: 16px 32px; background: var(--law-bg-layer-1); border-bottom: 1px solid var(--law-border-l1); }
-.filters label { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: var(--law-text-secondary); }
-.filters input, .filters select { height: 34px; padding: 0 10px; font-size: 12px; min-width: 110px; max-width: 200px; border: 1px solid var(--law-border-l2); border-radius: 7px; background: var(--law-bg-layer-1); color: var(--law-text-primary); }
-.filters form { display: flex; align-items: end; gap: 6px; }
-.body { overflow: auto; flex: 1; min-height: 0; padding: 24px 32px 32px; }
-.notice { padding: 12px 14px; margin-bottom: 16px; border: 1px solid var(--law-border-l2); border-radius: 8px; background: var(--law-state-warn-subtle); font-size: 13px; }
-.metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
-.metric, .resources article, .chart { border: 1px solid var(--law-border-l1); background: var(--law-bg-layer-1); border-radius: 12px; padding: 20px; }
-.metric { display: flex; flex-direction: column; gap: 12px; }
-.metric span { font-size: 13px; color: var(--law-text-secondary); }
-.metric strong { font-size: 25px; font-weight: 650; overflow-wrap: anywhere; }
-.metric small { font-size: 11px; color: var(--law-text-secondary); }
-.resources { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; }
-.resources h2, .chart h2 { font-size: 15px; font-weight: 600; margin: 12px 0; }
-.resources strong { font-size: 24px; }
-.resources p { color: var(--law-text-secondary); font-size: 12px; margin: 12px 0; }
-.resources button { color: var(--law-state-info); font-size: 13px; }
-.badge { font-size: 11px; padding: 4px 7px; border-radius: 5px; background: var(--law-surface-code); color: var(--law-text-secondary); white-space: nowrap; }
-.chartGrid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; margin-top: 20px; }
+.page button:focus-visible, .page input:focus-visible, .page select:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 2px; }
+.header { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--sp-4); padding: var(--sp-6) clamp(20px, 4vw, 64px) var(--sp-4); background: var(--c-canvas); }
+.header h1 { font-size: var(--fs-heading); line-height: var(--lh-heading); font-weight: 600; margin: var(--sp-1) 0 0; }
+.header p { margin: var(--sp-1) 0 0; font-size: var(--fs-meta); line-height: var(--lh-meta); color: var(--c-text-3); }
+.eyebrow { color: var(--c-accent); font-size: var(--fs-meta); line-height: var(--lh-meta); }
+.actions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+.actions button, .filters button, .pagination button { height: 32px; padding: 0 var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-control); background: var(--c-raised); color: var(--c-text-1); font-size: var(--fs-body); }
+.actions button:hover, .filters button:hover, .pagination button:hover { background: var(--c-hover); }
+/* 页签改成分段控件形态（§7.6）：容器下沉、选中上浮，不再用下划线 */
+.tabs { display: flex; gap: 2px; margin: 0 clamp(20px, 4vw, 64px); padding: 2px; border-radius: var(--r-control); background: var(--c-sunken); overflow-x: auto; flex-shrink: 0; width: fit-content; max-width: calc(100% - 2 * clamp(20px, 4vw, 64px)); }
+.tabs button { height: 28px; padding: 0 var(--sp-3); border-radius: var(--r-control); font-size: var(--fs-body); white-space: nowrap; color: var(--c-text-2); }
+.tabs button:hover { color: var(--c-text-1); background: var(--c-hover); }
+.tabs button[aria-current] { background: var(--c-raised); color: var(--c-text-1); font-weight: 500; box-shadow: var(--sh-menu); }
+.filters { display: flex; flex-wrap: wrap; align-items: end; gap: var(--sp-3); padding: var(--sp-3) clamp(20px, 4vw, 64px); background: var(--c-canvas); border-bottom: 1px solid var(--c-line); }
+.filters label { display: flex; flex-direction: column; gap: var(--sp-1); font-size: var(--fs-meta); color: var(--c-text-3); }
+.filters input, .filters select { height: 32px; padding: 0 var(--sp-3); font-size: var(--fs-body); min-width: 110px; max-width: 200px; border: 1px solid transparent; border-radius: var(--r-control); background: var(--c-raised); color: var(--c-text-1); }
+.filters input:focus-visible, .filters select:focus-visible { border-color: var(--c-accent); outline: none; }
+.filters form { display: flex; align-items: end; gap: var(--sp-2); }
+.body { overflow: auto; flex: 1; min-height: 0; padding: var(--sp-4) clamp(20px, 4vw, 64px) var(--sp-8); }
+.notice { padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-4); border: 0; border-radius: var(--r-panel); background: var(--c-warn-soft); color: var(--c-warn); font-size: var(--fs-body); }
+.metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-3); }
+/* 卡片：去掉描边，用白底浮在灰页上（与设置页去框同一口径） */
+.metric, .resources article, .chart { border: 0; background: var(--c-raised); border-radius: var(--r-panel); padding: var(--sp-5); }
+.metric { display: flex; flex-direction: column; gap: var(--sp-3); }
+.metric span { font-size: var(--fs-meta); color: var(--c-text-3); }
+.metric strong { font-size: var(--fs-display); line-height: var(--lh-display); font-weight: 600; overflow-wrap: anywhere; }
+.metric small { font-size: var(--fs-caption); color: var(--c-text-3); }
+.resources { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); margin-top: var(--sp-5); }
+.resources h2, .chart h2 { font-size: var(--fs-title); line-height: var(--lh-title); font-weight: 600; margin: var(--sp-3) 0; }
+.resources strong { font-size: var(--fs-heading); }
+.resources p { color: var(--c-text-3); font-size: var(--fs-meta); margin: var(--sp-3) 0; }
+.resources button { color: var(--c-accent); font-size: var(--fs-body); }
+.badge { font-size: var(--fs-caption); padding: 1px var(--sp-2); border-radius: var(--r-control); background: var(--c-sunken); color: var(--c-text-2); white-space: nowrap; }
+.chartGrid { display: grid; grid-template-columns: 1.2fr 1fr; gap: var(--sp-4); margin-top: var(--sp-5); }
 .chart h2 { margin-top: 0; }
-.chart h2 small { font-size: 10px; color: var(--law-text-secondary); font-weight: 400; }
-.barRow { display: flex; align-items: center; gap: 12px; width: 100%; font-size: 12px; padding: 9px 0; }
-.barTrack { flex: 1; height: 8px; background: var(--law-state-info-subtle); border-radius: 4px; }
-.barTrack span { display: block; height: 100%; background: var(--law-state-info); border-radius: 4px; min-width: 3px; }
-.modelRow { display: flex; justify-content: space-between; gap: 12px; width: 100%; font-size: 12px; padding: 10px 0; border-bottom: 1px solid var(--law-border-l1); }
+.chart h2 small { font-size: var(--fs-caption); color: var(--c-text-3); font-weight: 400; }
+.barRow { display: flex; align-items: center; gap: var(--sp-3); width: 100%; font-size: var(--fs-meta); padding: var(--sp-2) 0; }
+.barTrack { flex: 1; height: 8px; background: var(--c-accent-soft); border-radius: var(--r-pill); }
+.barTrack span { display: block; height: 100%; background: var(--c-accent); border-radius: var(--r-pill); min-width: 3px; }
+.modelRow { display: flex; justify-content: space-between; gap: var(--sp-3); width: 100%; font-size: var(--fs-meta); padding: var(--sp-2) 0; border-bottom: 1px solid var(--c-line); }
 .modelRow span { overflow-wrap: anywhere; text-align: left; }
 .modelRow strong { white-space: nowrap; }
-.chart .subheading { margin-top: 22px; }
-.summary, .footnote { color: var(--law-text-secondary); font-size: 12px; line-height: 1.8; margin: 16px 0; }
-.tableWrap { overflow-x: auto; border: 1px solid var(--law-border-l1); border-radius: 10px; background: var(--law-bg-layer-1); }
-.tableWrap table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.tableWrap th { padding: 12px 16px; text-align: left; color: var(--law-text-secondary); background: var(--law-surface-code); white-space: nowrap; }
-.tableWrap td { padding: 12px 16px; border-top: 1px solid var(--law-border-l1); vertical-align: middle; }
+.chart .subheading { margin-top: var(--sp-5); }
+.summary, .footnote { color: var(--c-text-3); font-size: var(--fs-meta); line-height: 1.8; margin: var(--sp-4) 0; }
+.tableWrap { overflow-x: auto; border: 0; border-radius: var(--r-panel); background: var(--c-raised); }
+.tableWrap table { width: 100%; border-collapse: collapse; font-size: var(--fs-body); }
+.tableWrap th { padding: var(--sp-3) var(--sp-4); text-align: left; color: var(--c-text-3); background: var(--c-sunken); font-weight: 500; white-space: nowrap; }
+.tableWrap td { padding: var(--sp-3) var(--sp-4); border-top: 1px solid var(--c-line); vertical-align: middle; }
 .tableWrap td:first-child { min-width: 240px; max-width: 460px; }
 .tableWrap td:last-child { min-width: 152px; }
-.rowLink { display: flex; flex-direction: column; width: 100%; text-align: left; gap: 6px; }
-.rowLink strong { font-weight: 550; font-size: 13px; }
-.rowLink span { color: var(--law-text-secondary); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.6; }
-.rowLink:hover strong { color: var(--law-state-info); }
-.empty { padding: 32px; text-align: center; color: var(--law-text-secondary); font-size: 13px; }
-.pagination { display: flex; justify-content: center; gap: 18px; align-items: center; margin-top: 20px; font-size: 12px; }
-.drawer { position: absolute; top: 0; bottom: 0; right: 0; width: 460px; max-width: 100%; background: var(--law-bg-layer-1); border-left: 1px solid var(--law-border-l2); box-shadow: -8px 0 30px #00000012; display: flex; flex-direction: column; z-index: 5; }
-.drawer header { display: flex; align-items: center; justify-content: space-between; padding: 18px 22px; border-bottom: 1px solid var(--law-border-l1); }
-.drawer h2 { font-size: 16px; font-weight: 600; }
-.drawer header button { font-size: 24px; padding: 2px 8px; }
-.detailBody { overflow-y: auto; padding: 22px; font-size: 13px; }
-.detailBody h3 { font-size: 15px; font-weight: 600; margin: 0 0 16px; overflow-wrap: anywhere; }
-.detailBody dl { margin: 20px 0; }
-.detailBody dl div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; margin: 12px 0; }
-.detailBody dt { color: var(--law-text-secondary); }
+.rowLink { display: flex; flex-direction: column; width: 100%; text-align: left; gap: var(--sp-1); }
+.rowLink strong { font-weight: 500; font-size: var(--fs-body); }
+.rowLink span { color: var(--c-text-3); overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-height: 1.6; }
+.rowLink:hover strong { color: var(--c-accent); }
+.empty { padding: var(--sp-8); text-align: center; color: var(--c-text-3); font-size: var(--fs-body); }
+.pagination { display: flex; justify-content: center; gap: var(--sp-4); align-items: center; margin-top: var(--sp-5); font-size: var(--fs-meta); }
+.drawer { position: absolute; top: 0; bottom: 0; right: 0; width: 460px; max-width: 100%; background: var(--c-raised); border-left: 1px solid var(--c-line); box-shadow: var(--sh-overlay); display: flex; flex-direction: column; z-index: 5; }
+.drawer header { display: flex; align-items: center; justify-content: space-between; padding: var(--sp-4) var(--sp-5); border-bottom: 1px solid var(--c-line); }
+.drawer h2 { font-size: var(--fs-title); line-height: var(--lh-title); font-weight: 600; }
+.drawer header button { font-size: var(--fs-heading); padding: 0 var(--sp-2); color: var(--c-text-3); }
+.drawer header button:hover { color: var(--c-text-1); }
+.detailBody { overflow-y: auto; padding: var(--sp-5); font-size: var(--fs-body); }
+.detailBody h3 { font-size: var(--fs-title); line-height: var(--lh-title); font-weight: 600; margin: 0 0 var(--sp-4); overflow-wrap: anywhere; }
+.detailBody dl { margin: var(--sp-5) 0; }
+.detailBody dl div { display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: var(--sp-3); margin: var(--sp-3) 0; }
+.detailBody dt { color: var(--c-text-3); }
 .detailBody dd { margin: 0; overflow-wrap: anywhere; }
-.detailBody pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; line-height: 1.9; padding: 14px; background: var(--law-surface-code); border-radius: 8px; }
+.detailBody pre { white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; line-height: 1.9; padding: var(--sp-4); background: var(--c-sunken); border-radius: var(--r-panel); }
 @media (max-width: 1100px) { .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } .chartGrid { grid-template-columns: 1fr; } }
-@media (max-width: 600px) { .header { padding: 18px 16px; align-items: start; } .header h1 { font-size: 21px; } .header p { max-width: 150px; } .actions { flex-direction: column; } .tabs { padding: 0 8px; } .filters { padding: 12px 16px; gap: 10px; } .filters input, .filters select { max-width: 150px; } .body { padding: 18px 16px; } .metrics { gap: 10px; } .metric { padding: 14px; } .metric strong { font-size: 20px; } .resources { grid-template-columns: 1fr; } .drawer { width: 100%; } }
+@media (max-width: 600px) { .header { padding: var(--sp-4) var(--sp-4); } .header h1 { font-size: var(--fs-title); } .header p { max-width: 150px; } .actions { flex-direction: column; } .tabs { margin: 0 var(--sp-2); padding: 2px; } .filters { padding: var(--sp-3) var(--sp-4); } .filters input, .filters select { max-width: 150px; } .body { padding: var(--sp-4) var(--sp-4); } .metrics { gap: var(--sp-2); } .metric { padding: var(--sp-4); } .metric strong { font-size: var(--fs-heading); } .resources { grid-template-columns: 1fr; } .drawer { width: 100%; } }
+
+/* 产物位置列：路径/URL 用等宽字体，长串允许在任意位置折行 */
+.mono { font-family: var(--font-mono-code); font-size: var(--fs-meta); overflow-wrap: anywhere; }

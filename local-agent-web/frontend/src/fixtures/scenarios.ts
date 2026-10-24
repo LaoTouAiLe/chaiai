@@ -603,6 +603,51 @@ export const toolsScenario: ConversationScenario = {
         },
       }),
     },
+    {
+      // §18.7 自主委派：一屏里同时有"完成"与"未完成"两路，才能证明这张卡把状态讲清楚了。
+      kind: 'tool',
+      id: 't8',
+      tool: tool({
+        name: 'delegate_research',
+        summary: '子任务=2',
+        status: 'succeeded',
+        durationLabel: '6.2s',
+        target: null,
+        toolCallId: 'call-3a7c11',
+        parameters: [
+          { name: 'tasks', value: 'docs、src' },
+          { name: 'concurrency', value: '2' },
+        ],
+        resultPreview: '已核对的子任务原文：\\n# 取消（docs/cancel.md:1）',
+        resultTruncated: false,
+        resultDigest: 'sha256:77c1b0aa4e2f',
+        startedLabel: '14:07',
+        finishedLabel: '14:07',
+        card: {
+          kind: 'delegation',
+          children: [
+            {
+              scope: 'docs',
+              status: 'completed',
+              toolCalls: 4,
+              modelCalls: 1,
+              evidenceCount: 6,
+              error: null,
+            },
+            {
+              scope: 'src',
+              status: 'failed',
+              toolCalls: 0,
+              modelCalls: 1,
+              evidenceCount: 0,
+              error: '子任务超时',
+            },
+          ],
+          report: ['已核对的子任务原文：', '# 取消（docs/cancel.md:1）', '取消不撤销已发生的副作用。（docs/cancel.md:2）'].join('\\n'),
+          truncated: false,
+        },
+      }),
+    },
   ],
   plan: {
     goal: '修复 unit 检查的高度上限用例',
@@ -931,10 +976,10 @@ export const settingsModelsScenario: ConversationScenario = {
   settings: {
     connections,
     credentialStore: { kind: 'os', note: null },
-    // 权限分区（T38）：停在「自定义」，带两条授权，一条只读一条读写。
+    // 权限分区（T38）：停在出货默认「工作区可写」，带两条授权，一条只读一条读写。
     permissions: {
-      mode: 'whitelist',
-      defaultMode: 'whitelist',
+      mode: 'workspace-write',
+      defaultMode: 'workspace-write',
       grants: [
         { path: 'E:/design-assets', access: 'read' },
         { path: 'D:/team/shared', access: 'read_write' },
@@ -963,12 +1008,13 @@ export const settingsEmptyScenario: ConversationScenario = {
     connections: [],
     credentialStore: {
       kind: 'unavailable',
-      note: '当前系统凭据存储不可用：密钥只保存在本次进程内，重启后需要重新录入，也不会写入明文文件。',
+      // 与后端 `open_credential_store("memory")` 的措辞一致（§6.8 的降级提示）。
+      note: '已按配置使用临时模式：密钥只在本进程内有效，重启后需要重新录入。',
     },
     // 权限同样存不下：停在最保守的档位，并如实说明重启后会回到出厂默认。
     permissions: {
-      mode: 'deny',
-      defaultMode: 'whitelist',
+      mode: 'read-only',
+      defaultMode: 'workspace-write',
       grants: [],
       storeUnavailable: true,
     },
@@ -1242,8 +1288,11 @@ export const emptySessionScenario: ConversationScenario = {
   settings: null,
   modelMenu: null,
   empty: {
-    title: '开始一个新会话',
-    description: '描述你想完成的事即可。需要工具或文件改动时，会先给出计划，涉及危险操作会先请求你的确认。',
+    title: '在工作区里动手做事',
+    description: '读代码、改文件、跑受控命令；每一步都在本机，都能核对。',
+    highlightsTitle: '它替你做的三件事',
+    highlights: ['跨文件读代码，回答带路径与行号', '改文件只动该动的部分，先看 diff 再落盘', '命令和测试在受控范围里跑，需要授权先问你'],
+    hint: '描述你想完成的事即可；需要工具或文件改动时，会先给出计划，涉及危险操作会先请求你的确认。',
   },
   composer: { disabledReason: null, phase: null },
 }
@@ -1318,25 +1367,27 @@ export const meterOpenScenario: ConversationScenario = {
 }
 
 /* ---------------------------------------------------------------------------
- * v0.5 T56: 能力与档位面板（产品里是侧栏 live-only 入口，这里只为给它一条视觉基线）。
+ * v0.5 T56: 能力面板（产品里是侧栏 live-only 入口，这里只为给它一条视觉基线）。
  * ------------------------------------------------------------------------- */
 
 /**
- * 能力与档位：**闭集里的四种原因各出现一次**。
+ * 能力面板：**闭集里的三种原因与两种基础能力各出现一次**。
  *
- * 这条基线要证的不是"面板长得好看"，而是"不可用时说清了缺什么、怎么装"：所以 fixture 刻意让
- * `available` / `profile` / `disabled` / `missing_dependency` 四种原因同时出现在一屏里。
+ * 这条基线要证的不是"面板长得好看"，而是"关掉时说得清怎么打开、缺依赖时说得清怎么装"：所以 fixture
+ * 刻意让 `available` / `disabled` / `missing_dependency` 三种原因、加上两个不可关闭的基础能力，
+ * 同时出现在一屏里。
  *
- * 取的是 `researcher` 档 + 联网开关关闭 + Git 开关开着但**这台机器没有 git**——最后这一组正是
- * "两台机器配置一样却行为不同"的那个场景（§16.4），也是最容易被做成一排灰格子的一种。
+ * 取的是"写文件与命令关着（只读会话）+ 联网关着 + Git 读取开着但**这台机器没有 git**"——最后这一组
+ * 正是"两台机器配置一样却行为不同"的那个场景（§16.4），也是最容易被做成一排灰格子的一种。
  *
- * 八行文案**逐字**来自后端 `capabilities.py::capability_status()`（用同一组入参真算了一份再抄），
+ * 十行文案**逐字**来自后端 `capabilities.py::capability_status()`（用同一组入参真算了一份再抄），
  * 前端不在这里自造措辞；后端那份由 `tests/test_capabilities.py` 守着，改文案要两边一起改。
+ * 2026-10-13：闭集新增 `delegate`（§18.7），这一屏也跟着多了一行。
  */
 export const capabilitiesScenario: ConversationScenario = {
   id: 'capabilities',
   sessionId: 's-shell',
-  purpose: '能力与档位面板：档位 + 四种可用性原因（可用 / 档位没有 / 开关关闭 / 缺依赖）+ 可照做提示',
+  purpose: '能力面板：开关状态 + 三种可用性原因（可用 / 开关关闭 / 缺依赖）+ 两个不可关闭的基础能力',
   session: shellScenario.session,
   messages: shellScenario.messages,
   plan: shellScenario.plan,
@@ -1346,39 +1397,63 @@ export const capabilitiesScenario: ConversationScenario = {
   settings: null,
   modelMenu: null,
   capabilities: {
-    profile: 'researcher',
-    // 可选集由服务端枚举（§16.6）：原型也照真形状给一份，截图因此能画出档位选择器；
+    // 解析后的完整开关表：闭集里每一项都有，页面据此画每一项的开关。
+    switches: {
+      plan: true,
+      files_read: true,
+      code_search: true,
+      files_write: false,
+      shell: false,
+      web: true,
+      git_read: true,
+      git_write: false,
+      skill: true,
+      delegate: false,
+    },
+    // 可开关集由服务端枚举（§16.1）：原型也照真形状给一份，截图因此能画出开关；
     // 原型宿主的那个动作是惰性的（`App.tsx`），真宿主由 `CapabilitiesSection` 接线。
-    defaultProfile: 'coder',
-    profiles: ['coder', 'researcher', 'reviewer'],
+    // 联网自 2026-10-14 起是**常态能力**：它和两个基础能力一样不进可开关集。
+    switchable: [
+      'plan',
+      'files_write',
+      'shell',
+      'git_read',
+      'git_write',
+      'skill',
+      'delegate',
+    ],
     storeUnavailable: false,
     capabilities: [
-      { capability: 'plan', label: '任务计划', available: true, reason: 'available', detail: '当前可用。', hint: null },
-      { capability: 'files_read', label: '读取工作区文件', available: true, reason: 'available', detail: '当前可用。', hint: null },
-      { capability: 'code_search', label: '检索代码', available: true, reason: 'available', detail: '当前可用。', hint: null },
+      { capability: 'plan', label: '任务计划', available: true, reason: 'available', detail: '当前可用。', hint: null, locked: false },
+      { capability: 'files_read', label: '读取工作区文件', available: true, reason: 'available', detail: '基础能力，始终开启（关掉它会让闲聊与只读调查都无解）。', hint: null, locked: true },
+      { capability: 'code_search', label: '检索代码', available: true, reason: 'available', detail: '基础能力，始终开启（关掉它会让闲聊与只读调查都无解）。', hint: null, locked: true },
       {
         capability: 'files_write',
         label: '修改工作区文件',
         available: false,
-        reason: 'profile',
-        detail: '当前 Agent 档位没有包含这个能力。',
-        hint: '把 profiles.active 切到包含它的档位（coder / researcher / reviewer），或改 profiles.custom。',
+        reason: 'disabled',
+        detail: '修改工作区文件开关关着：Agent 只能读，不能改本机文件（只读会话就靠这一项）。',
+        hint: '在「能力」面板里打开这一项（保存后下一轮生效，不用重启服务）。',
+        locked: false,
       },
       {
         capability: 'shell',
         label: '执行命令',
         available: false,
-        reason: 'profile',
-        detail: '当前 Agent 档位没有包含这个能力。',
-        hint: '把 profiles.active 切到包含它的档位（coder / researcher / reviewer），或改 profiles.custom。',
+        reason: 'disabled',
+        detail: '执行命令开关关着：Agent 不能运行任何本机命令。',
+        hint: '在「能力」面板里打开这一项（保存后下一轮生效，不用重启服务）。',
+        locked: false,
       },
       {
         capability: 'web',
         label: '联网检索与抓取',
-        available: false,
-        reason: 'disabled',
-        detail: '联网开关关着：本机 Agent 一旦能联网，攻击面会扩到互联网，所以默认关闭。',
-        hint: '把 web_access.enabled 设为 true（并按 §16.3 的边界使用）。',
+        available: true,
+        reason: 'available',
+        detail:
+          '常态能力，始终开启：联网检索与抓取是日常问答的一部分——关掉它，模型只能凭训练数据回答。',
+        hint: null,
+        locked: true,
       },
       {
         capability: 'git_read',
@@ -1387,14 +1462,16 @@ export const capabilitiesScenario: ConversationScenario = {
         reason: 'missing_dependency',
         detail: '这台机器上找不到 git 可执行文件，因此该能力不会绑给模型。',
         hint: '安装 Git（Windows: https://git-scm.com/download/win ；macOS: brew install git ；Debian/Ubuntu: sudo apt install git）后重启本应用。',
+        locked: false,
       },
       {
         capability: 'git_write',
         label: '提交到 Git',
         available: false,
-        reason: 'profile',
-        detail: '当前 Agent 档位没有包含这个能力。',
-        hint: '把 profiles.active 切到包含它的档位（coder / researcher / reviewer），或改 profiles.custom。',
+        reason: 'disabled',
+        detail: 'Git 提交开关关着：默认不让 Agent 改仓库状态。',
+        hint: '在「能力」面板里打开这一项（保存后下一轮生效，不用重启服务）。',
+        locked: false,
       },
       {
         capability: 'skill',
@@ -1403,6 +1480,16 @@ export const capabilitiesScenario: ConversationScenario = {
         reason: 'available',
         detail: '当前可用。',
         hint: null,
+        locked: false,
+      },
+      {
+        capability: 'delegate',
+        label: '自主委派调查',
+        available: false,
+        reason: 'disabled',
+        detail: '自主委派开关关着：模型只能自己一步一步查，不能把调查派给隔离子 Agent（每个子任务会多花一次模型调用，所以默认关闭）。',
+        hint: '在「能力」面板里打开这一项（保存后下一轮生效，不用重启服务）。',
+        locked: false,
       },
     ],
   },

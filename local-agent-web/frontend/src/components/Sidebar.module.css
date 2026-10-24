@@ -1,14 +1,36 @@
-.sidebar {
+﻿.sidebar {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-lg);
+  gap: var(--sp-2);
   width: var(--law-sidebar-width);
   flex: 0 0 var(--law-sidebar-width);
-  padding: var(--law-space-lg) var(--law-space-md) var(--law-space-md);
-  background: var(--law-surface-sidebar);
-  border-right: 1px solid var(--law-border-l1);
-  overflow-y: auto;
+  /* 上 8 + brand 44 = 52，与 56px 顶栏的标题行基本齐平 */
+  padding: var(--sp-2) var(--sp-2) var(--sp-3);
+  background: var(--c-panel);
+  border-right: 1px solid var(--c-line);
+  overflow: hidden;
+  min-height: 0;
 }
+
+.sessionScroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+/* 「展示更多」：文字按钮，不抢视觉（§4.1） */
+.showMore {
+  display: block;
+  width: 100%;
+  height: 28px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-control);
+  font-size: var(--fs-meta);
+  line-height: 28px;
+  color: var(--c-text-3);
+  text-align: center;
+}
+
+.showMore:hover {
+  background: var(--c-hover);
+  color: var(--c-text-1);
+}
+.sidebar > :not(.sessionScroll) { flex-shrink: 0; }
 
 /* Narrow rail (matrix 24). Width is the measured value from T25. */
 .sidebarCollapsed {
@@ -50,9 +72,9 @@
 .brand {
   display: flex;
   align-items: center;
-  gap: var(--law-space-md);
-  padding: 0 var(--law-space-md);
-  height: 28px;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-2);
+  height: 44px;
 }
 
 .brandMark {
@@ -80,51 +102,109 @@
 }
 
 .brandName {
-  font-size: var(--law-text-lg);
-  line-height: var(--law-leading-lg);
-  font-weight: 650;
-  letter-spacing: -.4px;
+  font-size: var(--fs-title);
+  line-height: var(--lh-title);
+  font-weight: 600;
+  color: var(--c-text-1);
 }
 
-.newSession {
+/* 功能入口（2026-10-22）：从底部挪到顶部。原来五个入口堆在左下角，
+   等于把最常用的跳转放在离视线最远的地方；对齐 hermes 的侧栏 nav 行。 */
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 0 var(--sp-1);
+}
+
+.navRow {
   display: flex;
   align-items: center;
-  justify-content: center;
-  gap: var(--law-space-sm);
-  height: 38px;
-  border-radius: var(--law-radius-lg);
-  border: 1px solid var(--law-border-l2);
-  background: var(--law-button-ghost-fill);
-  color: var(--law-text-primary);
-  font-size: var(--law-text-md);
-  line-height: var(--law-leading-md);
-  font-weight: var(--law-weight-medium);
-  transition: background var(--law-duration-base) var(--law-ease);
+  /* 2026-10-23 对齐 hermes 的 SidebarMenuButton：h-8 / text-sm / rounded-md / gap-2 */
+  gap: var(--sp-2);
+  height: var(--law-session-row-height);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-panel);
+  color: var(--c-text-2);
+  font-size: var(--fs-chat);
+  line-height: var(--lh-body);
+  font-weight: 500;
+  text-align: left;
 }
 
-.newSession:hover {
-  background: var(--law-button-ghost-hover);
+.navRow:hover {
+  background: var(--c-hover);
+  color: var(--c-text-1);
+}
+
+.navIcon {
+  display: inline-flex;
+  flex: 0 0 16px;
+  justify-content: center;
+  color: var(--c-text-2);
+}
+
+.navRow:hover .navIcon {
+  color: var(--c-text-1);
+}
+
+.navLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.navBadge {
+  flex: 0 0 auto;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: var(--r-control);
+  background: var(--c-warn-soft);
+  color: var(--c-warn);
+  font-size: var(--fs-caption);
+  line-height: 16px;
+  text-align: center;
+}
+
+.sidebarCollapsed .navRow {
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebarCollapsed .navLabel,
+.sidebarCollapsed .navBadge {
+  display: none;
 }
 
 .search {
   display: block;
-  padding: 0 var(--law-space-md);
+  padding: 0 var(--sp-2);
 }
 
+/* 无边框搜索框（§7.3）：底槽色区分，聚焦才出现描边 */
 .search input {
   width: 100%;
-  height: 30px;
-  padding: 0 var(--law-space-lg);
-  border-radius: var(--law-radius-md);
-  border: 1px solid var(--law-border-l2);
-  background: var(--law-bg-layer-1);
-  color: var(--law-text-primary);
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
+  height: 32px;
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-control);
+  border: 1px solid transparent;
+  /* 白底而不是 sunken：侧栏本身是 #f7f8fa，sunken(#f1f3f6) 与它几乎同色，
+     输入框会看不见边界（2026-10-22 截图复核）。 */
+  background: var(--c-raised);
+  color: var(--c-text-1);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+
+.search input:focus-visible {
+  border-color: var(--c-accent);
+  outline: none;
 }
 
 .search input::placeholder {
-  color: var(--law-text-caption);
+  color: var(--c-text-3);
 }
 
 .noResults {
@@ -190,11 +270,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding: var(--law-space-sm) var(--law-space-md);
-  color: var(--law-text-secondary);
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
-  font-weight: var(--law-weight-medium);
+  padding: 0 var(--sp-2);
+  height: 28px;
+  line-height: 28px;
+  color: var(--c-text-2);
+  font-size: var(--fs-body);
+  font-weight: 500;
   /* Rows are <button> since T30 so they are reachable by keyboard: reset the
      browser defaults so the pixels match the prototype's <div> exactly. */
   border: 0;
@@ -207,14 +288,13 @@
 .session {
   display: flex;
   align-items: center;
-  gap: var(--law-space-sm);
+  gap: var(--sp-2);
   height: var(--law-session-row-height);
-  padding: 0 var(--law-space-md);
-  border-radius: var(--law-radius-md);
-  color: var(--law-text-primary);
-  font-size: var(--law-text-md);
-  line-height: var(--law-leading-md);
-  transition: background var(--law-duration-fast) var(--law-ease);
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-control);
+  color: var(--c-text-1);
+  font-size: var(--fs-chat);
+  line-height: var(--lh-body);
   /* Same reset as `.workspaceTitle`: identical pixels, real button semantics. */
   width: 100%;
   border: 0;
@@ -222,14 +302,30 @@
   font-family: inherit;
   text-align: left;
   cursor: pointer;
+  transition: background var(--dur-hover-out) var(--ease-out);
 }
 
+/* hover 当帧生效（transition: none），离开时才走 100ms 回退 */
 .session:hover {
-  background: var(--law-hover-solid);
+  background: var(--c-hover);
+  transition: none;
 }
 
+/* 当前会话：底色 + 左侧 2px 强调条。底色单独不够区分（§4.1）。 */
 .sessionSelected {
-  background: var(--law-active);
+  position: relative;
+  background: var(--c-active);
+}
+
+.sessionSelected::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  border-radius: var(--r-pill);
+  background: var(--c-accent);
 }
 
 .dot {
@@ -284,47 +380,28 @@
   line-height: var(--law-leading-xs);
 }
 
-.footer {
-  margin-top: auto;
-  padding-top: var(--law-space-md);
-}
-
+/* 「已归档会话」这一行仍复用这个名字（它确实是列表里的一个入口行），
+   但与顶部 nav 行同高同圆角，不再自成一套。 */
 .footerButton {
   display: flex;
-  gap: 8px;
+  gap: var(--sp-2);
   align-items: center;
   width: 100%;
-  height: 42px;
-  padding: 0 var(--law-space-md);
-  border-radius: var(--law-radius-lg);
-  color: var(--law-text-secondary);
-  font-size: var(--law-text-md);
-  line-height: var(--law-leading-md);
+  height: 28px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-control);
+  color: var(--c-text-2);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
 }
 
 .footerButton:hover {
-  background: var(--law-hover-solid);
-  color: var(--law-text-primary);
+  background: var(--c-hover);
+  color: var(--c-text-1);
 }
 
 .footerButton svg { flex-shrink: 0; }
 .sidebarCollapsed .footerButton { justify-content: center; padding: 0; }
-
-/* 「等你处理」角标（T62；§17.6）：需要人工核对的任务必须能被发现，用 warn 令牌保持与状态色一致。 */
-.footerBadge {
-  flex: 0 0 auto;
-  margin-left: auto;
-  min-width: 18px;
-  padding: 0 var(--law-space-xs);
-  text-align: center;
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-xs);
-  color: var(--law-state-warn-label);
-  border: 1px solid var(--law-state-warn-subtle);
-  border-radius: var(--law-radius-pill);
-}
-
-.sidebarCollapsed .footerBadge { margin-left: 0; }
 
 .managedRow { display: flex; align-items: center; min-width: 0; position: relative; }
 .managedRow > .session, .managedRow > .workspaceTitle { flex: 1; min-width: 0; }

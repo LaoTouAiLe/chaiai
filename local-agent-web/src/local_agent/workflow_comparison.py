@@ -216,6 +216,7 @@ def summarize_comparison(rows: list[dict[str, Any]], repetitions: int) -> dict[s
             events = row.get("tool_events", [])
             allowed = ({"read_file", "edit_file", "run_shell"} if case.test_command
                        else {"read_file", "grep", "glob", "list_dir"})
+            allowed.add("task_control")
             edits = [event for event in events if event.get("tool_name") == "edit_file"]
             if (any(event.get("tool_name") not in allowed or event.get("status") != "ok"
                     for event in events) or len(edits) != (1 if case.test_command else 0)

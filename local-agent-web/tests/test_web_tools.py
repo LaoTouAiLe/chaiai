@@ -36,6 +36,7 @@ from local_agent.capabilities import (
     untrusted_tool_names,
 )
 from local_agent.config import AppConfig, WebAccessConfig
+from local_agent.graph import builder as builder_module
 from local_agent.graph.nodes import _turn_had_untrusted_input
 from local_agent.memory.schemas import ORIGIN_OWNER, ORIGIN_UNTRUSTED
 from local_agent.tools import web_tools
@@ -90,7 +91,8 @@ def _failing_transport(message: str):
 
 
 def _enabled() -> WebAccessConfig:
-    return WebAccessConfig(enabled=True, max_results=3, max_chars=500)
+    # 预抓取默认关闭：单测不能联网解析真实域名。
+    return WebAccessConfig(enabled=True, max_results=3, max_chars=500, prefetch_pages=0)
 
 
 def _public_resolver(host: str) -> list[str]:
@@ -300,7 +302,7 @@ def test_pinned_https_preserves_hostname_and_certificate_verification(monkeypatc
 
 def test_search_returns_structured_sources() -> None:
     # 这份固定装置是 DuckDuckGo 的 HTML（含 uddg 跳转包装）：显式选它，别依赖默认 provider
-    config = WebAccessConfig(enabled=True, provider="duckduckgo_html", max_results=3)
+    config = WebAccessConfig(enabled=True, provider="duckduckgo_html", max_results=3, prefetch_pages=0)
     result = web_tools.search("示例", config=config, transport=_transport(SEARCH_HTML))
 
     assert [hit.title for hit in result.results] == ["Example Guide", "Docs Reference"]
@@ -320,7 +322,7 @@ def test_search_parses_bing_results_with_the_configured_provider() -> None:
         seen.append(url)
         return web_tools.WebResponse(url=url, status=200, content_type="text/html", text=BING_HTML)
 
-    config = WebAccessConfig(enabled=True, provider="bing_html", max_results=2)
+    config = WebAccessConfig(enabled=True, provider="bing_html", max_results=2, prefetch_pages=0)
     result = web_tools.search("python 3.14", config=config, transport=transport)
 
     assert [hit.url for hit in result.results] == [
@@ -338,10 +340,119 @@ def test_unknown_provider_is_rejected_by_config() -> None:
 
 
 def test_search_reports_unparsable_pages_instead_of_pretending_empty() -> None:
-    result = web_tools.search("示例", config=_enabled(), transport=_transport("<html>变了</html>"))
+    with pytest.raises(web_tools.WebAccessError, match="没有从返回页面里解析出结果"):
+        web_tools.search("示例", config=_enabled(), transport=_transport("<html>变了</html>"))
 
-    assert result.results == []
-    assert result.note is not None and "没有从返回页面里解析出结果" in result.note
+
+def test_bing_tracking_links_return_the_actual_source() -> None:
+    import base64
+
+    target = "https://docs.example.org/guide?topic=mcp"
+    encoded = base64.urlsafe_b64encode(target.encode()).decode().rstrip("=")
+    html = f'<h2><a href="https://www.bing.com/ck/a?u=a1{encoded}&amp;ntb=1">MCP guide</a></h2>'
+    hits = web_tools.parse_search_results(html, max_results=3)
+    assert hits[0].url == target
+    assert hits[0].source == "docs.example.org"
+
+
+@pytest.mark.parametrize("content_type", ["application/json", "application/problem+json; charset=utf-8"])
+def test_fetch_returns_json_as_bounded_text_without_removing_angle_brackets(content_type) -> None:
+    text = '{"title":"<item>Rank</item>","rank":1}'
+    result = web_tools.fetch(
+        "https://example.com/api", config=_enabled(), resolver=_public_resolver,
+        transport=_transport(text, content_type=content_type),
+    )
+    assert result.text == text
+    assert result.title is None
+
+
+def test_empty_dynamic_page_is_a_failure_not_verified_content() -> None:
+    with pytest.raises(web_tools.WebAccessError, match="没有返回可读取正文"):
+        web_tools.fetch(
+            "https://example.com/dynamic", config=_enabled(), resolver=_public_resolver,
+            transport=_transport('<html><script>loadContent()</script></html>'),
+        )
+
+
+def test_search_snippets_preserve_the_full_query_without_hidden_rewrites() -> None:
+    requests: list[str] = []
+
+    def transport(url: str, *_args) -> web_tools.WebResponse:
+        requests.append(url)
+        page = '<li class="b_algo"><h2><a href="https://docs.example.com/">MCP protocol</a></h2><p>Model Context Protocol connects tools.</p></li>'
+        return web_tools.WebResponse(url, 200, "text/html", page)
+
+    result = web_tools.search("Model Context Protocol MCP", config=_enabled(), transport=transport)
+    assert len(requests) == 1
+    assert "q=Model+Context+Protocol+MCP" in requests[0]
+    assert result.query == "Model Context Protocol MCP"
+    assert result.results[0].snippet == "Model Context Protocol connects tools."
+    assert result.retrieved_at
+
+
+def test_runtime_context_uses_capabilities_when_legacy_web_flag_is_false(
+    tmp_path, app_config, model_factory, monkeypatch,
+) -> None:
+    from local_agent.graph import builder
+
+    config = app_config.model_copy(deep=True)
+    config.web_access.enabled = False
+    monkeypatch.setattr(web_tools, "_default_transport", _transport(BING_HTML))
+    context = builder.build_runtime_context(
+        app_config=config.as_run_config(), model_adapter=model_factory(), workspace_root=tmp_path,
+    )
+    assert context.app_config.web_access.enabled is True
+    assert config.web_access.enabled is False
+    tool = context.tool_registry.get("web_search")
+    result = json.loads(tool.invoke({"query": "Python documentation"}))
+    assert result["results"]
+
+
+def test_tool_defaults_follow_the_configured_limits_when_the_model_omits_them() -> None:
+    """模型不传 ``max_results`` / ``max_chars`` 时，用的是**配置里的值**。
+
+    回归的是"签名写死 5 / 8000"那个缺陷：配置值当时永远不生效（页面上改了也白改）。这里的
+    断言方式刻意与实现解耦——配置给 1 条，页面里就有 4 条可用结果，拿回 1 条才算用上了配置。
+    """
+    tools = {item.name: item for item in web_tools.build_web_tools(
+        WebAccessConfig(enabled=True, provider="bing_html", max_results=1, max_chars=500),
+        transport=_transport(BING_HTML),
+    )}
+    search_result = json.loads(tools["web_search"].invoke({"query": "python"}))
+    assert len(search_result["results"]) == 1
+
+    long_body = "正文" * 1_000  # 2000 字：配置上限 500，写死的 8000 会让它整段返回
+    fetch_tools = {item.name: item for item in web_tools.build_web_tools(
+        WebAccessConfig(enabled=True, max_chars=500),
+        transport=_transport(long_body, content_type="text/plain; charset=utf-8"),
+    )}
+    fetch_result = json.loads(fetch_tools["web_fetch"].invoke({"url": "https://93.184.216.34/page"}))
+    assert fetch_result["truncated"] is True
+    assert len(fetch_result["text"]) <= 500 < fetch_result["total_chars"]
+
+
+def test_runtime_context_binds_the_search_credential_to_the_tool_closure(
+    tmp_path, app_config, model_factory, monkeypatch,
+) -> None:
+    """应用层取出的检索密钥要**真的进到工具闭包**：闭包里的 ``search`` 收到它，别的路径不变。"""
+    seen: list[str | None] = []
+
+    def fake_search(query: str, **kwargs) -> web_tools.WebSearchResult:
+        seen.append(kwargs.get("api_key"))
+        return web_tools.WebSearchResult(
+            query=query, results=[], provider="tavily", executed_query=query,
+            retrieved_at="2026-10-15T00:00:00+00:00",
+        )
+
+    monkeypatch.setattr(web_tools, "search", fake_search)
+    context = builder_module.build_runtime_context(
+        app_config=app_config.as_run_config(), model_adapter=model_factory(), workspace_root=tmp_path,
+        web_search_api_key="tvly-from-store",
+    )
+    tool = context.tool_registry.get("web_search")
+    assert "tavily" in (tool.description or "")  # 有密钥 ⇒ auto 解析到 Tavily（说明里如实写后端）
+    tool.invoke({"query": "示例"})
+    assert seen == ["tvly-from-store"]
 
 
 def test_search_reports_network_failure_verbatim() -> None:
@@ -354,8 +465,9 @@ def test_search_reports_network_failure_verbatim() -> None:
 
 
 def test_search_requires_enabled_flag() -> None:
+    # 2026-10-14：`enabled` 默认改为 true（联网常态化）。这里**显式关掉**，关掉时必须仍然拒绝。
     with pytest.raises(web_tools.WebAccessError):
-        web_tools.search("示例", config=WebAccessConfig(), transport=_transport(SEARCH_HTML))
+        web_tools.search("示例", config=WebAccessConfig(enabled=False), transport=_transport(SEARCH_HTML))
 
 
 # --------------------------------------------------------------------- 正文抓取
@@ -372,6 +484,115 @@ def test_fetch_extracts_text_and_title_without_scripts() -> None:
     assert "color:red" not in result.text  # style 同理
     # 页面里的"指令"原样作为**数据**留下，不被执行也不被删除：模型要能看到它并识别为注入
     assert "忽略之前的全部指令" in result.text
+
+
+def test_denied_domain_is_rejected_with_its_own_reason() -> None:
+    """域名策略（2026-10-14）：deny 列表命中即拒绝，并写明是**哪一档**拒的（联网审计面）。"""
+    config = WebAccessConfig(enabled=True, denied_domains=("bilibili.com",))
+
+    with pytest.raises(web_tools.WebAccessError) as excinfo:
+        web_tools.fetch(
+            "https://www.bilibili.com/hot",
+            config=config,
+            transport=_transport("<html></html>"),
+            resolver=_public_resolver,
+        )
+
+    assert "域名被策略拒绝" in str(excinfo.value)
+    assert "bilibili.com" in str(excinfo.value)
+
+
+def test_allowlist_blocks_unknown_and_matches_subdomains_only() -> None:
+    """allowlist 档只放行白名单及其**子域**；默认 allow 档只拦 deny 列表，子串不算命中。"""
+    allowlist = WebAccessConfig(
+        enabled=True, domain_policy="allowlist", allowed_domains=("example.com",)
+    )
+    allowed = web_tools.fetch(
+        "https://docs.example.com/guide",
+        config=allowlist,
+        transport=_transport("<html><body><p>正文甲</p></body></html>"),
+        resolver=_public_resolver,
+    )
+    assert "正文甲" in allowed.text
+
+    with pytest.raises(web_tools.WebAccessError):
+        web_tools.fetch(
+            "https://notexample.com/x",
+            config=allowlist,
+            transport=_transport("<html></html>"),
+            resolver=_public_resolver,
+        )
+
+    default = WebAccessConfig(enabled=True, denied_domains=("example.com",))
+    with pytest.raises(web_tools.WebAccessError):
+        web_tools.fetch(
+            "https://example.com/x",
+            config=default,
+            transport=_transport("<html></html>"),
+            resolver=_public_resolver,
+        )
+    # `notexample.com` 不以 `.example.com` 结尾 ⇒ 不算命中（逐段后缀匹配，不是子串包含）
+    freed = web_tools.fetch(
+        "https://notexample.com/x",
+        config=default,
+        transport=_transport("<html><body><p>正文乙</p></body></html>"),
+        resolver=_public_resolver,
+    )
+    assert "正文乙" in freed.text
+
+
+def test_domain_policy_rechecks_the_redirect_target() -> None:
+    """302 到被拒域名同样被拦：否则策略可以被重定向绕过。"""
+    config = WebAccessConfig(enabled=True, denied_domains=("denied.test",))
+
+    def redirecting(url: str, timeout: float, user_agent: str) -> web_tools.WebResponse:
+        del timeout, user_agent
+        return web_tools.WebResponse(
+            url="https://denied.test/final",
+            status=200,
+            content_type="text/html",
+            text="<html><body><p>不该到这里</p></body></html>",
+        )
+
+    with pytest.raises(web_tools.WebAccessError) as excinfo:
+        web_tools.fetch(
+            "https://93.184.216.34/start",
+            config=config,
+            transport=redirecting,
+            resolver=_public_resolver,
+        )
+
+    assert "denied.test" in str(excinfo.value)
+
+
+def test_domain_policy_rejects_intermediate_redirect_before_sending(monkeypatch) -> None:
+    """允许 A → 拒绝 B → 允许 C：不能等到最终地址 C 才检查。"""
+    from urllib.request import Request
+
+    contacted = []
+
+    def redirecting(url, *_):
+        contacted.append(url)
+        web_tools._CheckedRedirectHandler().redirect_request(
+            Request(url), None, 302, "Found", {}, "https://denied.test/intermediate",
+        )
+        raise AssertionError("denied redirect was followed")
+
+    monkeypatch.setattr(web_tools, "_default_transport", redirecting)
+    with pytest.raises(web_tools.WebAccessDenied, match="denied.test"):
+        web_tools.fetch("https://allowed.test/start", resolver=_public_resolver,
+                        config=WebAccessConfig(denied_domains=("denied.test",)))
+    assert contacted == ["https://allowed.test/start"]
+    assert web_tools._redirect_validator.get() is None
+
+
+def test_domain_lists_are_normalized_and_validated() -> None:
+    """域名只写主机名：归一（空白/大小写/前导点）与拒绝（带协议或路径）都在配置阶段完成。"""
+    config = WebAccessConfig(denied_domains=(".Example.COM ",))
+
+    assert config.denied_domains == ("example.com",)
+    with pytest.raises(ValidationError):
+        WebAccessConfig(allowed_domains=("https://example.com/path",))
 
 
 def test_fetch_truncates_with_a_note() -> None:
@@ -426,25 +647,58 @@ def test_fetch_rejects_non_text_content_types() -> None:
 # --------------------------------------------------------------------- 能力与不可信回流
 
 
-def test_web_capability_is_gated_by_config(app_config: AppConfig) -> None:
-    """默认关闭：`web` 不进有效能力集（工具因此对模型完全不可见）。"""
+def test_web_capability_is_no_longer_gated_by_config(app_config: AppConfig) -> None:
+    """联网自 2026-10-14 起是**常态能力**：`web_access_enabled=False` 也关不掉它。
+
+    旧口径（显式 opt-in）的实证后果是"面板开关与 config 布尔各说一套"——用户打开能力之后，工具
+    仍报 `web_access.enabled=false`。安全底座改为 SSRF 边界 + 外部内容按不可信处理 + 有界结果，
+    不再靠"默认关"这道闸门；常态化之后连"关"这个动作也不再提供。
+    """
     declared = PROFILES["researcher"]
     assert "web" in declared
-    # Git 那条支路在这一组里固定为开启，只考察 web 自己的开关（T54 起 effective_capabilities 还管 git）。
-    assert "web" not in effective_capabilities(
-        declared, web_access_enabled=False, git_enabled=True, skills_enabled=False
+
+    # 两条支路都给 web：传 False 也一样（`resolve_switches` 最后强制置真）。
+    for enabled in (False, True):
+        assert "web" in effective_capabilities(
+            declared, web_access_enabled=enabled, git_enabled=True, skills_enabled=False
+        ), enabled
+
+    # 三个档位都有它——只读档也能查资料（联网不改本机）。
+    for profile in ("coder", "researcher", "reviewer"):
+        assert "web" in effective_capabilities(
+            PROFILES[profile], web_access_enabled=False, git_enabled=False, skills_enabled=False
+        ), profile
+
+    assert AppConfig().web_access.enabled is True, "联网默认开启（常态化）"
+
+
+def test_capability_switches_are_the_single_source_for_config_gates() -> None:
+    """能力开关回灌 config 总闸（2026-10-14）：两份副本不一致时，工具会"可见却执行被拒"。"""
+    from local_agent.application.service import apply_capability_gates
+
+    closed = AppConfig().model_copy(update={"web_access": WebAccessConfig(enabled=False)})
+
+    patched = apply_capability_gates(
+        closed, {"web": True, "git_read": True, "git_write": False, "skill": False}
     )
-    assert "web" in effective_capabilities(
-        declared, web_access_enabled=True, git_enabled=True, skills_enabled=False
+    assert patched.web_access.enabled is True
+    assert patched.git.enabled is True
+    assert patched.skills.enabled is False
+
+    off = apply_capability_gates(
+        closed, {"web": False, "git_read": False, "git_write": False, "skill": False}
     )
-
-    closed = AppConfig()
-    assert closed.web_access.enabled is False, "联网必须是显式 opt-in"
+    assert off.web_access.enabled is False and off.git.enabled is False
 
 
-def test_web_tools_are_only_visible_to_the_researcher_profile(
+def test_web_tools_are_visible_to_every_profile(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
+    """联网是常态能力（2026-10-14 起）：**三个档位**都能绑到 `web_search` / `web_fetch`。
+
+    旧口径是"只有 researcher 有 web"（T53）；常态化之后只读档也有——检索与抓取都不改本机，
+    只读档照样靠它查资料。
+    """
     from local_agent.security.policy import SecurityPolicy
     from local_agent.tools.tool_registry import ToolRegistry
 
@@ -454,17 +708,20 @@ def test_web_tools_are_only_visible_to_the_researcher_profile(
     policy = SecurityPolicy.from_config(config, workspace_root=tmp_path, environ={})
     registry = ToolRegistry.build(policy, web_access=config.web_access)
 
-    researcher = [
-        tool.name for tool in registry.tools_for("tool", PROFILES["researcher"])
-    ]
-    coder = [tool.name for tool in registry.tools_for("tool", PROFILES["coder"])]
-
-    assert "web_search" in researcher and "web_fetch" in researcher
-    assert "web_search" not in coder and "web_fetch" not in coder
+    for profile in ("researcher", "coder", "reviewer"):
+        names = [tool.name for tool in registry.tools_for("tool", PROFILES[profile])]
+        assert "web_search" in names and "web_fetch" in names, profile
 
 
 def test_web_tools_are_declared_as_untrusted_sources() -> None:
-    assert set(untrusted_tool_names()) == {"web_search", "web_fetch"}
+    # 2026-10-20 追加 `mcp_tool_search`：MCP 工具的描述与返回值同样来自第三方进程（契约 §6.13），
+    # 与网页同级，所以同样进不可信来源。这不是放宽，是**扩大**不可信范围。
+    assert set(untrusted_tool_names()) == {
+        "web_search",
+        "web_fetch",
+        "browser",
+        "mcp_tool_search",
+    }
     # 不写 `[-2:]`：新增能力一律**追加在末尾**（T54 追加了 Git），位置断言会随每次新增而失效。
     assert {"web_search", "web_fetch"} <= set(tool_names_for("tool", PROFILES["researcher"]))
 
@@ -536,3 +793,186 @@ def test_web_result_makes_the_tool_output_look_like_data() -> None:
 
     assert "标题" in payload["text"] and "正文第一段。" in payload["text"]
     assert ORIGIN_UNTRUSTED != ORIGIN_OWNER  # 两个来源级别确实是不同的值
+
+
+# --------------------------------------------------------------------- 查询清洗与缓存（2026-10-23）
+
+
+@pytest.fixture(autouse=True)
+def _fresh_search_cache():
+    """搜索缓存是模块级的：每条用例前后清一次，避免用例之间互相命中。"""
+    web_tools.clear_search_cache()
+    yield
+    web_tools.clear_search_cache()
+
+
+UNRELATED_HTML = (
+    '<li class="b_algo"><h2><a href="https://oneplus.example/x">一加手机官网</a></h2></li>'
+)
+RELATED_HTML = (
+    '<li class="b_algo"><h2><a href="https://gov.cn/a">'
+    '纪念长征胜利90周年大会在京举行</a></h2></li>'
+)
+
+
+def _recording_transport(body: str, calls: list[str]):
+    def call(request_url: str, timeout: float, user_agent: str) -> web_tools.WebResponse:
+        del timeout, user_agent
+        calls.append(request_url)
+        return web_tools.WebResponse(
+            url=request_url, status=200, content_type="text/html; charset=utf-8", text=body
+        )
+
+    return call
+
+
+def test_search_cleans_list_noise_before_querying_the_engine() -> None:
+    """榜单整行先清洗再发请求；原始 query 仍留在结果里，便于核对到底搜了什么。"""
+    calls: list[str] = []
+    config = WebAccessConfig(enabled=True, provider="bing_html", max_results=2, prefetch_pages=0)
+
+    result = web_tools.search(
+        "1 纪念长征胜利90周年大会隆重举行 790.5 万",
+        config=config,
+        # 结果要与查询词沾边，否则会触发"原句重搜"那条补救路径，干扰这里的断言。
+        transport=_recording_transport(RELATED_HTML, calls),
+    )
+
+    assert len(calls) == 1
+    from urllib.parse import parse_qs, urlsplit
+
+    sent = parse_qs(urlsplit(calls[0]).query).get("q", [""])[0]
+    assert sent == "纪念长征胜利90周年大会隆重举行"
+    assert "790.5" not in sent
+    assert result.query == "1 纪念长征胜利90周年大会隆重举行 790.5 万"
+    assert result.executed_query == "纪念长征胜利90周年大会隆重举行"
+    assert result.note is not None and "已清理" in result.note
+
+
+def test_search_reuses_cache_for_queries_that_clean_to_the_same_thing() -> None:
+    """两条写法不同、清洗后相同的查询只发一次请求，第二次如实说明用了缓存。"""
+    calls: list[str] = []
+    config = WebAccessConfig(enabled=True, provider="bing_html", max_results=2, prefetch_pages=0)
+    transport = _recording_transport(RELATED_HTML, calls)
+
+    # 两条写法不同、清洗后都是"纪念长征胜利90周年大会"：序号与热度各删各的。
+    first = web_tools.search("1 纪念长征胜利90周年大会 790.5 万", config=config, transport=transport)
+    second = web_tools.search("2 纪念长征胜利90周年大会 3.4w", config=config, transport=transport)
+
+    assert len(calls) == 1
+    assert second.executed_query == first.executed_query
+    assert second.note is not None and "缓存" in second.note
+    # 缓存命中的结果内容必须与第一次一致，而不是空壳
+    assert [hit.url for hit in second.results] == [hit.url for hit in first.results]
+
+
+def test_falls_back_to_the_original_query_when_cleaned_results_stick_to_nothing() -> None:
+    """清洗后一条都不沾查询词时，用原句重搜一次，采用命中更好的那份。"""
+    calls: list[str] = []
+
+    def transport(url: str, timeout: float, user_agent: str) -> web_tools.WebResponse:
+        del timeout, user_agent
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(url).query).get("q", [""])[0]
+        calls.append(query)
+        # 只有带热度的原句能搜到结果：模拟"清洗把唯一能命中的限定词删掉了"。
+        body = RELATED_HTML if "790.5" in query else UNRELATED_HTML
+        return web_tools.WebResponse(
+            url=url, status=200, content_type="text/html; charset=utf-8", text=body
+        )
+
+    config = WebAccessConfig(enabled=True, provider="bing_html", max_results=3, prefetch_pages=0)
+    result = web_tools.search(
+        "1 纪念长征胜利90周年大会 790.5 万", config=config, transport=transport
+    )
+
+    assert len(calls) == 2
+    assert calls[0] == "纪念长征胜利90周年大会"
+    assert "790.5" in calls[1]
+    assert result.note is not None and "原始查询" in result.note
+    assert result.results[0].url == "https://gov.cn/a"
+
+
+def test_does_not_retry_when_cleaned_results_are_on_topic() -> None:
+    calls: list[str] = []
+
+    def transport(url: str, timeout: float, user_agent: str) -> web_tools.WebResponse:
+        del timeout, user_agent
+        from urllib.parse import parse_qs, urlsplit
+
+        calls.append(parse_qs(urlsplit(url).query).get("q", [""])[0])
+        return web_tools.WebResponse(
+            url=url, status=200, content_type="text/html; charset=utf-8", text=RELATED_HTML
+        )
+
+    config = WebAccessConfig(enabled=True, provider="bing_html", max_results=3, prefetch_pages=0)
+    result = web_tools.search(
+        "1 纪念长征胜利90周年大会 790.5 万", config=config, transport=transport
+    )
+
+    assert len(calls) == 1
+    assert result.note is not None and "已清理" in result.note
+
+
+SEARCH_WITH_SNIPPETS = """
+<li class="b_algo"><h2><a href="https://a.example/one">第一条结果</a></h2><p>搜索摘要一</p></li>
+<li class="b_algo"><h2><a href="https://b.example/two">第二条结果</a></h2><p>搜索摘要二</p></li>
+"""
+ARTICLE_HTML = (
+    "<html><body><h1>标题</h1>"
+    "<p>这是抓回来的正文首段，比搜索摘要详细得多，模型据此不必再 fetch。</p></body></html>"
+)
+
+
+def test_prefetches_page_text_for_the_top_hits() -> None:
+    """照 Tavily 的做法：搜索直接带回正文首段，省掉模型自己的 web_fetch。"""
+    fetched: list[str] = []
+
+    def transport(url: str, timeout: float, user_agent: str) -> web_tools.WebResponse:
+        del timeout, user_agent
+        if "bing.com/search" in url:
+            return web_tools.WebResponse(
+                url=url, status=200, content_type="text/html", text=SEARCH_WITH_SNIPPETS
+            )
+        fetched.append(url)
+        return web_tools.WebResponse(
+            url=url, status=200, content_type="text/html", text=ARTICLE_HTML
+        )
+
+    config = WebAccessConfig(
+        enabled=True, provider="bing_html", max_results=2, prefetch_pages=2,
+    )
+    result = web_tools.search(
+        "示例查询", config=config, transport=transport, resolver=_public_resolver
+    )
+
+    assert len(fetched) == 2
+    assert "正文首段" in result.results[0].snippet
+    assert "正文首段" in result.results[1].snippet
+    assert result.note is not None and "已预抓取 2 条" in result.note
+
+
+def test_keeps_search_snippet_when_prefetch_fails() -> None:
+    """抓不到正文（JS 页面/反爬）时退回搜索摘要，不能让整次搜索失败。"""
+    def transport(url: str, timeout: float, user_agent: str) -> web_tools.WebResponse:
+        del timeout, user_agent
+        if "bing.com/search" in url:
+            return web_tools.WebResponse(
+                url=url, status=200, content_type="text/html", text=SEARCH_WITH_SNIPPETS
+            )
+        # 只有脚本、没有正文：fetch 会如实报"没有返回可读取正文"
+        return web_tools.WebResponse(
+            url=url, status=200, content_type="text/html",
+            text="<html><script>x()</script></html>",
+        )
+
+    config = WebAccessConfig(
+        enabled=True, provider="bing_html", max_results=2, prefetch_pages=2,
+    )
+    result = web_tools.search(
+        "示例查询", config=config, transport=transport, resolver=_public_resolver
+    )
+
+    assert [hit.snippet for hit in result.results] == ["搜索摘要一", "搜索摘要二"]
+    assert result.note is None or "已预抓取" not in result.note

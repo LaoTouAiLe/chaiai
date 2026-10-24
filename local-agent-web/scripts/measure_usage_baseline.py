@@ -15,7 +15,7 @@ output、端点与工具 Schema 指纹，以及发生压缩的位置。T35 的�
 
 用法::
 
-    uv run python scripts/measure_usage_baseline.py --data E:/tmp/t34-baseline
+    uv run python scripts/measure_usage_baseline.py --data <你的临时目录>/t34-baseline
     uv run python scripts/measure_usage_baseline.py            # 用临时目录
     uv run python scripts/measure_usage_baseline.py --profile researcher   # T51：按 Profile 各跑一遍
 

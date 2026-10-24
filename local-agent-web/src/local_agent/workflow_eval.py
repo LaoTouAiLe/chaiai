@@ -175,7 +175,8 @@ def validate_outcome(case: WorkflowCase, root: Path, state: Mapping[str, Any]) -
             failures.append("缺少修改后文件的实际复读证据")
         if sum(event.tool_name == "edit_file" for event in events) != 1:
             failures.append("修改副作用必须恰好执行一次")
-    elif any(event.tool_name not in {"read_file", "grep", "glob", "list_dir"} for event in events):
+    elif any(event.tool_name not in {"read_file", "grep", "glob", "list_dir", "task_control"}
+             for event in events):
         failures.append("只读任务出现非只读工具")
     return failures
 
@@ -228,12 +229,14 @@ def _script(case: WorkflowCase) -> list[AIMessage]:
                   expected_sha256=hashlib.sha256(BROKEN_CODE.encode()).hexdigest()),
             _tool("run_shell", "test", command=TEST_COMMAND),
             _tool("read_file", "code-after", path="bounds.py"),
-            AIMessage(content="已修复 clamp，运行三个 unittest 并复读文件。"),
+            _tool("task_control", "finish-code", action="complete",
+                  message="已修复 clamp，运行三个 unittest 并复读文件。"),
         ]
     return [
         *[_tool("read_file", f"read-{index}", path=path)
           for index, (path, _, _) in enumerate(case.claims)],
-        AIMessage(content="\n".join(f"{text}（{path}:{line}）" for path, line, text in case.claims)),
+        _tool("task_control", "finish-read", action="complete",
+              message="\n".join(f"{text}（{path}:{line}）" for path, line, text in case.claims)),
     ]
 
 

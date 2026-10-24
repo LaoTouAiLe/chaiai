@@ -2,7 +2,7 @@
 
 这组用例守住三件事：
 
-1. **既有行为不变**：默认 Profile（``coder``）与 ``chat`` 模式的工具集和顺序与 v0.4 逐项一致；
+1. **现行契约稳定**：默认 Profile 与 chat 模式的完整工具序列匹配已授权能力；
 2. **可见性即边界**：只读 Profile 拿不到写类工具与 Shell，且未登记的能力/工具不会静默通过；
 3. **配置错误启动即失败**：未知名字、空列表、重复能力、覆盖内置名都在配置阶段报错。
 """
@@ -26,12 +26,13 @@ from local_agent.capabilities import (
     REASON_AVAILABLE,
     REASON_DISABLED,
     REASON_MISSING_DEPENDENCY,
-    REASON_PROFILE,
     CapabilityStatus,
+    as_switch_layer,
     capability_names,
     capability_status,
     effective_capabilities,
     profile_names,
+    resolve_switches,
     tool_names_for,
 )
 from local_agent.config import AppConfig, ConfigError, load_config
@@ -41,28 +42,29 @@ from local_agent.reflection.reflector import PLAN_DRAFT_MARKER, plan_draft_instr
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.tool_registry import ToolRegistry
 
-#: v0.4 ``tool`` 模式的工具集（**含顺序**）：T50 的硬约束是它一个都不能变——
-#: 顺序即绑定顺序，变化会让供应商前缀缓存整段失效（架构 §6.9）。
-V04_TOOL_ORDER = (
-    "update_plan",
-    "list_dir",
-    "read_file",
-    "grep",
-    "glob",
-    "edit_file",
-    "write_file",
-    "delete_file",
-    "run_shell",
+#: 当前核心工具序列；显式列出，避免由被测实现生成期望。
+CORE_TOOL_ORDER = (
+    "task_control", "update_plan", "list_dir", "read_file", "grep", "glob", "search_files",
+    "edit_file", "write_file", "delete_file", "download_file", "run_shell",
+    # 2026-10-21：转后台之后的两条查询/结束工具（同属 shell 能力，紧跟在 run_shell 之后）。
+    "read_command", "stop_command",
+    # 2026-10-22：跑一段 Python（同一 shell 能力门）。
+    "execute_code",
 )
-
-#: v0.4 ``chat`` 模式：闲聊也能列目录与读文件，是既有行为，v0.5 不改。
-V04_CHAT_ORDER = ("list_dir", "read_file")
-
-#: v0.5 T54 给默认档追加的 Git 工具（**追加在末尾**：前面的字节不变，前缀缓存前半段仍可复用）。
+CHAT_TOOL_ORDER = ("list_dir", "read_file", "web_search", "web_fetch")
 GIT_TOOL_ORDER = ("git_status", "git_diff", "git_log", "git_commit")
-
-#: v0.5 T55 追加的技能工具，同样追加在末尾（只读，见 §6.12、§16.5）。
 SKILL_TOOL_ORDER = ("skill_list", "skill_load")
+WEB_TOOL_ORDER = ("web_search", "web_fetch")
+IMAGE_TOOL_ORDER = ("view_image",)
+INTERACTIVE_TOOL_ORDER = (
+    "start_shell", "read_shell", "write_shell", "stop_shell", "list_shell_sessions",
+    "inspect_system", "browser",
+)
+BASELINE_TOOL_ORDER = (*CORE_TOOL_ORDER, *WEB_TOOL_ORDER, *IMAGE_TOOL_ORDER, *INTERACTIVE_TOOL_ORDER)
+CODER_TOOL_ORDER = (
+    *CORE_TOOL_ORDER, *WEB_TOOL_ORDER, *GIT_TOOL_ORDER, *SKILL_TOOL_ORDER,
+    *IMAGE_TOOL_ORDER, *INTERACTIVE_TOOL_ORDER,
+)
 
 
 def _registry(app_config: AppConfig, workspace: Path) -> ToolRegistry:
@@ -75,43 +77,46 @@ def _names(tools: Sequence[BaseTool]) -> list[str]:
     return [tool.name for tool in tools]
 
 
-def test_default_profile_keeps_the_v04_prefix_and_appends_new_capabilities(
-    app_config: AppConfig, tmp_path: Path
+def test_default_profile_exposes_current_tools_in_stable_order(
+    app_config: AppConfig, tmp_path: Path,
 ) -> None:
-    """默认 Profile：v0.4 的九个工具**顺序与位置都不变**，新能力追加在末尾。"""
+    """控制、下载和交互工具均在现行能力契约中，chat 仍保持固定只读工具集。"""
     registry = _registry(app_config, tmp_path)
-
-    assert _names(registry.tools_for("chat")) == list(V04_CHAT_ORDER)
-    tool_mode = _names(registry.tools_for("tool"))
-    # 前缀逐项相等是**成本约束**：前面的字节不变，供应商前缀缓存的前半段仍可复用（架构 §6.9）。
-    assert tool_mode[: len(V04_TOOL_ORDER)] == list(V04_TOOL_ORDER)
-    assert tool_mode == [*V04_TOOL_ORDER, *GIT_TOOL_ORDER, *SKILL_TOOL_ORDER]
-    assert _names(registry.tools_for("tool", PROFILES[DEFAULT_PROFILE])) == tool_mode
+    assert _names(registry.tools_for("chat")) == list(CHAT_TOOL_ORDER)
+    assert _names(registry.tools_for("tool")) == list(CODER_TOOL_ORDER)
+    assert _names(registry.tools_for("tool", PROFILES[DEFAULT_PROFILE])) == list(CODER_TOOL_ORDER)
 
 
 def test_builtin_profiles_are_declared_read_only_subsets(tmp_path: Path) -> None:
     """三档内置 Profile 的能力集合（名字固定，配置与验收都用它们）。"""
     assert PROFILES["coder"] == (
+        "task_lifecycle",
         "plan",
         "files_read",
         "code_search",
         "files_write",
         "shell",
-        # T54：Git 读写都进默认档（写的那一半仍要过人工审批，见 §16.4）。
+        # 2026-10-14：联网是常态能力，三个档位都有它（放在 shell 之后 = 与 `CAPABILITY_TOOLS` 同序）。
+        "web",
+        # T54：Git 读写都进默认档（写的那一半仍受权限开关约束，见 §16.4）。
         "git_read",
         "git_write",
         # T55：技能清单与正文是只读的，三档都给（§16.5）。
         "skill",
+        # 2026-10-16：看图（只读）。追加在末尾 = 与 `CAPABILITY_TOOLS` 同序。
+        "image_read",
+        "terminal", "page_control",
     )
     assert PROFILES["researcher"] == (
-        "plan", "files_read", "code_search", "web", "git_read", "skill",
+        "task_lifecycle", "plan", "files_read", "code_search", "web", "git_read", "skill", "image_read",
     )
-    assert PROFILES["reviewer"] == ("files_read", "code_search", "skill")
-    # 最小权限用**显式枚举**表达，不假设"researcher 一定是 coder 的子集"：T53 起 researcher 多了 `web`
-    # （coder 没有），两者是各取所需，而不是包含关系；T54 又多了 Git 的**读**能力。
+    assert PROFILES["reviewer"] == ("task_lifecycle", "files_read", "code_search", "web", "skill", "image_read")
+    # 最小权限用**显式枚举**表达，不假设"researcher 一定是 coder 的子集"：T54 起 researcher 多了 Git 的
+    # **读**能力，两者是各取所需，而不是包含关系。
     assert set(PROFILES["reviewer"]) < set(PROFILES["researcher"])
     assert set(PROFILES["reviewer"]) < set(PROFILES["coder"])
-    assert "web" in PROFILES["researcher"] and "web" not in PROFILES["coder"]
+    # 联网自 2026-10-14 起是**常态能力**：三档都有它（不再是"只有 researcher 有"）。
+    assert all("web" in PROFILES[name] for name in ("coder", "researcher", "reviewer"))
     # 读 / 写分成两个能力就是为了能这样分别表态：研究档看得到差异，但**不能提交**。
     assert "git_read" in PROFILES["researcher"] and "git_write" not in PROFILES["researcher"]
     # T55：技能是只读的，只读档也该能按需读手册——所以三档都有 `skill`。
@@ -128,12 +133,15 @@ def test_only_read_tools_are_visible_to_read_only_profiles(
     reviewer = _names(registry.tools_for("tool", PROFILES["reviewer"]))
 
     assert researcher == [
+        "task_control",
         "update_plan",
         "list_dir",
         "read_file",
         "grep",
         "glob",
-        # T53：Web 能力只给 researcher（架构 §16.3）
+        # 合并入口（2026-10-22）：只读，只读档也有它。
+        "search_files",
+        # 联网（2026-10-14 起常态：只读档也有它——检索抓取不改本机）
         "web_search",
         "web_fetch",
         # T54：Git 的**读**能力（`git_read`）也给它——看差异可以，提交不行（见下面的 forbidden）
@@ -143,10 +151,28 @@ def test_only_read_tools_are_visible_to_read_only_profiles(
         # T55：技能（只读）
         "skill_list",
         "skill_load",
+        # 看图（2026-10-16）：只读，只读档也有它（排在技能之后 = 与 `CAPABILITY_TOOLS` 同序）。
+        "view_image",
     ]
-    assert reviewer == ["list_dir", "read_file", "grep", "glob", "skill_list", "skill_load"]
+    assert reviewer == [
+        "task_control",
+        "list_dir",
+        "read_file",
+        "grep",
+        "glob",
+        # 合并入口（2026-10-22）：只读，只读档也有它。
+        "search_files",
+        # 联网也是只读能力：只读档照样能查资料（2026-10-14）。
+        "web_search",
+        "web_fetch",
+        "skill_list",
+        "skill_load",
+        # 看图（2026-10-16）：只读，只读档也有它（排在技能之后 = 与 `CAPABILITY_TOOLS` 同序）。
+        "view_image",
+    ]
     # `git_commit` 是写类：只读档里连"看得见"都不该有（§16.4）。
-    for forbidden in ("edit_file", "write_file", "delete_file", "run_shell", "git_commit"):
+    for forbidden in ("edit_file", "write_file", "delete_file", "download_file", "run_shell",
+                      "git_commit", *INTERACTIVE_TOOL_ORDER):
         assert forbidden not in researcher
         assert forbidden not in reviewer
 
@@ -159,15 +185,23 @@ def test_tool_order_is_stable_across_calls_and_profiles(
 
     first = _names(registry.tools_for("tool", PROFILES["coder"]))
     second = _names(registry.tools_for("tool", PROFILES["coder"]))
-    assert first == second == [*V04_TOOL_ORDER, *GIT_TOOL_ORDER, *SKILL_TOOL_ORDER]
+    assert first == second == list(CODER_TOOL_ORDER)
 
     assert _names(registry.tools_for("tool", PROFILES["reviewer"])) == [
+        "task_control",
         "list_dir",
         "read_file",
         "grep",
         "glob",
+        # 合并入口（2026-10-22）：只读，只读档也有它。
+        "search_files",
+        # 联网是只读能力：只读档也有它（2026-10-14 起常态）。
+        "web_search",
+        "web_fetch",
         "skill_list",
         "skill_load",
+        # 看图（2026-10-16）：只读，只读档也有它（排在技能之后 = 与 `CAPABILITY_TOOLS` 同序）。
+        "view_image",
     ]
     # 再切回来仍是原顺序：顺序由常量决定，不受访问顺序影响
     assert _names(registry.tools_for("tool", PROFILES["coder"])) == first
@@ -186,10 +220,11 @@ def test_git_capability_is_gated_by_config_and_by_the_environment() -> None:
         coder, web_access_enabled=False, git_enabled=False, skills_enabled=False
     )
     assert not {"git_read", "git_write"} & set(disabled)
-    # 关掉 Git 之后剩下的正是 v0.4 那九个工具的能力映射——"关闭新增能力后基础行为不变"。
-    assert tool_names_for("tool", disabled) == V04_TOOL_ORDER
+    # 关掉 Git 之后剩下的是**基线工具集**（现行核心工具 + 联网/看图/交互工具）——"关闭新增能力后基础行为不变"，
+    # 只是这条"基线"自 2026-10-14 起含联网（它不再是扩展能力）。
+    assert tool_names_for("tool", disabled) == BASELINE_TOOL_ORDER
 
-    # 默认关闭：示例配置里的开关就是 false，因此默认档与 v0.4 的工具集一致（不含 Git）。
+    # 默认关闭：示例配置里的开关就是 false，因此默认配置不包含 Git。
     assert AppConfig().git.enabled is False
 
 
@@ -205,8 +240,8 @@ def test_skill_capability_is_gated_by_config_only() -> None:
         coder, web_access_enabled=False, git_enabled=False, skills_enabled=False
     )
     assert "skill" not in off
-    # 关掉它之后，默认档正好回到 v0.4 的九个工具——"关闭新增能力后基础行为不变"。
-    assert tool_names_for("tool", off) == V04_TOOL_ORDER
+    # 关掉它之后，默认档正好回到**基线工具集**（现行核心工具 + 联网/看图/交互工具）。
+    assert tool_names_for("tool", off) == BASELINE_TOOL_ORDER
     assert AppConfig().skills.enabled is False
 
 
@@ -239,14 +274,23 @@ def _status_rows(
     skills_enabled: bool = False,
     git_hint: str | None = None,
 ) -> dict[str, CapabilityStatus]:
-    """默认按"web 关、git 关、技能关"算一遍能力状态，用例按需覆盖。"""
+    """默认按"git 关、技能关"算一遍能力状态，用例按需覆盖。
+
+    构造开关表的方式与 `effective_capabilities` 同一口径。``web_access_enabled`` 这个参数**已经不再
+    决定联网**（2026-10-14 起它被 `resolve_switches` 强制置真）——留着它，正是为了有用例能钉住
+    "传 false 也照样联网"这条新口径。
+    """
+    layer = dict(as_switch_layer(PROFILES["coder"] if capabilities is None else capabilities))
+    layer.update(
+        {
+            "web": web_access_enabled,
+            "git_read": git_access_enabled,
+            "git_write": git_access_enabled,
+            "skill": skills_enabled,
+        }
+    )
     rows = capability_status(
-        PROFILES["coder"] if capabilities is None else capabilities,
-        web_access_enabled=web_access_enabled,
-        git_access_enabled=git_access_enabled,
-        git_available=git_available,
-        skills_enabled=skills_enabled,
-        git_hint=git_hint,
+        resolve_switches(layer), git_available=git_available, git_hint=git_hint
     )
     return {row.capability: row for row in rows}
 
@@ -258,18 +302,25 @@ def test_capability_status_covers_the_whole_closed_set() -> None:
     assert set(rows) == set(CAPABILITY_TOOLS)
 
 
-def test_capability_status_separates_the_four_reasons() -> None:
-    """四种原因各走一条路：可用 / 档位没声明 / 开关关闭 / 环境缺依赖（§16.6）。"""
-    # 默认（web 关、git 关）：coder 声明了 git，但开关没打开
+def test_capability_status_separates_the_three_reasons() -> None:
+    """三种原因各走一条路：可用 / 开关关闭 / 环境缺依赖（§16.1、§16.6）。
+
+    2026-10-13：档位退出运行期绑定，原先的第四种原因（"档位没声明"）随之删除——页面不再有换档这个
+    动作，留着它只会渲染出一句做不到的建议。现在开关关着与档位没声明合成同一条"开关关闭"。
+    """
+    # 默认（git 关）：只有 git 那一类落在"开关关闭"上
     rows = _status_rows()
 
     assert rows["plan"].reason == REASON_AVAILABLE
-    # coder 不声明 web：这是**档位**问题，不是开关问题——提示要指向 profiles.active
-    assert rows["web"].reason == REASON_PROFILE
-    assert "profiles.active" in (rows["web"].hint or "")
-
+    # 关着的项一律指向**开关本身**，且必须说清"不用重启"
     assert rows["git_write"].reason == REASON_DISABLED
-    assert "git.enabled" in (rows["git_write"].hint or "")
+    assert "不用重启" in (rows["git_write"].hint or "")
+
+    # 联网自 2026-10-14 起是**常态能力**：即使调用方传 `web_access_enabled=False`，它照样可用且锁定；
+    # 页面理由讲的是"为什么关不掉"，而不是"去面板里打开它"。
+    assert rows["web"].reason == REASON_AVAILABLE and rows["web"].locked is True
+    assert rows["web"].hint is None
+    assert "始终开启" in rows["web"].detail
 
     # 开关打开且环境就绪：git 转为可用（这条与上一条互为对照，避免"永远返回不可用"也能过）
     ready = _status_rows(git_access_enabled=True)
@@ -352,6 +403,7 @@ def test_profiles_config_defaults_and_custom_profile() -> None:
         "read_file",
         "grep",
         "glob",
+        "search_files",
     )
 
 
@@ -394,12 +446,19 @@ def test_load_config_reports_unknown_active_profile(tmp_path: Path) -> None:
 
 
 def test_runtime_context_defaults_keep_existing_callers_unchanged() -> None:
-    """``RuntimeContext`` 的默认 Profile 就是 v0.4 的工具集：既有构造点不传也不变。"""
+    """``RuntimeContext`` 的默认能力集就是现行 coder 工具集：既有构造点不传也不变。
+
+    2026-10-13：档位退出运行期绑定，``agent_profile`` 字段随之删除，换成 ``agent_switches``
+    （开关表，页面要如实回显"哪一项开着"）。默认能力集仍是 ``coder`` 那套——行为不变。
+    """
     defaults = {field.name: field.default for field in fields(RuntimeContext)}
 
-    assert defaults["agent_profile"] == DEFAULT_PROFILE
     assert defaults["agent_capabilities"] == PROFILES[DEFAULT_PROFILE]
     assert MODE_CAPABILITIES["tool"] == PROFILES[DEFAULT_PROFILE]
+    # 开关表默认空：运行期由 `build_runtime_context` 用 config 的出厂默认补齐，不在这里写死一份。
+    # 它用 `default_factory`（可变默认值不能共享），所以不能从 `field.default` 读。
+    switches_field = next(field for field in fields(RuntimeContext) if field.name == "agent_switches")
+    assert switches_field.default_factory() == {}
 
 
 def test_plan_draft_instruction_follows_the_profile() -> None:

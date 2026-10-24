@@ -21,11 +21,9 @@ from typing import Final, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-#: 明显是密钥或私人绝对路径的内容：宁可构造失败，也不要把它送进页面或日志（§15.5、§15.8）。
+#: 错误展示文本拒绝密钥样式；路径允许原样显示。
 _FORBIDDEN_IN_TEXT: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{8,}"),
-    re.compile(r"[A-Za-z]:\\"),
-    re.compile(r"/(?:home|Users)/[^/\s]+"),
 )
 
 ErrorCategory = Literal[
@@ -86,6 +84,10 @@ CONTEXT_COMPRESSION_FAILED: Final[str] = "CONTEXT_COMPRESSION_FAILED"
 MEMORY_WRITE_FAILED: Final[str] = "MEMORY_WRITE_FAILED"
 TOOL_CALL_FAILED: Final[str] = "TOOL_CALL_FAILED"
 TOOL_CALL_BLOCKED: Final[str] = "TOOL_CALL_BLOCKED"
+#: 命令在**当前环境**里根本起不来（找不到可执行文件或 Shell 适配器）：与"被安全策略拒绝"是两回事。
+#: 2026-10-14 实测：`time /t`（cmd 内建）曾被显示成「工具调用被安全策略拦截」，而它与策略毫无关系——
+#: 用户该做的是换一条等价命令或改写请求，不是"把请求改成合规"。
+TOOL_UNAVAILABLE: Final[str] = "TOOL_UNAVAILABLE"
 APPROVAL_FLOW_FAILED: Final[str] = "APPROVAL_FLOW_FAILED"
 #: 兜底：没有专门映射的阶段失败，页面看到的是"未分类异常"，不是节点名。
 #:
@@ -131,6 +133,7 @@ _ERROR_CATEGORY_OF: Final[dict[str, ErrorCategory]] = {
     MEMORY_WRITE_FAILED: "system",
     TOOL_CALL_FAILED: "tool",
     TOOL_CALL_BLOCKED: "security",
+    TOOL_UNAVAILABLE: "tool",
     APPROVAL_FLOW_FAILED: "approval",
     RUN_STAGE_FAILED: "system",
     RUN_DEGRADED: "system",
@@ -172,6 +175,7 @@ _RETRY_CONDITION: Final[dict[str, str]] = {
     MEMORY_WRITE_FAILED: "整理好要记住的内容后重新发送。",
     TOOL_CALL_FAILED: "修正工具参数或目标路径后重新发送；已产生的副作用不会自动重放。",
     TOOL_CALL_BLOCKED: "调整请求本身或改为在工作区内操作。",
+    TOOL_UNAVAILABLE: "换成等价的命令，或改写请求后重发。",
     APPROVAL_FLOW_FAILED: "重新发起请求并重新确认。",
     RUN_STAGE_FAILED: "重新发送请求；本地日志里可用诊断编号定位细节。",
     RUN_DEGRADED: "直接重发即可；本轮已经用兜底结论给出了回答。",
@@ -203,8 +207,7 @@ def retry_condition_of(code: str) -> str | None:
 class ErrorView(BaseModel):
     """页面可见的错误 DTO。
 
-    `message` / `hint` / `detail` 都是**已脱敏的展示文本**：供应商原文、密钥与绝对私人路径
-    不得进入这里（§15.5、§15.8）。原始异常只进本地日志。
+    展示文本中的密钥必须脱敏；绝对路径允许原样显示。原始异常不直接作为错误 DTO。
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -237,7 +240,7 @@ class ErrorView(BaseModel):
     @field_validator("title", "message", "hint", "retry_condition", "blocked_reason", "source")
     @classmethod
     def _reject_unsafe_text(cls, value: str | None) -> str | None:
-        """展示文本 fail-closed：出现密钥样式或私人绝对路径就拒绝构造。
+        """展示文本出现密钥样式就拒绝构造；路径不影响构造。
 
         调用方要先把异常原文脱敏（`local_agent.config.redact_secrets`）再填进来；这里不"顺手抹掉"，
         因为悄悄改写错误信息比直接报错更危险。
@@ -246,7 +249,7 @@ class ErrorView(BaseModel):
             return None
         for pattern in _FORBIDDEN_IN_TEXT:
             if pattern.search(value):
-                msg = f"错误展示文本包含密钥样式或私人绝对路径：{pattern.pattern}"
+                msg = f"错误展示文本包含密钥样式：{pattern.pattern}"
                 raise ValueError(msg)
         return value
 
@@ -257,7 +260,7 @@ class ErrorView(BaseModel):
             raise ValueError("诊断编号包含不安全字符")
         for pattern in _FORBIDDEN_IN_TEXT:
             if pattern.search(value):
-                raise ValueError("诊断编号包含密钥样式或私人绝对路径")
+                raise ValueError("诊断编号包含密钥样式")
         return value
 
     @classmethod
@@ -423,9 +426,7 @@ def workspace_not_found(*, workspace_id: str, occurred_at: datetime) -> Applicat
 def workspace_unusable(*, occurred_at: datetime) -> ApplicationError:
     """用户给出的工作区路径不可用（非绝对路径 / 不存在 / 不是目录 / 不可访问）。
 
-    复用 `WORKSPACE_NOT_FOUND`，**不新增错误码**。文案里刻意不带那条路径：`ErrorView` 的展示
-    文本 fail-closed 拒绝私人绝对路径（§15.8），而这里正是用户刚输入的那条路径；具体是哪一条
-    由调用方（页面 / 前端）自己回显——它本来就知道用户填了什么。
+    复用 `WORKSPACE_NOT_FOUND`，**不新增错误码**。这里返回统一指引，具体输入由调用方回显。
     """
     return ApplicationError(
         ErrorView.for_code(
@@ -594,8 +595,8 @@ def permission_grant_invalid(*, detail: str, occurred_at: datetime) -> Applicati
     """新增外部路径授权被拒（T38）。
 
     复用 ``MODEL_SETTINGS_INVALID``：它表达的是"设置写入没通过服务端校验"，不新增稳定错误码
-    （错误码表是冻结契约，加一个码要同时动契约导出与前端）。``detail`` 是**不含路径**的规则说明：
-    展示文本 fail-closed，``E:\\...`` 这种私人绝对路径会被 `ErrorView` 直接挡下。
+    （错误码表是冻结契约，加一个码要同时动契约导出与前端）。``detail`` 是规则说明，
+    可以包含目标路径，密钥须由调用方脱敏。
     """
     return ApplicationError(
         ErrorView.for_code(
@@ -613,7 +614,7 @@ def permission_grant_invalid(*, detail: str, occurred_at: datetime) -> Applicati
 def settings_store_unavailable(*, detail: str, occurred_at: datetime) -> ApplicationError:
     """§15.9：设置库不可用时要说明降级原因，而不是让页面看到一堆内部异常。
 
-    ``detail`` 只放安全的短语（例如"目录不可写"），**不能**带绝对路径——展示文本 fail-closed。
+    ``detail`` 可包含目录路径，密钥须由调用方脱敏。
     """
     return ApplicationError(
         ErrorView.for_code(

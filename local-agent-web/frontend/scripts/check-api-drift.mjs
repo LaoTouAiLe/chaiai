@@ -10,7 +10,8 @@ import { fileURLToPath } from "node:url";
 import process from "node:process";
 
 const generated = fileURLToPath(new URL("../src/api/schema.gen.ts", import.meta.url));
-const openapi = fileURLToPath(new URL("../../docs/api/openapi.json", import.meta.url));
+// 文档统一放在仓库根 `docs/`：本文件在 local-agent-web/frontend/scripts/，所以是三层向上。
+const openapi = fileURLToPath(new URL("../../../docs/api/openapi.json", import.meta.url));
 
 const before = readFileSync(generated, "utf8");
 

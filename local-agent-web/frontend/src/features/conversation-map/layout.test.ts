@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+﻿import { describe, expect, it } from 'vitest'
 import type { MapData, MapNode } from './adapters'
 import { CARD_HEIGHT, CARD_WIDTH, fitTree, layoutTree, zoomAt } from './layout'
 

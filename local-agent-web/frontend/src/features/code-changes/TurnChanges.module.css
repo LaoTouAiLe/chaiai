@@ -1,0 +1,271 @@
+/* 对话流里的一轮改动摘要（2026-10-23 按参考图改成卡片）。
+   结构：卡片头行 + 文件列表；悬停文件行弹一层只读浮层预览 diff，点击仍打开右栏。
+   颜色/圆角/间距一律用新体系（`--c-*` / `--r-*` / `--sp-*` / `--fs-*`），diff 色沿用 `--law-diff-*`。 */
+.card {
+  margin: var(--sp-3) 0 0;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-overlay);
+  background: var(--c-raised);
+  overflow: hidden;
+}
+
+/* 头行：图标 + 标题 + 操作。它的高度比文件行略高，读起来像"标题条"而不是又一行文件。 */
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+}
+
+.icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--c-text-3);
+}
+
+.title {
+  color: var(--c-text-1);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  font-weight: 500;
+}
+
+/* 口径标注：把"累计"写得比标题弱一档，只用来消除误解，不抢注意力。 */
+.scope {
+  color: var(--c-text-3);
+  font-size: var(--fs-caption);
+}
+
+.grow {
+  flex: 1 1 auto;
+}
+
+/* 头行的文字按钮：无边框、hover 才有底。 */
+.link {
+  flex: 0 0 auto;
+  padding: 2px var(--sp-2);
+  border: none;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--c-text-2);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  cursor: pointer;
+}
+
+.link:hover {
+  background: var(--c-hover);
+  color: var(--c-text-1);
+}
+
+.link:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 1px;
+}
+
+.list {
+  margin: 0;
+  padding: var(--sp-1) var(--sp-2) var(--sp-2);
+  border-top: 1px solid var(--c-line);
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 30px;
+  padding: 0 var(--sp-2);
+  border: none;
+  border-radius: var(--r-control);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--law-font-mono);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  color: var(--c-text-1);
+}
+
+.row:hover {
+  background: var(--c-sunken);
+}
+
+/* 选中态（右栏正在看这个文件）：左侧 2px 主色条 + 浅底，比整行高亮安静。 */
+.rowActive {
+  background: var(--c-accent-soft);
+  box-shadow: inset 2px 0 0 var(--c-accent);
+}
+
+.path {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.dir {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--c-text-3);
+}
+
+.name {
+  flex: 0 0 auto;
+  color: var(--c-text-1);
+}
+
+.counts {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: var(--sp-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.add {
+  color: var(--law-diff-add-text);
+}
+
+.del {
+  color: var(--law-diff-del-text);
+}
+
+/* ===== 悬停浮层 ======================================================
+   `pointer-events: none` 是这块的关键：鼠标一移进浮层就会从文件行上 leave，
+   如果浮层吃鼠标，就会陷入"弹出→移入→收起→再弹出"的抖动。只读预览不需要交互。 */
+.popover {
+  position: fixed;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-control);
+  background: var(--c-raised);
+  box-shadow: var(--sh-overlay);
+  pointer-events: none;
+}
+
+.popoverHead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+  padding: var(--sp-1) var(--sp-2);
+  border-bottom: 1px solid var(--c-line);
+  font-size: var(--fs-caption);
+}
+
+.popoverPath {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-2);
+  font-family: var(--law-font-mono);
+}
+
+.popoverStats {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: var(--sp-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.popoverBody {
+  min-height: 0;
+  overflow: hidden;
+  font-family: var(--law-font-mono);
+  font-size: var(--fs-meta);
+  line-height: 20px;
+}
+
+.pRow {
+  display: flex;
+  align-items: stretch;
+  min-width: max-content;
+}
+
+.pAdd {
+  background: var(--law-diff-add-bg);
+}
+
+.pDel {
+  background: var(--law-diff-del-bg);
+}
+
+.pNum {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  padding: 0 var(--sp-2) 0 var(--sp-3);
+  text-align: right;
+  color: var(--law-diff-gutter);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.pAdd .pNum {
+  background: var(--law-diff-add-num-bg);
+  color: var(--law-diff-num-text);
+}
+
+.pDel .pNum {
+  background: var(--law-diff-del-num-bg);
+  color: var(--law-diff-num-text);
+}
+
+.pSign {
+  flex: 0 0 auto;
+  width: 1.6em;
+  text-align: center;
+  color: var(--c-text-3);
+  user-select: none;
+}
+
+.pAdd .pSign {
+  color: var(--law-diff-add-text);
+}
+
+.pDel .pSign {
+  color: var(--law-diff-del-text);
+}
+
+.pCode {
+  flex: 1 0 auto;
+  padding-right: var(--sp-4);
+  white-space: pre;
+  color: var(--c-text-1);
+}
+
+/* hunk 之间的 `⋮`：一行矮的分隔，不占正文的行号。 */
+.pGap {
+  display: flex;
+  align-items: center;
+  min-width: max-content;
+  height: 16px;
+  color: var(--c-text-3);
+  font-size: var(--fs-caption);
+}
+
+/* 浮层里的说明/"还有 N 行"：一行文字，不另起一块。
+   `flex: 0 0 auto` 是必须的：浮层限高时被压缩的应该是 diff 行，而不是这句话。 */
+.popoverNote {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--sp-2);
+  color: var(--c-text-3);
+  font-size: var(--fs-caption);
+}
+
+.more {
+  margin: 0;
+  padding: 0 var(--sp-3) var(--sp-2);
+  border-top: 1px solid var(--c-line);
+  color: var(--c-text-3);
+  font-size: var(--fs-caption);
+}

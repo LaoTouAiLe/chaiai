@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+﻿import { useRef, useState } from 'react'
 import type { components } from '../../api/schema.gen'
 import type { MemoryFilters } from '../../api/client'
 import { useMemoryPage, useUsagePage } from '../../api/queries'
@@ -9,7 +9,8 @@ import styles from './DataCenter.module.css'
 type Tab = 'overview' | 'medium' | 'fact' | 'conclusion' | 'usage'
 const tabs: { id: Tab; label: string }[] = [
   { id: 'overview', label: '概览' }, { id: 'medium', label: '中期记忆' },
-  { id: 'fact', label: '长期事实' }, { id: 'conclusion', label: '任务结论' }, { id: 'usage', label: 'Token 用量' },
+  { id: 'fact', label: '长期事实' }, { id: 'conclusion', label: '任务结论' },
+  { id: 'usage', label: 'Token 用量' },
 ]
 const PAGE_SIZE = 30
 type Workspaces = components['schemas']['WorkspaceRef'][]
@@ -47,10 +48,12 @@ export function DataCenter({ workspaces, initialWorkspaceId, running, onClose }:
     if (body.current) body.current.scrollTop = 0
   }
   function switchTab(value: Tab) { setTab(value); reset() }
-  const memoryTab = tab !== 'overview' && tab !== 'usage'
+  // 显式列举，避免新增 tab 时被 `tab !== 'usage'` 这类否定条件误吞。
+  const memoryTab = tab === 'medium' || tab === 'fact' || tab === 'conclusion'
   const activeQuery = tab === 'usage' ? usage : memory
   const total = tab === 'usage' ? usage.data?.total : memory.data?.total
-  const updating = (tab !== 'usage' && memory.isFetching) || ((tab === 'overview' || tab === 'usage') && usage.isFetching)
+  const updating = (tab !== 'usage' && memory.isFetching)
+    || ((tab === 'overview' || tab === 'usage') && usage.isFetching)
   const usageData = validDates ? usage.data : undefined
   const totals = usageData?.totals
 
@@ -87,7 +90,7 @@ export function DataCenter({ workspaces, initialWorkspaceId, running, onClose }:
     <div ref={body} className={styles.body}>
       {running ? <p className={styles.notice}>当前会话仍在执行或等待审批。此处只查看数据，可返回会话处理。</p> : null}
       {!validDates && (tab === 'usage' || tab === 'overview') ? <p role="alert" className={styles.notice}>开始日期不能晚于结束日期。</p> : null}
-      {(tab !== 'usage' && memory.isError) || ((tab === 'usage' || tab === 'overview') && usage.isError) ?
+      {((tab !== 'usage') && memory.isError) || ((tab === 'usage' || tab === 'overview') && usage.isError) ?
         <p role="alert" className={styles.notice}>数据暂时无法读取，请检查连接后点击“刷新数据”。</p> : null}
       {tab !== 'usage' ? memory.data?.notices?.map((note) => <p key={note} role="status" className={styles.notice}>{note}</p>) : null}
       {tab === 'overview' || tab === 'usage' ? usage.data?.notices?.map((note) => <p key={note} role="status" className={styles.notice}>{note}</p>) : null}

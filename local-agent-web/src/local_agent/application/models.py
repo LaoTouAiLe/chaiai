@@ -1,4 +1,4 @@
-"""UI/API 的唯一业务契约来源（ARCHITECTURE §15.4–§15.9）。
+﻿"""UI/API 的唯一业务契约来源（ARCHITECTURE §15.4–§15.9）。
 
 本模块只放**纯数据契约**：不导入 LangChain 消息类、LangGraph、`local_agent.graph` 或 `local_agent.ui`，
 不做 I/O，不读 Checkpoint。把 State / Checkpoint 映射成这些 DTO 是 T28 的事。
@@ -292,6 +292,74 @@ class CapabilitiesView(_Dto):
     capabilities: list[CapabilityStatusView] = Field(default_factory=list)
 
 
+# ---- MCP 外部工具（2026-10-20；契约 §6.13）--------------------------------
+
+
+class McpToolView(_Dto):
+    """一个外部工具在页面上的样子。
+
+    **这里必须显示工具名**——与能力面板"只讲能力不讲工具"（§16.6）相反。理由是工具名不是内部
+    实现细节：它是用户自己配的外部资产，不显示出来就没法核对"我配的这个 server 到底暴露了什么"。
+    """
+
+    #: 模型可见名（``mcp__<server>__<tool>``）。
+    name: str = Field(min_length=1)
+    #: server 报的原始名。
+    tool: str = Field(min_length=1)
+    description: str = ""
+    exposure: Literal["direct", "deferred", "hidden"] = "hidden"
+    #: 为什么落在这一档（``ExposureRow.reason`` 的闭集取值）。
+    reason: str | None = None
+    #: 是否被用户**显式停用**（写进 ``disabled_tools``）。页面据此画勾选状态；
+    #: 与 ``exposure`` 分开是因为"停用"是用户可撤销的选择，"超配额"是系统行为。
+    disabled: bool = False
+
+
+class McpServerView(_Dto):
+    """一台 MCP Server 的状态与工具清单（**不含任何凭据**）。"""
+
+    name: str = Field(min_length=1)
+    env_keys: list[str] = Field(default_factory=list)
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    enabled_tools: list[str] | None = None
+    disabled_tools: list[str] = Field(default_factory=list)
+    enabled: bool = False
+    status: Literal["disabled", "idle", "connecting", "connected", "failed"] = "disabled"
+    tool_count: int = 0
+    tools: list[McpToolView] = Field(default_factory=list)
+    failure_kind: str | None = None
+    #: 可照做的失败原因（"装 Node"、"看 server 日志"由 ``kind`` 决定）。
+    failure_message: str | None = None
+
+
+class McpSummaryView(_Dto):
+    """一行能读懂的规模事实（页面必须明说"多少工具、多少按需检索"）。"""
+
+    configured: int = 0
+    enabled: int = 0
+    connected: int = 0
+    failed: int = 0
+    tools: int = 0
+    direct: int = 0
+    deferred: int = 0
+
+
+class McpView(_Dto):
+    """MCP 面板的全部数据（**每次现算**，与能力面板同一口径）。"""
+
+    #: 能力开关里 ``mcp`` 的当前值（总闸）。
+    enabled: bool = False
+    #: ``mcp.json`` 的位置。**只给路径不给内容**：文件里可能有凭据。
+    config_path: str | None = None
+    #: 配置文件解析失败时的可读原因（每次现算，用户改完文件刷新就能看到新结论）。
+    config_error: str | None = None
+    #: 没有可用设置库：开关只能来自 ``config.yaml``，写下去会被拒（503）。
+    store_unavailable: bool = False
+    servers: list[McpServerView] = Field(default_factory=list)
+    summary: McpSummaryView = Field(default_factory=McpSummaryView)
+
+
 # ---- 技能（技能管理页，2026-10-16；§16.5）--------------------------------
 
 
@@ -415,6 +483,75 @@ class FileDiffView(_Dto):
     hunks: list[FileDiffHunkView] = Field(default_factory=list)
 
 
+class FileChangeSummaryView(_Dto):
+    """一次任务里某个文件的累计变更（2026-10-21）。
+
+    ``edits`` 是**被改了几次**（同一个文件被 edit 多次是正常的：一次改一处），
+    ``additions``/``deletions`` 是这一组内的累计行数，不是最后一次的片段。
+    """
+
+    path: str
+    kind: Literal["create", "modify", "delete"]
+    additions: int = Field(ge=0)
+    deletions: int = Field(ge=0)
+    edits: int = Field(ge=1)
+    last_at: str
+    #: 有没有可对比的"改前内容"。``False`` 时 `unavailable_reason` 说明为什么（新建/二进制/超大）。
+    has_baseline: bool
+    unavailable_reason: str | None = None
+
+
+class TurnChangesView(_Dto):
+    """一轮（``run_id``）里的文件变更；页面按轮次分组显示。"""
+
+    run_id: str | None
+    started_at: str | None
+    files: list[FileChangeSummaryView] = Field(default_factory=list)
+
+
+class UnrecordedChangeView(_Dto):
+    """命令/代码改过、但**没有进账本**的文件（2026-10-22）。
+
+    为什么单列而不并进账本：这些写入没有"改前原文"，塞进账本会让面板假装自己有基线。
+    用户需要知道的是"还有这些文件被动过"，而不是让面板谎报完整性。
+    """
+
+    path: str
+    status: str
+    #: 为什么没有基线：目前只有一种——经 `run_shell` / `execute_code` 写入。
+    reason: str = "经命令或代码写入，没有逐次改前内容"
+
+
+class SessionChangesView(_Dto):
+    """整个会话的文件变更总览（最新的轮次在前）。"""
+
+    session_id: str
+    turns: list[TurnChangesView] = Field(default_factory=list)
+    total_files: int = Field(ge=0)
+    additions: int = Field(ge=0)
+    deletions: int = Field(ge=0)
+    #: 账本之外、本轮被命令/代码动过的文件（2026-10-22）。`unrecorded_note` 解释为什么为空。
+    unrecorded: list[UnrecordedChangeView] = Field(default_factory=list)
+    unrecorded_note: str | None = None
+
+
+class FileChangeDiffView(_Dto):
+    """整文件 diff：``baseline``（首次改动前原文）对 ``当前磁盘内容``。
+
+    与工具卡片里的 :class:`FileDiffView` 结构一致，但**覆盖整个文件**，不是单次调用的片段。
+    """
+
+    path: str
+    additions: int = Field(ge=0)
+    deletions: int = Field(ge=0)
+    hunks: list[FileDiffHunkView] = Field(default_factory=list)
+    truncated: bool = False
+    has_baseline: bool
+    unavailable_reason: str | None = None
+    before_sha256: str | None = None
+    after_sha256: str | None = None
+
+
 class SearchMatchView(_Dto):
     """A bounded, sanitized content match with its real source line."""
 
@@ -476,6 +613,9 @@ class ToolOutcomeView(_Dto):
     stderr: str | None = None
     exit_code: int | None = None
     timed_out: bool | None = None
+    #: 命令仍在后台运行（用户点了"转后台"，2026-10-21）。
+    #: 它与 `timed_out` 是两件不同的事：超时=这一轮不等了并终止；后台=这一轮不等了但进程还活着。
+    background: bool = False
     #: 一次自主委派的每个子任务结局（§18.7）；只有 `kind="delegation"` 会填。
     children: list[DelegationChildView] = Field(default_factory=list)
     truncated: bool = False
@@ -1036,12 +1176,28 @@ class ConversationBranchView(_Dto):
     active: bool
 
 
+class SideChatView(_Dto):
+    """会话地图里挂着的侧聊（§21.7，2026-10-23）。
+
+    侧聊是**独立会话**（各自 thread、各自 checkpoint），但在图上要显示成主会话的
+    关联分支——否则用户在"会话地图"里看不到它，就会以为侧聊是凭空冒出来的。
+    """
+
+    session_id: str
+    title: str
+    #: 从主会话的哪一轮开出；为空表示"从最新一轮"。
+    origin_turn_id: str | None = None
+    created_at: str | None = None
+
+
 class ConversationMapView(_Dto):
     session_id: str
     active_branch_id: str
     nodes: list[ConversationNodeView]
     branches: list[ConversationBranchView]
     matched_turn_ids: list[str] = Field(default_factory=list)
+    #: 从本会话开出的侧聊。**独立会话**，只是在地图上挂成关联分支（见 `SideChatView`）。
+    side_chats: list[SideChatView] = Field(default_factory=list)
 
 
 class SessionSummaryView(_Dto):
@@ -1059,6 +1215,8 @@ class SessionSummaryView(_Dto):
     #: 是否是"当前打开的会话"（`sessions.status='active'` 全库唯一）。
     is_active: bool = False
     archived: bool = False
+    #: 侧边会话（§21.7）：从哪个会话开出；普通会话为 `None`。
+    parent_session_id: str | None = None
     created_at: datetime
     updated_at: datetime
     last_checkpoint_id: str | None = Field(default=None, exclude=True)

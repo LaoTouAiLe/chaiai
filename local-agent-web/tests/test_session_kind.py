@@ -180,8 +180,16 @@ def test_jobs_table_rebuild_to_v8_keeps_rows_and_widens_the_closed_set(tmp_path:
     connection = sqlite3.connect(tmp_path / "chat.sqlite")
     # 只升到 v7：模拟"上一次发布的库"
     assert migrations._apply(connection, migrations._CHAT_MIGRATIONS[:7]) == 7
-    session = SessionStore(connection, workspace_root=tmp_path).create()
-    legacy = JobStore(connection).create(session_id=session.session_id)
+    # 用**原始 SQL** 造旧数据，不经过当前的 `SessionStore.create`：后者的列集合会随 schema 前进
+    # （v13 起多写 parent_session_id / origin_turn_id），拿它往 v7 的表里写必然报"没有这一列"。
+    connection.execute(
+        "INSERT INTO sessions (session_id, thread_id, title, workspace_root, project_id,"
+        " created_at, updated_at, last_checkpoint_id, status, mode, archived, kind)"
+        " VALUES ('legacy-sess','thread-legacy','旧会话',?,'p1','2026-01-01','2026-01-01',"
+        " NULL,'idle','agent',0,'interactive')",
+        (str(tmp_path),),
+    )
+    legacy = JobStore(connection).create(session_id="legacy-sess")
 
     with pytest.raises(sqlite3.IntegrityError):
         connection.execute(
@@ -274,3 +282,29 @@ def test_job_state_chain_keeps_run_id_and_seals_terminal_rows(tmp_path: Path) ->
     assert jobs.list_by_state(JOB_STATE_QUEUED) == []
     assert jobs.list_by_state() == []
     connection.close()
+
+
+def test_missing_side_chat_columns_are_repaired_even_when_version_says_latest(
+    tmp_path: Path,
+) -> None:
+    """线上故障复现（2026-10-23）：`schema_migrations` 记了 13，`sessions` 却没有那两列。
+
+    此后每次列会话 / 切换工作区都 500（`no such column: parent_session_id`）。
+    只信版本号不够，必须按**列**校验并补齐。
+    """
+    connection = sqlite3.connect(tmp_path / "chat.sqlite")
+    connection.row_factory = sqlite3.Row
+    assert migrations.apply_migrations(connection) == migrations.CHAT_SCHEMA_VERSION
+
+    # 人为把库做坏：删列但不改版本号——正是线上那次的样子
+    # （索引引用了这一列，SQLite 不允许在有索引时删列，先删索引）
+    connection.execute("DROP INDEX IF EXISTS idx_sessions_parent")
+    connection.execute("ALTER TABLE sessions DROP COLUMN parent_session_id")
+    connection.commit()
+    broken = {str(row[1]) for row in connection.execute("PRAGMA table_info(sessions)")}
+    assert "parent_session_id" not in broken
+
+    # 再跑一次：版本已是最新，靠列校验补回来
+    assert migrations.apply_migrations(connection) == migrations.CHAT_SCHEMA_VERSION
+    repaired = {str(row[1]) for row in connection.execute("PRAGMA table_info(sessions)")}
+    assert {"parent_session_id", "origin_turn_id"} <= repaired

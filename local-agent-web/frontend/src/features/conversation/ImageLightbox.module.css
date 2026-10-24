@@ -1,0 +1,47 @@
+/* 放大看图（2026-10-16）：点缩略图打开，Esc / 点背景 / 关闭按钮都能收起。 */
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--law-space-2xl);
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.panel {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+/* 原图可能很大：限定在视口内、保持比例（`contain`），不裁切也不拉伸 ✗。 */
+.image {
+  display: block;
+  max-width: 90vw;
+  max-height: 88vh;
+  border-radius: var(--law-radius-md, 10px);
+  background: var(--law-bg-layer-1);
+  object-fit: contain;
+}
+
+.close {
+  position: absolute;
+  top: calc(-1 * var(--law-space-lg));
+  right: calc(-1 * var(--law-space-lg));
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-pill);
+  background: var(--law-bg-layer-1);
+  color: var(--law-text-primary);
+  cursor: pointer;
+  font-size: var(--law-text-md);
+  line-height: 1;
+}

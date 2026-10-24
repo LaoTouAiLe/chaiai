@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { App } from './App'
 
@@ -41,6 +41,7 @@ describe('App sidebar state', () => {
   it('leaves unselected rows on their own fixture state', () => {
     openScenario('shell')
     render(<App />)
+    fireEvent.click(screen.getByRole('button', { name: 'local-agent-web展示更多会话' }))
     // The selected row is the shell session; the approval row is untouched.
     expect(within(sessionRow('给 README 补一段快速开始')).getByText('已完成')).toBeInTheDocument()
     expect(within(sessionRow('清理构建产物')).getByText('等待审批')).toBeInTheDocument()

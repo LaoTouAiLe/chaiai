@@ -11,7 +11,7 @@
 
 .head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: var(--law-space-md);
   padding: 0 var(--law-space-sm);
 }
@@ -26,6 +26,23 @@
   color: var(--law-text-caption);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
+}
+
+.close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  border-radius: var(--law-radius-md);
+  color: var(--law-text-secondary);
+}
+
+.close:hover:not(:disabled) {
+  background: var(--law-button-ghost-hover);
+  color: var(--law-text-primary);
 }
 
 .list {

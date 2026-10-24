@@ -1,37 +1,43 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 
-/**
- * 档位切换（§16.6）：真服务 + 真前端。
- *
- * 为什么必须打真服务：这条要证明的是"页面里切一下，**下一次运行真的按新档位绑定能力**，
- * 而且不用重启"。用 `page.route` 打桩能证明"页面会按我编的响应渲染"，证明不了档位真的写进了
- * 设置库、也证明不了刷新之后仍是用户的选择（那正是"存设置库、config 只是出厂默认"这条口径）。
- *
- * 服务由 `playwright.live.config.ts` 拉起（`serve_fake.py`，同源托管产物）。
- */
-test('切换档位：能力跟着变、不用重启，刷新后仍是用户的选择', async ({ page }) => {
+// 真服务验收独立能力开关。
+// 2026-10-19 起「能力」并入设置（侧栏不再有独立的「能力与档位」入口），夹具走「设置 → 能力」。
+// 不假设"联网检索与抓取"有开关：它在当前服务端已是始终开启的基础能力。
+
+async function openCapabilities(page: Page): Promise<Locator> {
+  await page.getByRole('button', { name: '设置' }).click()
+  const settings = page.getByRole('dialog', { name: '设置' })
+  await expect(settings).toBeVisible()
+  await settings.getByRole('tab', { name: '能力', exact: true }).click()
+  return settings
+}
+
+test('能力开关保存后立即更新，关闭重开和刷新后仍一致', async ({ page }) => {
   await page.goto('/')
-  await page.getByRole('button', { name: '能力与档位' }).click()
-  const panel = page.getByRole('dialog', { name: '能力与档位' })
-  await expect(panel).toBeVisible()
 
-  // 出厂默认是全能力档：写文件能力可用，选择器停在 coder。
-  const writeRow = panel.getByRole('listitem').filter({ hasText: '修改工作区文件' })
-  await expect(writeRow).toContainText('可用')
-  const selector = panel.getByLabel('切换当前档位')
-  await expect(selector).toHaveValue('coder')
+  const settings = await openCapabilities(page)
+  const row = settings.getByRole('listitem').filter({ hasText: '按需加载技能' })
+  const toggle = row.getByRole('checkbox', { name: '按需加载技能开关' })
+  // 不预设初值：这项可能被之前的运行改过。先读出来，再翻到相反状态核对。
+  const initiallyOn = await toggle.isChecked()
+  await expect(row).toContainText(initiallyOn ? '可用' : '开关已关闭')
 
-  // 切到只读档：**同一份面板**立刻改口（响应就是服务端重新算过的完整视图）。
-  await selector.selectOption('reviewer')
-  await expect(writeRow).toContainText('当前档位没有')
-  await expect(selector).toHaveValue('reviewer')
+  // 开关由保存响应控制，不做乐观勾选；等待服务端返回后再核对状态。
+  await toggle.click()
+  await expect(toggle).toBeChecked({ checked: !initiallyOn })
+  await expect(row).toContainText(initiallyOn ? '开关已关闭' : '可用')
 
-  // 没有重启、也没有重新打开面板——改的是设置库，下一次运行就会按新档位绑定工具。
+  await settings.getByRole('button', { name: '关闭设置' }).click()
+  await expect(settings).toHaveCount(0)
+
+  await openCapabilities(page)
+  await expect(toggle).toBeChecked({ checked: !initiallyOn })
+
   await page.reload()
-  await page.getByRole('button', { name: '能力与档位' }).click()
-  const reopened = page.getByRole('dialog', { name: '能力与档位' })
-  await expect(reopened.getByLabel('切换当前档位')).toHaveValue('reviewer')
-  await expect(reopened.getByRole('listitem').filter({ hasText: '修改工作区文件' })).toContainText(
-    '当前档位没有',
-  )
+  await openCapabilities(page)
+  await expect(toggle).toBeChecked({ checked: !initiallyOn })
+
+  // 收尾：恢复到进入时的状态，免得这份工作区数据被留成"改过"的样子。
+  await toggle.click()
+  await expect(toggle).toBeChecked({ checked: initiallyOn })
 })

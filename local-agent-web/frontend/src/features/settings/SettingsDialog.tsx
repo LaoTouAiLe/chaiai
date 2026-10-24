@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { KeyboardEvent, ReactNode } from 'react'
 
 import { Check, Close, Cross } from '../../components/icons'
 import type {
@@ -8,9 +8,11 @@ import type {
   ModelConnectionView,
   SettingsView,
 } from '../../fixtures/types'
-import { ScrollToBottom } from './ScrollToBottom'
+import { ScrollToBottom } from '../../components/ScrollToBottom'
 import { PermissionSection } from './PermissionSection'
 import type { PermissionActions } from './PermissionSection'
+import { SETTINGS_SEARCH_INDEX, filterSettings, settingElementId } from './settingsSearch'
+import type { SettingsSearchHit } from './settingsSearch'
 import styles from './SettingsDialog.module.css'
 
 /** 真实模式下的动作；**不传就是原型宿主**（fixtures 直出、按钮惰性）。 */
@@ -44,17 +46,20 @@ interface SettingsDialogProps {
   extraSections?: Partial<Record<SettingsSection, ReactNode>>
 }
 
-export type SettingsSection = 'models' | 'permissions' | 'skills' | 'capabilities' | 'general' | 'execution' | 'retrieval' | 'web_access' | 'attachments' | 'memory' | 'medium_term' | 'embedding' | 'advanced'
+export type SettingsSection = 'models' | 'permissions' | 'skills' | 'capabilities' | 'general' | 'execution' | 'retrieval' | 'web_access' | 'mcp' | 'attachments' | 'memory' | 'medium_term' | 'embedding' | 'advanced'
 
 /** 原型保留连接/权限；真实宿主注入应用设置各组。 */
+/**
+ * 设置分区清单。
+ *
+ * 2026-10-22：**技能 / 能力 / MCP 三项已移出设置**，改由侧栏「能力中心」整页提供。
+ * 原因是它们属于高频日常操作（今天能不能联网、能不能提交），埋在 14 个分区里每次要多两步；
+ * 2026-10-19 曾反向下过"并进设置"的决定，那次是为了消除重复入口，这次有明确的新事实推翻了它。
+ * 类型里的 `skills` / `capabilities` / `mcp` 三个 id 保留，避免其它调用方（测试、深链）类型断裂。
+ */
 const SECTIONS: readonly { id: SettingsSection; label: string }[] = [
   { id: 'models', label: '模型连接' },
   { id: 'permissions', label: '权限' },
-  // 技能管理（2026-10-16）：与「权限」同类——都是"带开关的管理列表"，所以排在它后面；
-  // 标签只在真宿主注入了内容时才出现（见下面的可见性过滤）。
-  { id: 'skills', label: '技能' },
-  // 能力（2026-10-19）：原来是从顶栏打开的独立面板，现在也放进设置（顶栏入口保留）。
-  { id: 'capabilities', label: '能力' },
   { id: 'general', label: '通用与外观' },
   { id: 'execution', label: '任务执行' },
   { id: 'retrieval', label: '自动代码检索' },
@@ -72,7 +77,7 @@ const SECTIONS: readonly { id: SettingsSection; label: string }[] = [
  * 分组只影响呈现顺序，`id` 与分区标签不变（测试与深链仍按标签找 tab）。
  */
 const SECTION_GROUPS: readonly { label: string; ids: readonly SettingsSection[] }[] = [
-  { label: '模型与权限', ids: ['models', 'skills', 'capabilities', 'permissions'] },
+  { label: '模型与权限', ids: ['models', 'permissions'] },
   { label: '任务与工具', ids: ['execution', 'retrieval', 'web_access', 'attachments'] },
   { label: '记忆', ids: ['memory', 'medium_term', 'embedding'] },
   // 分组标题只做归类；`通用与外观` 与只读的 `高级配置` 都是"改页面本身怎么跑"，同放一组。
@@ -143,52 +148,69 @@ function ConnectionCard({
 }) {
   // 真实模式下按钮必须真有行为（§15.9：不得沿用无行为按钮）；原型模式没有 actions，保持惰性。
   const busy = actions !== undefined && actions.busyId === connection.id
+  // 收起 / 展开（2026-10-22 V4）：一屏能看 6+ 行，而不是 3 张全展开的卡。
+  // 默认收起——但要显示"是否需要关注"的信息（状态、是否有风险）仍在收起态可见。
+  const [expanded, setExpanded] = useState(false)
   return (
     <article className={styles.card} aria-label={`连接 ${connection.name}`}>
       <header className={styles.cardHead}>
         <h3 className={styles.cardName}>{connection.name}</h3>
+        <span className={styles.cardModel}>{connection.modelId}</span>
         {connection.isDefault ? <span className={styles.defaultTag}>默认</span> : null}
         <span className={`${styles.status} ${STATUS_CLASS[connection.status]}`}>
           {STATUS_LABEL[connection.status]}
         </span>
+        {connection.transport === 'plaintext-http' ? (
+          <span className={styles.riskTagInHead}>明文传输</span>
+        ) : null}
+        <button
+          type="button"
+          className={styles.cardToggle}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((open) => !open)}
+        >
+          {expanded ? '收起' : '详情'}
+        </button>
         <span className={styles.cardId}>{connection.id}</span>
       </header>
 
-      <dl className={styles.cardFacts}>
-        <div className={styles.fact}>
-          <dt>端点</dt>
-          <dd className={styles.mono}>{connection.baseUrl}</dd>
-        </div>
-        <div className={styles.fact}>
-          <dt>模型</dt>
-          <dd className={styles.mono}>{connection.modelId}</dd>
-        </div>
-        <div className={styles.fact}>
-          <dt>上下文</dt>
-          <dd>{connection.contextWindowLabel}</dd>
-        </div>
-        <div className={styles.fact}>
-          <dt>密钥</dt>
-          <dd>{KEY_LABEL[connection.keyStatus]}</dd>
-        </div>
-      </dl>
+      {expanded ? <>
+        <dl className={styles.cardFacts}>
+          <div className={styles.fact}>
+            <dt>端点</dt>
+            <dd className={styles.mono}>{connection.baseUrl}</dd>
+          </div>
+          <div className={styles.fact}>
+            <dt>模型</dt>
+            <dd className={styles.mono}>{connection.modelId}</dd>
+          </div>
+          <div className={styles.fact}>
+            <dt>上下文</dt>
+            <dd>{connection.contextWindowLabel}</dd>
+          </div>
+          <div className={styles.fact}>
+            <dt>密钥</dt>
+            <dd>{KEY_LABEL[connection.keyStatus]}</dd>
+          </div>
+        </dl>
 
-      {connection.transport === 'plaintext-http' ? (
-        <p className={styles.risk}>
-          <span className={styles.riskTag}>明文传输</span>
-          局域网 HTTP 端点：请求内容在传输中不加密。保存时已由你确认该风险，可改为 HTTPS 或删除该连接。
-        </p>
-      ) : null}
+        {connection.transport === 'plaintext-http' ? (
+          <p className={styles.risk}>
+            <span className={styles.riskTag}>明文传输</span>
+            局域网 HTTP 端点：请求内容在传输中不加密。保存时已由你确认该风险，可改为 HTTPS 或删除该连接。
+          </p>
+        ) : null}
 
-      <div className={styles.capabilities}>
-        {connection.capabilities.map((capability) => (
-          <CapabilityChip key={capability.name} capability={capability} />
-        ))}
-      </div>
+        <div className={styles.capabilities}>
+          {connection.capabilities.map((capability) => (
+            <CapabilityChip key={capability.name} capability={capability} />
+          ))}
+        </div>
 
-      {connection.statusDetail === null ? null : (
-        <p className={styles.cardDetail}>{connection.statusDetail}</p>
-      )}
+        {connection.statusDetail === null ? null : (
+          <p className={styles.cardDetail}>{connection.statusDetail}</p>
+        )}
+      </> : null}
 
       {connection.pendingApply ? (
         <p className={styles.pendingApply}>编辑已保存为新版本 · 从下一轮请求开始生效，正在运行的一轮不受影响</p>
@@ -278,11 +300,13 @@ export function SettingsDialog({
   extraSections,
 }: SettingsDialogProps) {
   const [section, setSection] = useState<SettingsSection>('models')
+  const [query, setQuery] = useState('')
+  const [hitIndex, setHitIndex] = useState(0)
+  /** 待定位的字段：分区切换后目标行才会渲染出来，交给 effect 轮询定位。 */
+  const [pending, setPending] = useState<SettingsSearchHit | null>(null)
+  /** 目标字段在当前取值下不渲染时（条件显示字段）的如实解释。 */
+  const [notice, setNotice] = useState<string | null>(null)
   const panesRef = useRef<HTMLDivElement | null>(null)
-  // 切换分区时回到顶部：上一分区滚到底再切过去，新分区会从半截开始。
-  useEffect(() => {
-    if (panesRef.current !== null) panesRef.current.scrollTop = 0
-  }, [section])
 
   const visibleSections = SECTIONS.filter(
     item => item.id === 'models' || item.id === 'permissions' || extraSections?.[item.id] !== undefined,
@@ -294,15 +318,115 @@ export function SettingsDialog({
     }))
     .filter(group => group.items.length > 0)
 
+  // 搜索只覆盖偏好字段：模型连接与权限是手写分区，不在这份字段表里。
+  const canSearch = visibleSections.some(item => item.id !== 'models' && item.id !== 'permissions')
+  const searching = query.trim().length > 0
+  // 可见分区拼成字符串做依赖：visibleSections 每次渲染都是新数组，直接依赖会让 memo 永不命中。
+  const availableIds = visibleSections.map(item => item.id).join('|')
+  const hits = useMemo(() => {
+    if (!searching) return []
+    const available = new Set(availableIds.split('|'))
+    return filterSettings(SETTINGS_SEARCH_INDEX, query).filter(hit => available.has(hit.group))
+  }, [availableIds, query, searching])
+
+  // 切换分区或进出搜索时回到顶部：上一分区滚到底再切过去，新分区会从半截开始。
+  useEffect(() => {
+    if (panesRef.current !== null) panesRef.current.scrollTop = 0
+  }, [section, searching])
+
+  // 目标行可能晚几帧才挂载（hidden 的祖先也不能 scrollIntoView），所以短暂轮询：
+  // 找到就滚到中间并闪一下；始终找不到说明它的显示条件没满足，用文案说明而不是静默失败。
+  useEffect(() => {
+    if (pending === null) return
+    let cancelled = false
+    let attempts = 0
+    let timer = 0
+    const targetId = settingElementId(pending.group, pending.key)
+    const attempt = () => {
+      if (cancelled) return
+      const element = document.getElementById(targetId)
+      if (element !== null) {
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        element.classList.add('settings-field-flash')
+        window.setTimeout(() => element.classList.remove('settings-field-flash'), 1600)
+        setPending(null)
+        return
+      }
+      if (attempts < 20) {
+        attempts += 1
+        timer = window.setTimeout(attempt, 50)
+        return
+      }
+      setNotice(pending.requirement)
+      setPending(null)
+    }
+    timer = window.setTimeout(attempt, 30)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [pending, section])
+
+  const openHit = useCallback((hit: SettingsSearchHit) => {
+    setQuery('')
+    setHitIndex(0)
+    setNotice(null)
+    setSection(hit.group)
+    setPending(hit)
+  }, [])
+
+  const searchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Escape') {
+      setQuery('')
+      setHitIndex(0)
+      return
+    }
+    if (!searching || hits.length === 0) return
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      setHitIndex(index => Math.min(index + 1, hits.length - 1))
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      setHitIndex(index => Math.max(index - 1, 0))
+      return
+    }
+    if (event.key === 'Enter') {
+      const hit = hits[Math.min(hitIndex, hits.length - 1)]
+      if (hit !== undefined) {
+        event.preventDefault()
+        openHit(hit)
+      }
+    }
+  }
+
   const empty = settings.connections.length === 0
   return (
     <div className={styles.overlay}>
       <div className={styles.dialog} role="dialog" aria-modal="true" aria-label="设置">
         <header className={styles.header}>
-          <div>
+          <div className={styles.headerText}>
             <h2 className={styles.title}>设置</h2>
             <p className={styles.subtitle}>连接、偏好与运行参数 · 密钥只写入不回读</p>
           </div>
+          {canSearch ? (
+            <div className={styles.searchWrap}>
+              <input
+                type="search"
+                role="searchbox"
+                aria-label="搜索设置项"
+                className={styles.searchInput}
+                placeholder="搜索设置项（如：域名、超时）"
+                value={query}
+                onChange={event => {
+                  setQuery(event.target.value)
+                  setHitIndex(0)
+                }}
+                onKeyDown={searchKeyDown}
+              />
+            </div>
+          ) : null}
           <button
             type="button"
             className={styles.close}
@@ -339,12 +463,35 @@ export function SettingsDialog({
 
           <div className={styles.paneWrap}>
           <div className={styles.panes} ref={panesRef}>
+          {notice === null ? null : <p className={styles.notice} role="status">{notice}</p>}
+          {/* 搜索态只把分区切到 hidden：不卸载，未保存的草稿与滚动位置都还在。 */}
+          <div hidden={!searching} className={styles.hits} role="listbox" aria-label="设置项搜索结果">
+            {hits.length === 0 ? (
+              <p className={styles.hitsEmpty} role="status">没有匹配的设置项。换个词试试，例如「域名」「超时」「记忆」。</p>
+            ) : hits.map((hit, index) => (
+              <div
+                key={`${hit.group}-${hit.key}`}
+                role="option"
+                aria-selected={index === hitIndex}
+                className={`${styles.hit} ${index === hitIndex ? styles.hitSelected : ''}`}
+                onClick={() => openHit(hit)}
+                onMouseEnter={() => setHitIndex(index)}
+              >
+                <span className={styles.hitMain}>
+                  <span className={styles.hitLabel}>{hit.label}</span>
+                  <span className={styles.hitSection}>{hit.sectionLabel}{hit.readOnly ? ' · 只读' : ''}</span>
+                </span>
+                <span className={styles.hitNote}>{hit.note}</span>
+                {hit.requirement === null ? null : <span className={styles.hitRequires}>{hit.requirement}</span>}
+              </div>
+            ))}
+          </div>
           {Object.entries(extraSections ?? {}).map(([id, content]) => (
-            <div key={id} hidden={section !== id} role="tabpanel" id={`settings-panel-${id}`} aria-labelledby={`settings-tab-${id}`}>
+            <div key={id} hidden={searching || section !== id} role="tabpanel" id={`settings-panel-${id}`} aria-labelledby={`settings-tab-${id}`}>
               {content}
             </div>
           ))}
-          {section === 'permissions' ? (
+          {searching ? null : section === 'permissions' ? (
             <div
               role="tabpanel"
               id="settings-panel-permissions"
@@ -405,8 +552,8 @@ export function SettingsDialog({
             </div>
           ) : null}
           </div>
-          {/* 内容没到底时才出现的"滑到最底"箭头；不干预各分区自己的滚动逻辑。 */}
-          <ScrollToBottom paneRef={panesRef} resetKey={section} />
+          {/* 内容没到底时才出现的"滑到最底"箭头；搜索结果自己会滚，藏着它免得压在结果上。 */}
+          {searching ? null : <ScrollToBottom paneRef={panesRef} resetKey={section} />}
           </div>
         </div>
       </div>

@@ -24,7 +24,7 @@ export default defineConfig({
   },
   projects: [{ name: 'streaming', use: { ...devices['Desktop Chrome'], viewport: { width: 1440, height: 900 } } }],
   webServer: {
-    command: `npm run build && uv run --project .. python ../scripts/serve_fake.py --port ${PORT} --streaming --chunk-delay 0.7 --reply "${REPLY}"`,
+    command: `npm run build && uv run --project .. python ../scripts/serve_fake.py --port ${PORT} --streaming --command-stream-demo --chunk-delay 0.7 --reply "${REPLY}"`,
     url: `http://127.0.0.1:${PORT}/api/health`,
     reuseExistingServer: !process.env.CI,
     timeout: 240_000,

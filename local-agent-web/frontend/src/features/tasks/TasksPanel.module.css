@@ -15,11 +15,12 @@
   width: min(680px, 100%);
   max-height: 80vh;
   overflow: auto;
-  padding: var(--law-space-2xl);
-  background: var(--law-bg-layer-1);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-lg);
-  box-shadow: var(--law-shadow-lv3);
+  padding: var(--sp-6);
+  background: var(--c-canvas);
+  /* 去描边、统一浮层高度（2026-10-22 V6，与设置弹窗同口径） */
+  border: 0;
+  border-radius: var(--r-overlay);
+  box-shadow: var(--sh-overlay);
 }
 
 .head {
@@ -109,10 +110,12 @@
   list-style: none;
 }
 
+/* 任务行：灰底块而不是描边（与设置页连接卡同一口径） */
 .row {
-  padding: var(--law-space-lg);
-  border: 1px solid var(--law-border-l1);
-  border-radius: var(--law-radius-md);
+  padding: var(--sp-3) var(--sp-4);
+  border: 0;
+  border-radius: var(--r-panel);
+  background: var(--c-panel);
 }
 
 .rowHead {

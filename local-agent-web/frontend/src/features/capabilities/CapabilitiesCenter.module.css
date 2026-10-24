@@ -1,0 +1,60 @@
+/**
+ * 能力中心整页（2026-10-22 V5）。
+ *
+ * 布局与数据中台同一套：占满中栏、页头固定、内容区独立滚动。
+ * 内边距用规范 §2.4 的页面留白（`clamp(20px, 4vw, 64px)`），与其它整页一致。
+ */
+.page {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--c-canvas);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-6) clamp(20px, 4vw, 64px) var(--sp-4);
+}
+
+.heading {
+  min-width: 0;
+}
+
+.eyebrow {
+  display: block;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+.title {
+  margin: 0;
+  color: var(--c-text-1);
+  font-size: var(--fs-heading);
+  line-height: var(--lh-heading);
+  font-weight: 600;
+}
+
+.subtitle {
+  margin: var(--sp-1) 0 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  max-width: 72ch;
+}
+
+.tabBar {
+  padding: 0 clamp(20px, 4vw, 64px) var(--sp-3);
+  border-bottom: 1px solid var(--c-line);
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-4) clamp(20px, 4vw, 64px) var(--sp-8);
+}

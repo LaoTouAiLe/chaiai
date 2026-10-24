@@ -1,4 +1,4 @@
-"""HTTP 路由（T29；契约 §6.2、§15.3，计划 §6.2）。
+﻿"""HTTP 路由（T29；契约 §6.2、§15.3，计划 §6.2）。
 
 这一层是**薄适配层**：解析请求 → 调应用服务 → 返回 T27 的 DTO。业务规则、每会话单飞、幂等
 台账、错误码都在服务里；本层只做服务不做的那几件事：
@@ -33,9 +33,13 @@ from local_agent.api.schemas import (
     CancelTaskRequest,
     CapabilitiesRequest,
     CreateSessionRequest,
+    CreateSideChatRequest,
     ErrorResponse,
     ExternalPathGrantRequest,
     HealthView,
+    McpServerCreateRequest,
+    McpServerRequest,
+    McpServerSpecRequest,
     ModelConnectionRequest,
     OssCredentialRequest,
     OssCredentialView,
@@ -44,6 +48,7 @@ from local_agent.api.schemas import (
     PickDirectoryView,
     RecoveryRequest,
     RenameRequest,
+    ResolveTaskReviewRequest,
     SelectDefaultConnectionRequest,
     SelectionExpectation,
     SelectSessionModelRequest,
@@ -56,21 +61,42 @@ from local_agent.api.schemas import (
 )
 from local_agent.api.security import is_allowed_origin
 from local_agent.application import errors as app_errors
-from local_agent.application.data_center_models import MemoryPageView, UsagePageView
+from local_agent.application.cron_models import (
+    CronJobCreateRequest,
+    CronJobsView,
+    CronJobUpdateRequest,
+    CronJobView,
+    CronRunsPageView,
+    CronRunView,
+)
+from local_agent.application.data_center_models import (
+    ArtifactPreviewView,
+    ArtifactsPageView,
+    MemoryPageView,
+    UsagePageView,
+)
 from local_agent.application.models import (
     SCHEMA_VERSION,
     AttachmentView,
     CapabilitiesView,
     CommandResultView,
     ConversationMapView,
+    FileChangeDiffView,
+    McpView,
     ModelConnectionView,
     PermissionsView,
+    SessionChangesView,
     SessionSnapshot,
     SessionSummaryView,
     SkillsView,
     TaskCenterView,
     WebSearchKeyView,
     WorkspaceRef,
+)
+from local_agent.application.workspace_models import (
+    GitDiffView,
+    GitStatusView,
+    WorkspaceFilesView,
 )
 from local_agent.exceptions import AttachmentError, SessionStoreError
 from local_agent.model_settings import ConnectionDraft, SelectionRef
@@ -80,6 +106,7 @@ from local_agent.model_settings.preferences import (
     PreferencesRequest,
     PreferencesView,
 )
+from local_agent.persistence.job_store import JobStoreError
 
 #: 公开错误码 → HTTP 状态码。**显式列出**；表里没有的一律 500。
 #: 409 用于"服务端状态决定了这次不能做"（忙碌、冲突、需要人工核对、审批失效）。
@@ -142,6 +169,11 @@ _WEB_CREDENTIAL_WRITE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
     503: {"model": ErrorResponse, "description": "没有可用的凭据存储，密钥存不下来"},
 }
 #: 技能写接口（技能管理页，2026-10-16）：名字不是当前发现的技能 422，没有设置库 503。
+_MCP_WRITE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
+    422: {"model": ErrorResponse, "description": "mcp.json 里没有这台 server，或配置/名单不合法"},
+    503: {"model": ErrorResponse, "description": "没有可用的设置库，改动存不下来"},
+}
+
 _SKILL_WRITE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
     422: {"model": ErrorResponse, "description": "没有发现这个技能（理由里列出当前可用的名字）"},
     503: {"model": ErrorResponse, "description": "没有可用的设置库，改动存不下来"},
@@ -245,6 +277,161 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
             raise HTTPException(status_code=422, detail="开始时间必须早于结束时间")
         return service.get_usage_page(workspace_id=workspace_id, model=model, since=since,
                                       until=until, offset=offset, limit=limit)
+
+    @router.get("/data-center/artifacts", response_model=ArtifactsPageView, summary="只读产物汇总")
+    def artifacts_page(workspace_id: str | None = None,
+                       kind: Literal["image", "file", "link"] | None = None,
+                       days: int = Query(default=30, ge=1, le=365),
+                       offset: int = Query(default=0, ge=0, le=100000),
+                       limit: int = Query(default=50, ge=1, le=200),
+                       refresh: bool = Query(default=False)) -> ArtifactsPageView:
+        """Agent 跑出来的东西：图片、写出的文件、引用过的链接（§15.11.1）。
+
+        每次请求现算，不新建表；触扫描闸门时 `incomplete=true` 并说明没扫全。
+        `refresh=true` 跳过 60 秒结果缓存（页面「刷新」按钮用）。
+        """
+        return service.get_artifacts_page(workspace_id=workspace_id, kind=kind, days=days,
+                                          offset=offset, limit=limit, refresh=refresh)
+
+    @router.get("/data-center/artifacts/preview", response_model=ArtifactPreviewView,
+                summary="产物内容预览")
+    def preview_artifact(
+        path: str = Query(min_length=1, max_length=500),
+        workspace_id: str | None = Query(default=None, max_length=128),
+        scope: Literal["workspace", "attachments"] = Query(default="workspace"),
+    ) -> ArtifactPreviewView:
+        """看一眼产物的内容（§15.11.3）：只读、有大小上限、不代打开外链。"""
+        try:
+            return service.preview_artifact(path=path, workspace_id=workspace_id, scope=scope)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # ---- 侧边会话（§21.7，2026-10-23）------------------------------------
+    @router.post("/sessions/{session_id}/side-chats", response_model=SessionSummaryView,
+                 status_code=201, summary="从某个会话开一个侧聊")
+    def create_side_chat(session_id: str, payload: CreateSideChatRequest) -> SessionSummaryView:
+        """侧聊是**独立会话**（带 `parent_session_id`），不打断父会话的 active 分支。
+
+        上下文由服务端读父会话的问答文本生成，**客户端不许传历史**——能传就能伪造。
+        """
+        try:
+            return service.create_side_chat(
+                parent_session_id=session_id, origin_turn_id=payload.origin_turn_id
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.post("/sessions/{session_id}/promote", response_model=SessionSummaryView,
+                 summary="侧聊提升为正式会话")
+    def promote_session(session_id: str) -> SessionSummaryView:
+        """清掉血统即可（§21.7）：**不改 id、不删历史**——改 id 会让已打开的页面与运行记录全部失效。"""
+        try:
+            return service.promote_side_chat(session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # ---- 右栏只读面板（§21.6，2026-10-22）--------------------------------
+    @router.get("/workspace/files", response_model=WorkspaceFilesView, summary="列一层目录（只读）")
+    def workspace_files(path: str = Query(default="", max_length=500),
+                        workspace_id: str | None = Query(default=None, max_length=128),
+                        recursive: bool = Query(default=False)) -> WorkspaceFilesView:
+        """**不递归**、不含 `node_modules` 这类噪声目录；读文件内容走产物预览端点。"""
+        try:
+            return service.list_workspace_files(path=path, workspace_id=workspace_id,
+                                              recursive=recursive)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.get("/workspace/files/search", response_model=WorkspaceFilesView,
+                summary="按文件名搜索工作区（只读）")
+    def search_workspace_files(q: str = Query(min_length=1, max_length=120),
+                               workspace_id: str | None = Query(default=None, max_length=128)) -> WorkspaceFilesView:
+        """递归搜索文件名，跳过 `node_modules` 等噪声目录，最多 50 条、深度 8 层。"""
+        try:
+            return service.search_workspace_files(q=q, workspace_id=workspace_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.get("/workspace/git/status", response_model=GitStatusView, summary="工作区 git 状态（只读）")
+    def workspace_git_status(
+        workspace_id: str | None = Query(default=None, max_length=128),
+    ) -> GitStatusView:
+        """工作区不是 git 仓库时返回 `available=false`，不是错误。"""
+        return service.workspace_git_status(workspace_id=workspace_id)
+
+    @router.get("/workspace/git/diff", response_model=GitDiffView, summary="单文件 diff（只读）")
+    def workspace_git_diff(path: str = Query(min_length=1, max_length=500),
+                           workspace_id: str | None = Query(default=None, max_length=128)) -> GitDiffView:
+        """相对 `HEAD` 的 diff。未跟踪文件没有 diff——那是状态信息，不在这里编造。"""
+        try:
+            return service.workspace_git_diff(path=path, workspace_id=workspace_id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # ---- 定时任务（§21.5，2026-10-22 J2）--------------------------------
+    @router.get("/cron/jobs", response_model=CronJobsView, summary="定时任务列表")
+    def list_cron_jobs() -> CronJobsView:
+        """`scheduler_running=false` 表示调度线程没起来——页面上要点明"不会触发"。"""
+        return service.get_cron_jobs()
+
+    @router.post("/cron/jobs", response_model=CronJobView, status_code=201, summary="新建定时任务")
+    def create_cron_job(payload: CronJobCreateRequest) -> CronJobView:
+        try:
+            return service.create_cron_job(
+                name=payload.name, prompt=payload.prompt, schedule=payload.schedule,
+                workspace_id=payload.workspace_id, mode=payload.mode,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.patch("/cron/jobs/{job_id}", response_model=CronJobView, summary="修改定时任务")
+    def update_cron_job(job_id: str, payload: CronJobUpdateRequest) -> CronJobView:
+        try:
+            return service.update_cron_job(
+                job_id, name=payload.name, prompt=payload.prompt, schedule=payload.schedule,
+                mode=payload.mode, enabled=payload.enabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.delete("/cron/jobs/{job_id}", status_code=204, summary="删除定时任务")
+    def delete_cron_job(job_id: str) -> Response:
+        try:
+            service.delete_cron_job(job_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(status_code=204)
+
+    @router.post("/cron/jobs/{job_id}/run", response_model=CronRunView, summary="立即触发一次")
+    def run_cron_job(job_id: str) -> CronRunView:
+        """不等排期地跑一次；**排期本身不动**。上一次没跑完时返回 409。"""
+        try:
+            return service.run_cron_job_now(job_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @router.get("/cron/jobs/{job_id}/runs", response_model=CronRunsPageView, summary="运行记录")
+    def list_cron_runs(job_id: str,
+                       offset: int = Query(default=0, ge=0, le=100000),
+                       limit: int = Query(default=20, ge=1, le=100)) -> CronRunsPageView:
+        try:
+            return service.get_cron_runs(job_id, offset=offset, limit=limit)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     @router.post("/sessions/{session_id}/attachments", response_model=AttachmentView,
                  summary="上传一张图片（base64）", responses=_NOT_FOUND)
@@ -372,13 +559,20 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         """仅移除工作区登记，保留磁盘目录与全部会话。"""
         service.remove_workspace(workspace_id)
 
-    @router.get("/sessions", response_model=list[SessionSummaryView], summary="会话列表")
+    @router.get("/sessions", response_model=list[SessionSummaryView], summary="会话列表或搜索")
     def list_sessions(
         workspace_id: str | None = Query(default=None, min_length=1, max_length=128),
         archived: bool = Query(default=False),
+        q: str = Query(default="", max_length=200),
+        limit: int | None = Query(default=None, ge=1, le=100),
     ) -> list[SessionSummaryView]:
-        """`workspace_id` 缺省表示列出全部会话。"""
-        return service.list_sessions(workspace_id=workspace_id, archived=archived)
+        """`workspace_id` 缺省表示列出全部会话。
+
+        `q` 非空时改为搜索（§15.11.2）：匹配标题与用户提问，按最近活动倒序。
+        **不传 `q` 时行为与响应和旧实现完全一致**，`limit` 也只在搜索分支生效。
+        """
+        return service.list_sessions(workspace_id=workspace_id, archived=archived,
+                                     query=q, limit=limit)
 
     @router.patch("/sessions/{session_id}", response_model=SessionSummaryView, responses=_NOT_FOUND)
     def rename_session(session_id: str, payload: RenameRequest) -> SessionSummaryView:
@@ -401,11 +595,38 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         """取消在跑的任务（§17.4）：**幂等**，没有可取消的任务时返回当时的结局。"""
         return service.cancel_task(session_id, payload.reason)
 
+    @router.post(
+        "/sessions/{session_id}/commands/{command_id}/detach",
+        responses=_NOT_FOUND,
+        summary="把正在前台等待的命令转入后台",
+    )
+    def detach_command(session_id: str, command_id: str) -> dict[str, bool]:
+        """只发"转后台"信号，不结束进程（2026-10-21）。
+
+        返回 ``{"detached": false}`` 表示这条命令已经不在等（跑完了、或 id 对不上）——
+        页面据此说"这条命令已经结束"，而不是假装它还在后台。
+        """
+        return {"detached": service.detach_command(session_id, command_id)}
+
     @router.post("/sessions/{session_id}/archive", response_model=SessionSummaryView, responses=_STATE_CONFLICT)
     def archive_session(session_id: str) -> SessionSummaryView:
         return service.archive_session(session_id)
 
     # ---- 任务中心（T62；§17.6）--------------------------------------------------
+
+    @router.post("/tasks/{job_id}/review", summary="人工核对结案")
+    def close_task_review(job_id: str, payload: ResolveTaskReviewRequest) -> dict[str, str]:
+        """把 `needs_review` 的任务结案（§17.1 唯一例外）。
+
+        没有这个入口，那条任务**出不去终态**，会话会永远挂在侧栏的「需人工核对」上。
+        """
+        try:
+            state = service.close_task_review(job_id, outcome=payload.outcome)
+        except LookupError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except JobStoreError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"job_id": job_id, "state": state}
 
     @router.get("/tasks", response_model=TaskCenterView,
                 summary="任务中心（只读索引，不读会话 Checkpoint）")
@@ -450,6 +671,32 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     def get_session(session_id: str) -> SessionSnapshot:
         """只读快照；刷新与重连都以它为准（§15.3）。"""
         return service.get_session_snapshot(session_id)
+
+    @router.get(
+        "/sessions/{session_id}/changes",
+        response_model=SessionChangesView,
+        responses=_NOT_FOUND,
+        summary="会话内文件变更总览",
+    )
+    def session_changes(session_id: str) -> SessionChangesView:
+        """按轮分组的"改了哪些文件、各改了几行"（2026-10-21）。
+
+        数据来自变更账本（写盘时记账 + 首次改动前留基线），**不是**从工具消息里的事件拼出来的：
+        一个文件被 edit 四次时，事件里只有四段互不相干的片段。
+        """
+        return service.session_changes(session_id)
+
+    @router.get(
+        "/sessions/{session_id}/changes/diff",
+        response_model=FileChangeDiffView,
+        responses=_NOT_FOUND,
+        summary="单个文件的整文件 diff",
+    )
+    def session_change_diff(
+        session_id: str, path: str = Query(..., max_length=PATH_MAX_CHARS)
+    ) -> FileChangeDiffView:
+        """``baseline``（首次改动前原文）对当前磁盘内容，覆盖整个文件。"""
+        return service.session_change_diff(session_id, path)
 
     @router.post(
         "/sessions/{session_id}/messages",
@@ -683,6 +930,67 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     def remove_skill_root(path: str = Query(min_length=1)) -> SkillsView:
         """只允许移除**用户自己添加**的根；随包与个人级根按契约不可删。"""
         return service.remove_skill_root(path)
+
+    # ---- MCP 外部工具（2026-10-20；契约 §6.13）--------------------------------
+    # 这一组**必须显示工具名**（与能力面板§16.6 相反）：工具名是用户自己配的外部资产，
+    # 不显示出来他就没法核对"这个 server 到底暴露了什么"。凭据（``env``）永不出现在任何响应里。
+
+    @router.get("/mcp", response_model=McpView, summary="MCP Server、工具清单与规模统计")
+    def mcp() -> McpView:
+        """每台 server 的状态、工具与"多少按需检索"（**每次现算**）。
+
+        ``config_error`` 每次重读 ``mcp.json`` 现算：改坏文件后刷新页面就能看到第几行错了。
+        """
+        return service.mcp_view()
+
+    @router.post(
+        "/mcp/servers",
+        response_model=McpView,
+        responses=_MCP_WRITE_RESPONSES,
+        summary="新增一台 MCP Server",
+    )
+    def add_mcp_server(payload: McpServerCreateRequest) -> McpView:
+        """把一台只走 stdio 的 server 写进 ``mcp.json``（已存在的同名会被拒）。
+
+        `env` 里的凭据**只写不回读**：响应与日志都没有它们。写完立即重载连接管理器。
+        """
+        return service.add_mcp_server(payload.model_dump())
+
+    @router.put(
+        "/mcp/servers/{name}",
+        response_model=McpView,
+        responses=_MCP_WRITE_RESPONSES,
+        summary="改一台 MCP Server 的开关或工具名单",
+    )
+    def set_mcp_server(name: str, payload: McpServerRequest) -> McpView:
+        """打开/关闭一台 server，或收窄它的工具名单：**保存即生效、作用于下一轮**。
+
+        只带本次动过的键；显式传 ``enabled_tools: null`` 表示"取消白名单"。响应是保存后的完整视图。
+        """
+        return service.set_mcp_server(name, payload.model_dump(exclude_unset=True))
+
+    @router.put("/mcp/servers/{name}/spec", response_model=McpView,
+                responses=_MCP_WRITE_RESPONSES, summary="编辑 MCP Server 连接方式")
+    def edit_mcp_server(name: str, payload: McpServerSpecRequest) -> McpView:
+        return service.edit_mcp_server(name, payload.model_dump(exclude_unset=True))
+
+    @router.delete("/mcp/servers/{name}", response_model=McpView,
+                   responses=_MCP_WRITE_RESPONSES, summary="删除 MCP Server")
+    def delete_mcp_server(name: str) -> McpView:
+        return service.delete_mcp_server(name)
+
+    @router.post(
+        "/mcp/reload",
+        response_model=McpView,
+        responses=_MCP_WRITE_RESPONSES,
+        summary="重读 mcp.json",
+    )
+    def reload_mcp() -> McpView:
+        """重读配置文件并让连接管理器换一份（"添加 server"之后走这里）。
+
+        与保存开关不同，这一步**会断开**新配置里已经不存在的 server，并清掉它的工具目录。
+        """
+        return service.reload_mcp()
 
     # ---- 权限（T38；§1.5）------------------------------------------------------
     # 这组接口只读写"工作区外路径"的档位与授权条目：档位存设置库（`config.yaml` 只是出厂默认），

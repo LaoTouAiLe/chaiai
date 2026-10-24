@@ -13,10 +13,12 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -69,6 +71,31 @@ def test_save_full_writes_every_match_and_keeps_the_preview_capped(
     spilled = (tmp_path / locator).read_text(encoding="utf-8").splitlines()
     assert len(spilled) == total
     assert spilled[0].startswith("f0.py:1:target line")
+
+
+def test_spill_keeps_exactly_the_workspace_text_it_came_from(
+    tmp_path: Path, policy: SecurityPolicy
+) -> None:
+    """落盘检索结果**保留原文**（§20.3）：它写的就是工作区里已有的那一行，**不新增暴露面**。
+
+    这是"落盘算本机文件、允许原文"这条判断的依据本身，所以要被用例钉住——包括密钥**样式**串：
+    它在源文件里本来就有，落盘只是同一份文本的副本（目录自忽略、不进检索，见相邻用例）。
+    **刻意不在写盘前脱敏**：那样模型随后用 `read_file` 读 locator 会读到与工具结果不一致的文本，
+    属于悄悄改变模型所见（§20.3 写明这一取舍）。
+    """
+    # 形状像密钥、但明确是占位符：前缀写 EXAMPLE，避免被密钥扫描器当成真实泄露
+    # （`sk-live...` 会被 gitleaks 一类工具判为 OpenAI key，开源的 CI 会因此红）。
+    secret = "sk-EXAMPLE-not-a-real-key"
+    source_line = f'token = "{secret}"'
+    _write(tmp_path, "config.py", f"{source_line}\n")
+
+    result = search_tools.grep_content("token", policy=policy, max_matches=1, save_full=True)
+
+    locator = _locator(result.note)
+    spilled = (tmp_path / locator).read_text(encoding="utf-8").splitlines()
+    # 逐字相同：落盘那一行 == 源文件那一行（连"是同一份文本"这件事本身也被断言了）。
+    assert spilled == [f"config.py:1:{source_line}"]
+    assert (tmp_path / "config.py").read_text(encoding="utf-8").splitlines()[0] == source_line
 
 
 def test_locator_is_readable_through_the_existing_read_tool(
@@ -137,6 +164,61 @@ def test_save_result_reports_failure_instead_of_raising(tmp_path: Path) -> None:
     ) is None
 
 
+@pytest.mark.parametrize("failure", ["write", "close", "replace"])
+@pytest.mark.parametrize("has_old_result", [False, True])
+def test_midwrite_failure_preserves_old_result_and_cleans_temporary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, has_old_result: bool,
+) -> None:
+    """真文件已写入后失败：不留下半成品，不截断已发出的旧 locator。"""
+    arguments = {"workspace_root": tmp_path, "kind": "grep", "key": "midwrite", "complete": True}
+    target = tmp_path / SPILL_DIR / "grep-midwrite.txt"
+    if has_old_result:
+        assert result_spill.save_result(**arguments, lines=["旧完整结果"]) is not None
+    old_bytes = target.read_bytes() if has_old_result else None
+    real_open = Path.open
+    real_replace = Path.replace
+
+    class FailingHandle:
+        def __init__(self, handle: Any) -> None:
+            self.handle = handle
+            self.writes = 0
+
+        def __enter__(self) -> Any:
+            return self
+
+        def write(self, value: str) -> int:
+            if self.writes and failure == "write":
+                raise OSError(errno.ENOSPC, "write: no space left")
+            self.writes += 1
+            size = self.handle.write(value)
+            self.handle.flush()
+            return size
+
+        def __exit__(self, *_args: object) -> None:
+            self.handle.close()
+            if failure == "close":
+                raise OSError(errno.ENOSPC, "close: no space left")
+
+    def failing_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+        handle = real_open(path, *args, **kwargs)
+        return FailingHandle(handle) if path.suffix == ".tmp" else handle
+
+    def failing_replace(path: Path, destination: Any) -> Path:
+        if path.suffix == ".tmp" and failure == "replace":
+            raise OSError(errno.ENOSPC, "replace: no space left")
+        return real_replace(path, destination)
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    monkeypatch.setattr(Path, "replace", failing_replace)
+    assert result_spill.save_result(**arguments, lines=["新内容", "剩余内容"]) is None
+    assert target.exists() is has_old_result
+    if has_old_result:
+        assert target.read_bytes() == old_bytes
+    assert sorted(p.name for p in target.parent.iterdir()) == (
+        [".gitignore", "grep-midwrite.txt"] if has_old_result else [".gitignore"]
+    )
+
+
 def test_default_writes_nothing_and_is_unchanged(
     tmp_path: Path, policy: SecurityPolicy
 ) -> None:
@@ -158,9 +240,7 @@ def test_incomplete_collect_is_labeled_in_the_note(
 ) -> None:
     """收集自己触到扫描上限时，"落盘结果也不完整"必须一起说出来（不许让 locator 显得无所不能）。"""
     _many_matches(tmp_path, files=3, per_file=1)
-    monkeypatch.setattr(search_tools, "MAX_SCAN_FILES", 1)
-
-    result = search_tools.grep_content("target", policy=policy, save_full=True)
+    result = search_tools.grep_content("target", policy=policy, save_full=True, max_scan_files=1)
 
     assert result.truncated is True
     assert "已达文件数上限 1" in (result.note or "")

@@ -540,7 +540,11 @@ def test_example_config_keeps_embedding_disabled(app_config: AppConfig) -> None:
     assert config.enabled is False
     assert app_config.memory.medium_term.enabled is False
     assert config.provider == "onnx_local"
-    assert Path(config.cache_dir).is_absolute()
+    # **2026-10-16：示例里的 cache_dir 刻意留空**。它原来是开发机的绝对路径，朋友照抄到自己的机器上
+    # 只会"下不动模型"，而模板的职责是给出形状、不是给出某台机器的实情。
+    # "打开 embedding 时必须绝对路径"仍由上面那条用例钉着（`embedding.cache_dir` 的校验器），
+    # 所以放宽的只有"示例本身"，不是"运行要求"。
+    assert config.cache_dir == ""
 
     with pytest.raises(EmbeddingUnavailableError):
         embedding_module.build_embedding_function(config)

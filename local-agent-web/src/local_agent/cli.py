@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from local_agent import config as config_module
-from local_agent.api.container import resolve_memory_paths
+from local_agent.api.container import resolve_memory_paths, resolve_skill_paths
 from local_agent.config import AppConfig, ConfigError
 from local_agent.exceptions import EmbeddingError, MemoryStoreError
 from local_agent.llm import embedding as embedding_module
@@ -310,7 +310,9 @@ def _load_config(path: str | None) -> AppConfig:
         )
     # 记忆库路径按**配置文件所在目录**展开（§8）：不展开的话，从别的目录执行 `memory list`
     # 会打开另一个库、把"记忆是空的"显示成事实。
-    return resolve_memory_paths(config_module.load_config(target), target.resolve().parent)
+    base = target.resolve().parent
+    # 技能发现根与记忆库路径同一口径：相对路径按配置文件所在目录展开（2026-10-16）。
+    return resolve_skill_paths(resolve_memory_paths(config_module.load_config(target), base), base)
 
 
 def _open_long(config: AppConfig) -> long_term.LongTermStore | None:

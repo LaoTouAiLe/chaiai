@@ -502,7 +502,7 @@ test('the model menu states that a switch applies to the next submit only', asyn
   await expect(page.getByRole('region', { name: '模型选择' })).toBeVisible()
   await expect(page.getByText('已选择 模型 B · 从下一轮开始生效。')).toBeVisible()
   await expect(page.getByText('正在运行的一轮：模型 A（本轮已固定）')).toBeVisible()
-  await expect(page.locator('[aria-pressed="true"]')).toHaveCount(1)
+  await expect(page.getByRole('region', { name: '模型选择' }).locator('[aria-pressed="true"]')).toHaveCount(1)
   // The chip is the selector, so it must agree with the menu and not with the
   // still-pinned running turn.
   await expect(page.getByRole('button', { name: '模型 B · 上下文 200k' })).toBeVisible()

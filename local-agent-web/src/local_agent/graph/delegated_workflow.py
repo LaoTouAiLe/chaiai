@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -12,7 +12,7 @@ from pathlib import Path, PurePosixPath
 from threading import Timer
 from typing import Any, TypedDict, cast
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
@@ -23,18 +23,16 @@ from local_agent.cancellation import CancellationToken
 from local_agent.capabilities import readonly_child_capabilities
 from local_agent.config import WorkflowsConfig
 from local_agent.exceptions import SecurityError
-from local_agent.graph.readonly_workflow import build_readonly_subgraph
 from local_agent.graph.state import AgentState, EvidenceReference, ReflectionResult, RuntimeContext
 from local_agent.llm.usage_recording import (
     ModelCallRecord,
     ModelCallRecorder,
-    record_model_call,
     use_model_recorder,
 )
 from local_agent.llm.workflow_model import single_attempt_model
 from local_agent.security.path_guard import ExternalPathPolicy
 from local_agent.security.policy import SecurityPolicy
-from local_agent.session_kind import SESSION_KIND_SUBAGENT
+from local_agent.tools.delegate_tools import ChildOutcome, DelegatedResearchResult
 from local_agent.tools.tool_registry import ToolRegistry
 from local_agent.workflow_contracts import (
     DELEGATED_RESEARCH,
@@ -43,7 +41,6 @@ from local_agent.workflow_contracts import (
     ChildResearchTask,
     DelegatedResearchRequest,
     DelegatedWorkflowState,
-    ReadonlyResearchRequest,
     WorkflowReference,
 )
 
@@ -83,6 +80,7 @@ class _PreparedChild:
     input_bound: int
     output_bound: int
     limits: WorkflowsConfig
+    autonomous: bool = False
 
 
 @dataclass
@@ -143,9 +141,11 @@ def _fail(data: DelegatedWorkflowState, reason: str, limit: int = 20000) -> Agen
             "reflection_result": ReflectionResult(goal_achieved=False, result_trust="failed", next_action="ask_user")}
 
 
-def _prepare(state: AgentState, context: RuntimeContext) -> list[_PreparedChild]:
+def _prepare(
+    state: AgentState, context: RuntimeContext, *, require_enabled: bool = True
+) -> list[_PreparedChild]:
     limits = context.app_config.workflows
-    if not limits.enabled or state.get("session_mode") != "agent":
+    if (require_enabled and not limits.enabled) or state.get("session_mode") != "agent":
         raise ValueError("工作流未启用或不是 Agent 模式")
     if context.readonly_research is not None or context.code_change is not None:
         raise ValueError("工作流请求必须互斥")
@@ -164,6 +164,11 @@ def _prepare(state: AgentState, context: RuntimeContext) -> list[_PreparedChild]
     if child_steps < 1 or any(value < 1 for value in shares.values()):
         raise ValueError("父总预算不足以预留子任务份额")
     child_limits = limits.model_copy(update={**shares, "max_steps": child_steps})
+    if not require_enabled:
+        # 工具触发路径（§18.7）：开门的是上游那个能力开关，而子图自身还会检查 `workflows.enabled`
+        # （`readonly_workflow` 的入口门）。给**子上下文**打开它，否则子 Agent 会因为一个与它无关的
+        # 总开关而失败；父这一侧的门已经由 `_prepare` / `dispatch_delegation` 按能力开关把住了。
+        child_limits = child_limits.model_copy(update={"enabled": True})
     llm = context.app_config.llm
     output_bound = min(limits.max_model_output_tokens, llm.max_tokens)
     policy = context.security_policy
@@ -179,7 +184,7 @@ def _prepare(state: AgentState, context: RuntimeContext) -> list[_PreparedChild]
         if input_bound + output_bound > min(shares["max_model_tokens"], llm.context_window_tokens):
             raise ValueError("模型 Token 预留超过父总预算份额或连接窗口")
         prepared.append(_PreparedChild(task, root, f"{state['run_id']}:child:{index}",
-                                       input_bound, output_bound, child_limits))
+                                       input_bound, output_bound, child_limits, state.get("agent_loop_version") == 1))
     return prepared
 
 
@@ -191,17 +196,25 @@ def _child_context(parent: RuntimeContext, item: _PreparedChild, token: Cancella
         raise ValueError("缺少父安全策略")
     config.security = parent.security_policy.security.model_copy(deep=True)
     config.workspace = parent.security_policy.workspace.model_copy(deep=True)
-    config.web_access.enabled = config.git.enabled = config.skills.enabled = False
+    config.web_access.enabled = item.autonomous and "web" in parent.agent_capabilities
+    # MCP **有意不给子 Agent**（2026-10-20；契约 §6.13）：外部工具跑在本机第三方进程里、副作用在远端，
+    # 而子 Agent 是只读档、没有人盯着它的审批卡。下面构建注册表时也不传 `mcp_tools`——两层都不给，
+    # 能力集那边另由 `readonly_child_capabilities` 收窄。
+    config.git.enabled = config.skills.enabled = False
     config.agents.enabled = config.rag.enabled = config.embedding.enabled = False
     config.memory.medium_term.enabled = config.memory.long_term.enabled = config.memory.compression.enabled = False
+    # 只读档本身允许外部读取；委派另以内部 workspace_only 约束指定 scope，不继承父授权。
     policy = SecurityPolicy.from_config(config, workspace_root=item.root,
-        external_policy=ExternalPathPolicy(mode="deny"), cancellation=token, allow_result_spill=False)
+        external_policy=ExternalPathPolicy(mode="read-only", workspace_only=True),
+        cancellation=token, allow_result_spill=False)
     registry = ToolRegistry.build(policy, web_access=config.web_access, git=config.git, skills=config.skills)
     return replace(parent, app_config=config, workspace_root=item.root, current_cwd=item.root,
-                   agent_capabilities=readonly_child_capabilities(parent.agent_capabilities),
+                   agent_capabilities=(readonly_child_capabilities(parent.agent_capabilities) if item.autonomous else
+                       tuple(cap for cap in parent.agent_capabilities if cap in {"files_read", "code_search"})),
                    agents_context=None, user_id=None, request_id=item.child_id,
                    security_policy=policy, tool_registry=registry, usage_recorder=None,
-                   cancellation=token, readonly_research=None, code_change=None, delegated_research=None, child_index=None)
+                   cancellation=token, readonly_research=None, code_change=None, delegated_research=None,
+                   child_index=None, delegation_audit=None)
 
 
 def _recorder(parent: RuntimeContext, child_id: str) -> ModelCallRecorder | None:
@@ -216,6 +229,95 @@ def _recorder(parent: RuntimeContext, child_id: str) -> ModelCallRecorder | None
 
 
 def _run_child(parent: RuntimeContext, item: _PreparedChild) -> _ChildResult:
+    """独立工具循环；旧冻结规格继续按原只读协议恢复。"""
+    if not item.autonomous:
+        return _run_legacy_child(parent, item)
+    from local_agent.graph import nodes
+
+    token = CancellationToken()
+    if parent.cancellation is not None:
+        def cancel_child(_reason: str) -> None:
+            token.cancel("父任务已取消")
+        parent.cancellation.add_cancel_hook(cancel_child)
+    timer = Timer(parent.app_config.workflows.child_timeout_seconds, lambda: token.cancel("子任务超时"))
+    timer.daemon = True
+    report: ChildResearchReport = {"child_id": item.child_id, "scope": item.task.scope,
+        "status": "failed", "steps": 0, "tool_calls": 0, "model_calls": 0,
+        "model_tokens_reserved": item.input_bound + item.output_bound, "references": [], "error": None,
+        "answer": ""}
+    state: AgentState = {}
+    recorder = _recorder(parent, item.child_id)
+    timer.start()
+    try:
+        context = _child_context(parent, item, token)
+        context = replace(context, model_adapter=single_attempt_model(parent.model_adapter,
+            timeout=parent.app_config.workflows.child_timeout_seconds))
+        graph = StateGraph(AgentState, context_schema=RuntimeContext)
+        graph.add_node("compress", nodes.compression_node)
+        graph.add_node("decide", nodes.agent_decision_node)
+        graph.add_node("safety", nodes.safety_gate_node)
+        graph.add_node("execute", nodes.tool_execution_node)
+        graph.add_node("observe", nodes.reflection_node)
+        graph.add_edge(START, "compress")
+        graph.add_edge("compress", "decide")
+        graph.add_edge("decide", "safety")
+        graph.add_conditional_edges("safety", lambda current: "observe" if (
+            current.get("pending_approval") or not current.get("pending_tool_calls")
+        ) else "execute", {"observe": "observe", "execute": "execute"})
+        graph.add_edge("execute", "observe")
+
+        def route(current: AgentState) -> str:
+            if token.cancelled or current.get("task_status") in {"completed", "blocked", "cancelled"}:
+                return "done"
+            if current.get("pending_approval"):
+                return "done"
+            if int(current.get("loop_count", 0)) >= item.limits.max_steps:
+                return "done"
+            if len(current.get("tool_events", [])) >= item.limits.max_tool_calls:
+                return "done"
+            return "continue"
+
+        graph.add_conditional_edges("observe", route, {"done": END, "continue": "compress"})
+        initial: AgentState = {"run_id": item.child_id, "run_user_message_id": f"{item.child_id}:user",
+            "session_mode": "agent", "session_kind": "subagent",
+            "agent_loop_version": 1, "mode": "tool", "task_status": "running",
+            "model_next_action": "continue", "loop_count": 0, "max_loop_count": None,
+            "task_goal": item.task.question, "user_input": item.task.question,
+            "messages": [HumanMessage(content=item.task.question, id=f"{item.child_id}:user")]}
+        with use_model_recorder(recorder):
+            for value in graph.compile().stream(initial, context=context, stream_mode="values",
+                    config={"recursion_limit": (item.limits.max_steps + 2) * 6}):
+                state = cast(AgentState, value)
+        if token.cancelled:
+            raise ValueError(token.reason)
+        report.update({"steps": int(state.get("loop_count", 0)),
+                       "tool_calls": len(state.get("tool_events", [])),
+                       "model_calls": int(state.get("loop_count", 0))})
+        if state.get("task_status") != "completed":
+            raise ValueError("子任务尚未完成、请求额外权限或达到配置资源额度")
+        report.update({"status": "completed", "answer": str(state.get("model_final_response") or "")})
+        state["workflow"] = {"name": "autonomous_research", "run_id": item.child_id,
+                             "phase": "completed", "references": []}  # type: ignore[typeddict-item]
+    except Exception as exc:  # noqa: BLE001 - 返回真实错误与已发生审计，不自动重放子任务。
+        reason = (token.reason or "子任务已取消") if token.cancelled else str(exc)
+        report["error"] = reason[:512] or type(exc).__name__
+    finally:
+        timer.cancel()
+        report["steps"] = int(state.get("loop_count", report["steps"]))
+        report["tool_calls"] = len(state.get("tool_events", []))
+        report["model_calls"] = int(state.get("loop_count", report["model_calls"]))
+    return _ChildResult(report, state, recorder.finished_records() if recorder is not None else [])
+
+
+def _run_legacy_child(parent: RuntimeContext, item: _PreparedChild) -> _ChildResult:
+    """只用于没有自主循环标记的旧冻结子任务，避免恢复时更换协议或重放操作。"""
+    from langchain_core.messages import SystemMessage
+
+    from local_agent.graph.readonly_workflow import build_readonly_subgraph
+    from local_agent.llm.protocol import describe_parse_failure, parse_structured
+    from local_agent.llm.usage_recording import record_model_call
+    from local_agent.workflow_contracts import ReadonlyResearchRequest
+
     token = CancellationToken()
     if parent.cancellation is not None:
         def cancel_child(_reason: str) -> None:
@@ -252,30 +354,34 @@ def _run_child(parent: RuntimeContext, item: _PreparedChild) -> _ChildResult:
                 or isinstance(actual_input, int) and actual_input > item.input_bound
                 or isinstance(actual_output, int) and actual_output > item.output_bound):
             raise ValueError("模型响应超过预留额度")
-        plan = ReadonlyResearchRequest.model_validate_json(response.content)
+        try:
+            plan = parse_structured(response, ReadonlyResearchRequest)
+        except (ValidationError, ValueError) as exc:
+            raise ValueError(f"检索计划不可用：{describe_parse_failure(exc)}") from exc
         context.readonly_research = plan.model_dump()
-        # 独立 State，无父历史、审批、记忆或委派入口。原只读图没有模型/记忆节点。
         for snapshot in build_readonly_subgraph(lambda _name, node: node).stream({
-            "run_id": item.child_id, "session_mode": "agent", "session_kind": SESSION_KIND_SUBAGENT,
+            "run_id": item.child_id, "session_mode": "agent", "session_kind": "subagent",
             "user_input": item.task.question, "messages": [],
         }, context=context, stream_mode="values"):
             state = snapshot
         data: dict[str, Any] = dict(state.get("workflow") or {})
-        report.update({"steps": 2 + int(data.get("steps", 0)),
-                       "tool_calls": int(data.get("tool_calls", 0))})
+        report.update({"steps": 2 + int(data.get("steps", 0)), "tool_calls": int(data.get("tool_calls", 0))})
         if token.cancelled:
             raise ValueError(token.reason)
         if state.get("task_status") != "completed":
             raise ValueError(str(data.get("error") or "缺少证据"))
         report.update({"status": "completed", "references": cast(list[WorkflowReference], data.get("references", []))})
-    except Exception as exc:  # noqa: BLE001 - 子失败收口，保留原审计，不重试、不写文件。
-        report["error"] = (token.reason if token.cancelled else (
-            str(exc) if isinstance(exc, ValueError) and not isinstance(exc, ValidationError)
-            else f"子执行异常（{type(exc).__name__}）"))
+    except Exception as exc:  # noqa: BLE001 - 保留旧协议错误语义与审计。
+        if token.cancelled:
+            report["error"] = token.reason
+        elif isinstance(exc, ValueError) and not isinstance(exc, ValidationError):
+            report["error"] = str(exc)
+        elif isinstance(exc, ValidationError):
+            report["error"] = f"子执行异常（{describe_parse_failure(exc)}）"
+        else:
+            report["error"] = f"子执行异常（{type(exc).__name__}）"
         report["error"] = (report["error"] or "子任务失败")[:256]
     finally:
-        data = dict(state.get("workflow") or {})
-        report.update({"steps": 2 + int(data.get("steps", 0)), "tool_calls": int(data.get("tool_calls", 0))})
         timer.cancel()
     return _ChildResult(report, state, recorder.finished_records() if recorder is not None else [])
 
@@ -284,9 +390,11 @@ def _validate_references(item: _PreparedChild, state: AgentState, context: Runti
     """父收口前复核成功事件、完整正文与实际文件，不信子模型的自述。"""
     data = dict(state.get("workflow") or {})
     if (state.get("run_id") != item.child_id or state.get("task_status") != "completed"
-            or data.get("name") != READONLY_RESEARCH or data.get("phase") != "completed"
+            or data.get("name") not in {READONLY_RESEARCH, "autonomous_research"} or data.get("phase") != "completed"
             or data.get("run_id") != item.child_id):
         raise ValueError("子任务终态与身份不能核对")
+    if data.get("name") == "autonomous_research":
+        return []
     references = data.get("references")
     if not isinstance(references, list) or not references or context.security_policy is None:
         raise ValueError("缺少子任务原文证据")
@@ -331,11 +439,18 @@ def _validate_references(item: _PreparedChild, state: AgentState, context: Runti
     return verified
 
 
-def reserve(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
+def prepare_delegation(
+    state: AgentState, context: RuntimeContext, *, require_enabled: bool = True
+) -> AgentState:
+    """`reserve` 节点的实现体（§18.3）：在任何调用之前把子任务份额与解析后的目录固定下来。
+
+    ``require_enabled=False`` 只给**工具触发路径**用（§18.7）：那条路的闸门是页面上的能力开关
+    （模型能看见 `delegate_research` 就说明开关是开的），而 `workflows.enabled` 是**显式图入口**的
+    闸门。两条路共用同一份资源上限（`workflows` 段），只是"谁来开门"不同。
+    """
     data = _blank(state)
-    context = runtime.context
     try:
-        prepared = _prepare(state, context)
+        prepared = _prepare(state, context, require_enabled=require_enabled)
     except (ValidationError, ValueError, SecurityError) as exc:
         reason = "输入校验失败" if isinstance(exc, ValidationError) else str(exc)
         return _fail(data, f"输入或预留失败：{reason}", context.app_config.workflows.max_report_chars)
@@ -343,18 +458,34 @@ def reserve(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
     request = DelegatedResearchRequest.model_validate(context.delegated_research)
     data["request"] = request.model_dump()
     data["child_specs"] = [{"task": item.task.model_dump(), "root": str(item.root), "child_id": item.child_id,
-        "input_bound": item.input_bound, "output_bound": item.output_bound, "limits": item.limits.model_dump()}
+        "input_bound": item.input_bound, "output_bound": item.output_bound, "limits": item.limits.model_dump(),
+        "autonomous": item.autonomous}
         for item in prepared]
     return {"workflow": data, "task_status": "running"}
 
 
+def reserve(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
+    """显式图入口的 `reserve` 节点（§18.3）：默认要求 `workflows.enabled`。"""
+    return prepare_delegation(state, runtime.context)
+
+
 def _from_spec(spec: dict[str, Any]) -> _PreparedChild:
     return _PreparedChild(ChildResearchTask.model_validate(spec["task"]), Path(spec["root"]), spec["child_id"],
-                          spec["input_bound"], spec["output_bound"], WorkflowsConfig.model_validate(spec["limits"]))
+                          spec["input_bound"], spec["output_bound"], WorkflowsConfig.model_validate(spec["limits"]), bool(spec.get("autonomous")))
 
 
 def dispatch(state: AgentState, runtime: Runtime[RuntimeContext], *, checkpointer: BaseCheckpointSaver | None = None) -> AgentState:
-    context = runtime.context
+    """显式图入口的 `dispatch` 节点（§18.3）。"""
+    return dispatch_delegation(state, runtime.context, checkpointer=checkpointer)
+
+
+def dispatch_delegation(
+    state: AgentState,
+    context: RuntimeContext,
+    *,
+    checkpointer: BaseCheckpointSaver | None = None,
+    require_enabled: bool = True,
+) -> AgentState:
     data = cast(DelegatedWorkflowState | None, state.get("workflow"))
     if data is None or not data.get("child_specs"):
         return _fail(_blank(state), "旧委派检查点缺少冻结规格，请人工核对后重新提交")
@@ -366,7 +497,9 @@ def dispatch(state: AgentState, runtime: Runtime[RuntimeContext], *, checkpointe
             raise ValueError("冻结身份不匹配")
         if not {"files_read", "code_search"} <= set(readonly_child_capabilities(context.agent_capabilities)):
             raise ValueError("当前父能力不足")
-        if not context.app_config.workflows.enabled or state.get("session_mode") != "agent":
+        # `require_enabled=False` 只给工具触发路径（§18.7）：那条路的闸门是能力开关，不是
+        # `workflows.enabled`（显式图入口的闸门）。见 `prepare_delegation` 的同一处说明。
+        if (require_enabled and not context.app_config.workflows.enabled) or state.get("session_mode") != "agent":
             raise ValueError("工作流已停用或模式不符")
         for index, item in enumerate(prepared, 1):
             if (item.child_id != f"{state['run_id']}:child:{index}" or item.task != request.tasks[index - 1]
@@ -418,32 +551,151 @@ def dispatch(state: AgentState, runtime: Runtime[RuntimeContext], *, checkpointe
 
 
 def report(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
+    """显式图入口的 `report` 节点（§18.3）。"""
+    return report_delegation(state, runtime.context)
+
+
+def report_delegation(state: AgentState, context: RuntimeContext) -> AgentState:
     data = cast(DelegatedWorkflowState | None, state["workflow"])
     if data is None or data["name"] != DELEGATED_RESEARCH:
         raise ValueError("缺少委派状态")
     data = {**data}
     data["steps"] += 1
-    if runtime.context.cancellation is not None and runtime.context.cancellation.cancelled:
-        return _fail(data, "父任务已取消", runtime.context.app_config.workflows.max_report_chars)
+    if context.cancellation is not None and context.cancellation.cancelled:
+        return _fail(data, "父任务已取消", context.app_config.workflows.max_report_chars)
     if any(child["status"] != "completed" for child in data["children"]):
         return _fail(data, "；".join(f"{child['child_id']} {child['error']}" for child in data["children"]
-                                   if child["status"] != "completed"), runtime.context.app_config.workflows.max_report_chars)
+                                   if child["status"] != "completed"), context.app_config.workflows.max_report_chars)
     references: list[WorkflowReference] = []
     for child in data["children"]:
         for ref in child["references"]:
             path = ref["path"] if child["scope"] == "." else f"{child['scope']}/{ref['path']}"
             references.append({**ref, "path": path})
-    text = "已核对的子任务原文：\n" + "\n".join(f"{ref['text']}（{ref['path']}:{ref['line']}）" for ref in references)
-    if (not references or len(text) > runtime.context.app_config.workflows.max_report_chars
-            or sum(len(ref["text"]) for ref in references) > runtime.context.app_config.workflows.max_evidence_chars):
-        return _fail(data, "没有证据或父报告超过上限", runtime.context.app_config.workflows.max_report_chars)
+    answers = [f"{child['scope']}：{child.get('answer', '')}" for child in data["children"] if child.get("answer")]
+    text = "子任务结果：\n" + "\n".join(answers + [f"{ref['text']}（{ref['path']}:{ref['line']}）" for ref in references])
+    if ((not references and not answers) or len(text) > context.app_config.workflows.max_report_chars
+            or sum(len(ref["text"]) for ref in references) > context.app_config.workflows.max_evidence_chars):
+        return _fail(data, "没有证据或父报告超过上限", context.app_config.workflows.max_report_chars)
     evidence = [EvidenceReference(source_event_id=ref["tool_call_id"], evidence_type="file_hash",
         summary=f"{ref['path']} sha256={ref['sha256']}", verified=True, created_at=datetime.now(timezone.utc))
         for ref in {ref["tool_call_id"]: ref for ref in references}.values()]
     return {"workflow": {**data, "phase": "completed"}, "task_status": "completed",
             "final_response": text, "messages": [AIMessage(content=text)], "final_evidence": evidence,
-            "reflection_result": ReflectionResult(goal_achieved=True, result_trust="verified", next_action="finish",
+            "reflection_result": ReflectionResult(goal_achieved=True, result_trust="verified" if evidence else "uncertain", next_action="finish",
                                                   evidence=tuple(evidence))}
+
+
+def run_delegation(
+    state: AgentState, context: RuntimeContext, *, checkpointer: BaseCheckpointSaver | None = None
+) -> AgentState:
+    """**工具触发路径**（§18.7）：与显式子图共用同一套 reserve → dispatch → report。
+
+    与走子图的差别只有三处，都收在这里，不在别处再写第二套：
+
+    1. **闸门不同**：这条路要求能力开关开着（模型能看见 `delegate_research` 就说明开着），
+       **不要求** ``workflows.enabled``——那是显式图入口的闸门。资源上限两条路共用。
+    2. **不参与子检查点恢复**：工具执行拿不到父图的 saver，所以 ``checkpointer=None``（契约写明）。
+       后果是"父轮次中断后子任务不会从子检查点复用"，如实记在 §18.7，不假装与子图等价。
+    3. **不登记父子身份索引**：工具路径没有父 ``run_id``（它在 State 里，工具拿不到），
+       用 ``child_index=None`` 的上下文副本执行。子任务的轨迹与用量改由**委派审计槽**并回父轮次。
+
+    Returns:
+        累积后的状态片段：失败与成功的形状都与子图一致（``workflow`` / ``task_status`` /
+        ``final_response``，成功时另带 ``final_evidence`` 与 ``reflection_result``），
+        另含由 :func:`dispatch_delegation` 汇入的审计列表。
+    """
+    current: AgentState = {**state}
+    current.update(prepare_delegation(current, context, require_enabled=False))
+    if current.get("task_status") != "running":
+        return current
+    current.update(dispatch_delegation(current, context, checkpointer=checkpointer, require_enabled=False))
+    if current.get("task_status") != "running":
+        return current
+    current.update(report_delegation(current, context))
+    return current
+
+
+def delegation_audit_update(audit: Sequence[Mapping[str, Any]], run_id: str) -> dict[str, Any]:
+    """把一次工具触发委派的审计并成**父 State 的更新**（§18.7）。
+
+    与 :func:`dispatch_delegation` 的返回形状一致：子调用与子事件都改写成父轮次的 ``run_id``，
+    于是整轮用量汇总与轨迹页面不会漏掉这次委派——工具只能给模型返回字符串，这是唯一的通道。
+
+    Args:
+        audit: 委派审计槽里累积的片段（每条含 ``model_call_records`` / ``tool_events`` /
+            ``tool_results`` / ``decision_trace`` / ``error_events`` 的子集）。
+        run_id: 父轮次的 ``run_id``。
+    """
+    update: dict[str, list[Any]] = {}
+    for entry in audit:
+        update.setdefault("model_call_records", []).extend(
+            replace(record, run_id=run_id) for record in entry.get("model_call_records", []))
+        update.setdefault("tool_events", []).extend(
+            replace(event, run_id=run_id) for event in entry.get("tool_events", []))
+        update.setdefault("tool_results", []).extend(
+            {**record, "run_id": run_id} for record in entry.get("tool_results", []))
+        update.setdefault("decision_trace", []).extend(entry.get("decision_trace", []))
+        update.setdefault("error_events", []).extend(
+            {**record, "run_id": run_id} for record in entry.get("error_events", []))
+    return {key: value for key, value in update.items() if value}
+
+
+def make_delegation_runner(context: RuntimeContext) -> Callable[[Sequence[Mapping[str, str]], int], str]:
+    """把一次运行装配成 `delegate_research` 的执行入口（§18.7 的 A 方案：装配时闭包注入）。
+
+    工具执行节点只拿得到调用参数（``_invoke_tool`` 只调 ``tool.invoke(call)``），所以运行依赖
+    （配置、模型、策略、用量录音机、取消信号）由这里带进去。返回的字符串就是工具结果
+    （:class:`~local_agent.tools.delegate_tools.DelegatedResearchResult` 的 JSON）。
+
+    子标识用 ``{request_id}:delegate:child:N``：这条路径没有父 ``run_id``，而同一个请求只会被处理
+    一次，所以它在一轮内唯一、也能从用量明细回溯到这次委派。
+    """
+    def run(tasks: Sequence[Mapping[str, str]], concurrency: int) -> str:
+        request = DelegatedResearchRequest.model_validate(
+            {"tasks": [dict(task) for task in tasks], "concurrency": concurrency}
+        )
+        run_id = f"{context.request_id or 'delegate'}:delegate"
+        # 两处刻意的替换，都用副本，不改父上下文：
+        # - `child_index=None`：不登记父子索引（工具路径没有父 job id，登记会指向一个不存在的父）；
+        # - `delegated_research=...`：`_prepare` 从上下文读子任务规格（与显式选择同一条路），
+        #   而这条路径的选择来自**模型调用参数**。
+        # 注意 `delegation_audit` **不替换**：副本与父上下文共用同一个列表对象，runner 追加进去的就是
+        # 父节点收尾时会排空的那一个（§18.7 的审计通道）。
+        delegated = replace(context, child_index=None, delegated_research=request.model_dump())
+        result = run_delegation({"run_id": run_id, "session_mode": "agent", "agent_loop_version": 1, "messages": []}, delegated)
+        if delegated.delegation_audit is not None:
+            audit = {
+                key: result.get(key) or []
+                for key in ("model_call_records", "tool_events", "tool_results", "decision_trace", "error_events")
+            }
+            if any(audit.values()):
+                delegated.delegation_audit.append(audit)
+        data: dict[str, Any] = dict(result.get("workflow") or {})
+        children = [
+            ChildOutcome(
+                scope=str(child.get("scope") or "."),
+                status="completed" if child.get("status") == "completed" else "failed",
+                # 计数直接搬子报告里已有的字段（§18.3 的子报告本来就算过），不在这一层重算。
+                # `model_tokens_reserved` 刻意不带出来：它是预留上限，不是这一路的实际花费
+                # （2026-10-13 裁定，见 `ChildOutcome` 的说明）。
+                tool_calls=int(child.get("tool_calls") or 0),
+                model_calls=int(child.get("model_calls") or 0),
+                evidence_count=len(child.get("references") or []),
+                error=child.get("error"),
+            )
+            for child in data.get("children") or []
+        ]
+        completed = result.get("task_status") == "completed"
+        report = str(result.get("final_response") or "")
+        note = None if completed else f"本次委派未完成：{data.get('error') or '子任务失败'}。报告里没有结论。"
+        return DelegatedResearchResult(
+            status="completed" if completed else "failed",
+            report=report[: context.app_config.workflows.max_report_chars],
+            children=children,
+            note=note,
+        ).model_dump_json()
+
+    return run
 
 
 def build_delegated_subgraph(wrap: Callable[[str, Callable[..., Any]], Callable[..., Any]],

@@ -86,7 +86,9 @@ def test_v10_identity_index_migration_preserves_v9_rows_and_is_idempotent(tmp_pa
         sessions = SessionStore(connection, workspace_root=tmp_path)
         session = sessions.create(kind="subagent")
         old_job = JobStore(connection).create(session_id=session.session_id)
-        assert migrations.apply_migrations(connection) == migrations.apply_migrations(connection) == 10
+        # 断言"升到最新"而不是某个具体版本号：这条测的是 v10 迁移的可重复性，
+        # 写死 10 会在每次新增迁移（如 v12 定时任务）时误报。
+        assert migrations.apply_migrations(connection) == migrations.apply_migrations(connection) == migrations.CHAT_SCHEMA_VERSION
         store = JobStore(connection, lock=threading.Lock())
         store.link_children(old_job.job_id, "run", ["run:child:1", "run:child:2"])
         store.link_children(old_job.job_id, "run", ["run:child:1", "run:child:2"])
@@ -331,7 +333,8 @@ def test_application_restart_reads_child_proof_and_only_settles_index(tmp_path, 
 @pytest.mark.parametrize("decision", ["approve", "reject", "cancelled"])
 def test_parent_code_approval_reopens_via_original_command_and_persistent_cancel(tmp_path, decision):
     context, model = _code_environment(tmp_path)
-    context.app_config.security.large_edit.max_changed_lines_without_approval = 1
+    context.app_config.security.require_approval.large_batch_edit = True
+    context.app_config.security.large_edit.max_files_without_approval = 0
     path = tmp_path / "approval.sqlite"
     database = open_database(path, workspace_root=tmp_path)
     session = database.sessions.create()

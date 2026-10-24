@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>文档 · chaiai</title>
+<meta name="description" content="chaiai 文档：操作手册与技术实现说明。" />
+<meta name="color-scheme" content="light" />
+<link rel="stylesheet" href="assets/docs.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="../site.html" aria-label="chaiai 官网">
+      <svg class="brand__mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <defs>
+          <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#F8B65C"/><stop offset="1" stop-color="#E77737"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="18" fill="url(#chaiaiWarm)"/>
+        <path d="m16 27-1-13c-.4-3 1.2-4 3.3-2.2l8.7 7.4a16 16 0 0 1 10 0l8.7-7.4c2.1-1.8 3.7-.8 3.3 2.2l-1 13c3 3.2 4 7.2 4 11 0 8.4-8.2 14-20 14-2.4 0-4.7-.2-7-.7L15 55l2.3-10.2C13.9 42.4 12 39.4 12 36c0-3.5 1.4-6.7 4-9Z" fill="#FFF7E9"/>
+        <path d="m19.3 16.8.8 8.4 5.1-3.5Zm25.4 0-.8 8.4-5.1-3.5Z" fill="#BF6A37"/>
+        <path d="M24 32.5v2M40 32.5v2" fill="none" stroke="#633E2B" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M29.2 38.1c-.7-.8-.2-2.1.9-2.1h3.8c1.1 0 1.6 1.3.9 2.1L33 40a1.4 1.4 0 0 1-2 0Z" fill="#633E2B"/>
+        <path d="M26.5 42.2c1.5 1.7 3.3 1.7 5.5-.3 2.2 2 4 2 5.5.3" fill="none" stroke="#633E2B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>chaiai</span>
+      <span class="brand__divider" aria-hidden="true"></span>
+      <span class="brand__label">文档</span>
+    </a>
+    <nav class="topnav" aria-label="站点导航">
+      <a href="index.html" aria-current="page">文档首页</a>
+      <a href="manual/index.html">操作手册</a>
+      <a href="internals/index.html">技术实现</a>
+      <a class="topnav__out" href="../site.html">返回官网</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="sidebar" aria-label="文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="index.html" aria-current="page">概览</a>
+      <a href="manual/index.html">操作手册</a>
+      <a href="internals/index.html">技术实现说明</a>
+    </div>
+    <div class="sidebar__foot"><a href="../site.html">← 返回官网</a></div>
+  </nav>
+
+  <main class="doc">
+    <p class="kicker">OVERVIEW</p>
+    <h1>文档</h1>
+    <p class="lead">
+      分两套写：一套教你把 chaiai 用起来，一套讲清它在代码里是怎么做到的。两套共用同一个口径 ——
+      能做的写清边界，没验证过的标明"未验证"，不拿推测当结论。
+    </p>
+    <div class="meta">
+      <span class="pill pill--brand">适用版本 v1.0</span>
+      <span class="pill">最后更新 2026-10-19</span>
+      <span class="pill">操作手册已更新 · 技术实现待编写</span>
+    </div>
+
+    <div class="entries">
+      <a class="entry" href="manual/index.html">
+        <span class="entry__kicker">MANUAL</span>
+        <h2 class="entry__title">操作手册</h2>
+        <p class="entry__text">安装与启动、连接模型、权限三档、会话地图、数据中台、常见问题。每步都写"跑完应该看到什么"。</p>
+        <p class="entry__meta"><span>8 章 · 已可阅读</span><span class="entry__arrow">阅读 →</span></p>
+      </a>
+      <a class="entry" href="internals/index.html">
+        <span class="entry__kicker">INTERNALS</span>
+        <h2 class="entry__title">技术实现说明</h2>
+        <p class="entry__text">架构、一轮请求的生命周期、安全判据与沙箱、记忆与压缩、浏览器与持久进程。结论落到代码路径。</p>
+        <p class="entry__meta"><span>8 章 · 面向开发者</span><span class="entry__arrow">阅读 →</span></p>
+      </a>
+    </div>
+
+    <div class="note">
+      <strong>当前状态：</strong>操作手册八章已经写完，可以照着操作；技术实现说明的章节已定，正文待写。
+      两套材料共用同一套术语，改章节时先改目录再写正文。
+    </div>
+
+    <section class="chapter" id="order">
+      <h2>阅读顺序建议</h2>
+      <div class="prose">
+        <ul>
+          <li>第一次接触：先看「操作手册」的安装与连接两章，跑通一轮提问，再回头看其余章节。</li>
+          <li>想改代码或排查问题：直接看「技术实现说明」的架构总览与一轮请求的生命周期。</li>
+          <li>两套材料共用一套术语：工作区、轮次、档位、审批、投影，含义在《操作手册》首页的「附：术语」里统一。</li>
+        </ul>
+      </div>
+    </section>
+
+    <nav class="pager" aria-label="翻页">
+      <span></span>
+      <a class="pager__next" href="manual/index.html">
+        <span class="pager__hint">下一篇</span>
+        <span class="pager__title">操作手册 →</span>
+      </a>
+    </nav>
+
+    <p class="pagefoot">最后更新 2026-10-19 · 适用版本 v1.0</p>
+  </main>
+
+  <aside class="aside" aria-label="本页目录">
+    <p class="aside__title">本页目录</p>
+    <a href="#order">阅读顺序建议</a>
+  </aside>
+</div>
+
+</body>
+</html>

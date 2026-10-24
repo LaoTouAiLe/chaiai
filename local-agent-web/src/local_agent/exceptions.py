@@ -15,6 +15,10 @@ class SecurityError(LocalAgentError):
     """安全策略拒绝：路径越界、敏感文件、未放行的工具等。"""
 
 
+class FileOperationError(LocalAgentError):
+    """文件参数、内容或版本状态不满足要求；修正操作即可重试，不属于授权拒绝。"""
+
+
 class WorkspaceBoundaryError(SecurityError):
     """路径解析后位于工作区之外。"""
 
@@ -25,6 +29,13 @@ class SessionStoreError(LocalAgentError):
 
 class JobStoreError(LocalAgentError):
     """任务索引操作被拒绝：任务不存在、状态取值越界、改写终态等（架构 §17.1）。"""
+
+
+class AttachmentError(LocalAgentError):
+    """附件（用户在对话框里上传的图片）的存取与校验失败（2026-10-16）。
+
+    消息面向用户，必须说清"哪里不对、怎么改"（格式不支持 / 太大 / 数量超限 / 引用不合法）。
+    """
 
 
 class MemoryStoreError(LocalAgentError):

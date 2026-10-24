@@ -51,6 +51,8 @@ export function ConnectionForm({ initial, busy, error, onSubmit, onCancel }: Con
   const [timeoutSeconds, setTimeoutSeconds] = useState(String(initial?.timeout_seconds ?? 120))
   const [retryCount, setRetryCount] = useState(String(initial?.retry_count ?? 2))
   const [streaming, setStreaming] = useState(initial?.streaming ?? false)
+  // 逐连接声明"支持图片输入"（2026-10-16）：默认关（失败闭合）——勾错会让带图的请求每轮失败。
+  const [supportsVision, setSupportsVision] = useState(initial?.supports_vision ?? false)
   const [authMode, setAuthMode] = useState<'api_key' | 'none'>(initial?.auth_mode ?? 'api_key')
   const [apiKey, setApiKey] = useState('')
   const [consent, setConsent] = useState(false)
@@ -88,6 +90,7 @@ export function ConnectionForm({ initial, busy, error, onSubmit, onCancel }: Con
         timeout_seconds: Number(timeoutSeconds) || 120,
         retry_count: Number(retryCount) || 0,
         streaming,
+        supports_vision: supportsVision,
         auth_mode: authMode,
         allow_plaintext_http: plaintext ? consent : false,
       },
@@ -214,6 +217,15 @@ export function ConnectionForm({ initial, busy, error, onSubmit, onCancel }: Con
           onChange={(event) => setStreaming(event.target.checked)}
         />
         按增量流式展示最终回答（失败会退化为一次完整回答）
+      </label>
+
+      <label className={styles.checkboxRow}>
+        <input
+          type="checkbox"
+          checked={supportsVision}
+          onChange={(event) => setSupportsVision(event.target.checked)}
+        />
+        这条连接支持图片输入（勾了之后「看图片」工具才会交给模型；不确定就别勾——勾错会让带图的请求失败）
       </label>
 
       {plaintext ? (

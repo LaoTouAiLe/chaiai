@@ -23,7 +23,8 @@ class _Preference(BaseModel):
 
 
 class GeneralPreferences(_Preference):
-    theme: Literal["light", "dark", "system"] = "light"
+    #: 默认跟随系统外观（2026-10-22，页面规范 §12 决策 2）。前端 generalDefaults 同步。
+    theme: Literal["light", "dark", "system"] = "system"
     font_size: Literal["small", "standard", "large"] = "standard"
     animations: bool = True
     send_shortcut: Literal["enter", "ctrl_enter"] = "enter"
@@ -96,6 +97,8 @@ class WebAccessPreferences(_Preference):
     provider: WebAccessProvider = "auto"
     max_results: int = Field(default=5, ge=1, le=20)
     max_chars: int = Field(default=8_000, ge=500, le=100_000)
+    #: 搜索后自动抓取前 N 条的正文首段（2026-10-23）；上下界与 ``WebAccessConfig`` 一致。
+    prefetch_pages: int = Field(default=2, ge=0, le=5)
     max_search_calls: int | None = Field(default=None, ge=1)
     max_read_pages: int | None = Field(default=None, ge=1)
     max_reads_per_page: int | None = Field(default=None, ge=1)
@@ -251,9 +254,9 @@ def initial_preferences(config: AppConfig) -> PreferenceValues:
         ),
         web_access=WebAccessPreferences(
             **config.web_access.model_dump(include={
-                "provider", "max_results", "max_chars", "max_search_calls", "max_read_pages",
-                "max_reads_per_page", "timeout_seconds", "domain_policy",
-                "denied_domains", "allowed_domains",
+                "provider", "max_results", "max_chars", "prefetch_pages",
+                "max_search_calls", "max_read_pages", "max_reads_per_page",
+                "timeout_seconds", "domain_policy", "denied_domains", "allowed_domains",
             }),
         ),
         attachments=AttachmentsPreferences(),

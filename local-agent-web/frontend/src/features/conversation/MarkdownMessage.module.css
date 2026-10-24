@@ -56,10 +56,20 @@
 
 .bar {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--law-space-sm);
   padding: var(--law-space-xs) var(--law-space-sm);
   background: var(--law-surface-code);
   border-bottom: 1px solid var(--law-border-l1);
+}
+
+/* 语言名（2026-10-21）：只说"这是什么语言"，不承担切换高亮的职责（本期没有那个能力）。 */
+.language {
+  color: var(--law-text-caption);
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
 }
 
 .pre {

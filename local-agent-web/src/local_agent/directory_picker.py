@@ -35,6 +35,8 @@ import sys
 from collections.abc import Sequence
 from typing import Final
 
+from local_agent.security.process_guard import run_process
+
 #: 自我 spawn 开关：`<exe> --pick-directory` 只做一件事——弹一个窗，把结果写到 stdout。
 PICK_DIRECTORY_FLAG: Final[str] = "--pick-directory"
 
@@ -140,15 +142,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def _decode(data: bytes) -> str:
+    """按 **UTF-8** 解码子进程输出。
+
+    父进程与子进程都钉成 UTF-8（中文路径不能靠 locale 猜，见 :func:`main`），所以这里不读
+    ``locale.getpreferredencoding()``；解不出来的字节用 ``replace`` 如实标出。
+    """
+    return data.decode("utf-8", errors="replace")
+
+
 def pick_directory(*, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> str | None:
     """弹出原生目录选择器，返回选中的绝对路径；用户取消返回 ``None``。
 
     启动独立子进程并读取 stdout，因此不会占用本服务的事件循环。源码模式必须通过 `-m`
     进入应用入口；只有冻结后的 exe 才能直接以 `sys.executable --pick-directory` 自我启动。
 
+    子进程经**统一执行出口**启动（§20.1）：超时按**进程树**终止（此前 ``subprocess.run``
+    只杀直接子进程）。四类错误（起不来 / 超时 / 非零退出 / 输出不可解析）的消息与从前**逐字相同**；
+    **用户取消不是错误**——那是一条空行，对应 ``None``。
+
     Raises:
         DirectoryPickerError: 子进程起不来、超时退出、非零退出或输出不可解析。
-            **用户取消不是错误**——那是一条空行，对应 ``None``。
     """
     command = (
         [sys.executable, PICK_DIRECTORY_FLAG]
@@ -156,30 +170,31 @@ def pick_directory(*, timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS) -> str |
         else [sys.executable, "-m", "local_agent.api", PICK_DIRECTORY_FLAG]
     )
     try:
-        completed = subprocess.run(
+        # 走**统一执行出口**（§20.1）：超时按**进程树**终止，不是只杀直接子进程。
+        # **不传 registry**：这是页面的一次本机动作，既不属于任何一轮执行、也没有取消令牌，
+        # 因此用一次性登记表——取消不适用于它，但同一套树终止与如实记录照旧。
+        outcome = run_process(
             command,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            check=False,
+            timeout_seconds=timeout_seconds,
             creationflags=_NO_WINDOW,
         )
-    except subprocess.TimeoutExpired as exc:
-        msg = "目录选择器等待超时（窗口可能还开着）：已放弃这次选择。"
-        raise DirectoryPickerError(msg) from exc
     except OSError as exc:
         msg = f"无法启动目录选择器子进程：{type(exc).__name__}"
         raise DirectoryPickerError(msg) from exc
 
-    if completed.returncode != 0:
-        reason = (completed.stderr or "").strip().splitlines()
-        detail = reason[-1] if reason else f"退出码 {completed.returncode}"
+    if outcome.timed_out:
+        msg = "目录选择器等待超时（窗口可能还开着）：已放弃这次选择。"
+        raise DirectoryPickerError(msg)
+
+    stdout_text = _decode(outcome.stdout)
+    stderr_text = _decode(outcome.stderr)
+    if outcome.exit_code != 0:
+        reason = stderr_text.strip().splitlines()
+        detail = reason[-1] if reason else f"退出码 {outcome.exit_code}"
         msg = f"目录选择器未能打开：{detail}"
         raise DirectoryPickerError(msg)
 
-    lines = completed.stdout.splitlines()
+    lines = stdout_text.splitlines()
     if not lines:
         msg = "目录选择器没有返回任何结果。"
         raise DirectoryPickerError(msg)

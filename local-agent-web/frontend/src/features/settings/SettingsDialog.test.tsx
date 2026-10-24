@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { settingsEmptyScenario, settingsModelsScenario } from '../../fixtures/scenarios'
@@ -17,8 +17,8 @@ function cardOf(name: string): HTMLElement {
 
 function permissionsOf(overrides: Partial<PermissionsView> = {}): PermissionsView {
   return {
-    mode: 'whitelist',
-    defaultMode: 'whitelist',
+    mode: 'workspace-write',
+    defaultMode: 'workspace-write',
     grants: [],
     storeUnavailable: false,
     ...overrides,
@@ -50,6 +50,16 @@ async function openPermissions(
   return user
 }
 
+/**
+ * 展开一张连接卡的详情（2026-10-22 V4 起卡片默认收起）。
+ * 端点、密钥、能力徽章、状态说明都在详情里，断言前必须先展开。
+ */
+function expandCard(name: string): HTMLElement {
+  const card = cardOf(name)
+  fireEvent.click(within(card).getByRole('button', { name: '详情' }))
+  return card
+}
+
 describe('SettingsDialog', () => {
   it('covers every connection state in one list', () => {
     render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} />)
@@ -70,20 +80,20 @@ describe('SettingsDialog', () => {
   it('never claims an untested capability passed', () => {
     render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} />)
     // 模型 B has never been checked: every capability reads "未知", none "通过".
-    const untested = cardOf('模型 B')
+    const untested = expandCard('模型 B')
     expect(within(untested).getByText('聊天 未知')).toBeInTheDocument()
     expect(within(untested).getByText('工具调用 未知')).toBeInTheDocument()
     expect(within(untested).getByText('流式输出 未知')).toBeInTheDocument()
     expect(within(untested).queryByText(/通过/)).not.toBeInTheDocument()
     // 备用端点 reports the one thing it actually failed at.
-    expect(within(cardOf('备用端点')).getByText('工具调用 失败')).toBeInTheDocument()
+    expect(within(expandCard('备用端点')).getByText('工具调用 失败')).toBeInTheDocument()
   })
 
   it('reports key state without ever exposing a key value', () => {
     const { container } = render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} />)
-    expect(within(cardOf('模型 A')).getByText('已配置（只能覆盖写入，不回读）')).toBeInTheDocument()
-    expect(within(cardOf('未命名连接')).getByText('未配置')).toBeInTheDocument()
-    expect(within(cardOf('本地端点')).getByText('仅本次进程内 · 重启后需重新录入')).toBeInTheDocument()
+    expect(within(expandCard('模型 A')).getByText('已配置（只能覆盖写入，不回读）')).toBeInTheDocument()
+    expect(within(expandCard('未命名连接')).getByText('未配置')).toBeInTheDocument()
+    expect(within(expandCard('本地端点')).getByText('仅本次进程内 · 重启后需重新录入')).toBeInTheDocument()
 
     const text = container.textContent ?? ''
     expect(text).not.toMatch(/sk-[A-Za-z0-9]{8,}/)
@@ -92,19 +102,20 @@ describe('SettingsDialog', () => {
 
   it('never states an untested capability as usable', () => {
     render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} />)
-    const detail = cardOf('模型 B').textContent ?? ''
+    const detail = expandCard('模型 B').textContent ?? ''
     expect(detail).toContain('聊天能力未验证；可尝试普通聊天，工具能力尚未确认。')
     expect(detail).not.toMatch(/可用/)
   })
 
   it('marks plaintext transport on a non-loopback LAN endpoint', () => {
     render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} />)
-    const risky = cardOf('本地端点')
-    expect(within(risky).getByText('明文传输')).toBeInTheDocument()
+    // 收起态就要能看到风险标记（不能靠点开才发现明文传输）
+    expect(within(cardOf('本地端点')).getAllByText('明文传输').length).toBeGreaterThan(0)
+    const risky = expandCard('本地端点')
     expect(within(risky).getByText(/请求内容在传输中不加密/)).toBeInTheDocument()
     // HTTPS endpoints carry no such mark.
-    expect(within(cardOf('模型 A')).queryByText('明文传输')).not.toBeInTheDocument()
-    expect(within(cardOf('旧供应商')).queryByText('明文传输')).not.toBeInTheDocument()
+    expect(within(expandCard('模型 A')).queryByText('明文传输')).not.toBeInTheDocument()
+    expect(within(expandCard('旧供应商')).queryByText('明文传输')).not.toBeInTheDocument()
   })
 
   it('asks before deactivating and keeps history', () => {
@@ -123,14 +134,16 @@ describe('SettingsDialog', () => {
 
   it('says when an edit only applies to the next request', () => {
     render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} />)
-    expect(within(cardOf('模型 B')).getByText(/从下一轮请求开始生效/)).toBeInTheDocument()
+    expect(within(expandCard('模型 B')).getByText(/从下一轮请求开始生效/)).toBeInTheDocument()
   })
 
   it('explains an empty list and an unusable credential store', () => {
     render(<SettingsDialog settings={settingsOf(settingsEmptyScenario)} />)
     expect(screen.getByText('还没有模型连接')).toBeInTheDocument()
     expect(screen.queryAllByRole('article')).toHaveLength(0)
-    expect(screen.getByText(/密钥只保存在本次进程内，重启后需要重新录入/)).toBeInTheDocument()
+    // 文案与后端 `open_credential_store("memory")` 的降级说明一致（§6.8）：
+    // 2026-10-13 起默认后端是本地设置库，这条只在"强制临时模式"时出现。
+    expect(screen.getByText(/密钥只在本进程内有效，重启后需要重新录入/)).toBeInTheDocument()
   })
 
   it('offers a section switcher that honours both sections', async () => {
@@ -147,40 +160,40 @@ describe('SettingsDialog', () => {
 
     await user.click(screen.getByRole('tab', { name: '权限' }))
     expect(screen.getByRole('tab', { name: '权限' })).toHaveAttribute('aria-selected', 'true')
-    expect(screen.getByRole('radiogroup', { name: '工作区外路径' })).toBeInTheDocument()
+    expect(screen.getByRole('radiogroup', { name: '权限档位' })).toBeInTheDocument()
     expect(screen.queryAllByRole('article')).toHaveLength(0)
   })
 })
 
 describe('SettingsDialog · 权限分区（T38）', () => {
   it('lays out all three presets and marks the one the server reports', async () => {
-    await openPermissions(withPermissions(permissionsOf({ mode: 'whitelist' })))
+    await openPermissions(withPermissions(permissionsOf({ mode: 'workspace-write' })))
 
-    const group = screen.getByRole('radiogroup', { name: '工作区外路径' })
+    const group = screen.getByRole('radiogroup', { name: '权限档位' })
     expect(within(group).getAllByRole('radio')).toHaveLength(3)
-    expect(within(group).getByRole('radio', { name: '手动审批' })).toHaveAttribute('aria-checked', 'false')
-    expect(within(group).getByRole('radio', { name: '自定义' })).toHaveAttribute('aria-checked', 'true')
-    expect(within(group).getByRole('radio', { name: '放行' })).toHaveAttribute('aria-checked', 'false')
+    expect(within(group).getByRole('radio', { name: '只读' })).toHaveAttribute('aria-checked', 'false')
+    expect(within(group).getByRole('radio', { name: '工作区可写' })).toHaveAttribute('aria-checked', 'true')
+    expect(within(group).getByRole('radio', { name: '常规免审' })).toHaveAttribute('aria-checked', 'false')
   })
 
   it('hands the chosen preset back to the container instead of editing the view itself', async () => {
     const actions = permissionActions()
-    const user = await openPermissions(withPermissions(permissionsOf({ mode: 'deny' })), actions)
+    const user = await openPermissions(withPermissions(permissionsOf({ mode: 'read-only' })), actions)
 
-    await user.click(screen.getByRole('radio', { name: '放行' }))
-    expect(actions.onSelectMode).toHaveBeenCalledWith('allow')
+    await user.click(screen.getByRole('radio', { name: '常规免审' }))
+    expect(actions.onSelectMode).toHaveBeenCalledWith('danger-full-access')
   })
 
-  it('shows the grant list only under the 自定义 preset', async () => {
-    // 「放行」档不要求用户配任何东西：在"少打扰"档里让人一条条加目录，与那个档位的名字自相矛盾。
-    for (const mode of ['deny', 'allow'] as const) {
+  it('shows the grant list in every preset — the tier never hides where writes can go', async () => {
+    // 2026-10-15：工作区外的写**永远**只来自逐条授权，所以没有任何一档可以把这张列表藏起来
+    // 只读档保留记录，但授权也不能使它可写。
+    for (const mode of ['read-only', 'workspace-write', 'danger-full-access'] as const) {
       const { unmount } = render(<SettingsDialog settings={withPermissions(permissionsOf({ mode }))} />)
       const user = userEvent.setup()
       await user.click(screen.getByRole('tab', { name: '权限' }))
 
-      expect(screen.queryByRole('button', { name: '添加授权' })).not.toBeInTheDocument()
-      expect(screen.queryByRole('button', { name: /^撤销授权 / })).not.toBeInTheDocument()
-      expect(screen.queryByLabelText('授权目录')).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: '添加可写目录' })).toBeInTheDocument()
+      expect(screen.getByLabelText('外部可写目录')).toBeInTheDocument()
       unmount()
     }
   })
@@ -190,7 +203,7 @@ describe('SettingsDialog · 权限分区（T38）', () => {
     const user = await openPermissions(
       withPermissions(
         permissionsOf({
-          mode: 'whitelist',
+          mode: 'workspace-write',
           grants: [
             { path: 'E:/design-assets', access: 'read' },
             { path: 'D:/team/shared', access: 'read_write' },
@@ -202,55 +215,88 @@ describe('SettingsDialog · 权限分区（T38）', () => {
 
     const list = screen.getByRole('list')
     expect(within(list).getByText('E:/design-assets')).toBeInTheDocument()
-    expect(within(list).getByText('只读')).toBeInTheDocument()
+    expect(within(list).getByText('旧只读记录（读取已默认允许）')).toBeInTheDocument()
     expect(within(list).getByText('D:/team/shared')).toBeInTheDocument()
-    expect(within(list).getByText('读写')).toBeInTheDocument()
+    expect(within(list).getByText('可写授权')).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '撤销授权 E:/design-assets' }))
+    await user.click(screen.getByRole('button', { name: '移除只读记录 E:/design-assets' }))
     expect(actions.onRevokeGrant).toHaveBeenCalledWith('E:/design-assets')
   })
 
-  it('sends the typed path and level back, then clears the draft', async () => {
+  it('adds a writable directory without asking for a redundant read level', async () => {
     const actions = permissionActions()
     const user = await openPermissions(
-      withPermissions(permissionsOf({ mode: 'whitelist', grants: [] })),
+      withPermissions(permissionsOf({ mode: 'workspace-write', grants: [] })),
       actions,
     )
 
-    const input = screen.getByLabelText('授权目录')
+    const input = screen.getByLabelText('外部可写目录')
     await user.type(input, 'D:\\shared\\data')
-    await user.selectOptions(screen.getByLabelText('访问级别'), 'read_write')
-    await user.click(screen.getByRole('button', { name: '添加授权' }))
+    expect(screen.queryByLabelText('访问级别')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '添加可写目录' }))
 
     expect(actions.onAddGrant).toHaveBeenCalledWith('D:\\shared\\data', 'read_write')
     expect(input).toHaveValue('')
   })
 
-  it('calls a blank list what it is — equivalent to 手动审批, not "no restriction"', async () => {
-    await openPermissions(withPermissions(permissionsOf({ mode: 'whitelist', grants: [] })))
+  it('explains external reads remain available without writable grants', async () => {
+    await openPermissions(withPermissions(permissionsOf({ mode: 'workspace-write', grants: [] })))
 
-    expect(screen.getByText(/空白名单与「手动审批」等效/)).toBeInTheDocument()
+    expect(screen.getByText(/尚未添加外部可写目录/)).toBeInTheDocument()
+    expect(screen.getByText(/本机外部读取无需授权/)).toBeInTheDocument()
     expect(screen.queryByRole('list')).not.toBeInTheDocument()
   })
 
   it('reports the factory default as a file fact, not as a product default', async () => {
-    // 服务端报的当前档位是「手动审批」，出厂默认却是「自定义」：两件事必须分开说。
-    await openPermissions(withPermissions(permissionsOf({ mode: 'deny', defaultMode: 'whitelist' })))
+    // 服务端报的当前档位是「只读」，出厂默认却是「工作区可写」：两件事必须分开说。
+    await openPermissions(withPermissions(permissionsOf({ mode: 'read-only', defaultMode: 'workspace-write' })))
 
-    expect(screen.getByText(/出厂默认（config.yaml）：自定义/)).toBeInTheDocument()
+    expect(screen.getByText(/出厂默认（config.yaml）：工作区可写/)).toBeInTheDocument()
   })
 
-  it('states the four hard constraints and the un-authorisable targets in every preset', async () => {
-    for (const mode of ['deny', 'whitelist', 'allow'] as const) {
+  it('distinguishes rejected read-only writes from approvals and states protected targets in every preset', async () => {
+    for (const mode of ['read-only', 'workspace-write', 'danger-full-access'] as const) {
       const { unmount } = render(<SettingsDialog settings={withPermissions(permissionsOf({ mode }))} />)
       const user = userEvent.setup()
       await user.click(screen.getByRole('tab', { name: '权限' }))
 
       const text = screen.getByRole('tabpanel').textContent ?? ''
-      expect(text).toContain('都必须人工批准')
+      expect(text).toContain('「只读」档直接拒绝文件工具写入')
+      expect(text).toContain('工作区内编辑、覆盖和删除默认免审批，外部写入需要目录授权')
+      expect(text).toContain('破坏性 Shell 命令在任何档位下都须人工批准')
       expect(text).toContain('不能被授权')
       unmount()
     }
+  })
+
+  it('tells every preset what it does to Shell approvals, not only to paths', async () => {
+    // 2026-10-14 起：三档的说明不能只讲路径——沙箱并入档位之后，"命令怎么跑"本就是档位的一部分。
+    await openPermissions(withPermissions(permissionsOf({ mode: 'workspace-write' })))
+
+    const group = screen.getByRole('radiogroup', { name: '权限档位' })
+    const noteOf = (label: string) =>
+      within(group).getByRole('radio', { name: label }).textContent ?? ''
+
+    expect(noteOf('只读')).toMatch(/无可写 SID 的受限令牌/)
+    expect(noteOf('工作区可写')).toMatch(/常规 Shell 命令免批准/)
+    expect(noteOf('常规免审')).toMatch(/常规命令免批准/)
+  })
+
+  it('has no sandbox switch any more, and explains where the boundary comes from', async () => {
+    // 2026-10-15 权限模型重构：写侧沙箱由档位派生，页面上不再有那个开关。
+    await openPermissions(withPermissions(permissionsOf()))
+
+    expect(screen.queryByRole('switch', { name: '写侧沙箱' })).not.toBeInTheDocument()
+    expect(screen.getByText(/Windows 上各档位均通过受限令牌约束命令写入/)).toBeInTheDocument()
+    // 边界仍必须说清：哪两档套沙箱、哪一档不套、其它平台为什么没有 OS 级边界。
+    expect(screen.getByText(/其余档位可写工作区、专属临时目录和你授权的读写目录/)).toBeInTheDocument()
+    expect(screen.getByText(/其它平台没有 OS 级写边界/)).toBeInTheDocument()
+    expect(screen.getByText(/新建目录立即继承可写/)).toBeInTheDocument()
+    expect(screen.getByText(/硬链接及并发改名仍有边界/)).toBeInTheDocument()
+    // 2026-10-15（裁定 B2）：还要写清"有权改不了权限的目录会被跳过"以及两条修法——
+    // 实证里用户只看到"写失败"，想不到原因，也想不到下一步。
+    expect(screen.getByText(/沙箱会跳过它们/)).toBeInTheDocument()
+    expect(screen.getByText(/请求提权（会弹审批、只对这一次生效）/)).toBeInTheDocument()
   })
 
   it('says the change cannot be stored, instead of looking like it saved', async () => {
@@ -273,7 +319,7 @@ describe('SettingsDialog · 权限分区（T38）', () => {
     const user = userEvent.setup()
     render(
       <SettingsDialog
-        settings={withPermissions(permissionsOf({ mode: 'deny' }))}
+        settings={withPermissions(permissionsOf({ mode: 'read-only' }))}
         permissionError="设置库不可用：这次改动没有保存。"
         permissionActions={actions}
       />,
@@ -283,5 +329,52 @@ describe('SettingsDialog · 权限分区（T38）', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('这次改动没有保存')
     await user.click(screen.getByRole('button', { name: '重新读取权限设置' }))
     expect(actions.onReload).toHaveBeenCalled()
+  })
+
+  it('finds a setting across sections and lands on the owning tab', () => {
+    render(
+      <SettingsDialog
+        settings={settingsOf(settingsModelsScenario)}
+        extraSections={{
+          retrieval: <p>检索占位</p>,
+          web_access: <p>联网占位</p>,
+          memory: <p>记忆占位</p>,
+        }}
+      />,
+    )
+
+    const box = screen.getByRole('searchbox', { name: '搜索设置项' })
+    fireEvent.change(box, { target: { value: '域名' } })
+    // 同名的「域名」相关项只应命中联网检索那条，且结果带所属分区。
+    const hit = screen.getByRole('option', { name: /拒绝的域名/ })
+    expect(within(hit).getByText('联网检索')).toBeInTheDocument()
+
+    fireEvent.click(hit)
+
+    expect(screen.getByRole('tab', { name: '联网检索' })).toHaveAttribute('aria-selected', 'true')
+    expect(box).toHaveValue('')
+  })
+
+  it('opens the highlighted result with Enter', () => {
+    render(
+      <SettingsDialog
+        settings={settingsOf(settingsModelsScenario)}
+        extraSections={{
+          retrieval: <p>检索占位</p>,
+          memory: <p>记忆占位</p>,
+        }}
+      />,
+    )
+
+    const box = screen.getByRole('searchbox', { name: '搜索设置项' })
+    fireEvent.change(box, { target: { value: '老化天数' } })
+    fireEvent.keyDown(box, { key: 'Enter' })
+
+    expect(screen.getByRole('tab', { name: '长期记忆' })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('offers no search when only the hand-written sections are present', () => {
+    render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} />)
+    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
   })
 })

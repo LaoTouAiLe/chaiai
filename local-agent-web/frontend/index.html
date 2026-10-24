@@ -6,6 +6,35 @@
     <meta name="application-name" content="chaiai" />
     <link rel="icon" type="image/svg+xml" href="/chaiai.svg" />
     <title>chaiai</title>
+    <!--
+      首屏防闪（V0）：偏好真源是服务端 /api/preferences，React 挂载前取不到。
+      这里只读上一次生效结果的本地缓存做一次猜测，避免深色用户先看到一帧白底。
+      PreferencesProvider 拿到服务端值后会校正并回写缓存；缓存不构成偏好真源。
+    -->
+    <script>
+      (function () {
+        try {
+          var root = document.documentElement;
+          var theme = null;
+          var motion = null;
+          try {
+            theme = localStorage.getItem('chaiai.theme');
+            motion = localStorage.getItem('chaiai.motion');
+          } catch (e) {
+            /* 隐私模式下存储不可用，退回系统判定 */
+          }
+          var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var reduced =
+            window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+          root.dataset.theme =
+            theme === 'light' || theme === 'dark' ? theme : dark ? 'dark' : 'light';
+          root.dataset.motion =
+            motion === 'reduced' || motion === 'full' ? motion : reduced ? 'reduced' : 'full';
+        } catch (e) {
+          /* 任何异常都不能阻塞首屏 */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

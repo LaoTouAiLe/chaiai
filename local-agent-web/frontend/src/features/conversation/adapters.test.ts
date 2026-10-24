@@ -104,6 +104,17 @@ describe('mapTool', () => {
     expect(mapTool(toolMessage('pending').tool).status).toBe('pending')
   })
 
+  it('shows the command before any outcome has arrived', () => {
+    const row = mapTool(toolMessage('pending', {
+      tool_name: 'run_shell', redacted_arguments: { command: 'python -u example.py', cwd: 'src' },
+      output_preview: null, outcome: null,
+    }).tool)
+    expect(row.target).toBe('python -u example.py')
+    expect(row.card).toMatchObject({
+      kind: 'terminal', command: 'python -u example.py', cwd: 'src', output: '', exitCode: null,
+    })
+  })
+
   it('carries the redacted arguments, the duration and the truncated output', () => {
     const row = mapTool(toolMessage('ok').tool)
 
@@ -111,6 +122,38 @@ describe('mapTool', () => {
     expect(row.durationLabel).toBe('1.5s')
     expect(row.card).toMatchObject({ kind: 'generic', detail: 'first line' })
     expect(row.target).toBeNull() // 没有结构化结果就不猜目标路径
+  })
+
+  it('takes the delegated children from the contract instead of parsing the report', () => {
+    const row = mapTool(toolMessage('ok', {
+      tool_name: 'delegate_research',
+      outcome: {
+        kind: 'delegation', background: false,
+        summary: '2 个子任务 · 1 个已完成',
+        text: '已核对的子任务原文：\n# 取消（docs/cancel.md:1）',
+        children: [
+          {
+            scope: 'docs', status: 'completed', tool_calls: 4, model_calls: 1,
+            evidence_count: 6, error: null,
+          },
+          {
+            scope: 'src', status: 'failed', tool_calls: 0, model_calls: 1,
+            evidence_count: 0, error: '子任务超时',
+          },
+        ],
+        truncated: false,
+      },
+    }).tool)
+
+    expect(row.card).toMatchObject({
+      kind: 'delegation',
+      // 下划线 → 驼峰只在映射层发生一次；计数原样搬运，缺项按 0（契约的默认读法）。
+      children: [
+        { scope: 'docs', status: 'completed', toolCalls: 4, evidenceCount: 6, error: null },
+        { scope: 'src', status: 'failed', toolCalls: 0, evidenceCount: 0, error: '子任务超时' },
+      ],
+      report: '已核对的子任务原文：\n# 取消（docs/cancel.md:1）',
+    })
   })
 
   it('keeps the structured payload, result preview and timings for the trace view', () => {
@@ -149,7 +192,7 @@ describe('mapTool', () => {
     const row = mapTool(
       toolMessage('ok', {
         outcome: {
-          kind: 'read',
+          kind: 'read', background: false,
           target: 'src/app.ts',
           text: 'a\nb\nc',
           total: 3,
@@ -170,7 +213,7 @@ describe('mapTool', () => {
     const row = mapTool(
       toolMessage('ok', {
         outcome: {
-          kind: 'read',
+          kind: 'read', background: false,
           target: 'big.txt',
           text: 'a\nb',
           total: 1000,
@@ -189,7 +232,7 @@ describe('mapTool', () => {
     // 取不到就是取不到：退回从 1 起（与从前逐字相同），不编一个"看起来对"的行号。
     const row = mapTool(
       toolMessage('ok', {
-        outcome: { kind: 'read', target: 'a.txt', text: 'a', total: 1, truncated: false },
+        outcome: { kind: 'read', background: false, target: 'a.txt', text: 'a', total: 1, truncated: false },
       }).tool,
     )
 
@@ -203,7 +246,7 @@ describe('mapTool', () => {
         tool_name: 'run_shell',
         redacted_arguments: { command: 'pytest -q' },
         outcome: {
-          kind: 'shell',
+          kind: 'shell', background: false,
           target: '.',
           summary: '退出码 1',
           stdout: 'out',
@@ -233,7 +276,7 @@ describe('mapTool', () => {
         tool_name: 'run_shell',
         redacted_arguments: { command: 'pytest -q' },
         outcome: {
-          kind: 'shell',
+          kind: 'shell', background: false,
           target: '.',
           summary: '退出码 1',
           stdout: 'out',
@@ -253,7 +296,7 @@ describe('mapTool', () => {
       toolMessage('ok', {
         tool_name: 'edit_file',
         outcome: {
-          kind: 'edit',
+          kind: 'edit', background: false,
           target: 'src/app.ts',
           summary: '替换 1 处 · 2 行变化',
           text: '@@ -1 +1 @@',
@@ -276,7 +319,7 @@ describe('mapTool', () => {
       toolMessage('ok', {
         tool_name: 'edit_file',
         outcome: {
-          kind: 'edit',
+          kind: 'edit', background: false,
           target: 'src/app.ts',
           summary: '替换 1 处 · 2 行变化',
           text: '@@ -1,2 +1,2 @@',
@@ -626,7 +669,8 @@ describe('mapStats', () => {
       cacheHitRatio: null, // 供应商没报写缓存：命中率未知，不写 0
       inputTokens: 600,
       outputTokens: 20,
-      elapsedLabel: '5.0s',
+      // 整轮耗时改用人读格式（2026-10-22）：>60s 写"X 分 Y 秒"。
+      elapsedLabel: '5 秒',
       // 2026-09-30 新增的四项耗时/吞吐：这一支的 `turn()` 没有给这些字段，所以标签是空串、
       // 吞吐是 `null`（缺分母就不算），而不是 0。
       modelElapsedLabel: '',
@@ -634,6 +678,10 @@ describe('mapStats', () => {
       firstTokenLabel: '',
       throughput: null,
       cacheReported: true,
+      // 2026-10-16 新增：上下文占用与终态（轨迹页按轮显示用）。
+      contextUsedTokens: null,
+      contextWindowTokens: null,
+      finalState: 'completed',
       estimated: false,
       calls: [
         {
@@ -644,6 +692,17 @@ describe('mapStats', () => {
           outputTokens: 20,
           elapsedLabel: '1.2s',
           schemaFingerprint: null, // 这一支没记录工具 Schema：未知，不编指纹
+          // 2026-10-16 新增的四项逐次账目：这一支的 `call()` 只给了 cache_read/uncached，
+          // 其余为 `null`（未上报）或空串（没耗时），都不是 0。
+          cacheReadTokens: 400,
+          cacheWriteTokens: null,
+          reasoningTokens: null,
+          firstTokenLabel: '',
+          // 2026-10-16 新增的原始时刻（时间轴用）：`call()` 只给了 `started_at`，
+          // 首字与结束时刻缺席 ⇒ 空串（页面不画那一段，不拿别的时刻凑）。
+          startedAt: '2026-09-27T10:00:00+00:00',
+          firstTokenAt: '',
+          finishedAt: '',
         },
         {
           id: 'run-1:model:2',
@@ -653,6 +712,13 @@ describe('mapStats', () => {
           outputTokens: 20,
           elapsedLabel: '1.2s',
           schemaFingerprint: null,
+          cacheReadTokens: 400,
+          cacheWriteTokens: null,
+          reasoningTokens: null,
+          firstTokenLabel: '',
+          startedAt: '2026-09-27T10:00:00+00:00',
+          firstTokenAt: '',
+          finishedAt: '',
         },
       ],
     })
@@ -671,8 +737,8 @@ describe('mapStats', () => {
       }),
     )
 
-    expect(stats?.modelElapsedLabel).toBe('2.0s')
-    expect(stats?.toolElapsedLabel).toBe('1.5s')
+    expect(stats?.modelElapsedLabel).toBe('2 秒')
+    expect(stats?.toolElapsedLabel).toBe('1 秒')
     expect(stats?.firstTokenLabel).toBe('800ms')
     expect(stats?.throughput).toBe(250) // 500 tok ÷ 2s
   })
@@ -742,6 +808,64 @@ describe('mapStats', () => {
     })
 
     expect(mapTurnStats(snap, mapMessages(snap)).map((item) => item.afterMessageId)).toEqual(['a1', 'a3'])
+  })
+
+  it('puts the compaction row right after the turn it happened in, and the running one at the tail', () => {
+    // 2026-10-16：压缩提示从输入区搬进对话流（与 Think、工具行同级）。位置有讲究：
+    // 压缩发生在**这一轮的开头**（上下文到线才压），所以紧跟那轮的提问；而"正在压缩"还没有
+    // Checkpoint 记录，只能放流尾。
+    const snap = snapshot({
+      messages: [userMessage('u1', 'first'), assistantMessage('a1', 'one', true)],
+      turn_usages: [
+        {
+          user_message_id: 'u1',
+          usage: turn(),
+          model_calls: [],
+          events: [
+            {
+              kind: 'compaction',
+              event_id: 'run-1:compression:1',
+              run_id: 'run-1',
+              at: '2026-10-16T09:55:51Z',
+              finished_at: null,
+              label: '上下文压缩：折叠 151 条消息',
+              status: null,
+              wait_ms: null,
+              folded_messages: 151,
+              tokens_before: 149_231,
+              tokens_after: 36_931,
+            },
+          ],
+        },
+      ],
+    })
+
+    const rows = mapMessages(snap)
+
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'compression', 'assistant'])
+    const row = rows[1]
+    expect(row.kind === 'compression' && row.compression.running).toBe(false)
+    expect(row.kind === 'compression' && row.compression.foldedMessages).toBe(151)
+  })
+
+  it('appends the running compaction at the tail instead of guessing a turn', () => {
+    const snap = snapshot({
+      messages: [userMessage('u1', 'first'), assistantMessage('a1', 'one', true)],
+      // 只给这一支真正会用到的字段：契约里 `scope` 是**必填**，`used_tokens`/`window_tokens` 可缺
+      // （用 `...snapshot().context` 展开会在 `context` 为空时把必填项也变成可缺，`tsc` 会拦下）。
+      context: {
+        scope: 'current',
+        used_tokens: 150_000,
+        window_tokens: 200_000,
+        compression: { operation_id: 'run-1:compression:2', run_id: 'run-1', state: 'running' },
+      },
+    })
+
+    const rows = mapMessages(snap)
+
+    expect(rows.map((row) => row.kind)).toEqual(['user', 'assistant', 'compression'])
+    const row = rows[rows.length - 1]
+    expect(row.kind === 'compression' && row.compression.running).toBe(true)
   })
 
   it('keeps previous turn statistics while withholding the active turn until it finishes', () => {

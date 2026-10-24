@@ -20,7 +20,7 @@ function fixture(): PreferencesDto {
     general: { ...generalDefaults },
     execution: { max_tool_loops: 20, max_retries_per_step: 2, shell_timeout_seconds: 60, shell_max_output_chars: 30000, safe_delete: true },
     retrieval: { enabled: true, max_files: 2000, max_results: 8, timeout_seconds: 10, context_lines: 20 },
-    web_access: { provider: 'auto' as const, max_results: 5, max_chars: 8000, max_search_calls: 4, max_read_pages: 6, max_reads_per_page: 3, timeout_seconds: 15, domain_policy: 'allow' as const, denied_domains: [], allowed_domains: [] },
+    web_access: { provider: 'auto' as const, max_results: 5, max_chars: 8000, prefetch_pages: 2, max_search_calls: 4, max_read_pages: 6, max_reads_per_page: 3, timeout_seconds: 15, domain_policy: 'allow' as const, denied_domains: [], allowed_domains: [] },
     memory: { enabled: true, confidence_threshold: .75, importance_threshold: .5, aging_enabled: true, forget_after_days: 180 },
     medium_term: { enabled: false, top_k: 8, min_score: .53, decay_half_life_days: 30 },
     embedding: { enabled: false, provider: 'onnx_local' as const, model: 'unit-test', cache_dir: 'E:/models', local_files_only: true, base_url: '', api_key_env: '', allow_plaintext_http: false },
@@ -204,6 +204,29 @@ describe('应用偏好', () => {
     expect(screen.getByRole('button', { name: '恢复初始值' })).toBeDisabled()
   })
 
+  it('exports the read-only overview as JSON without leaving a blob URL behind', () => {
+    const createObjectURL = vi.fn(() => 'blob:prefs')
+    const revokeObjectURL = vi.fn()
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: createObjectURL })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: revokeObjectURL })
+    const downloaded: HTMLAnchorElement[] = []
+    const originalClick = HTMLAnchorElement.prototype.click
+    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) { downloaded.push(this) }
+    try {
+      host(<PreferenceSection group="advanced" />)
+      fireEvent.click(screen.getByRole('button', { name: '导出为 JSON' }))
+
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      expect(downloaded[0]?.download).toBe('chaiai-preferences-v0.json')
+      // 下载地址用完必须释放，否则每点一次就多占一份内存
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:prefs')
+    } finally {
+      HTMLAnchorElement.prototype.click = originalClick
+      delete (URL as unknown as Record<string, unknown>).createObjectURL
+      delete (URL as unknown as Record<string, unknown>).revokeObjectURL
+    }
+  })
+
   it('saves retrieval limits with domain lists as arrays and keeps the key on its own endpoint', async () => {
     const data = fixture()
     mock.save.mockImplementation(async values => ({ ...data, values, version: 1 }))
@@ -244,6 +267,24 @@ describe('应用偏好', () => {
     expect(screen.getByRole('button', { name: '删除已保存密钥' })).toBeDisabled()
   })
 
+  it('shows a configured key as a masked cell and only opens the input after a click', async () => {
+    mock.key.mockResolvedValue({ configured: true, source: 'settings', store: 'local', note: null })
+    host(<PreferenceSection group="web_access" />)
+    await screen.findByText('已配置（设置在本地设置库）')
+
+    // 已配置时不给空输入框：那会让人以为密钥丢了。先给只读格，点它才转输入态。
+    const masked = screen.getByLabelText('Tavily API Key（已配置，点击修改）')
+    expect(masked).toHaveAttribute('readonly')
+    expect(screen.queryByRole('button', { name: '保存密钥' })).not.toBeInTheDocument()
+
+    fireEvent.click(masked)
+
+    expect(screen.getByLabelText('Tavily API Key')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '保存密钥' })).toBeInTheDocument()
+    // 删除入口在两种状态下都在：它是独立动作，不该被"编辑态"藏起来。
+    expect(screen.getByRole('button', { name: '删除已保存密钥' })).toBeEnabled()
+  })
+
   it('applies saved appearance immediately and follows system theme and motion changes', async () => {
     const listeners = new Map<string, () => void>()
     const dark = { matches: true, addEventListener: (_: string, fn: () => void) => listeners.set('dark', fn), removeEventListener: vi.fn() }
@@ -269,7 +310,7 @@ describe('应用偏好', () => {
   it('uses the saved Think default but preserves an explicit per-message collapse', () => {
     const { rerender } = render(<GeneralContext value={{ ...generalDefaults, reasoning_expanded: true }}><ReasoningRow text="真实思考" running={false} /></GeneralContext>)
     expect(screen.getByRole('region', { name: '思考内容' })).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Think' }))
+    fireEvent.click(screen.getByRole('button', { name: '思考' }))
     rerender(<GeneralContext value={{ ...generalDefaults, reasoning_expanded: true }}><ReasoningRow text="新增思考" running /></GeneralContext>)
     expect(screen.queryByRole('region', { name: '思考内容' })).not.toBeInTheDocument()
   })

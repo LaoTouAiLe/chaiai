@@ -1,31 +1,52 @@
+/**
+ * 顶栏（2026-10-22 V1 三段式）。
+ *
+ * 左段 = 工作区 + 标题 + 页签组（页签紧跟标题，不再贴右）；
+ * 右段 = 只放"管旁边那一栏"的开关。
+ * 长标题只压缩左段自己（`max-width` + 省略号），页签不参与压缩。
+ */
 .bar {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--law-space-xl);
+  gap: var(--sp-4);
   height: var(--law-header-height);
-  padding: 0 var(--law-space-3xl) 0 var(--law-space-2xl);
-  border-bottom: 1px solid var(--law-border-l1);
+  padding: 0 var(--sp-6) 0 var(--sp-5);
+  border-bottom: 1px solid var(--c-line);
+  background: var(--c-canvas);
+}
+
+.lead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .left {
   min-width: 0;
+  max-width: 46%;
   overflow: hidden;
+  flex: 0 1 auto;
 }
 
 .breadcrumb {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--law-text-caption);
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-xs);
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: 16px;
 }
 
 .title {
-  font-size: var(--law-text-md);
-  line-height: var(--law-leading-md);
-  font-weight: var(--law-weight-medium);
+  margin: 0;
+  font-size: var(--fs-title);
+  line-height: var(--lh-title);
+  font-weight: 600;
+  color: var(--c-text-1);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -35,35 +56,32 @@
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: var(--law-space-md);
+  gap: var(--sp-2);
 }
 
-.tabs {
-  display: flex;
+/* 页签组与右栏开关已改用原语（components/ui），这里不再维护各自的胶囊样式。 */
+
+/* 侧聊标记（§21.7）：当前会话是从别处开出来的侧聊，点一下可提升为正式会话 */
+.sideChatTag {
+  display: inline-flex;
   align-items: center;
-  gap: var(--law-space-xxs);
-  padding: var(--law-space-xxs);
-  border-radius: var(--law-radius-md);
-  background: var(--law-surface-selector);
+  gap: var(--sp-1);
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 var(--sp-2);
+  margin-left: var(--sp-2);
+  border-radius: var(--r-control);
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+  font-size: var(--fs-meta);
+  line-height: 24px;
 }
 
-.tab {
-  height: 27px;
-  padding: 0 var(--law-space-lg);
-  border-radius: var(--law-radius-sm);
-  color: var(--law-text-secondary);
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
-  transition: background var(--law-duration-fast) var(--law-ease);
+.sideChatTag:hover {
+  background: var(--c-hover);
 }
 
-.tab:hover {
-  color: var(--law-text-primary);
-}
-
-.tabActive {
-  background: var(--law-bg-layer-1);
-  color: var(--law-text-primary);
-  font-weight: var(--law-weight-medium);
-  box-shadow: var(--law-shadow-lv1);
+.sideChatHint {
+  color: var(--c-text-3);
+  font-size: var(--fs-caption);
 }

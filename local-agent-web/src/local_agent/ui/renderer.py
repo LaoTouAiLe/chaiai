@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -364,7 +365,11 @@ def render_workspace_picker(
 
         typed = st.text_input(
             "工作区绝对路径",
-            placeholder="例如 E:/projects/demo",
+            # 示例按**平台**给（2026-10-16）：原来写死开发机的盘符路径，换机器照抄会得到
+            # 一个不存在的路径；这里只给"形状"，不给某台机器的实情。
+            placeholder=(
+                "例如 C:/projects/demo" if os.name == "nt" else "例如 /home/you/projects/demo"
+            ),
             help="目录不存在或不可读时只提示，不会改变当前会话。",
             key=f"{key_prefix}-workspace-path",
         )

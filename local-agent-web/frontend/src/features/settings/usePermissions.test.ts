@@ -18,8 +18,8 @@ function json(status: number, body: unknown): Response {
 
 function permissions(overrides: Partial<PermissionsDto> = {}): PermissionsDto {
   return {
-    mode: 'whitelist',
-    default_mode: 'whitelist',
+    mode: 'workspace-write',
+    default_mode: 'workspace-write',
     grants: [],
     store_unavailable: false,
     ...overrides,
@@ -53,8 +53,8 @@ describe('usePermissions', () => {
         json(
           200,
           permissions({
-            mode: 'allow',
-            default_mode: 'whitelist',
+            mode: 'danger-full-access',
+            default_mode: 'workspace-write',
             grants: [{ path: 'E:/design-assets', access: 'read' }],
           }),
         ),
@@ -63,9 +63,9 @@ describe('usePermissions', () => {
     const { result } = renderHook(() => usePermissions())
 
     await waitFor(() => expect(result.current.status).toBe('ready'))
-    expect(result.current.permissions?.mode).toBe('allow')
+    expect(result.current.permissions?.mode).toBe('danger-full-access')
     // 出厂默认与当前档位是两件事：默认来自 config.yaml，不因为用户改过档位就跟着变。
-    expect(result.current.permissions?.default_mode).toBe('whitelist')
+    expect(result.current.permissions?.default_mode).toBe('workspace-write')
     expect(result.current.permissions?.grants).toHaveLength(1)
   })
 
@@ -73,7 +73,7 @@ describe('usePermissions', () => {
     let failing = false
     stubFetch({
       'GET /api/permissions': () =>
-        failing ? json(500, { detail: '内部错误' }) : json(200, permissions({ mode: 'deny' })),
+        failing ? json(500, { detail: '内部错误' }) : json(200, permissions({ mode: 'read-only' })),
     })
 
     const { result } = renderHook(() => usePermissions())
@@ -84,25 +84,25 @@ describe('usePermissions', () => {
       await result.current.reload()
     })
 
-    expect(result.current.permissions?.mode).toBe('deny') // 不闪成空白
+    expect(result.current.permissions?.mode).toBe('read-only') // 不闪成空白
     expect(result.current.error?.detail).toContain('内部错误')
   })
 
   it('sends the chosen mode and adopts the view the server returns', async () => {
     const calls = stubFetch({
       'GET /api/permissions': () => json(200, permissions()),
-      'PUT /api/permissions': () => json(200, permissions({ mode: 'allow' })),
+      'PUT /api/permissions': () => json(200, permissions({ mode: 'danger-full-access' })),
     })
 
     const { result } = renderHook(() => usePermissions())
     await waitFor(() => expect(result.current.status).toBe('ready'))
 
     await act(async () => {
-      await result.current.setMode('allow')
+      await result.current.setMode('danger-full-access')
     })
 
-    expect(calls.at(-1)).toEqual({ key: 'PUT /api/permissions', body: { mode: 'allow' } })
-    expect(result.current.permissions?.mode).toBe('allow')
+    expect(calls.at(-1)).toEqual({ key: 'PUT /api/permissions', body: { mode: 'danger-full-access' } })
+    expect(result.current.permissions?.mode).toBe('danger-full-access')
   })
 
   it('sends the path and level verbatim and adopts the returned view', async () => {
@@ -148,7 +148,7 @@ describe('usePermissions', () => {
 
   it('leaves the view untouched when a write fails, instead of looking saved', async () => {
     stubFetch({
-      'GET /api/permissions': () => json(200, permissions({ mode: 'deny' })),
+      'GET /api/permissions': () => json(200, permissions({ mode: 'read-only' })),
       'PUT /api/permissions': () =>
         json(503, {
           error: {
@@ -171,11 +171,11 @@ describe('usePermissions', () => {
 
     let outcome: PermissionsDto | null = null
     await act(async () => {
-      outcome = await result.current.setMode('allow')
+      outcome = await result.current.setMode('danger-full-access')
     })
 
     expect(outcome).toBeNull()
-    expect(result.current.permissions?.mode).toBe('deny') // 仍是改之前的样子
+    expect(result.current.permissions?.mode).toBe('read-only') // 仍是改之前的样子
     expect(result.current.error?.message).toContain('没有保存')
     expect(result.current.busy).toBe(false)
   })
@@ -186,7 +186,7 @@ describe('usePermissions', () => {
       'GET /api/permissions': () => json(200, permissions()),
       'PUT /api/permissions': () =>
         new Promise<Response>((resolve) => {
-          release = () => resolve(json(200, permissions({ mode: 'deny' })))
+          release = () => resolve(json(200, permissions({ mode: 'read-only' })))
         }),
     })
 
@@ -195,10 +195,10 @@ describe('usePermissions', () => {
 
     let pending: Promise<unknown> = Promise.resolve()
     act(() => {
-      pending = result.current.setMode('deny')
+      pending = result.current.setMode('read-only')
     })
 
-    // 忙态必须起来：否则连点两次"放行"会发两次写请求（档位写入不是幂等的语义，只是最后写赢）。
+    // 忙态必须起来：否则连点两次档位会发两次写请求（档位写入不是幂等的语义，只是最后写赢）。
     await waitFor(() => expect(result.current.busy).toBe(true))
 
     await act(async () => {
@@ -206,6 +206,6 @@ describe('usePermissions', () => {
       await pending
     })
     expect(result.current.busy).toBe(false)
-    expect(result.current.permissions?.mode).toBe('deny')
+    expect(result.current.permissions?.mode).toBe('read-only')
   })
 })

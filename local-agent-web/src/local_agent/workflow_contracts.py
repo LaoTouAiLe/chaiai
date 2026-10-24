@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import PurePosixPath
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, NotRequired, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -168,8 +168,8 @@ class ChildResearchTask(BaseModel):
 
 class DelegatedResearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    tasks: list[ChildResearchTask] = Field(min_length=1, max_length=3)
-    concurrency: int = Field(default=1, ge=1, le=2)
+    tasks: list[ChildResearchTask] = Field(min_length=1)
+    concurrency: int = Field(default=1, ge=1)
 
 
 class ReadonlyWorkflowRequest(BaseModel):
@@ -197,6 +197,7 @@ WorkflowRequest = Annotated[
 
 
 class ChildResearchReport(TypedDict):
+    answer: NotRequired[str]
     child_id: str
     scope: str
     status: str

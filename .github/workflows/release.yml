@@ -1,0 +1,128 @@
+# 发布：打 tag（v0.2.0）→ 构建 Windows 产物 → 建 GitHub Release。
+#
+# 产物三件，缺一不可：
+#   chaiai-<version>-win64.zip       绿色包（解压即用）
+#   chaiai-setup-<version>.exe       安装包（Inno Setup 编译）
+#   SHA256SUMS.txt                   上面两个的校验值（下载校验、后续自动更新的依据）
+#
+# 为什么产物里必须有校验值：安装包没有代码签名，"下载到的那份是不是我们发的"只能靠 SHA256 回答；
+# 将来接自动更新时，客户端也是拿它比对。
+#
+# 手动触发（workflow_dispatch）需要填 version；tag 触发时从 tag 里取（`v0.2.0` → `0.2.0`）。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（不带 v），例如 0.1.0"
+        required: true
+        type: string
+
+# 创建 Release 需要写权限；其余步骤不需要
+permissions:
+  contents: write
+
+# 同一 tag 重复跑时取消旧的，避免两个 Release 抢同一个 tag
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: windows / build + release
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: local-agent-web
+    env:
+      CHAIAI_OUT_DIR: build/packaging/out-release
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: local-agent-web/pyproject.toml
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: local-agent-web/frontend/package-lock.json
+
+      - name: 解析版本号
+        id: version
+        shell: pwsh
+        run: |
+          $v = "${{ inputs.version }}"
+          if ([string]::IsNullOrWhiteSpace($v)) { $v = "${{ github.ref_name }}" -replace '^v', '' }
+          if ($v -notmatch '^\d+\.\d+\.\d+') { throw "版本号不合法：$v（应为 0.1.0 这种）" }
+          "value=$v" >> $env:GITHUB_OUTPUT
+          "tag=v$v" >> $env:GITHUB_OUTPUT
+
+      - name: 前端产物
+        working-directory: local-agent-web/frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Python 依赖（运行 + 构建工具链）
+        # memory 组必须装：不装的话包里的中期记忆（chromadb）缺失，功能会比源码形态少一块；
+        # desktop 组必须装：没有它打包出来的 exe 打不开窗口，只能退回浏览器。
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[memory,desktop]"
+          pip install -r scripts/requirements-build.txt
+
+      - name: 打包（目录式）
+        run: python scripts/build_windows_package.py
+
+      - name: 安装 Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: 编译安装包
+        # iss 在仓库根的 packaging/ 下，相对路径以它为基准：
+        # SourceDir 指回 local-agent-web 的构建输出，产物也落回 local-agent-web/build 下。
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /Qp `
+            /DAppVersion=${{ steps.version.outputs.value }} `
+            "/DSourceDir=..\local-agent-web\build\packaging\out-release\chaiai" `
+            ..\packaging\chaiai.iss
+
+      - name: 压缩绿色包
+        shell: pwsh
+        run: |
+          $zip = "build/packaging/chaiai-${{ steps.version.outputs.value }}-win64.zip"
+          Compress-Archive -Path "build/packaging/out-release/chaiai/*" -DestinationPath $zip
+          "ZIP_PATH=$zip" >> $env:GITHUB_ENV
+
+      - name: 生成校验值
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem build/packaging/installer/chaiai-setup-*.exe | Select-Object -First 1).FullName
+          $lines = foreach ($f in @($env:ZIP_PATH, $setup)) {
+            $hash = (Get-FileHash -Algorithm SHA256 -Path $f).Hash.ToLower()
+            "$hash  $(Split-Path $f -Leaf)"
+          }
+          $lines | Set-Content -Encoding ascii build/packaging/SHA256SUMS.txt
+          Get-Content build/packaging/SHA256SUMS.txt
+
+      - name: 创建 GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" `
+            "$env:ZIP_PATH" `
+            "build/packaging/installer/chaiai-setup-${{ steps.version.outputs.value }}.exe" `
+            "build/packaging/SHA256SUMS.txt" `
+            --target "$env:GITHUB_SHA" `
+            --title "chaiai ${{ steps.version.outputs.value }}" `
+            --generate-notes

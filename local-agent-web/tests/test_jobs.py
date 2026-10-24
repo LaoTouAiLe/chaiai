@@ -1,4 +1,4 @@
-"""T58：后台任务运行时与状态机（架构 §17.2）。
+﻿"""T58：后台任务运行时与状态机（架构 §17.2）。
 
 四组用例：
 
@@ -440,3 +440,57 @@ def test_cancel_signal_and_settlement_share_the_same_transition_lock(tmp_path: P
     saved = store.get(job.job_id)
     assert saved.state == JOB_STATE_CANCELLED
     assert saved.run_id == "bound-at-cancellation"
+
+
+# ---- 人工核对结案（§17.1 唯一例外，2026-10-23）-----------------------------
+# 背景：`needs_review` 是终态且 `update_state()` 明文"终态不可改写"，于是任务一旦
+# 落到这里就**永远出不去**——会话会一直挂在侧栏的「需人工核对」上（实机复现）。
+# 例外只开在 `close_review()` 这一个入口。
+
+def _review_job(store):
+    job = store.create(session_id="s1")
+    store.update_state(job.job_id, "running")
+    store.update_state(job.job_id, "needs_review", detail="服务重启时正在执行")
+    return job
+
+
+def test_close_review_completes_the_task(tmp_path: Path):
+    store, _ = _runtime(tmp_path, background=False)
+    job = _review_job(store)
+
+    closed = store.close_review(job.job_id, outcome="completed", detail="核对后确认已写完")
+
+    assert closed.state == "completed"
+    assert closed.finished_at is not None
+
+
+def test_close_review_can_cancel(tmp_path: Path):
+    store, _ = _runtime(tmp_path, background=False)
+    job = _review_job(store)
+    assert store.close_review(job.job_id, outcome="cancelled").state == "cancelled"
+
+
+def test_close_review_rejects_other_outcomes(tmp_path: Path):
+    store, _ = _runtime(tmp_path, background=False)
+    job = _review_job(store)
+    with pytest.raises(JobStoreError):
+        store.close_review(job.job_id, outcome="running")
+
+
+def test_close_review_only_accepts_needs_review(tmp_path: Path):
+    """别的终态不能借这个入口被改写——例外只对 `needs_review` 生效。"""
+    store, _ = _runtime(tmp_path, background=False)
+    job = store.create(session_id="s1")
+    store.update_state(job.job_id, "running")
+    store.update_state(job.job_id, "completed")
+
+    with pytest.raises(JobStoreError):
+        store.close_review(job.job_id, outcome="cancelled")
+
+
+def test_update_state_still_refuses_terminal_rewrite(tmp_path: Path):
+    """`update_state` 的规则一个字没改：终态仍然不可改写。"""
+    store, _ = _runtime(tmp_path, background=False)
+    job = _review_job(store)
+    with pytest.raises(JobStoreError):
+        store.update_state(job.job_id, "completed")

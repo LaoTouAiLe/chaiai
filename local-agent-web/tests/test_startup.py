@@ -94,3 +94,20 @@ def test_keyboard_interrupt_is_not_swallowed(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(KeyboardInterrupt):
         startup.main()
+
+
+def test_frozen_cleanup_dispatch_does_not_start_the_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    from local_agent.security import process_cleanup
+
+    called: list[list[str]] = []
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "argv", ["chaiai.exe", "--internal-sandbox-taskkill", "/pid", "123", "/f"])
+
+    def cleanup(arguments):
+        called.append(list(arguments))
+        return 17
+
+    monkeypatch.setattr(process_cleanup, "main", cleanup)
+    monkeypatch.setattr(api_main, "main", lambda: pytest.fail("cleanup must not start the API"))
+    assert startup.main() == 17
+    assert called == [["/pid", "123", "/f"]]

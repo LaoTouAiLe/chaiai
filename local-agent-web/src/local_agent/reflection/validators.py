@@ -79,7 +79,12 @@ def validate_tool_event(
 
     reasons: list[str] = []
     if not status_ok:
-        reasons.append(f"工具状态为 {result['status']}，没有可验证的产出")
+        # 区分"**被拒绝、没有执行**"与"执行了却拿不到产出"：前者根本不是执行失败（2026-10-14）。
+        # 汇总处（`graph/nodes.py` 的机械校验）据此把被拒事件排除在证据之外，不再污染整轮可信度。
+        if result["status"] == "denied":
+            reasons.append("调用被拒绝、没有执行（不是执行失败），没有可验证产出")
+        else:
+            reasons.append(f"工具状态为 {result['status']}，没有可验证的产出")
         return ToolEvidence(
             status_ok=False,
             has_output=has_output,
@@ -88,6 +93,12 @@ def validate_tool_event(
             file_hash_changed_as_expected=file_hash_changed,
             diff_non_empty=diff_non_empty,
             reasons=tuple(reasons),
+        )
+
+    if payload and (payload.get("timed_out") is True or payload.get("cancelled") is True):
+        return ToolEvidence(
+            status_ok=status_ok, has_output=has_output, evidence_level="failed",
+            exit_code_ok=exit_code_ok, reasons=("命令超时或被取消，不能作为成功执行的依据",),
         )
 
     if exit_code_ok is False:
@@ -114,7 +125,7 @@ def validate_tool_event(
             reasons=tuple(reasons),
         )
 
-    if not has_output:
+    if not has_output and not (event.tool_name == "run_shell" and exit_code_ok is True):
         reasons.append("工具返回为空，无法确认结果")
         return ToolEvidence(
             status_ok=True,
@@ -154,10 +165,10 @@ def validate_tool_event(
         reasons.append("文件 Hash 已变化")
     if diff_non_empty:
         reasons.append("diff 非空")
-    reasons.append("工具执行成功且返回了内容")
+    reasons.append("命令正常退出（无输出）" if not has_output else "工具执行成功且返回了内容")
     return ToolEvidence(
         status_ok=True,
-        has_output=True,
+        has_output=has_output,
         evidence_level="verified",
         exit_code_ok=exit_code_ok,
         file_hash_changed_as_expected=file_hash_changed,

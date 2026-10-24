@@ -701,6 +701,13 @@ class WebAccessConfig(_StrictModel):
     max_results: int = Field(default=5, ge=1, le=20)
     #: 单次抓取的正文上限（字符）：超过即截断，并在结果 ``note`` 里写明。
     max_chars: int = Field(default=8_000, ge=500, le=100_000)
+    #: 搜索后自动抓取前 N 条的正文首段并填进 ``snippet``（2026-10-23）。
+    #:
+    #: 为什么要它：搜索引擎给的摘要通常只有 50–200 字，模型常常还要再 ``web_fetch`` 两三次；
+    #: Tavily 好用的一大原因就是它直接返回抽取过的正文片段。这里用已有的 ``fetch`` 补上这一环。
+    #: 0 = 关闭；默认 2：实测每条 0.3–0.8 秒，两条并发后总耗时增加约 1 秒，换来通常省掉一次抓取。
+    #: 失败（JS 页面、反爬、超时）一律保留原摘要，不让整次搜索失败。
+    prefetch_pages: int = Field(default=2, ge=0, le=5)
     #: 请求头里的 User-Agent。不伪装成浏览器：被对方按 UA 拒绝时，如实失败比假装成 Chrome 更诚实。
     user_agent: str = "chaiai/0.5 (local agent)"
     #: 域名策略（2026-10-14，联网常态化的配套）。``allow`` = 除 `denied_domains` 外一律放行——这是主流
@@ -781,6 +788,35 @@ class SkillsConfig(_StrictModel):
                     f"{value!r}。请写成绝对路径，或写成相对 `config.yaml` 所在的目录名"
                 )
         return self
+
+
+class McpConfig(_StrictModel):
+    """MCP 客户端的**运行参数**（架构 §6.13；2026-10-20）。
+
+    这里**没有** server 列表：server 的连接方式在独立的 ``mcp.json``（与 CodeBuddy 同格式，
+    可整份粘贴），server 的开关与工具白/黑名单是用户状态、存设置库。三份东西分开的理由是
+    "部署配置 / 用户状态 / 运行参数"三者的生命周期不同，混在一起会让升级与备份互相牵连。
+
+    **默认关闭**：``enabled`` 为假时不连任何 server、``mcp`` 能力不出现，行为与接入前一致。
+    """
+
+    enabled: bool = False
+    #: 直接绑定给模型的工具上限。其余走检索——这是"工具有几千个也不会把提示撑爆"的主闸。
+    max_direct_tools: int = Field(default=20, ge=0, le=200)
+    #: 同时在连的 server 数上限。50 个 npx+node 常驻会吃掉数 GB 内存，必须排队。
+    max_connected_servers: int = Field(default=4, ge=1, le=64)
+    #: 空闲多久断开子进程（秒）。**0 表示不回收**：只在内存充裕的机器上这么设，
+    #: 否则几十台 server 的常驻进程会拖垮整机。
+    idle_timeout_seconds: int = Field(default=600, ge=0, le=86_400)
+    #: 单台 server 的启动（握手）超时。``npx -y`` 首次要下载包，给到 30 秒。
+    startup_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    #: 单次 ``tools/call`` 超时。超时按失败如实报告，**不重试**。
+    call_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    #: 单条工具定义（描述 + 参数 schema）的字节上限。超限的工具直接不可见（照 Codex 的字节闸：
+    #: 字节在生成时就知道，token 要估，前者更早失败、没有估算偏差这种含糊地带）。
+    max_tool_schema_bytes: int = Field(default=8_192, ge=256, le=1_000_000)
+    #: 单次检索返回的工具条数（照 Codex ``tool_search`` 的默认 8）。
+    max_search_results: int = Field(default=8, ge=1, le=50)
 
 
 class ProfilesConfig(_StrictModel):
@@ -893,6 +929,8 @@ class AppConfig(_StrictModel):
     web_access: WebAccessConfig = Field(default_factory=WebAccessConfig)
     git: GitConfig = Field(default_factory=GitConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    #: MCP 客户端（2026-10-20）。默认关闭；server 列表不在这里，见同目录 ``mcp.json``。
+    mcp: McpConfig = Field(default_factory=McpConfig)
     jobs: JobsConfig = Field(default_factory=JobsConfig)
     workflows: WorkflowsConfig = Field(default_factory=WorkflowsConfig)
 
@@ -920,6 +958,9 @@ class AppConfig(_StrictModel):
         layer["git_read"] = git_on
         layer["git_write"] = git_on
         layer["skill"] = declared["skill"] and self.skills.enabled
+        # MCP **不在任何内置档位里**（它取决于用户自己配了哪些 server），所以出厂默认只由
+        # `mcp.enabled` 决定，不看档位声明。页面上改过开关之后，以设置库里的选择为准（§16.1）。
+        layer["mcp"] = self.mcp.enabled
         return {name: layer[name] for name in CAPABILITY_TOOLS}
 
     def as_run_config(self) -> RunConfig:
@@ -983,6 +1024,8 @@ def apply_capability_gates(app_config: _ConfigT, switches: Mapping[str, bool]) -
             "enabled": bool(switches.get("git_read") or switches.get("git_write")),
         }),
         "skills": app_config.skills.model_copy(update={"enabled": bool(switches.get("skill"))}),
+        # MCP 的总闸跟能力开关走（与 web/git/skills 同构）：`config.yaml` 的 `mcp.enabled` 只是出厂默认。
+        "mcp": app_config.mcp.model_copy(update={"enabled": bool(switches.get("mcp"))}),
     })
 
 

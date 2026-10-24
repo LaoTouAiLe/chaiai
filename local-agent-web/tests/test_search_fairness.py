@@ -53,13 +53,12 @@ def test_scan_cap_cannot_be_eaten_by_one_subtree(
     tmp_path: Path, app_config: AppConfig, monkeypatch
 ) -> None:
     """文件数上限同理：额度按条目轮转分配，不能被第一个子树吃光。"""
-    monkeypatch.setattr(search_tools, "MAX_SCAN_FILES", 2)
     for index in range(5):
         _write(tmp_path, f"aaa/one_{index}.py", "nope\n")
     _write(tmp_path, "zzz/target.py", "target\n")
     policy = _policy(tmp_path, app_config)
 
-    result = search_tools.grep_content("target", policy=policy)
+    result = search_tools.grep_content("target", policy=policy, max_scan_files=2)
 
     assert [hit.path for hit in result.hits] == ["zzz/target.py"]
     assert "已达文件数上限 2" in (result.note or "")

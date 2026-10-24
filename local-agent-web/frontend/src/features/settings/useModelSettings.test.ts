@@ -25,6 +25,8 @@ function connection(overrides: Partial<ModelConnectionDto> = {}): ModelConnectio
     timeout_seconds: 120,
     retry_count: 2,
     streaming: false,
+    // 2026-10-16：连接级"支持图片输入"（服务端一定会回/收这一位，夹具照实写）。
+    supports_vision: false,
     auth_mode: 'api_key',
     key_status: 'configured',
     is_default: true,
@@ -75,6 +77,8 @@ function body(overrides: Record<string, unknown> = {}) {
     timeout_seconds: 120,
     retry_count: 2,
     streaming: false,
+    // 2026-10-16：连接级"支持图片输入"（服务端一定会回/收这一位，夹具照实写）。
+    supports_vision: false,
     auth_mode: 'api_key' as const,
     allow_plaintext_http: false,
     ...overrides,
@@ -173,6 +177,7 @@ describe('useModelSettings', () => {
           timeout_seconds: 120,
           retry_count: 2,
           streaming: false,
+          supports_vision: false,
           auth_mode: 'api_key',
           allow_plaintext_http: false,
         },

@@ -71,7 +71,7 @@ def test_shell_non_zero_exit_is_not_verified() -> None:
     assert any("退出码" in reason for reason in evidence.reasons)
 
 
-def test_shell_empty_output_is_uncertain() -> None:
+def test_shell_empty_output_with_successful_exit_is_verified() -> None:
     evidence = validate_tool_event(
         _event(),
         _result(preview='{"exit_code": 0, "stdout": "", "stderr": ""}'),
@@ -80,7 +80,15 @@ def test_shell_empty_output_is_uncertain() -> None:
 
     assert evidence.exit_code_ok is True
     assert evidence.has_output is False
-    assert evidence.evidence_level == "uncertain"
+    assert evidence.evidence_level == "verified"
+
+
+def test_timed_out_command_with_zero_exit_and_output_is_not_verified() -> None:
+    evidence = validate_tool_event(
+        _event(), _result(),
+        payload={"exit_code": 0, "stdout": "partial", "stderr": "", "timed_out": True},
+    )
+    assert evidence.evidence_level == "failed"
 
 
 def test_shell_timeout_without_exit_code_is_failed() -> None:
@@ -290,6 +298,82 @@ def test_reflection_marks_failed_when_no_verified_evidence(
     assert update["reflection_result"].result_trust == "failed"
     assert update["final_evidence"][0].verified is False
     assert update["error_events"]
+
+
+def test_a_denied_call_is_not_counted_as_evidence_failure(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """**被拒绝的调用没有执行，也不该把整轮判成"拿不到证据"**（2026-10-14 实测）。
+
+    症状：一句被拒的 `run_shell`（例如"当前环境找不到可执行文件：time"）让整轮挂上
+    「机械校验未通过：本轮工具结果不能作为已验证证据」红卡（当时文案原文）——而事实是
+    "这次调用没执行"，不是"执行了却不可信"。现在被拒的事件不进信任度汇总，也不产生证据引用；
+    拒绝事实仍由 `error_events` 与对话里的拒绝消息如实记录。
+    """
+    context = _context(tmp_path, app_config, model_factory(decision="tool", reply="x"))
+    state: dict[str, Any] = {
+        "run_id": RUN_ID,
+        "loop_count": 1,
+        "messages": [],
+        "tool_events": [_event(status="denied")],
+        "tool_results": [_result(status="denied")],
+    }
+
+    update = nodes.reflection_node(state, _runtime(context, state))  # type: ignore[arg-type]
+
+    assert update["reflection_result"].result_trust != "failed", "被拒的调用不是证据失败"
+    assert update["final_evidence"] == [], "没有执行的调用不产生证据引用"
+    # 按 stage 判而不是按文案判：文案在 2026-10-15 改成了面向用户的说法，这里不该跟着改一次
+    # （否则"改文案"与"改判定"混成同一处断言，任一处变动就会看不出是哪件事变了）。
+    assert not [
+        item
+        for item in update.get("error_events", [])
+        if item.get("stage") == f"{nodes.REFLECTION_NODE}:mechanical"
+    ], "不该再打出那张'本轮没有证据'的红卡"
+
+
+def test_mechanical_failure_message_avoids_internal_jargon(
+    tmp_path: Path, app_config: AppConfig, model_factory
+) -> None:
+    """红卡正文不得出现内部术语（2026-10-15）。
+
+    投影层把这条事件的 ``message`` **原样**给用户看（`projection.py` 的 `_error_view` 只换
+    title/hint），所以文案写在节点里就等于印在页面上。2026-10-15 实测：一轮"百度热榜"回答
+    完整、却在 `web_fetch` 续读被版本校验拒掉的那一步留下了「机械校验未通过：本轮工具结果
+    不能作为已验证证据」——用户拿到的是我们的评级名，不是"这个结论能不能当依据"。
+
+    旧路径仍校验其提示文案；新循环只保留执行反馈，不再要求机械阻断红卡。
+    """
+    context_state_versions: list[int | None] = [None, 1]
+    for loop_version in context_state_versions:
+        model = model_factory(decision="tool", reply="已尽力")
+        state = _failed_state(
+            **({} if loop_version is None else {"agent_loop_version": loop_version})
+        )
+        update = nodes.reflection_node(
+            state, _runtime(_context(tmp_path, app_config, model), state)
+        )
+        if loop_version == 1:
+            assert update["reflection_result"].anomalies == ("read_file: error",)
+            assert update["task_status"] == "running"
+            assert not update.get("error_events")
+            assert model.decision_calls == 0
+            continue
+
+        messages = [
+            str(event["message"])
+            for event in update["error_events"]
+            if event["stage"] == f"{nodes.REFLECTION_NODE}:mechanical"
+        ]
+        # 两处分支必须写同一句话：曾各写一份字面量，改一处就会漏另一处。
+        assert all(message == nodes.MECHANICAL_FAILURE_MESSAGE for message in messages)
+        # 反向先钉住：去术语不能把这条事实一起删掉。
+        assert messages, f"loop_version={loop_version} 时机械失败必须仍留一条事件"
+        for message in messages:
+            for banned in ("机械", "校验", "证据等级", "verified", "failed"):
+                assert banned not in message, f"loop_version={loop_version} 的文案里出现了「{banned}」"
+            # 该说的事实要在：结果没核对通过、不能当依据。
+            assert "核对" in message and "依据" in message
 
 
 def test_completion_route_maps_every_next_action() -> None:
@@ -623,7 +707,12 @@ def _verified_state(**overrides: Any) -> dict[str, Any]:
 
 
 def _failed_state(**overrides: Any) -> dict[str, Any]:
-    """工具被拒（机械校验为 ``failed``）的 State。"""
+    """工具**执行了但失败**（机械校验为 ``failed``）的 State。
+
+    注意与"**被拒绝、没有执行**"的区别（2026-10-14 起）：被拒的调用不进证据汇总，因此它不会产生
+    ``failed``（见 ``test_a_denied_call_is_not_counted_as_evidence_failure``）。这里用结果状态
+    ``error`` 表达"跑过、但没拿到可信产出"，才是 ``failed`` 的真正来源。
+    """
     state: dict[str, Any] = {
         "run_id": RUN_ID,
         "loop_count": 1,
@@ -632,7 +721,7 @@ def _failed_state(**overrides: Any) -> dict[str, Any]:
         "tool_events": [
             ToolEvent(tool_call_id="c1", tool_name="read_file", status="error", run_id=RUN_ID)
         ],
-        "tool_results": [_tool_result(status="denied", preview="已拒绝执行 read_file")],
+        "tool_results": [_tool_result(status="error", preview="读取失败：目标不存在")],
     }
     state.update(overrides)
     return state

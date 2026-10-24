@@ -14,10 +14,11 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from local_agent.attachments import LoadedAttachment
 from local_agent.graph import nodes
+from local_agent.message_flags import TOOL_IMAGE_FLAG
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 
@@ -144,3 +145,51 @@ def test_missing_bytes_degrade_to_a_placeholder_instead_of_failing() -> None:
 
     assert not any(block.get("type") == "image_url" for block in resolved[0].content)
     assert any("无法读取" in str(block) for block in resolved[0].content)
+
+
+def _image_batch():
+    return [
+        AIMessage(content="", tool_calls=[
+            {"name": "view_image", "args": {}, "id": "a"},
+            {"name": "view_image", "args": {}, "id": "b"},
+        ]),
+        ToolMessage(content="first", tool_call_id="a"),
+        HumanMessage(content="first image", id="a:image", additional_kwargs={
+            TOOL_IMAGE_FLAG: True, "local_agent_image_refs": [_ref("first")],
+        }),
+        ToolMessage(content="second", tool_call_id="b"),
+        HumanMessage(content="second image", id="b:image", additional_kwargs={
+            TOOL_IMAGE_FLAG: True, "local_agent_image_refs": [_ref("second")],
+        }),
+    ]
+
+
+def test_batched_images_follow_all_tool_replies_without_changing_history() -> None:
+    messages = [HumanMessage(content="look"), *_image_batch(), AIMessage(content="done")]
+    original = [message.model_dump() for message in messages]
+
+    resolved = nodes._resolve_message_images(messages, _context())
+
+    # The provider requires every reply immediately after the assistant tool_calls.
+    pending = set()
+    for message in resolved:
+        if pending:
+            assert isinstance(message, ToolMessage)
+            pending.remove(message.tool_call_id)
+        elif isinstance(message, AIMessage):
+            pending = {call["id"] for call in message.tool_calls}
+    assert not pending
+    assert [message.id for message in resolved[4:6]] == ["a:image", "b:image"]
+    for message in resolved[4:6]:
+        assert any(block.get("type") == "image_url" for block in message.content)
+        assert "local_agent_image_refs" not in message.additional_kwargs
+    assert [message.model_dump() for message in messages] == original
+
+
+def test_image_reordering_does_not_cross_a_real_user_or_hide_missing_replies() -> None:
+    batch = _image_batch()
+    real_user = HumanMessage(content="stop", id="real-user")
+    for messages in (batch[:3], batch[:3] + [real_user] + batch[3:]):
+        resolved = nodes._resolve_message_images(messages, _context())
+        assert [message.type for message in resolved] == [message.type for message in messages]
+        assert [message.id for message in resolved] == [message.id for message in messages]

@@ -16,8 +16,10 @@
 .composer {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-lg);
-  padding: 10px 10px var(--law-space-md);
+  gap: var(--law-space-md);
+  /* 2026-10-21：整体放大一档（10px → 16px）。原来输入区只有约 94px 高，
+     一屏里显得"挤成一条"，与消息区的留白不成比例。 */
+  padding: var(--law-space-xl) var(--law-space-xl) var(--law-space-md);
   border: 1px solid var(--law-border-l2);
   border-radius: var(--law-radius-2xl);
   background: var(--law-bg-layer-1);
@@ -35,6 +37,30 @@
   line-height: var(--law-leading-xs);
 }
 
+.compressionStatus {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  padding: 0 var(--law-space-xs);
+  color: var(--law-text-caption);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.compressionIndicator,
+.compressionSpinner {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+}
+
+.compressionSpinner { animation: compressionSpin 1s linear infinite; }
+@keyframes compressionSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .compressionSpinner { animation: none; } }
+
 /* Why the input is disabled. Not a placeholder: it must survive being greyed out. */
 .disabledNote {
   margin: -8px 0 0;
@@ -51,8 +77,10 @@
 .input {
   display: block;
   width: 100%;
-  min-height: 24px;
-  padding: var(--law-space-xs) var(--law-space-lg) var(--law-space-xs) var(--law-space-xl);
+  /* 24px = 一行；48px = 两行起步（2026-10-21）。输入框是这一页最常点的东西，
+     一行的框会让人以为"只能写一句话"。 */
+  min-height: 48px;
+  padding: var(--law-space-md) var(--law-space-lg) var(--law-space-md) var(--law-space-xl);
   border: 0;
   background: transparent;
   font-size: var(--law-text-base);
@@ -77,50 +105,57 @@
   padding: 0 var(--law-space-xs);
 }
 
+/* 模式切换（2026-10-13 用户反馈"下拉太丑"）：改成**两段常驻的分段控件**——两个模式同时可见、
+   一点即切，不再有弹出菜单与第二次点击。轨道与选中块直接沿用 `TopBar` 页签那一套令牌
+   （`--law-surface-selector` 轨道 + `--law-bg-layer-1` 抬起的选中块 + `--law-shadow-lv1`），
+   所以它看起来就是本应用已有的"选中态"写法，不是新造的一种控件。 */
 .modeSelector {
-  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--law-space-xxs);
+  /* `min-width: 0`（与 `.chip` 同一条口径）：窄窗下先让这一组可以被压缩，再由 `.controls` 的
+     折行把计量器与发送整组移到第二行——而不是把发送按钮顶出视口（640 宽度是有用例守着的）。 */
   min-width: 0;
-}
-
-.modeMenu {
-  position: absolute;
-  z-index: 30;
-  bottom: calc(100% + var(--law-space-sm));
-  left: 0;
-  width: min(300px, calc(100vw - 32px));
-  padding: var(--law-space-sm);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-lg);
-  background: var(--law-bg-layer-1);
-  box-shadow: var(--law-shadow-lv2);
-}
-
-.modeHint {
-  margin: 0;
-  padding: var(--law-space-sm);
-  color: var(--law-text-caption);
-  font-size: var(--law-text-xs);
-}
-
-.modeMenu button {
-  display: flex;
-  width: 100%;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--law-space-xs);
-  padding: var(--law-space-sm) var(--law-space-lg);
-  border-radius: var(--law-radius-md);
-  text-align: left;
-}
-
-.modeMenu button:hover,
-.modeMenu button[aria-checked='true'] {
+  padding: var(--law-space-xxs);
+  border-radius: var(--law-radius-pill);
   background: var(--law-surface-selector);
 }
 
-.modeMenu button span {
-  color: var(--law-text-caption);
-  font-size: var(--law-text-xs);
+.modeOption {
+  height: 22px;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0 var(--law-space-lg);
+  border: 0;
+  border-radius: var(--law-radius-pill);
+  background: transparent;
+  color: var(--law-text-secondary);
+  font-family: inherit;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--law-duration-fast) var(--law-ease);
+}
+
+.modeOption:hover:not(:disabled) {
+  color: var(--law-text-primary);
+}
+
+/* 选中的那一段：抬起来。`aria-pressed` 是状态本身，不另开一个类名——类名会允许"选中但没有
+   `aria-pressed`"这种不一致状态存在。 */
+.modeOption[aria-pressed='true'] {
+  background: var(--law-bg-layer-1);
+  color: var(--law-text-primary);
+  font-weight: var(--law-weight-medium);
+  box-shadow: var(--law-shadow-lv1);
+}
+
+/* 禁用（原型态、或这一轮正在跑）：保留配色、只降不透明度——整块灰掉会被读成"这个模式没了"。 */
+.modeOption:disabled {
+  cursor: default;
+  opacity: 0.55;
 }
 
 /* 折行后仍靠右。宽窗空闲空间先被 `.spacer` 吃掉，所以分组前的像素不受影响。 */
@@ -204,7 +239,28 @@
   transition: background var(--law-duration-base) var(--law-ease);
 }
 
-/* No `.stop` rule: v0.4 has no cancel semantics, so no stop control exists. */
+/* 「停止生成」（§17.4，2026-10-13 起有真实语义）：与发送同一个位置、同一套尺寸与配色——
+   它是**同一个主按钮的另一种状态**，不是新加的一个控件。 */
+.stop {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--law-radius-pill);
+  background: var(--law-button-primary-fill);
+  color: var(--law-text-on-brand);
+  transition: background var(--law-duration-base) var(--law-ease);
+}
+
+.stop:hover:not(:disabled) {
+  background: var(--law-button-primary-hover);
+}
+
+.stop:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
 
 .send:hover {
   background: var(--law-button-primary-hover);
@@ -214,3 +270,100 @@
   background: var(--law-button-primary-disabled);
   color: var(--law-text-tertiary);
 }
+
+/* 待发图片（2026-10-16）：粘贴或选图之后排在输入框上方，发送前可逐张移除。
+   缩略图用**本地** object URL，字节的权威在服务端（这里只是预览）。 */
+.attachments {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm);
+  margin: 0 0 var(--law-space-sm);
+  padding: 0;
+  list-style: none;
+}
+
+.attachment {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  overflow: hidden;
+  border: 1px solid var(--law-border-l1);
+  /* 带兜底：这个模块里没有 `--law-radius-md` 的既有用法，缺了也不该退化成直角。 */
+  border-radius: var(--law-radius-md, 10px);
+  background: var(--law-bg-layer-1);
+}
+
+.attachmentImage {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.attachmentRemove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: var(--law-radius-pill);
+  background: var(--law-bg-layer-1);
+  color: var(--law-text-secondary);
+  cursor: pointer;
+  font-size: var(--law-text-xs);
+  line-height: 1;
+}
+
+.attachmentRemove:hover {
+  color: var(--law-text-primary);
+}
+
+/* 与 `.disabledNote` 同一套缩进：它是输入框的一段说明，不是输入框外的横幅
+   （2026-10-19 加图片入口移进 `.composer` 之后，这条也一起搬了进来）。 */
+.attachError {
+  margin: 0;
+  padding: 0 var(--law-space-xl);
+  color: var(--law-state-error, var(--law-text-secondary));
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+}
+
+/* 选图入口（2026-10-19）：粘贴才是主路径，它只是备用——所以不给边框与文字，
+   只留一颗与发送同尺寸的图标，落在计量器左边（用户口径："对话框右下、统计上下文圆形左边"）。 */
+.attach {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: var(--law-radius-pill);
+  color: var(--law-text-tertiary);
+  transition: color var(--law-duration-fast) var(--law-ease), background var(--law-duration-fast) var(--law-ease);
+}
+
+.attach:hover:not(:disabled) {
+  background: var(--law-button-ghost-hover);
+  color: var(--law-text-primary);
+}
+
+.attach:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+/* 上传中：图标换成小转圈——位置不动，按钮仍占同一个 28px 格子。 */
+.attachSpinner {
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: attachSpin 1s linear infinite;
+}
+
+@keyframes attachSpin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .attachSpinner { animation: none; } }

@@ -1,0 +1,37 @@
+/* 「滑到最底」箭头：浮在滚动区右下角。默认的 `bottom` 给设置用（让开吸底操作栏），
+   会话里由行内 style 覆盖成紧贴底部的值。 */
+
+.jumpBottom {
+  position: absolute;
+  right: 10px;
+  bottom: 92px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--law-border-l2);
+  border-radius: 50%;
+  background: var(--law-bg-layer-1);
+  box-shadow: var(--law-shadow-lv2);
+  color: var(--law-text-secondary);
+  cursor: pointer;
+}
+
+.jumpBottom:hover {
+  background: var(--law-button-ghost-hover);
+  color: var(--law-text-primary);
+}
+
+.jumpBottom:focus-visible {
+  outline: 2px solid var(--law-button-primary-fill);
+  outline-offset: 2px;
+}
+
+@media (max-width: 760px) {
+  .jumpBottom {
+    right: 8px;
+    bottom: 84px;
+  }
+}

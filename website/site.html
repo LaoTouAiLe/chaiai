@@ -1,0 +1,1805 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>chaiai — 本机上的 Agent 工作台</title>
+<meta name="description" content="chaiai 是运行在本机的本地 Agent 工作台：FastAPI + React 界面，Python + LangGraph 执行，默认只监听回环地址，工具、文件与运行记录的每一步都可追问、可审计。" />
+<meta name="color-scheme" content="light" />
+<meta name="theme-color" content="#ffffff" />
+<style>
+/* ==========================================================================
+   chaiai · 静态宣传页
+   配色刻意收敛：近黑灰阶 + 单一强调色（暖琥珀，与 chaiai 图标同族）。
+   不引入第二强调色、不使用彩虹渐变，层次全部由明度、边框与光影承担。
+   ========================================================================== */
+
+:root {
+  /* 底色与面：白页 + 浅灰分区 + 白卡片。口径照 workbuddy.cn 的 --wb2-*：
+     surface-page #fff、surface-sunken #f7f8f9、surface-chip #f1f2f4、border #e0e0e0 / #ebebeb。 */
+  --bg: #ffffff;
+  --bg-soft: #f7f8f9;
+  --surface: #ffffff;
+  --surface-2: #f1f2f4;
+  --sunken: #f7f8f9;
+  --line: #ebebeb;
+  --line-strong: #e0e0e0;
+
+  /* 文字：主 / 正文 / 次 / 元信息（官网 text-primary #1a1a1a、secondary #646464、tertiary #a3a3a3） */
+  --tx: #1a1a1a;
+  --tx-2: #454545;
+  --tx-3: #646464;
+  --tx-4: #a3a3a3;
+
+  /* 深色对比块（终端、代码块）：官网同样把 #0a0a0a 的终端放在白页上作对照 */
+  --ink: #0a0a0a;
+  --ink-line: #ffffff17;
+  --ink-tx: #f5f5f5;
+  --ink-tx-2: #c9c9c9;
+  --ink-tx-3: #8f8f8f;
+
+  /* 唯一强调色：**保留暖琥珀**（与 chaiai 图标同族，2026-10-19 用户口径）。
+     浅底上分两档：填充/描边用 --accent，文字必须用 --accent-ink（否则对比度不够）。 */
+  --accent: #e77737;
+  --accent-ink: #a94b12;
+  --accent-soft: #f8b65c;
+  --accent-ghost: #f4dcca;
+  --accent-tint: #fdf5ef;
+  --accent-hover: #c96513;
+
+  /* 字体：与官网同一条系统栈（PingFang SC 优先），不引外部字体 */
+  --font-sans: 'PingFang SC', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei',
+    'Hiragino Sans GB', 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono', Menlo,
+    'PingFang SC', 'Microsoft YaHei', monospace;
+
+  /* 版心 1200、卡片 16、大容器 20、节间距 96——照官网 --wb2-container / radius-card / radius-panel / section-gap */
+  --wrap: 1200px;
+  --radius: 16px;
+  --radius-lg: 20px;
+  --radius-sm: 10px;
+  --section-gap: 96px;
+  --ease: cubic-bezier(.4, 0, .2, 1);
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  /* 顶部一层极淡的暖白：让白页有"从暖到冷"的纵深，而不是整页同一块 #fff */
+  background: linear-gradient(180deg, #fff9f4 0, #ffffff 560px);
+  color: var(--tx);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overflow-x: hidden;
+}
+
+h1, h2, h3 { margin: 0; font-weight: 500; letter-spacing: -.02em; line-height: 1.15; }
+p { margin: 0; }
+ul, ol, dl, dd { margin: 0; padding: 0; list-style: none; }
+a { color: inherit; text-decoration: none; }
+code { font-family: var(--font-mono); font-size: .93em; }
+
+::selection { background: #e7773733; color: var(--tx); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 6px;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  background: var(--tx);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 0 0 10px 0;
+}
+.skip-link:focus { left: 0; }
+
+.wrap {
+  width: 100%;
+  max-width: var(--wrap);
+  margin: 0 auto;
+  padding: 0 28px;
+}
+
+/* ── 背景层（2026-10-19 两轮反馈：先加纹理，再加动效）：
+   细网格 + 首屏点阵 + 三处暖色辉光 + 底部暖光。全部 fixed 装饰层：
+   不参与布局、不吃指针；动效只用 transform / opacity，走合成层，不触发重排。 ── */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+}
+/* 网格：极慢地斜移一格（64s 一个来回）——静止时是纹理，动起来像"纸在呼吸" */
+.backdrop__grid {
+  position: absolute;
+  inset: -64px;
+  background-image:
+    linear-gradient(to right, #1a1a1a14 1px, transparent 1px),
+    linear-gradient(to bottom, #1a1a1a14 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(ellipse 96% 68% at 50% 0%, #000 14%, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse 96% 68% at 50% 0%, #000 14%, transparent 80%);
+  animation: gridDrift 64s linear infinite alternate;
+}
+@keyframes gridDrift {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(-32px, -32px, 0); }
+}
+/* 点阵：只铺首屏、往下淡出；比网格快一档，两层错开产生细微视差 */
+.backdrop::before {
+  content: '';
+  position: absolute;
+  inset: -40px;
+  background-image: radial-gradient(#1a1a1a1c 1px, transparent 1px);
+  background-size: 20px 20px;
+  mask-image: radial-gradient(ellipse 66% 40% at 50% 3%, #000 0%, transparent 74%);
+  -webkit-mask-image: radial-gradient(ellipse 66% 40% at 50% 3%, #000 0%, transparent 74%);
+  animation: dotsDrift 30s ease-in-out infinite alternate;
+}
+@keyframes dotsDrift {
+  from { transform: translate3d(0, 0, 0); }
+  to { transform: translate3d(-20px, 24px, 0); }
+}
+/* 底部暖光：把结尾 CTA 与页脚从白页里托起来 */
+.backdrop::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -320px;
+  width: 1200px;
+  height: 680px;
+  /* 基准态就带上 -50%：减弱动画时动画被关掉，仍靠它保持居中 */
+  transform: translateX(-50%);
+  background: radial-gradient(closest-side, #f8b65c33, transparent 72%);
+  filter: blur(70px);
+  will-change: transform;
+  animation: glowBottom 30s ease-in-out infinite alternate;
+}
+@keyframes glowBottom {
+  from { transform: translate(-50%, 0) scale(1); }
+  to { transform: translate(calc(-50% - 34px), -18px) scale(1.06); }
+}
+.backdrop__glow {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(120px);
+  opacity: .85;
+  will-change: transform;
+}
+/* 主光：标题后面那团琥珀，26s 缓慢游走 + 轻微呼吸 */
+.backdrop__glow--top {
+  top: -380px;
+  left: 50%;
+  width: 1040px;
+  height: 680px;
+  transform: translateX(-50%);
+  background: radial-gradient(circle, #e777373d, transparent 68%);
+  animation: glowTop 26s ease-in-out infinite alternate;
+}
+@keyframes glowTop {
+  from { transform: translate(-50%, 0) scale(1); }
+  to { transform: translate(calc(-50% + 46px), 28px) scale(1.07); }
+}
+/* 侧光：fixed 层里不能写 top:1180px（会落在视口外）——放在视口右侧中部，34s 反向游走 */
+.backdrop__glow--mid {
+  top: 42%;
+  right: -260px;
+  width: 720px;
+  height: 720px;
+  background: radial-gradient(circle, #f8b65c2e, transparent 70%);
+  animation: glowMid 34s ease-in-out infinite alternate;
+}
+@keyframes glowMid {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to { transform: translate3d(-46px, -30px, 0) scale(1.08); }
+}
+
+/* ── 顶栏：64px 白色玻璃条（照官网 .header：白 85% + blur(40px)），品牌左、导航居中、动作右 ── */
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  border-bottom: 1px solid transparent;
+  transition: background .25s var(--ease), border-color .25s var(--ease), box-shadow .25s var(--ease);
+}
+.nav.is-stuck {
+  background: #ffffffe6;
+  backdrop-filter: blur(40px);
+  -webkit-backdrop-filter: blur(40px);
+  border-bottom-color: var(--line);
+}
+.nav__inner {
+  max-width: 1436px;
+  margin: 0 auto;
+  padding: 0 40px;
+  height: 64px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 40px;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  justify-self: start;
+  color: var(--tx);
+  border-radius: 8px;
+}
+.brand__mark { display: block; border-radius: 8px; }
+.brand__text {
+  font-family: var(--font-sans);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  color: var(--tx);
+}
+.nav__links {
+  display: flex;
+  gap: 30px;
+  font-size: 14px;
+  color: var(--tx-3);
+}
+.nav__links a { transition: color .18s var(--ease); }
+.nav__links a:hover { color: var(--tx); }
+.nav__actions {
+  display: flex;
+  align-items: center;
+  justify-self: end;
+  gap: 12px;
+}
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: .01em;
+  color: var(--tx-3);
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 6px 13px;
+}
+.badge__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px #e7773726;
+  animation: liveDot 2.6s ease-in-out infinite;
+}
+/* 「本机运行」的状态点：扩一圈再收回，像心跳；不动位置，避免抢注意力 */
+@keyframes liveDot {
+  0%, 100% { box-shadow: 0 0 0 3px #e7773726; }
+  50% { box-shadow: 0 0 0 5px #e7773714; }
+}
+.nav__toggle {
+  display: none;
+  width: 38px;
+  height: 34px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+  padding: 0;
+}
+.nav__toggle span {
+  display: block;
+  width: 15px;
+  height: 1.5px;
+  margin: 4px auto;
+  background: var(--tx-2);
+}
+.nav__drawer {
+  display: none;
+  flex-direction: column;
+  padding: 6px 40px 18px;
+  border-bottom: 1px solid var(--line);
+  background: #fffffff2;
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+}
+.nav__drawer a { padding: 12px 0; color: var(--tx-2); border-bottom: 1px solid var(--line); }
+.nav__drawer a:last-child { border-bottom: 0; }
+
+/* ── 按钮：官网是胶囊；主按钮 #1a1a1a 白字，次按钮白底细描边 ──────────── */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px 24px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .18s var(--ease), border-color .18s var(--ease), color .18s var(--ease), transform .18s var(--ease), box-shadow .18s var(--ease);
+}
+.btn--primary { background: var(--tx); color: #fff; }
+.btn--primary:hover { background: #000; box-shadow: 0 8px 22px -12px #1a1a1a80; }
+.btn--ghost { border-color: var(--line-strong); color: var(--tx-2); background: #fff; }
+.btn--ghost:hover { border-color: var(--tx-4); color: var(--tx); background: var(--bg-soft); }
+.btn--sm { padding: 8px 18px; font-size: 13px; }
+.btn:active { transform: translateY(1px); }
+
+/* ── Hero：居中主视觉（官网 .wb2-hero：标题 88/1.02 居中，副标 16/28 限宽 560，CTA 上 32） ── */
+.hero {
+  position: relative;
+  padding: 104px 0 0;
+  text-align: center;
+}
+.hero__glow {
+  position: absolute;
+  left: 50%;
+  top: -20px;
+  width: min(1240px, 138%);
+  height: 600px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  /* 两层：靠内的蜜桃色 + 外圈的淡琥珀，叠出"光从标题后面透出来"的层次 */
+  background:
+    radial-gradient(closest-side, #f8b65c3d, transparent 66%),
+    radial-gradient(closest-side, #e777372b, transparent 76%);
+  filter: blur(110px);
+  opacity: 1;
+  pointer-events: none;
+  will-change: transform, opacity;
+  animation: heroBreathe 11s ease-in-out infinite;
+}
+/* 呼吸：11s 一轮，幅度很小——是"光在动"，不是"元素在跳" */
+@keyframes heroBreathe {
+  0%, 100% { transform: translateX(-50%) scale(1); opacity: .88; }
+  50% { transform: translateX(-50%) scale(1.05); opacity: 1; }
+}
+.hero__copy {
+  position: relative;
+  max-width: 60em;
+  margin: 0 auto;
+}
+/* 首屏入场：由下往上错峰浮起（同一条曲线，0.05s 递进） */
+@keyframes riseIn {
+  from { opacity: 0; transform: translateY(22px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--accent-ink);
+  background: var(--accent-tint);
+  border: 1px solid var(--accent-ghost);
+  border-radius: 999px;
+  padding: 6px 14px;
+  animation: riseIn .7s cubic-bezier(.16, 1, .3, 1) both;
+}
+.eyebrow__mark {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.hero__title {
+  margin: 26px 0 0;
+  font-size: clamp(2.25rem, 5vw, 4.5rem);
+  font-weight: 500;
+  letter-spacing: -.02em;
+  line-height: 1.06;
+  color: var(--tx);
+  animation: riseIn .9s cubic-bezier(.16, 1, .3, 1) .1s both;
+}
+.hero__title em {
+  font-style: normal;
+  color: var(--accent-ink);
+}
+.hero__lede {
+  margin: 24px auto 0;
+  max-width: 560px;
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 28px;
+  color: var(--tx-3);
+  text-wrap: pretty;
+  animation: riseIn .9s cubic-bezier(.16, 1, .3, 1) .22s both;
+}
+.hero__cta {
+  margin-top: 32px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 12px;
+  animation: riseIn .9s cubic-bezier(.16, 1, .3, 1) .34s both;
+}
+
+/* 主视觉：终端示意卡直接坐在白页上（官网 .wb2-hero__shot：上留 96、限宽 992） */
+.hero__panel {
+  position: relative;
+  margin: 96px auto 0;
+  max-width: 992px;
+  animation: riseIn 1s cubic-bezier(.16, 1, .3, 1) .46s both;
+}
+/* 三枚悬浮小标签（127.0.0.1:8000 等）不画了：浅底上它们会压在终端正文上，
+   同样的信息在下方 `.stats` 里已经如实列出。HTML 保留、这里只关掉。 */
+.chip { display: none; }
+
+/* 关键事实：四张浅灰小卡（白页上靠底色与圆角分组，不靠分隔线） */
+.stats {
+  position: relative;
+  margin: 64px auto 0;
+  max-width: 992px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+}
+.stats__item {
+  padding: 20px 22px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-soft);
+  text-align: left;
+}
+.stats__item dt {
+  font-size: 12px;
+  color: var(--tx-4);
+}
+.stats__item dd {
+  margin-top: 8px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--tx);
+}
+
+/* ── 终端展示卡：白页里的深色对照块（官网同款 #0a0a0a），圆角 20 ────── */
+.terminal {
+  margin: 0;
+  text-align: left;
+  border: 1px solid #ffffff0f;
+  border-radius: var(--radius-lg);
+  background: var(--ink);
+  box-shadow: 0 30px 70px -36px #1a1a1a47, 0 1px 2px #1a1a1a14;
+  overflow: hidden;
+}
+.terminal__bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--ink-line);
+  background: #ffffff08;
+}
+.terminal__dots { display: inline-flex; gap: 6px; }
+.terminal__dots i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #ffffff26;
+}
+.terminal__dots i:first-child { background: #ffffff3d; }
+.terminal__title {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-tx-3);
+  letter-spacing: .04em;
+}
+.terminal__tag {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: .1em;
+  color: var(--ink-tx-3);
+  border: 1px solid var(--ink-line);
+  border-radius: 999px;
+  padding: 2px 9px;
+}
+.terminal__body {
+  padding: 20px 20px 22px;
+  font-family: var(--font-mono);
+  font-size: 12.8px;
+  line-height: 1.85;
+  display: grid;
+  gap: 7px;
+}
+.row { display: grid; grid-template-columns: 62px 1fr; gap: 12px; }
+.row__key { color: var(--ink-tx-3); letter-spacing: .02em; }
+.row__text { color: var(--ink-tx-2); }
+.row--user .row__key { color: var(--ink-tx-3); }
+.row--user .row__text { color: var(--ink-tx); }
+.row--think .row__text { color: #9a9a9a; }
+.row--approval .row__key { color: var(--accent-soft); }
+.row--approval .row__text { color: var(--accent-soft); }
+.row--ok .row__key { color: var(--ink-tx-3); }
+.row code {
+  color: #fff;
+  background: #ffffff14;
+  border: 1px solid var(--ink-line);
+  border-radius: 6px;
+  padding: 1px 6px;
+}
+.row--cursor .row__text::after {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  margin-left: 3px;
+  vertical-align: -2px;
+  background: var(--accent-soft);
+  animation: blink 1.05s steps(2, start) infinite;
+}
+@keyframes blink { to { visibility: hidden; } }
+.terminal__note {
+  padding: 13px 20px 17px;
+  border-top: 1px solid var(--ink-line);
+  font-size: 12.5px;
+  color: var(--ink-tx-3);
+}
+
+/* ── 通用 section：靠留白（96）与浅灰分区切段，不用分隔线（官网 .wb2-section） ── */
+.section { padding: var(--section-gap) 0; }
+/* 白分区各带一处极淡的暖斑，左右交替——有纹理，又不至于变成色块 */
+#capabilities, #stack {
+  background-image: radial-gradient(780px 360px at 92% -60px, #e7773718, transparent 70%);
+}
+#safety, #limits {
+  background-image: radial-gradient(780px 360px at 4% -60px, #f8b65c1c, transparent 70%);
+}
+.section--alt {
+  background-color: var(--bg-soft);
+  background-image: radial-gradient(780px 400px at 88% -80px, #ffffffe0, transparent 70%);
+}
+.section__head {
+  display: grid;
+  /* 中文标题比官网的长，左列给到 1.35fr：否则「工作台」这种尾词会孤零零掉到第二行 */
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, .65fr);
+  gap: 14px 56px;
+  align-items: end;
+}
+.section__head > .sbadge { grid-column: 1 / -1; }
+.section__head .section__title { grid-column: 1; margin-top: 0; }
+.section__head .section__lede { grid-column: 2; margin-top: 0; padding-bottom: 6px; }
+.section__title {
+  margin-top: 20px;
+  font-size: clamp(1.7rem, 3.6vw, 3.25rem);
+  font-weight: 400;
+  line-height: 1.22;
+  letter-spacing: -.02em;
+}
+.section__title em { font-style: normal; color: var(--accent-ink); }
+.section__lede {
+  margin-top: 18px;
+  max-width: 420px;
+  color: var(--tx-3);
+  font-size: 16px;
+  font-weight: 300;
+  line-height: 28px;
+}
+
+/* 分区徽标：中文 + 英文大写，胶囊形（琥珀淡底 + 深琥珀字，浅底上可读） */
+.sbadge {
+  display: inline-flex;
+  align-items: center;
+  justify-self: start;
+  gap: 10px;
+  padding: 6px 14px;
+  border: 1px solid var(--accent-ghost);
+  border-radius: 999px;
+  background: var(--accent-tint);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent-ink);
+}
+.sbadge span {
+  padding-left: 10px;
+  border-left: 1px solid var(--accent-ghost);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: #a94b12b3;
+}
+
+/* ── 能力卡片：独立白卡（官网 .wb2-download__tile：白底、16 圆角、间距 16） ── */
+.cards {
+  margin-top: 48px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+.card {
+  position: relative;
+  padding: 28px 26px 26px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  overflow: hidden;
+  transition: border-color .22s var(--ease), box-shadow .22s var(--ease), transform .22s var(--ease);
+}
+.card:hover {
+  border-color: var(--line-strong);
+  box-shadow: 0 16px 36px -24px #1a1a1a33;
+  transform: translateY(-2px);
+}
+.card__num {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: .12em;
+  color: var(--accent-ink);
+}
+.card__title {
+  margin-top: 14px;
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--tx);
+}
+.card__text {
+  margin-top: 10px;
+  font-size: 14.5px;
+  line-height: 1.66;
+  color: var(--tx-3);
+}
+.card__meta {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: 12.5px;
+  color: var(--tx-4);
+}
+/* 光标光斑：跟随指针的柔和高光（浅底上收得更淡，避免糊成一片） */
+.card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    340px circle at var(--mx, 50%) var(--my, 0%),
+    #e777370d,
+    transparent 72%
+  );
+  opacity: 0;
+  transition: opacity .28s var(--ease);
+  pointer-events: none;
+}
+.card:hover::before { opacity: 1; }
+
+/* ── 整块圆角容器：白卡 + 两道极淡琥珀洗色（官网 .wb2-scenario__panel 的做法） ── */
+.canvas {
+  position: relative;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg);
+  padding: 56px 52px;
+  background:
+    radial-gradient(#1a1a1a0d 1px, transparent 1px) 0 0 / 24px 24px,
+    radial-gradient(ellipse 70% 60% at 8% 0%, #e7773718, transparent 62%),
+    radial-gradient(ellipse 60% 68% at 92% 100%, #f8b65c14, transparent 66%),
+    #fff;
+  overflow: hidden;
+}
+
+/* ── 安全边界 ─────────────────────────────────────────────────── */
+.safety {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 56px;
+  align-items: start;
+}
+.safety__note {
+  margin-top: 24px;
+  padding-left: 16px;
+  border-left: 2px solid var(--accent);
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--tx-3);
+}
+.safety__panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  overflow: hidden;
+}
+.safety__row {
+  padding: 26px 26px 24px;
+  border-bottom: 1px solid var(--line);
+}
+.safety__row--strict {
+  background: var(--accent-tint);
+  border-left: 2px solid var(--accent);
+}
+.safety__label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--tx-4);
+}
+.safety__row--strict .safety__label { color: var(--accent-ink); }
+.safety__list { margin-top: 16px; display: grid; gap: 10px; }
+.safety__list li {
+  position: relative;
+  padding-left: 20px;
+  font-size: 14.5px;
+  color: var(--tx-2);
+}
+.safety__list li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 11px;
+  width: 8px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--tx-4);
+}
+.safety__row--strict .safety__list li::before { background: var(--accent); }
+.safety__foot {
+  padding: 20px 26px 24px;
+  font-size: 13.5px;
+  color: var(--tx-3);
+  background: var(--bg-soft);
+}
+
+/* ── 架构流程 ─────────────────────────────────────────────────── */
+.flow {
+  margin-top: 48px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  border-top: 1px solid var(--line-strong);
+}
+.flow__step {
+  position: relative;
+  padding: 26px 24px 0 0;
+  border-right: 1px solid var(--line);
+}
+.flow__step:last-child { border-right: 0; padding-right: 0; }
+.flow__step::before {
+  content: '';
+  position: absolute;
+  top: -4px;
+  left: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px #e777371f;
+  /* 四个节点依次扩散：读起来像"执行链在往前走" */
+  animation: nodePulse 3.6s ease-in-out infinite;
+}
+.flow__step:nth-child(2)::before { animation-delay: .45s; }
+.flow__step:nth-child(3)::before { animation-delay: .9s; }
+.flow__step:nth-child(4)::before { animation-delay: 1.35s; }
+@keyframes nodePulse {
+  0%, 100% { box-shadow: 0 0 0 4px #e777371f; }
+  50% { box-shadow: 0 0 0 9px #e777370d; }
+}
+.flow__tag {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--tx-4);
+}
+.flow__title { margin-top: 12px; font-size: 16px; font-weight: 500; color: var(--tx); }
+.flow__text { margin-top: 8px; font-size: 13.5px; line-height: 1.7; color: var(--tx-3); }
+
+.stack-grid {
+  margin-top: 48px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+.stack {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 24px;
+  background: #fff;
+}
+.stack__title {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--tx-4);
+  font-weight: 500;
+}
+.stack__list { margin-top: 18px; display: grid; gap: 12px; }
+.stack__list li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-size: 14px;
+  color: var(--tx-3);
+}
+.stack__list span {
+  flex: 0 0 96px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--accent-ink);
+}
+
+/* ── 开始使用 ─────────────────────────────────────────────────── */
+/* 左栏跨两行、两个代码块各占一行：两块之间的间距只由 row-gap 决定，
+   不会被左栏文字的高度顶出一大段空白（2026-10-19）。 */
+.quickstart {
+  display: grid;
+  grid-template-columns: .9fr 1.1fr;
+  grid-auto-rows: min-content;
+  gap: 16px 56px;
+  align-items: start;
+}
+.quickstart__copy { grid-row: span 2; }
+.ticks { margin-top: 26px; display: grid; gap: 12px; }
+.ticks li {
+  position: relative;
+  padding-left: 24px;
+  font-size: 14.5px;
+  color: var(--tx-3);
+}
+.ticks li::before {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 10px;
+  width: 8px;
+  height: 4px;
+  border-left: 1.5px solid var(--accent);
+  border-bottom: 1.5px solid var(--accent);
+  transform: rotate(-45deg);
+}
+.ic {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 1px 6px;
+  color: var(--tx-2);
+}
+/* 代码块：与终端同一套深色（#0a0a0a），在白页上作为对照块 */
+.codeblock {
+  grid-column: 2;
+  border: 1px solid #ffffff0f;
+  border-radius: var(--radius-lg);
+  background: var(--ink);
+  overflow: hidden;
+  box-shadow: 0 24px 56px -34px #1a1a1a40;
+}
+.codeblock--slim { grid-column: 2; }
+.codeblock__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--ink-line);
+  background: #ffffff08;
+}
+.codeblock__path {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: .06em;
+  color: var(--ink-tx-3);
+}
+.codeblock__copy {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--ink-tx-2);
+  background: transparent;
+  border: 1px solid var(--ink-line);
+  border-radius: 999px;
+  padding: 4px 12px;
+  cursor: pointer;
+  transition: color .18s var(--ease), border-color .18s var(--ease), background .18s var(--ease);
+}
+.codeblock__copy:hover { color: #fff; border-color: #ffffff3d; background: #ffffff0f; }
+.codeblock__copy.is-done { color: var(--accent-soft); border-color: #f8b65c59; }
+.codeblock__pre {
+  margin: 0;
+  padding: 20px 18px;
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.95;
+  color: var(--ink-tx-2);
+}
+.codeblock__hint {
+  padding: 0 18px 18px;
+  font-size: 12.5px;
+  color: var(--ink-tx-3);
+}
+
+/* ── 设计原则：两张一行的白卡（不再用 1px 网格拼贴） ─────────────────── */
+.limits {
+  margin-top: 48px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.limits li {
+  padding: 24px 26px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: var(--tx-3);
+}
+.limits span {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 16px;
+  font-weight: 500;
+  color: var(--tx);
+}
+
+/* ── 运行记录（架构节）：浅灰底的白卡 ─────────────────────────── */
+.ledger {
+  margin-top: 40px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  overflow: hidden;
+}
+.ledger__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-soft);
+}
+.ledger__label {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--tx-3);
+}
+.ledger__hint { font-size: 12.5px; color: var(--tx-4); }
+.ledger__rows { display: grid; }
+.ledger__rows li {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr) auto;
+  gap: 8px 18px;
+  align-items: center;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 12.8px;
+}
+.ledger__rows li:last-child { border-bottom: 0; }
+.ledger__time { color: var(--tx-4); }
+.ledger__act { color: var(--tx-2); }
+.ledger__res { color: var(--tx-3); }
+.ledger__res--wait { color: var(--accent-ink); }
+@media (max-width: 720px) {
+  .ledger__rows li { grid-template-columns: 1fr; gap: 3px; }
+}
+
+/* ── 技术条：两侧渐隐的无限走道 ───────────────────────────────── */
+.marquee-band {
+  padding: 34px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  /* 中间偏暖、两侧回到浅灰：一条横向"光带"，让两个分区之间有过渡 */
+  background: linear-gradient(90deg, #f7f8f9 0%, #fdf4ec 46%, #fdf4ec 54%, #f7f8f9 100%);
+}
+.marquee {
+  overflow: hidden;
+  mask-image: linear-gradient(to right, transparent, #000 14%, #000 86%, transparent);
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 14%, #000 86%, transparent);
+}
+.marquee__track {
+  display: flex;
+  width: max-content;
+  animation: marquee 42s linear infinite;
+}
+.marquee:hover .marquee__track { animation-play-state: paused; }
+.marquee__group {
+  display: flex;
+  align-items: center;
+  gap: 54px;
+  padding-right: 54px;
+}
+.marquee__group li {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: .04em;
+  color: var(--tx-4);
+  white-space: nowrap;
+}
+.marquee__group li b {
+  font-weight: 500;
+  color: var(--tx-2);
+}
+@keyframes marquee {
+  to { transform: translateX(-50%); }
+}
+
+/* ── 文档入口（2026-10-19）：两张卡把人送到 docs/，首页不复制正文 ────────── */
+.docs-grid {
+  margin-top: 48px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.doc-card {
+  display: block;
+  padding: 28px 26px 26px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  transition: border-color .22s var(--ease), box-shadow .22s var(--ease), transform .22s var(--ease);
+}
+.doc-card:hover {
+  border-color: var(--line-strong);
+  box-shadow: 0 16px 36px -24px #1a1a1a33;
+  transform: translateY(-2px);
+}
+.doc-card__kicker {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--accent-ink);
+}
+.doc-card__title {
+  margin-top: 12px;
+  font-size: 20px;
+  font-weight: 500;
+  color: var(--tx);
+}
+.doc-card__text {
+  margin-top: 10px;
+  font-size: 14.5px;
+  line-height: 1.7;
+  color: var(--tx-3);
+}
+.doc-card__meta {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12.5px;
+  color: var(--tx-4);
+}
+.doc-card__arrow { color: var(--accent-ink); }
+
+/* ── 结尾 CTA ─────────────────────────────────────────────────── */
+.cta { padding: calc(var(--section-gap) + 16px) 0; }
+.cta__inner {
+  max-width: 40em;
+  text-align: center;
+}
+.cta__title {
+  font-size: clamp(2rem, 3.8vw, 3rem);
+  font-weight: 500;
+  line-height: 1.2;
+  margin: 0 auto;
+}
+.cta__actions {
+  margin-top: 34px;
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+/* ── 页脚 ─────────────────────────────────────────────────────── */
+.footer {
+  border-top: 1px solid var(--line);
+  padding: 48px 0 0;
+  /* 底部收尾：白 → 暖白 → 浅蜜桃，与背景层底部的暖辉光接上 */
+  background: linear-gradient(180deg, #fff 0%, #fdf6ef 72%, #faebdf 100%);
+}
+.footer__inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 20px 40px;
+}
+.footer__desc { margin-top: 6px; font-size: 13px; color: var(--tx-4); }
+.footer__links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  margin-left: auto;
+  font-size: 13.5px;
+  color: var(--tx-3);
+}
+.footer__links a:hover { color: var(--tx); }
+.footer__note {
+  flex: 1 0 100%;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--tx-4);
+}
+/* 页脚巨型描边字标：只留轮廓，底部裁切（浅底上用 8% 黑，不用白色） */
+.footer__brandmark {
+  margin-top: 46px;
+  height: .84em;
+  overflow: hidden;
+  text-align: center;
+  font-size: clamp(4.4rem, 19vw, 15rem);
+  font-weight: 700;
+  letter-spacing: -.04em;
+  line-height: 1;
+  white-space: nowrap;
+  color: transparent;
+  -webkit-text-stroke: 1px #1a1a1a1a;
+  user-select: none;
+  pointer-events: none;
+}
+
+/* ── 滚动揭示 ─────────────────────────────────────────────────── */
+.reveal {
+  opacity: 0;
+  transform: translateY(16px);
+  transition: opacity .6s var(--ease), transform .6s var(--ease);
+}
+.reveal.is-visible { opacity: 1; transform: none; }
+
+/* ── 响应式 ───────────────────────────────────────────────────── */
+@media (max-width: 1080px) {
+  .hero { padding: 72px 0 72px; }
+  .hero__panel { margin-top: 64px; }
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 48px; }
+  .canvas { padding: 44px 36px; }
+  .section { padding: 72px 0; }
+  .section__head { grid-template-columns: 1fr; gap: 0; align-items: start; }
+  .section__head > .sbadge,
+  .section__head .section__title,
+  .section__head .section__lede { grid-column: 1; }
+  .section__head .section__lede { margin-top: 16px; padding-bottom: 0; max-width: none; }
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .safety { grid-template-columns: 1fr; gap: 40px; }
+  .quickstart { grid-template-columns: 1fr; }
+  .quickstart__copy { grid-row: auto; }
+  .codeblock, .codeblock--slim { grid-column: 1; }
+  .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .flow__step { padding: 24px 20px 24px 0; }
+  .flow__step:nth-child(2n) { border-right: 0; padding-right: 0; }
+  .flow__step:nth-child(n+3) { border-top: 1px solid var(--line); }
+  .cta { padding: 72px 0; }
+}
+
+@media (max-width: 860px) {
+  /* 链接隐藏后，动作组会顶到中列——这里改成两列，品牌占 1fr、动作贴右。 */
+  .nav__inner { grid-template-columns: minmax(0, 1fr) auto; gap: 16px; padding: 0 24px; }
+  .nav__links, .nav__actions .badge { display: none; }
+  .nav__toggle { display: block; }
+  .nav__drawer[hidden] { display: none; }
+  .nav__drawer { display: flex; padding: 6px 24px 18px; }
+  .stack-grid { grid-template-columns: 1fr; }
+  .limits { grid-template-columns: 1fr; }
+  .docs-grid { grid-template-columns: 1fr; }
+  .section { padding: 64px 0; }
+  .chip { display: none; }
+  .marquee__group { gap: 40px; padding-right: 40px; }
+}
+
+@media (max-width: 620px) {
+  .wrap { padding: 0 20px; }
+  .nav__inner { padding: 0 20px; gap: 12px; }
+  .hero { padding: 56px 0 56px; }
+  .hero__panel { margin-top: 48px; }
+  .hero__title { font-size: clamp(2rem, 9vw, 2.6rem); }
+  .hero__lede { font-size: 15.5px; line-height: 26px; }
+  .stats { gap: 12px; margin-top: 40px; }
+  .stats__item { padding: 16px 18px; }
+  .canvas { padding: 30px 22px; border-radius: 18px; }
+  .cards { grid-template-columns: 1fr; }
+  .flow { grid-template-columns: 1fr; }
+  .flow__step { border-right: 0; padding-right: 0; }
+  .row { grid-template-columns: 54px 1fr; gap: 10px; }
+  .terminal__body { font-size: 12px; padding: 16px; }
+}
+
+/* ── 动效降级：尊重系统的“减少动画” ─────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  /* 这一步必须连 animation 一起关：入场动画带 `both`，若只放慢，
+     首屏元素会长时间停在 from 态（opacity 0）。关掉后各元素回到静态终态。 */
+  *, *::before, *::after {
+    animation: none !important;
+    transition-duration: .01ms !important;
+  }
+  .reveal { opacity: 1; transform: none; transition: none; }
+}
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">跳到主要内容</a>
+
+<div class="backdrop" aria-hidden="true">
+  <div class="backdrop__grid"></div>
+  <div class="backdrop__glow backdrop__glow--top"></div>
+  <div class="backdrop__glow backdrop__glow--mid"></div>
+</div>
+
+<header class="nav" id="nav">
+  <div class="nav__inner">
+    <a class="brand" href="#top" aria-label="chaiai 首页">
+      <svg class="brand__mark" viewBox="0 0 64 64" width="28" height="28" aria-hidden="true">
+        <defs>
+          <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#F8B65C"/>
+            <stop offset="1" stop-color="#E77737"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="18" fill="url(#chaiaiWarm)"/>
+        <path d="m16 27-1-13c-.4-3 1.2-4 3.3-2.2l8.7 7.4a16 16 0 0 1 10 0l8.7-7.4c2.1-1.8 3.7-.8 3.3 2.2l-1 13c3 3.2 4 7.2 4 11 0 8.4-8.2 14-20 14-2.4 0-4.7-.2-7-.7L15 55l2.3-10.2C13.9 42.4 12 39.4 12 36c0-3.5 1.4-6.7 4-9Z" fill="#FFF7E9"/>
+        <path d="m19.3 16.8.8 8.4 5.1-3.5Zm25.4 0-.8 8.4-5.1-3.5Z" fill="#BF6A37"/>
+        <path d="M24 32.5v2M40 32.5v2" fill="none" stroke="#633E2B" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M29.2 38.1c-.7-.8-.2-2.1.9-2.1h3.8c1.1 0 1.6 1.3.9 2.1L33 40a1.4 1.4 0 0 1-2 0Z" fill="#633E2B"/>
+        <path d="M26.5 42.2c1.5 1.7 3.3 1.7 5.5-.3 2.2 2 4 2 5.5.3" fill="none" stroke="#633E2B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span class="brand__text">chaiai</span>
+    </a>
+
+    <nav class="nav__links" aria-label="主导航">
+      <a href="#capabilities">能力</a>
+      <a href="#safety">安全边界</a>
+      <a href="#stack">架构</a>
+      <a href="#quickstart">开始使用</a>
+      <a href="#limits">设计原则</a>
+      <a href="docs/index.html">文档</a>
+    </nav>
+
+    <div class="nav__actions">
+      <span class="badge" title="默认只监听回环地址">
+        <span class="badge__dot" aria-hidden="true"></span>本机运行
+      </span>
+      <a class="btn btn--primary btn--sm" href="#quickstart">开始使用</a>
+      <button class="nav__toggle" type="button" id="navToggle" aria-expanded="false" aria-controls="navDrawer" aria-label="打开导航菜单">
+        <span aria-hidden="true"></span><span aria-hidden="true"></span>
+      </button>
+    </div>
+  </div>
+
+  <div class="nav__drawer" id="navDrawer" hidden>
+    <a href="#capabilities">能力</a>
+    <a href="#safety">安全边界</a>
+    <a href="#stack">架构</a>
+    <a href="#quickstart">开始使用</a>
+    <a href="#limits">设计原则</a>
+    <a href="docs/index.html">文档</a>
+  </div>
+</header>
+
+<main id="main">
+  <span id="top"></span>
+
+  <section class="hero">
+    <div class="hero__glow" aria-hidden="true"></div>
+    <div class="wrap">
+      <div class="hero__copy">
+        <p class="eyebrow">
+          <span class="eyebrow__mark" aria-hidden="true"></span>
+          LOCAL-FIRST AGENT WORKBENCH
+        </p>
+        <h1 class="hero__title">把本机变成<br />一个<em>可追问</em>的 Agent。</h1>
+        <p class="hero__lede">
+          chaiai 把模型连接、工具执行、文件读写、浏览器操作与运行记录收进一个本地服务：
+          界面是 FastAPI + React，执行是 Python + LangGraph。
+          默认只监听回环地址，全程单进程、单用户 —— 每一步都落在你自己的磁盘上。
+        </p>
+
+        <div class="hero__cta">
+          <a class="btn btn--primary" href="#quickstart">在本机跑起来</a>
+          <a class="btn btn--ghost" href="#capabilities">看看它能做什么</a>
+        </div>
+      </div>
+
+      <div class="hero__panel">
+        <span class="chip chip--a" aria-hidden="true">127.0.0.1:8000</span>
+        <span class="chip chip--b" aria-hidden="true">单进程 · 单用户</span>
+        <span class="chip chip--c" aria-hidden="true">每步都留痕</span>
+        <figure class="terminal" aria-label="界面示意：一轮任务在页面上留下的轨迹">
+          <figcaption class="terminal__bar">
+            <span class="terminal__dots" aria-hidden="true"><i></i><i></i><i></i></span>
+            <span class="terminal__title">chaiai · 对话与轨迹</span>
+            <span class="terminal__tag">示意</span>
+          </figcaption>
+          <div class="terminal__body">
+            <p class="row row--user"><span class="row__key">你</span><span class="row__text">查一下文档里的启动方式，然后构建界面。</span></p>
+            <p class="row row--think"><span class="row__key">Think</span><span class="row__text">先定位文档，再执行构建命令。</span></p>
+            <p class="row row--tool"><span class="row__key">工具</span><span class="row__text"><code>检索项目文档</code> → 命中 1 个相关章节</span></p>
+            <p class="row row--tool"><span class="row__key">工具</span><span class="row__text"><code>读取该章节</code> → 正文载入上下文</span></p>
+            <p class="row row--approval"><span class="row__key">审批</span><span class="row__text"><code>构建界面</code> 等待你的批准</span></p>
+            <p class="row row--ok"><span class="row__key">结果</span><span class="row__text">已执行，退出码与输出留在本轮记录里。</span></p>
+            <p class="row row--cursor"><span class="row__key">chaiai</span><span class="row__text" id="typedOut"></span></p>
+          </div>
+          <p class="terminal__note">页面按轮展示 Think / 工具 / 计划 / 检索 / 审批与用量；隐藏或未返回的推理不补造。</p>
+        </figure>
+      </div>
+
+      <dl class="stats">
+        <div class="stats__item">
+          <dt>监听地址</dt>
+          <dd>127.0.0.1:8000</dd>
+        </div>
+        <div class="stats__item">
+          <dt>运行形态</dt>
+          <dd>单进程 · 单实例</dd>
+        </div>
+        <div class="stats__item">
+          <dt>联网能力</dt>
+          <dd>出厂即开，不可关闭</dd>
+        </div>
+        <div class="stats__item">
+          <dt>上下文压缩</dt>
+          <dd>接近上限时自动整理</dd>
+        </div>
+      </dl>
+    </div>
+  </section>
+
+  <section class="section" id="capabilities">
+    <div class="wrap">
+      <header class="section__head reveal">
+        <p class="sbadge">能力<span>01 / CAPABILITIES</span></p>
+        <h2 class="section__title">不是聊天框，是一个工作台</h2>
+        <p class="section__lede">对话只是入口。真正干活的是工具、浏览器、后台进程，以及它们在本机留下的记录。</p>
+      </header>
+
+      <div class="cards">
+        <article class="card reveal">
+          <span class="card__num">01</span>
+          <h3 class="card__title">工具执行与逐条审批</h3>
+          <p class="card__text">常规命令直接执行；删除、覆盖已有文件、破坏性 Shell 与大范围编辑必须人工批准 —— 任何设置下都不免。</p>
+          <p class="card__meta">批准、拒绝、改参数都由你决定，动作留痕</p>
+        </article>
+
+        <article class="card reveal">
+          <span class="card__num">02</span>
+          <h3 class="card__title">浏览器操作</h3>
+          <p class="card__text">驱动一套独立的 Edge / Chrome：打开页面、填写表单、点击与截图都能做，登录状态与你的个人浏览器分开。</p>
+          <p class="card__meta">缺依赖时说明怎么装，不静默失败</p>
+        </article>
+
+        <article class="card reveal">
+          <span class="card__num">03</span>
+          <h3 class="card__title">持久进程与后台服务</h3>
+          <p class="card__text">启动一个需要持续输入的服务，读取它的输出、出错时停掉；运行文件收在自忽略的 <code>.agent-runtime/</code>，不污染工作区。</p>
+          <p class="card__meta">标准输入输出交互 · 不做全屏终端仿真</p>
+        </article>
+
+        <article class="card reveal">
+          <span class="card__num">04</span>
+          <h3 class="card__title">联网检索与网页读取</h3>
+          <p class="card__text">检索与抓取是常态能力，闲聊与 Agent 两种模式都可用；每次抓取前都先校验目标地址，重定向前后再各查一次。</p>
+          <p class="card__meta">页面按轮展示搜索来源、已读取内容与回答引用</p>
+        </article>
+
+        <article class="card reveal">
+          <span class="card__num">05</span>
+          <h3 class="card__title">会话地图与分支追问</h3>
+          <p class="card__text">对话长成一棵树：父节点在左、卡片向右展开；从任意一轮继续提问会新增子分支，原来的路径完整保留。</p>
+          <p class="card__meta">分支可改名与排序，文件与记录不随分支回滚</p>
+        </article>
+
+        <article class="card reveal">
+          <span class="card__num">06</span>
+          <h3 class="card__title">数据中台：记忆、任务与用量</h3>
+          <p class="card__text">概览、中期记忆、长期事实、任务结论与 Token 用量放在一处；按工作区、状态与日期筛选，缺数据的地方不补零。</p>
+          <p class="card__meta">只读展示 · 统计口径与上限如实标注</p>
+        </article>
+
+        <article class="card reveal">
+          <span class="card__num">07</span>
+          <h3 class="card__title">记忆与上下文压缩</h3>
+          <p class="card__text">短期对话、中期向量记忆与长期事实分层保存；上下文接近窗口上限时自动整理历史，保留结论与近期往来。</p>
+          <p class="card__meta">整理过什么会写在页面上，刷新也能回看</p>
+        </article>
+
+        <article class="card reveal">
+          <span class="card__num">08</span>
+          <h3 class="card__title">任务可取消，重启不重跑</h3>
+          <p class="card__text">运行中的任务可以停止生成或整体取消；被中断的任务会被明确标记出来，绝不会在你不知情时自动重跑。</p>
+          <p class="card__meta">停止不撤销已经发生的工具调用</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="safety">
+    <div class="wrap">
+      <div class="canvas reveal">
+        <div class="safety">
+          <div class="safety__copy">
+            <p class="sbadge">安全边界<span>02 / SAFETY</span></p>
+            <h2 class="section__title">权限写在规则里，不写在提示词里</h2>
+            <p class="section__lede">
+              工具执行、作用域判定与安全判据都在服务端；浏览器不直接操作你的文件，也不替你解释执行状态。
+              权限按"能写到哪"分三档：只读、工作区可写（默认）、常规免审 —— 本机外部路径默认可读，
+              写入范围与 Shell 的写侧沙箱随档位变化，往工作区外写还要逐目录授权。
+            </p>
+            <p class="safety__note">
+              外部内容一律按不可信数据处理：页面里的任何文字都只是数据，不能改变目标、规则与安全策略，也不能跳过人工审批。
+            </p>
+          </div>
+
+          <div class="safety__panel">
+            <div class="safety__row">
+              <span class="safety__label">默认放行</span>
+              <ul class="safety__list">
+                <li>工作区内的读取、写入与检索（默认档）</li>
+                <li>本机外部路径的读取与搜索（敏感文件除外）</li>
+                <li>常规命令（破坏性命令除外）</li>
+                <li>联网检索与网页读取（抓取前先校验目标地址）</li>
+              </ul>
+            </div>
+            <div class="safety__row safety__row--strict">
+              <span class="safety__label">始终需要批准</span>
+              <ul class="safety__list">
+                <li>删除文件或目录、覆盖已有文件</li>
+                <li>破坏性 Shell 与大范围编辑</li>
+                <li>工作区外的写入（需先在设置里授权该目录）</li>
+                <li>受保护目标与敏感文件（授权也不放行）</li>
+              </ul>
+            </div>
+            <p class="safety__foot">
+              破坏性命令名单由代码层底线保证：只能追加，不能取消；受保护目标与敏感文件不因审批放行。
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="stack">
+    <div class="wrap">
+      <header class="section__head reveal">
+        <p class="sbadge">架构<span>03 / ARCHITECTURE</span></p>
+        <h2 class="section__title">两层界面，一支执行链</h2>
+        <p class="section__lede">生产运行只需要 Python 服务与前端产物，不需要额外启动 Node 服务。</p>
+      </header>
+
+      <ol class="flow reveal">
+        <li class="flow__step">
+          <span class="flow__tag">浏览器</span>
+          <p class="flow__title">React 界面</p>
+          <p class="flow__text">会话、轨迹、审批与设置；只发请求，不碰文件。</p>
+        </li>
+        <li class="flow__step">
+          <span class="flow__tag">服务端</span>
+          <p class="flow__title">FastAPI</p>
+          <p class="flow__text">静态产物、API 与安全判据的唯一入口。</p>
+        </li>
+        <li class="flow__step">
+          <span class="flow__tag">执行</span>
+          <p class="flow__title">LangGraph</p>
+          <p class="flow__text">按轮推进：Think、工具、计划、审批与用量。</p>
+        </li>
+        <li class="flow__step">
+          <span class="flow__tag">本地数据</span>
+          <p class="flow__title">本机存储</p>
+          <p class="flow__text">对话与运行记录只落在本机，不经过第三方中转。</p>
+        </li>
+      </ol>
+
+      <div class="stack-grid">
+        <div class="stack reveal">
+          <h3 class="stack__title">运行时</h3>
+          <ul class="stack__list">
+            <li><span>Python</span>LangGraph 执行链</li>
+            <li><span>FastAPI</span>接口与静态产物</li>
+            <li><span>Uvicorn</span>单进程 · 单实例</li>
+          </ul>
+        </div>
+        <div class="stack reveal">
+          <h3 class="stack__title">前端</h3>
+          <ul class="stack__list">
+            <li><span>React 19</span>界面与轮次展示</li>
+            <li><span>Vite</span>开发与构建</li>
+            <li><span>Zustand</span>会话与轨迹状态</li>
+          </ul>
+        </div>
+        <div class="stack reveal">
+          <h3 class="stack__title">模型接入</h3>
+          <ul class="stack__list">
+            <li><span>OpenAI 兼容</span>自填端点与模型名</li>
+            <li><span>密钥只存本机</span>不进入日志、导出与截图</li>
+            <li><span>随换随用</span>更换模型不影响工作方式</li>
+          </ul>
+        </div>
+      </div>
+      <div class="ledger reveal">
+        <div class="ledger__head">
+          <span class="ledger__label">运行记录 · 示意</span>
+          <span class="ledger__hint">每一步都可回看，失败不隐藏</span>
+        </div>
+        <ul class="ledger__rows">
+          <li><span class="ledger__time">10:02:14</span><span class="ledger__act">读取工作区内的文件</span><span class="ledger__res">允许 · 只读</span></li>
+          <li><span class="ledger__time">10:02:15</span><span class="ledger__act">执行构建命令</span><span class="ledger__res ledger__res--wait">等待你的批准</span></li>
+          <li><span class="ledger__time">10:02:31</span><span class="ledger__act">由你确认后执行</span><span class="ledger__res">已完成 · 留痕</span></li>
+          <li><span class="ledger__time">10:03:02</span><span class="ledger__act">读取一个外部网页</span><span class="ledger__res">按不可信数据处理</span></li>
+          <li><span class="ledger__time">10:03:20</span><span class="ledger__act">打开浏览器并填写本地页面</span><span class="ledger__res">独立登录状态 · 留痕</span></li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="marquee-band" aria-label="技术构成">
+    <div class="marquee">
+      <div class="marquee__track">
+        <ul class="marquee__group">
+          <li>Python</li>
+          <li>LangGraph</li>
+          <li>FastAPI</li>
+          <li>Uvicorn</li>
+          <li>React 19</li>
+          <li>Vite</li>
+          <li>Zustand</li>
+          <li>OpenAI 兼容</li>
+        </ul>
+        <ul class="marquee__group" aria-hidden="true">
+          <li>Python</li>
+          <li>LangGraph</li>
+          <li>FastAPI</li>
+          <li>Uvicorn</li>
+          <li>React 19</li>
+          <li>Vite</li>
+          <li>Zustand</li>
+          <li>OpenAI 兼容</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="section section--alt" id="quickstart">
+    <div class="wrap quickstart">
+      <div class="quickstart__copy reveal">
+        <p class="sbadge">开始使用<span>04 / GET STARTED</span></p>
+        <h2 class="section__title">准备、连接、提问</h2>
+        <p class="section__lede">
+          不需要注册账号。启动服务后，在网页设置里填一次模型连接就能提问：发行包按随包说明安装；
+          从源码运行则是装依赖、构建前端，再启动 Python 服务。
+        </p>
+        <ul class="ticks">
+          <li>模型、密钥与权限都在网页设置里维护，随时可以撤销</li>
+          <li>密钥只保存在本机，不进入日志、导出与截图</li>
+          <li>对话、记忆与运行记录都存放在本机</li>
+        </ul>
+      </div>
+
+      <div class="codeblock reveal">
+        <div class="codeblock__bar">
+          <span class="codeblock__path">启动完成</span>
+          <button class="codeblock__copy" type="button" data-copy="#cmd-ready">复制</button>
+        </div>
+        <pre class="codeblock__pre"><code id="cmd-ready">chaiai 正在启动…
+✓ 本地服务已就绪
+→ 用浏览器打开 127.0.0.1:8000</code></pre>
+        <p class="codeblock__hint">服务只监听本机回环地址：同一网络里的其他设备也访问不到。</p>
+      </div>
+
+      <div class="codeblock codeblock--slim reveal">
+        <div class="codeblock__bar">
+          <span class="codeblock__path">三步走</span>
+        </div>
+        <pre class="codeblock__pre"><code>① 安装    取得发行包，或按源码说明装依赖并构建前端
+② 连接    在网页设置中填写端点、模型名与密钥
+③ 提问    指定一个工作目录，让它在那里干活</code></pre>
+        <p class="codeblock__hint">安装方式与版本要求以随包文档为准；服务自检可运行 <code>python -m local_agent.api --diagnose</code>。</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="limits">
+    <div class="wrap">
+      <header class="section__head reveal">
+        <p class="sbadge">设计原则<span>05 / PRINCIPLES</span></p>
+        <h2 class="section__title">把克制写进<em>默认值</em>里</h2>
+        <p class="section__lede">这些不是功能介绍，而是它做每一件事时都会遵守的约束。</p>
+      </header>
+
+      <ul class="limits">
+        <li class="reveal"><span>本机优先</span>默认只监听本机地址，对话与执行记录不经过第三方中转。</li>
+        <li class="reveal"><span>人在回路</span>有副作用的动作一律停在你的批准之前，不存在"悄悄执行"。</li>
+        <li class="reveal"><span>有据可查</span>每一次执行、批准与失败都留下可回看的记录，不做静默处理。</li>
+        <li class="reveal"><span>最小授权</span>只申请完成当前这件事所需的权限，读与写分开，随时可以收回。</li>
+        <li class="reveal"><span>显式失败</span>出错时给出可读的原因与下一步，不用沉默或猜测糊过去。</li>
+        <li class="reveal"><span>随时可停</span>运行中的任务随时能停下来，停下来也不掩盖已经发生的事。</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="section section--alt" id="docs">
+    <div class="wrap">
+      <header class="section__head reveal">
+        <p class="sbadge">文档<span>06 / DOCS</span></p>
+        <h2 class="section__title">先学会用，再看清怎么做到</h2>
+        <p class="section__lede">两套材料，分开写：一套按步骤带你用起来，一套讲清每一步在代码里怎么实现。</p>
+      </header>
+
+      <div class="docs-grid">
+        <a class="doc-card reveal" href="docs/manual/index.html">
+          <span class="doc-card__kicker">MANUAL</span>
+          <h3 class="doc-card__title">操作手册</h3>
+          <p class="doc-card__text">
+            安装与启动、连接模型、权限三档、会话地图、数据中台与常见问题 —— 每一步都写清"跑完应该看到什么"。
+          </p>
+          <p class="doc-card__meta"><span>面向使用者 · 建设中</span><span class="doc-card__arrow">阅读 →</span></p>
+        </a>
+        <a class="doc-card reveal" href="docs/internals/index.html">
+          <span class="doc-card__kicker">INTERNALS</span>
+          <h3 class="doc-card__title">技术实现说明</h3>
+          <p class="doc-card__text">
+            整体架构、一轮请求的生命周期、安全判据与沙箱、记忆与压缩、工具并行 —— 每段结论都落到代码路径。
+          </p>
+          <p class="doc-card__meta"><span>面向开发者 · 建设中</span><span class="doc-card__arrow">阅读 →</span></p>
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section cta">
+    <div class="wrap cta__inner reveal">
+      <h2 class="cta__title">先在本机跑一轮，再决定要不要用它。</h2>
+      <div class="cta__actions">
+        <a class="btn btn--primary" href="#quickstart">查看启动步骤</a>
+        <a class="btn btn--ghost" href="#safety">了解安全边界</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="footer">
+  <div class="wrap footer__inner">
+    <div class="footer__brand">
+      <span class="brand__text">chaiai</span>
+      <p class="footer__desc">本机 · 单用户 · 单进程的本地 Agent 工作台</p>
+    </div>
+    <nav class="footer__links" aria-label="页脚导航">
+      <a href="#capabilities">能力</a>
+      <a href="#safety">安全边界</a>
+      <a href="#stack">架构</a>
+      <a href="#quickstart">开始使用</a>
+      <a href="docs/index.html">文档</a>
+    </nav>
+    <p class="footer__note">静态宣传页 · 无外部依赖与追踪脚本</p>
+  </div>
+
+  <div class="footer__brandmark" aria-hidden="true">chaiai</div>
+</footer>
+
+<script>
+/* 全部为渐进增强：脚本被禁用时页面依然完整可读。 */
+(function () {
+  'use strict';
+
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* 1. 顶栏滚动状态：滚过首屏后加背景与分隔线 */
+  var nav = document.getElementById('nav');
+  var onScroll = function () {
+    if (!nav) return;
+    nav.classList.toggle('is-stuck', window.scrollY > 8);
+  };
+  onScroll();
+  window.addEventListener('scroll', onScroll, { passive: true });
+
+  /* 2. 窄屏导航抽屉 */
+  var toggle = document.getElementById('navToggle');
+  var drawer = document.getElementById('navDrawer');
+  var setDrawer = function (open) {
+    if (!toggle || !drawer) return;
+    drawer.hidden = !open;
+    toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    toggle.setAttribute('aria-label', open ? '关闭导航菜单' : '打开导航菜单');
+  };
+  if (toggle && drawer) {
+    toggle.addEventListener('click', function () {
+      setDrawer(drawer.hidden);
+    });
+    drawer.addEventListener('click', function (event) {
+      if (event.target.tagName === 'A') setDrawer(false);
+    });
+    document.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape' && !drawer.hidden) {
+        setDrawer(false);
+        toggle.focus();
+      }
+    });
+    window.addEventListener('resize', function () {
+      if (window.innerWidth > 860) setDrawer(false);
+    });
+  }
+
+  /* 3. 滚动揭示：进入视口时淡入，只触发一次 */
+  var targets = document.querySelectorAll('.reveal');
+  if (reduceMotion || !('IntersectionObserver' in window)) {
+    Array.prototype.forEach.call(targets, function (el) { el.classList.add('is-visible'); });
+  } else {
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        entry.target.classList.add('is-visible');
+        observer.unobserve(entry.target);
+      });
+    }, { rootMargin: '0px 0px -12% 0px', threshold: 0.12 });
+    Array.prototype.forEach.call(targets, function (el) { observer.observe(el); });
+  }
+
+  /* 4. Hero 末行逐字输入 */
+  var out = document.getElementById('typedOut');
+  if (out) {
+    var text = '界面已构建完成 —— 要我打开预览页吗？';
+    if (reduceMotion) {
+      out.textContent = text;
+    } else {
+      var index = 0;
+      var tick = function () {
+        out.textContent = text.slice(0, index);
+        index += 1;
+        if (index <= text.length) {
+          window.setTimeout(tick, 34);
+        } else {
+          window.setTimeout(function () { index = 0; tick(); }, 4200);
+        }
+      };
+      window.setTimeout(tick, 700);
+    }
+  }
+
+  /* 5. 代码块复制：clipboard 不可用时静默降级为提示 */
+  Array.prototype.forEach.call(document.querySelectorAll('[data-copy]'), function (button) {
+    button.addEventListener('click', function () {
+      var source = document.querySelector(button.getAttribute('data-copy'));
+      if (!source) return;
+      var text = source.textContent;
+      var done = function (ok) {
+        button.textContent = ok ? '已复制' : '请手动选择';
+        button.classList.toggle('is-done', ok);
+        window.setTimeout(function () {
+          button.textContent = '复制';
+          button.classList.remove('is-done');
+        }, 1800);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done(true); }, function () { done(false); });
+      } else {
+        done(false);
+      }
+    });
+  });
+
+  /* 6. 能力卡片：把指针位置写进 CSS 变量，驱动卡面光斑 */
+  if (!reduceMotion) {
+    Array.prototype.forEach.call(document.querySelectorAll('.card'), function (card) {
+      card.addEventListener('pointermove', function (event) {
+        var box = card.getBoundingClientRect();
+        card.style.setProperty('--mx', (event.clientX - box.left) + 'px');
+        card.style.setProperty('--my', (event.clientY - box.top) + 'px');
+      });
+    });
+  }
+})();
+</script>
+</body>
+</html>

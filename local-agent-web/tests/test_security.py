@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import shutil
@@ -18,7 +19,7 @@ from pydantic import ValidationError
 
 from local_agent.config import AgentsConfig, AppConfig
 from local_agent.context import agents_loader
-from local_agent.exceptions import WorkspaceBoundaryError
+from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
 from local_agent.graph import builder
 from local_agent.graph.state import RuntimeContext
 from local_agent.security import shell_guard
@@ -29,6 +30,9 @@ from local_agent.security.path_guard import (
     display_path,
     is_sensitive_path,
     normalize_grant_path,
+    protected_target_reason,
+    resolve_target,
+    resolve_within_workspace,
 )
 from local_agent.security.policy import SecurityPolicy
 from local_agent.security.shell_guard import (
@@ -167,6 +171,164 @@ def test_display_path_is_relative_inside_and_absolute_outside(tmp_path: Path) ->
     assert display_path(outside, workspace) == outside.as_posix()
 
 
+# ---- v0.9 T77：路径别名与边界收口（架构 §20.2）-------------------------------
+
+
+def test_trailing_dot_and_space_are_normalized_before_judging(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """① 每段结尾的点与空格：**先归一，再判定**（§20.2）。
+
+    实证过的绕过：`.env ` 的两种形态**都还不存在**时 `resolve()` 不会展开它（它只对已存在的目标
+    取真实名字），于是判定说"不敏感"，而写入真的造出了 `.env`——校验与执行看了两个名字。
+    """
+    if os.name != "nt":
+        pytest.skip("尾点/空格的静默忽略是 Win32 API 的行为；POSIX 上它们是普通字符（如实标注）")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    policy = SecurityPolicy.from_config(app_config, workspace_root=workspace, environ={})
+
+    # 归一：解析结果就是系统真正会打开的那个名字。
+    assert policy.resolve_path(".env ") == workspace / ".env"
+    assert policy.resolve_path("credentials.") == workspace / "credentials"
+    assert is_sensitive_path(policy.resolve_path(".env "))
+
+    # 负例：**写入方向**的绕过必须被拒——这正是实证里"造出了 .env"的那一步。
+    with pytest.raises(SecurityError, match="疑似密钥文件"):
+        policy.resolve_writable_path(".env ")
+    with pytest.raises(SecurityError, match="疑似密钥文件"):
+        policy.resolve_writable_path("credentials ")
+
+    # 归一不是"看到点或空格就拒绝"：普通文件的尾空格照旧只当尾空格。
+    assert policy.resolve_writable_path("普通文件.py ") == workspace / "普通文件.py"
+
+
+def test_protected_git_segment_is_case_insensitive_on_windows(tmp_path: Path) -> None:
+    """② 受保护判定的 `.git` 分段在 Windows 上不区分大小写（§20.2）。
+
+    已存在的目标由 `resolve()` 取磁盘真实大小写，这一半本来就对；**目标尚不存在**时取不到，
+    只能靠比较来判——`.GIT` 与 `.git` 在 Windows 上是同一个目录。
+    """
+    if os.name != "nt":
+        pytest.skip("大小写不敏感是 Windows 的路径语义；POSIX 上 `.GIT` 是另一个目录（如实标注）")
+
+    assert protected_target_reason(tmp_path / "repo" / ".GIT" / "config") == "Git 元数据目录"
+    assert protected_target_reason(tmp_path / "repo" / ".GiT" / "config") == "Git 元数据目录"
+    assert protected_target_reason(tmp_path / "repo" / "src" / "a.py") is None
+
+
+def test_device_and_extended_length_prefixes_are_rejected(tmp_path: Path) -> None:
+    """③ `\\?\\` / `\\.\\` 前缀一律拒绝（§20.2）：它们按设计绕开正常化。
+
+    包括"看起来指着工作区里"的那一条——判定与系统打开的目标必须是同一条路径，所以不因为
+    "它指着里面"就放行。
+    """
+    if os.name != "nt":
+        pytest.skip("这两种前缀是 Windows 的命名空间概念；POSIX 上 `\\\\?\\` 只是普通字符（如实标注）")
+
+    inside = tmp_path / "ws"
+    inside.mkdir()
+    allow = ExternalPathPolicy(mode="danger-full-access")
+
+    for raw in (
+        r"\\?\C:\Windows\win.ini",
+        rf"\\?\{inside}\a.txt",
+        r"\\.\C:\Windows\win.ini",
+        r"\\?\UNC\localhost\C$\Windows\win.ini",
+    ):
+        with pytest.raises(WorkspaceBoundaryError, match="设备路径"):
+            resolve_target(raw, base_dir=inside, workspace_root=inside, external_policy=allow)
+        with pytest.raises(WorkspaceBoundaryError, match="设备路径"):
+            resolve_within_workspace(raw, base_dir=inside, workspace_root=inside)
+
+
+def test_remote_paths_outside_the_workspace_are_rejected_in_every_mode(tmp_path: Path) -> None:
+    """④ 工作区**外**的远程路径一律拒绝（§20.2）：任何档位、连授权了也不放行。
+
+    实证：`\\\\localhost\\C$\\Windows\\win.ini` 判不出受保护目标（它的父目录里没有本机的 `C:\\Windows`），
+    于是 `allow` 档下"系统关键目录不可审批"被一个 UNC 别名绕过。本阶段无法证明远程路径别名到本机哪里
+    ⇒ 拒绝。工作区**就是**那个共享时不受影响（那一支走的是"工作区内"判定）。
+    """
+    if os.name != "nt":
+        pytest.skip("UNC 是 Windows/SMB 的路径形态；POSIX 上不存在这条（如实标注）")
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    remote = r"\\localhost\C$\Windows\win.ini"
+    policies = (
+        ExternalPathPolicy(mode="read-only"),
+        ExternalPathPolicy(mode="workspace-write"),
+        ExternalPathPolicy(mode="danger-full-access"),
+        # 最严格的一条：**已经授权**了也不放行——受保护目标判定在远程路径上不成立，
+        # 授权解决不了这一点。
+        ExternalPathPolicy(
+            mode="workspace-write",
+            grants={normalize_grant_path(r"\\localhost\C$"): "read_write"},
+        ),
+    )
+
+    for policy in policies:
+        with pytest.raises(WorkspaceBoundaryError, match="远程路径"):
+            resolve_target(
+                remote, base_dir=workspace, workspace_root=workspace, external_policy=policy
+            )
+    # 纯边界入口（工具层用它）本就以"工作区之外"拒绝；远程的**专项理由**加在解析/授权那一支。
+    with pytest.raises(WorkspaceBoundaryError, match="工作区之外"):
+        resolve_within_workspace(remote, base_dir=workspace, workspace_root=workspace)
+
+    share = Path(r"\\nas\share\ws")
+    assert resolve_within_workspace(
+        r"\\nas\share\ws\src\a.py", base_dir=share, workspace_root=share
+    ) == Path(r"\\nas\share\ws\src\a.py")
+
+
+def _short_name(path: Path) -> str:
+    """取 Windows 8.3 短名；卷/策略未启用 8.3 时返回长名本身。"""
+    if os.name != "nt":  # pragma: no cover - 调用方先行跳过
+        return str(path)
+    buffer = ctypes.create_unicode_buffer(600)
+    length = ctypes.windll.kernel32.GetShortPathNameW(str(path), buffer, 600)  # type: ignore[attr-defined]
+    return buffer.value if length else str(path)
+
+
+def test_short_names_are_equivalent_or_honestly_skipped(tmp_path: Path) -> None:
+    """⑤ 8.3 短名（§20.2）：别名必须与长名**同等判定**；本卷未启用 8.3 时**跳过并如实标注**。
+
+    本机卷实测未启用 8.3（`GetShortPathNameW` 返回长名），因此这条别名行为**无法在本机证明**——
+    跳过并写明原因，不假装跑过。
+    """
+    long_path = tmp_path / "credentials.txt"
+    long_path.write_text("token\n", encoding="utf-8")
+    short = _short_name(long_path)
+    if short == str(long_path):
+        pytest.skip("本卷未启用 8.3（GetShortPathNameW 返回长名）：无法在本机证明别名行为，不假装跑过")
+
+    assert Path(short).name != long_path.name  # 前提：确实拿到一个真短名
+    resolved = resolve_within_workspace(short, base_dir=tmp_path, workspace_root=tmp_path)
+    assert resolved == long_path  # 归一：短名被展开成长名
+    assert is_sensitive_path(resolved)  # 于是与长名同等判定（敏感文件照旧拦得住）
+
+
+def test_alias_rules_do_not_change_ordinary_paths(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """四类口径是**收窄**不是重写：普通路径、`..` 逃逸与越界的既有行为一字不变。"""
+    workspace = tmp_path / "ws"
+    (workspace / "sub").mkdir(parents=True)
+    (workspace / "sub" / "a.txt").write_text("a\n", encoding="utf-8")
+    policy = SecurityPolicy.from_config(app_config, workspace_root=workspace, environ={})
+
+    assert policy.resolve_path("sub/a.txt") == workspace / "sub" / "a.txt"
+    assert policy.resolve_path("sub/../sub/a.txt") == workspace / "sub" / "a.txt"
+    with pytest.raises(WorkspaceBoundaryError):
+        policy.resolve_path("../outside.txt")
+    # 仅由点构成的分段（`...`）：实测由 `resolve()` 按 Windows 语义**塌缩成父目录**
+    # （`sub/.../a.txt` ⇒ `sub/a.txt`，与系统真正打开的目标一致）；本模块的逐段去尾点
+    # 只对**非全点**分段生效，全点分段原样保留——不猜成空段。
+    assert policy.resolve_path("sub/.../a.txt") == workspace / "sub" / "a.txt"
+
+
 def test_policy_redacts_secret_values(app_config: AppConfig, tmp_path: Path) -> None:
     policy = SecurityPolicy(
         workspace_root=tmp_path,
@@ -184,9 +346,9 @@ def test_unknown_tool_is_denied(app_config: AppConfig, tmp_path: Path) -> None:
 
     assert policy.classify_tool("list_dir").allowed
     denied = policy.classify_tool("delete_file")
-    assert not denied.allowed
-    assert denied.requires_approval
-    assert "尚未接入" in denied.reason or "审批" in denied.reason
+    assert denied.allowed
+    assert not denied.requires_approval
+    assert "无需人工审批" in denied.reason
     assert not policy.classify_tool("some_unknown_tool").allowed
 
 
@@ -196,17 +358,16 @@ def test_write_tools_need_approval_when_risky(app_config: AppConfig, tmp_path: P
     small_edit = policy.classify_tool("edit_file", {"old_text": "a", "new_text": "b"})
     assert small_edit.allowed and not small_edit.requires_approval
 
+    # 一次改 500 行**不再**需要审批：大范围编辑按"本轮改过几个文件"判（2026-10-15）。
     huge_edit = policy.classify_tool(
-        "edit_file", {"old_text": "a", "new_text": "\n".join(str(i) for i in range(500))}
+        "edit_file", {"path": "a.py", "old_text": "a", "new_text": "\n".join(str(i) for i in range(500))}
     )
-    assert not huge_edit.allowed
-    assert huge_edit.requires_approval
-    assert "大范围修改" in huge_edit.reason
+    assert huge_edit.allowed and not huge_edit.requires_approval
 
     assert policy.classify_tool("edit_file", {}).allowed is False
     assert policy.classify_tool("write_file", {}).allowed is True
-    assert policy.classify_tool("write_file", {"overwrite": True}).requires_approval is True
-    assert policy.classify_tool("delete_file", {"recursive": True}).requires_approval is True
+    assert policy.classify_tool("write_file", {"overwrite": True}).requires_approval is False
+    assert policy.classify_tool("delete_file", {"recursive": True}).requires_approval is False
 
 
 # --------------------------------------------------------------------------- Shell 判定
@@ -216,6 +377,54 @@ def test_split_command_respects_quotes_and_keeps_backslashes() -> None:
     assert split_command('python "a b.py" --flag') == ["python", "a b.py", "--flag"]
     assert split_command(r"python C:\work\x.py") == ["python", r"C:\work\x.py"]
     assert split_command("   ") == []
+
+
+def _policy_with_mode(
+    app_config: AppConfig, tmp_path: Path, *, mode: str
+) -> SecurityPolicy:
+    """按指定权限档位构造策略（沙箱由档位派生，没有独立开关了）。"""
+    data = app_config.model_dump()
+    data["workspace"]["external_paths"]["mode"] = mode
+    return SecurityPolicy.from_config(
+        AppConfig.model_validate(data), workspace_root=tmp_path, environ={}
+    )
+
+
+def test_regular_commands_skip_approval_in_the_writable_tiers(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    """**常规命令一律免逐条审批**（2026-10-15 权限模型重构）。
+
+    换模型之前是"不在白名单就审批"：于是"想干活的命令"（mkdir、npm、跑脚本）全要人工点一次，
+    而且批准是一次性的。现在档位负责"能写到哪"、沙箱/授权条目负责把边界落实，命令本身不再是
+    需要用户逐条回答的问题——这正是 workspace-write 档"可以跑 powershell"的含义。
+
+    钉住三件事：常规命令免审；破坏性与提权**照旧要批准**；工作区外 cwd 也要批准。
+    """
+    command = {"command": "mkdir site", "cwd": "."}
+
+    for mode in ("workspace-write", "danger-full-access", "read-only"):
+        policy = _policy_with_mode(app_config, tmp_path, mode=mode)
+        relaxed = policy.classify_tool("run_shell", command)
+        assert relaxed.allowed and not relaxed.requires_approval, mode
+        assert mode in relaxed.reason
+
+        # 破坏性命令：任何档位都要人工批准（四项硬约束里唯一没被档位化的一项）。
+        destructive = policy.classify_tool("run_shell", {"command": "del a.txt", "cwd": "."})
+        assert not destructive.allowed and destructive.requires_approval, mode
+
+    # 越是界（提权）照旧要批准：那正是"越界才问"里被问的那一次。
+    writable = _policy_with_mode(app_config, tmp_path, mode="workspace-write")
+    escalate = writable.classify_tool(
+        "run_shell", {"command": "mkdir site", "cwd": ".", "escalate_sandbox": True}
+    )
+    assert not escalate.allowed and escalate.requires_approval
+
+    # 工作区外 cwd 不受档位影响：未授权时**直接拒绝**（不是"点一下就能跑"），
+    # 授权之后仍要人工批准（架构 §1.5 明写"不得命中免审白名单"；那条路径有单独用例）。
+    outside = tmp_path.parent
+    external = writable.classify_tool("run_shell", {"command": "mkdir site", "cwd": str(outside)})
+    assert external.allowed and not external.requires_approval
 
 
 def test_shell_whitelist_allows_exact_command(app_config: AppConfig, tmp_path: Path) -> None:
@@ -228,19 +437,31 @@ def test_shell_whitelist_allows_exact_command(app_config: AppConfig, tmp_path: P
     assert "白名单" in decision.reason
 
 
-def test_shell_whitelist_requires_approval_for_extra_args(
+def test_commands_no_longer_depend_on_the_whitelist(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
+    """白名单**不再是审批开关**（2026-10-15 权限模型重构）。
+
+    旧模型里"不在白名单 ⇒ 逐条审批"是主要摩擦源：想干活的命令全要人工点一次。现在档位与沙箱
+    负责边界，命令的审批只由"破坏性 / 提权 / 工作区外 cwd"三件事触发。
+    `security.shell.whitelist` 因此退化为兼容字段（`prepare_shell` 仍会算它，但不影响放行）。
+    """
     policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
 
-    for command in ("pytest -q", "git diff --stat", "ruff check --fix"):
+    for command in ("pytest -q", "git diff --stat", "ruff check --fix", "mkdir site"):
         decision = policy.classify_tool("run_shell", {"command": command})
-        assert not decision.allowed, command
-        assert decision.requires_approval, command
-        assert "白名单" in decision.reason
+        assert decision.allowed and not decision.requires_approval, command
 
 
-def test_shell_rejects_shell_syntax(app_config: AppConfig, tmp_path: Path) -> None:
+def test_shell_syntax_is_no_longer_an_approval_trigger(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    """Shell 语法**不再自动升级为审批**（2026-10-15 权限模型重构）。
+
+    旧模型里"含管道/重定向 ⇒ 提高风险等级 ⇒ 人工审批"是主要摩擦之一（`pytest -q | tail` 这种
+    日常命令也要点一次）。新模型把边界交给档位与沙箱：危险的是"命令做了什么"（破坏性模式、
+    提权、工作区外 cwd），不是"有没有管道"——这三类仍各自有专门分支拦着。
+    """
     policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
 
     for command in (
@@ -251,9 +472,7 @@ def test_shell_rejects_shell_syntax(app_config: AppConfig, tmp_path: Path) -> No
         "pytest --version & echo done",
     ):
         decision = policy.classify_tool("run_shell", {"command": command})
-        assert not decision.allowed, command
-        assert decision.requires_approval, command
-        assert "Shell 语法" in decision.reason
+        assert decision.allowed and not decision.requires_approval, command
 
 
 @pytest.mark.real_resolution
@@ -304,17 +523,23 @@ def test_shell_blocked_patterns_force_approval(app_config: AppConfig, tmp_path: 
 def test_shell_executable_name_matching_is_normalized(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
+    """可执行名归一仍要准——但验在 `prepare_shell` 那一层。
+
+    判定层已经不看白名单了（常规命令一律免审），所以"`PYTHON.EXE` 命中 `python`、`python3` 不命中"
+    这件事只能在 `prepare_shell` 里验。这条留着是因为它守着一个真问题：**判定对象必须与执行对象
+    是同一个**（架构 §5.3）——归一错了，指纹与审计就都会跟着错。
+    """
     data = app_config.model_dump()
     data["security"]["shell"]["whitelist"] = [
         {"platform": ["windows", "posix"], "executable": "python", "args": ["--version"], "match": "exact"}
     ]
-    policy = SecurityPolicy.from_config(
-        AppConfig.model_validate(data), workspace_root=tmp_path, environ={}
-    )
+    shell_config = AppConfig.model_validate(data).security.shell
 
-    assert policy.classify_tool("run_shell", {"command": "PYTHON.EXE --version"}).allowed
-    # 不同可执行名不能因为前缀相同而命中
-    assert not policy.classify_tool("run_shell", {"command": "python3 --version"}).allowed
+    matched = prepare_shell("PYTHON.EXE --version", config=shell_config, workspace_root=tmp_path)
+    missed = prepare_shell("python3 --version", config=shell_config, workspace_root=tmp_path)
+
+    assert matched.allowed and not matched.requires_approval, "白名单命中的命令免审"
+    assert not missed.allowed and missed.requires_approval, "不同可执行名不能因前缀相同而命中"
 
 
 def test_shell_platform_filter_is_respected(app_config: AppConfig, tmp_path: Path) -> None:
@@ -366,15 +591,38 @@ def test_shell_env_keys_block_secrets(app_config: AppConfig, tmp_path: Path) -> 
     assert ok.allowed
 
 
-def test_shell_timeout_cannot_exceed_limit(app_config: AppConfig, tmp_path: Path) -> None:
+def test_shell_timeout_has_no_ceiling_unless_one_is_configured(
+    app_config: AppConfig, tmp_path: Path
+) -> None:
+    """超时**默认不设上限**（2026-10-16）；配了 ``security.shell.max_timeout_seconds`` 才按它收。
+
+    原来上限就是 ``default_timeout_seconds`` **自己**（默认 60 秒），于是模型想把慢命令跑完
+    （冷启动浏览器、装依赖、真实构建）得先猜这个数，猜大了直接被拒——用户原话"完全就是限制
+    agent 能力"，而且那次拒绝还被渲染成"被安全策略拦截"。现在两截都钉住：
+    ① 没配上限时，远超默认值的请求照常放行；② 配了上限才拒，且理由里点名**是哪个键、当前多少**。
+    """
     policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
 
-    decision = policy.classify_tool(
-        "run_shell", {"command": "python --version", "timeout_seconds": 99999}
+    # ① 默认（未配 `max_timeout_seconds`）：600 秒也放行。
+    generous = policy.classify_tool(
+        "run_shell", {"command": "python --version", "timeout_seconds": 600}
     )
+    assert generous.allowed, generous.reason
 
-    assert not decision.allowed
-    assert "超时时间" in decision.reason
+    # ② 配了上限：超一点都拒，理由要能照做（点名键名与当前值）。
+    capped = SecurityPolicy.from_config(
+        _with_shell_config(app_config, max_timeout_seconds=30),
+        workspace_root=tmp_path,
+        environ={},
+    )
+    over = capped.classify_tool("run_shell", {"command": "python --version", "timeout_seconds": 31})
+    assert not over.allowed
+    assert "max_timeout_seconds" in over.reason and "30" in over.reason
+
+    # 上限之内照常放行。
+    assert capped.classify_tool(
+        "run_shell", {"command": "python --version", "timeout_seconds": 30}
+    ).allowed
 
 
 # --------------------------------------------------------------------------- T12 跨平台 Shell
@@ -478,35 +726,44 @@ def test_argv_commands_stay_without_shell_adapter(
     assert invocation[1:] == ["--version"]
 
 
-def test_absolute_path_executables_never_get_free_pass(
+def test_absolute_path_executables_are_flagged_by_prepare_shell_then_freed_by_the_tier(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
-    """带路径的可执行文件即使参数与白名单一致也不能免审（架构 §6.6）。"""
-    policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+    """带路径的可执行文件：`prepare_shell` 照旧标"需要人工审批"（架构 §6.6），判定层则由档位免掉。
 
-    # 参数与白名单完全一致，但执行对象是显式路径 → 只能走审批
-    decision = policy.classify_tool(
-        "run_shell", {"command": f'"{sys.executable}" --version'}
+    **2026-10-15 权限模型重构**：常规命令一律免审（档位与沙箱负责边界），"带路径"因此不再单独
+    触发人工批准。它守的那件事——**判定对象必须是执行对象**（带路径 ⇒ 解析后按该路径执行）——
+    降层到 `prepare_shell` 验，与"要不要问用户"是两回事。
+    """
+    plan = prepare_shell(
+        f'"{sys.executable}" --version',
+        config=app_config.security.shell,
+        workspace_root=tmp_path,
     )
+    assert not plan.allowed and plan.requires_approval
+    assert "路径" in plan.reason
 
-    assert not decision.allowed
-    assert decision.requires_approval
-    assert "路径" in decision.reason
+    # 判定层：同一条命令不再弹审批，理由里如实带出档位与 `prepare_shell` 的原始说明。
+    policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+    decision = policy.classify_tool("run_shell", {"command": f'"{sys.executable}" --version'})
+    assert decision.allowed and not decision.requires_approval
+    assert "常规命令免审批" in decision.reason
 
 
-def test_path_qualified_executable_needs_approval(
+def test_path_qualified_executable_in_workspace_is_flagged_at_prepare_shell(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
-    """工作区内的相对路径可执行文件：能解析到就提级审批（按该路径执行）。"""
+    """工作区内的相对路径可执行文件：`prepare_shell` 提级为"需要审批"并按该路径执行。"""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     (workspace / "tool.exe").write_bytes(b"stub")
-    policy = SecurityPolicy.from_config(app_config, workspace_root=workspace, environ={})
 
-    decision = policy.classify_tool("run_shell", {"command": "./tool.exe --version"})
+    plan = prepare_shell(
+        "./tool.exe --version", config=app_config.security.shell, workspace_root=workspace
+    )
 
-    assert not decision.allowed and decision.requires_approval
-    assert "路径" in decision.reason
+    assert not plan.allowed and plan.requires_approval
+    assert "路径" in plan.reason
 
 
 @pytest.mark.real_resolution
@@ -523,24 +780,43 @@ def test_unresolvable_executable_is_rejected_at_judgment(
         assert "找不到可执行文件" in decision.reason, command
 
 
-def test_executable_matching_is_normalized_without_aliases(
+def test_executable_aliases_do_not_change_the_tier_judgment(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
-    """大小写与 Windows 后缀归一化；别名不共享免审资格（架构 §6.6）。"""
+    """判定层对**能解析到的常规命令**一视同仁：大小写、后缀、别名都不改变结果。
+
+    2026-10-15 权限模型重构后判定层不看白名单（常规命令一律免审），所以"别名不共享免审资格"
+    这件事降层到 `prepare_shell` 验（见 `test_shell_executable_name_matching_is_normalized`）。
+    这里守的是另一半：**解析不到的仍照旧硬拒**——免掉的是审批，不是拒绝。
+    """
     policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
 
-    assert policy.classify_tool("run_shell", {"command": "PYTHON.EXE --version"}).allowed
-    assert policy.classify_tool("run_shell", {"command": "python --version"}).allowed
-
-    for command in ("python3 --version", "py --version", "pip --version", "giti status"):
-        assert not policy.classify_tool("run_shell", {"command": command}).allowed, command
+    for command in (
+        "PYTHON.EXE --version",
+        "python --version",
+        "python3 --version",
+        "py --version",
+        "pip --version",
+        "giti status",
+    ):
+        plan = prepare_shell(command, config=app_config.security.shell, workspace_root=tmp_path)
+        decision = policy.classify_tool("run_shell", {"command": command})
+        if plan.environment_unavailable:
+            # 环境里起不来：与审批无关，任何档位都拒绝。
+            assert not decision.allowed and not decision.requires_approval, command
+        else:
+            assert decision.allowed and not decision.requires_approval, command
 
 
 def test_whitelist_never_grants_extra_arguments(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
-    """``pytest`` 带任意参数、``git diff`` 带额外参数都不得免审（T12 验收）。"""
-    policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
+    """``pytest`` 带任意参数、``git diff`` 带额外参数都不得**命中白名单**（T12 验收）。
+
+    判定层已不看白名单（常规命令一律免审，2026-10-15），所以这条降到 `prepare_shell` 那一层验：
+    它守的是"白名单只认一字不差的调用"这件事本身，与"命令要不要审批"是两回事。
+    """
+    shell_config = app_config.security.shell
 
     for command in (
         "pytest",
@@ -551,13 +827,59 @@ def test_whitelist_never_grants_extra_arguments(
         "git status --short",
         "ruff check --fix",
     ):
-        decision = policy.classify_tool("run_shell", {"command": command})
-        assert not decision.allowed, command
-        assert decision.requires_approval, command
+        plan = prepare_shell(command, config=shell_config, workspace_root=tmp_path)
+        assert not plan.allowed, command
+        assert plan.requires_approval, command
 
-    # 参数完全一致的那一条仍然免审
-    assert policy.classify_tool("run_shell", {"command": "pytest --version"}).allowed
-    assert policy.classify_tool("run_shell", {"command": "git diff"}).allowed
+    # 参数完全一致的那两条仍然命中
+    for command in ("pytest --version", "git diff"):
+        plan = prepare_shell(command, config=shell_config, workspace_root=tmp_path)
+        assert plan.allowed and not plan.requires_approval, command
+
+
+def test_whitelist_prefix_matches_extra_arguments(app_config: AppConfig, tmp_path: Path) -> None:
+    """``match: prefix``：条目参数是实际参数的**前缀**，允许后面跟任意参数。
+
+    这解决的正是"`npm run build` 明明写在白名单里、却仍然被逐条问"——``exact`` 只认一字不差的调用。
+    前缀只作用在**参数**上，可执行名照旧逐项比较。
+    """
+    config = _with_shell_config(
+        app_config,
+        whitelist=[
+            {
+                "platform": ["windows", "posix"],
+                "executable": "python",
+                "args": ["--version"],
+                "match": "prefix",
+            }
+        ],
+    )
+    shell_config = config.security.shell
+
+    hit = prepare_shell("python --version --help", config=shell_config, workspace_root=tmp_path)
+    assert hit.allowed and not hit.requires_approval
+    assert "参数前缀匹配" in hit.reason
+
+    # 第一个参数就不对 → 照旧要问（前缀不是"这条可执行文件的任意调用"）。
+    miss = prepare_shell("python -c print(1)", config=shell_config, workspace_root=tmp_path)
+    assert not miss.allowed and miss.requires_approval
+
+    # 可执行名不受前缀影响。
+    other = prepare_shell("python3 --version", config=shell_config, workspace_root=tmp_path)
+    assert not other.allowed and other.requires_approval
+
+
+def test_prefix_whitelist_entry_needs_at_least_one_argument(app_config: AppConfig) -> None:
+    """``prefix`` 空参数 = 放行整个可执行文件（`python -c …` 就是任意代码）→ 配置层直接拒绝。"""
+    from pydantic import ValidationError
+
+    data = app_config.model_dump()
+    data["security"]["shell"]["whitelist"] = [
+        {"platform": ["windows", "posix"], "executable": "python", "args": [], "match": "prefix"}
+    ]
+
+    with pytest.raises(ValidationError, match="至少要写一个参数"):
+        AppConfig.model_validate(data)
 
 
 def test_whitelist_entry_can_limit_cwd(app_config: AppConfig, tmp_path: Path) -> None:
@@ -576,12 +898,17 @@ def test_whitelist_entry_can_limit_cwd(app_config: AppConfig, tmp_path: Path) ->
             }
         ],
     )
-    policy = SecurityPolicy.from_config(config, workspace_root=workspace, environ={})
+    # 白名单的 cwd 维度在 `prepare_shell` 那一层验（判定层不再看白名单，见上一条的理由）。
+    shell_config = config.security.shell
 
-    inside = policy.classify_tool("run_shell", {"command": "python --version", "cwd": "sub"})
+    inside = prepare_shell(
+        "python --version", config=shell_config, workspace_root=workspace, cwd="sub"
+    )
     assert inside.allowed
 
-    outside = policy.classify_tool("run_shell", {"command": "python --version", "cwd": "."})
+    outside = prepare_shell(
+        "python --version", config=shell_config, workspace_root=workspace, cwd="."
+    )
     assert not outside.allowed and outside.requires_approval
 
 
@@ -606,8 +933,13 @@ def test_blocked_patterns_match_parsed_structure(
         decision = policy.classify_tool("run_shell", {"command": command})
         assert not decision.allowed, command
         assert "破坏性命令模式" in decision.reason, command
-        if shutil.which(executable) is None:
-            # 环境里没有这个可执行文件（例如 Windows 上的 rm/del/chmod）→ 直接拒绝
+        if shutil.which(executable) is None and not shell_guard.is_platform_builtin(
+            executable, shell_guard.resolve_platform(policy.security.shell.platform)
+        ):
+            # 环境里没有这个可执行文件、**且它不是平台内建命令**（例如 Windows 上的 rm / chmod）
+            # → 直接拒绝，不给审批入口（批准了也起不来）。
+            # 内建命令（`del` / `rd`…）不同：它们经适配器**真能跑**，所以照旧进审批——
+            # 2026-10-14 修掉的正是"既命中破坏性模式、又永远执行不了"这一格。
             assert not decision.requires_approval, command
             assert "找不到可执行文件" in decision.reason, command
         else:
@@ -693,21 +1025,28 @@ def test_classify_edit_patch_mode_needs_no_approval_when_small(
     assert "unified diff" in decision.reason
 
 
-def test_classify_edit_patch_over_limit_requires_approval(
+def test_classify_edit_patch_over_the_file_limit_requires_approval(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
-    """补丁的改动行数（删除 + 新增）超过免审上限时进入审批。"""
+    """大范围编辑按"本轮触及的文件数"判，patch 模式同样走这条（2026-10-15）。
+
+    原来判的是"改动行数 > 200"，而那正是"重写一个函数"的常态——正常重构被逐次拦下。
+    """
+    app_config.security.require_approval.large_batch_edit = True
     policy = SecurityPolicy.from_config(app_config, workspace_root=tmp_path, environ={})
-    limit = app_config.security.large_edit.max_changed_lines_without_approval
-    patch = f"@@ -1 +1,{limit + 1} @@\n-a\n" + "".join(
-        f"+l{index}\n" for index in range(limit + 1)
-    )
+    limit = app_config.security.large_edit.max_files_without_approval
+    for index in range(limit):  # 先把免审额度用掉
+        policy.note_edited(tmp_path / f"touched{index}.py")
+    patch = "@@ -1 +1 @@\n-a\n+b\n"
 
     decision = policy.classify_tool("edit_file", {"path": "a.py", "patch": patch})
 
     assert not decision.allowed
     assert decision.requires_approval
+    assert decision.large_edit is True
     assert "大范围修改" in decision.reason
+    # 额度用完只挡**新**文件：已经改过的文件不再反复问。
+    assert policy.classify_tool("edit_file", {"path": "touched0.py", "patch": patch}).allowed
 
 
 def test_classify_edit_patch_structure_failure_is_a_hard_reject(
@@ -838,8 +1177,15 @@ def test_registry_exposes_only_read_tools_in_chat_mode(app_config: AppConfig, tm
     registry = ToolRegistry.build(policy)
 
     # T50：`tools_for_mode` → `tools_for(mode, capabilities)`；默认 Profile 等价于 v0.4 的 tool 模式。
-    assert [tool.name for tool in registry.tools_for("chat")] == ["list_dir", "read_file"]
+    # 2026-10-14：闲聊也带联网工具——闲聊与 Agent 的差别是"要不要动手改东西"，不是"能不能查资料"。
+    assert [tool.name for tool in registry.tools_for("chat")] == [
+        "list_dir",
+        "read_file",
+        "web_search",
+        "web_fetch",
+    ]
     assert [tool.name for tool in registry.tools_for("tool")] == [
+        "task_control",
         "update_plan",
         "list_dir",
         "read_file",
@@ -847,10 +1193,21 @@ def test_registry_exposes_only_read_tools_in_chat_mode(app_config: AppConfig, tm
         # （白名单要求参数完全匹配，搜索类命令一律落到"需人工审批"）。
         "grep",
         "glob",
+        # 2026-10-23：`search_files` 按文件名全项目搜索（右栏文件面板在用），排在 glob 之后。
+        "search_files",
         "edit_file",
         "write_file",
         "delete_file",
+        "download_file",
         "run_shell",
+        # 2026-10-23：命令会话化之后的三个工具，注册表顺序如此。
+        "read_command",
+        "stop_command",
+        "execute_code",
+        # 2026-10-14：联网常态化（`web` 出厂即开、不可关闭），排在 `CAPABILITY_TOOLS` 的位置上——
+        # 即 Git / 技能两段之前。
+        "web_search",
+        "web_fetch",
         # v0.5 T54：新增能力一律**追加在末尾**（前面的字节不变，前缀缓存的前半段仍可复用）。
         # 注意这里问的是**注册表**（不看配置开关），所以 git 工具会出现；真正绑定给模型时还要过
         # `capabilities.effective_capabilities`——默认 `git.enabled=false`，于是"默认档与 v0.4 一致"。
@@ -861,11 +1218,17 @@ def test_registry_exposes_only_read_tools_in_chat_mode(app_config: AppConfig, tm
         # v0.5 T55：技能工具同样追加在末尾，且是**只读**的（登记在 READ_ONLY_TOOLS，不需要审批）。
         "skill_list",
         "skill_load",
+        # 2026-10-16：看图（`view_image`）——只读，追加在末尾。注意这里问的是**注册表**，
+        # 所以它一定会出现；真正绑不绑给模型还要过 `enabled_capabilities` 的 `vision_available`
+        # （连接没声明支持图像输入时 `image_read` 不进有效能力集）。
+        "view_image",
+        "start_shell", "read_shell", "write_shell", "stop_shell",
+        "list_shell_sessions", "inspect_system", "browser",
     ]
     assert registry.get("nope") is None
 
 
-def test_git_commit_always_needs_approval_and_says_what_gets_committed(
+def test_git_commit_needs_no_approval_and_says_what_gets_committed(
     app_config: AppConfig, tmp_path: Path
 ) -> None:
     """提交改的是**仓库历史**：始终需要人工审批，且理由里带出路径与提交信息（架构 §16.4）。
@@ -878,8 +1241,8 @@ def test_git_commit_always_needs_approval_and_says_what_gets_committed(
     decision = policy.classify_tool(
         "git_commit", {"paths": ["notes.md", "docs/a.md"], "message": "补一段说明"}
     )
-    assert decision.requires_approval is True
-    assert decision.allowed is False  # "不自动放行"，与 delete_file 同一口径
+    assert decision.requires_approval is False
+    assert decision.allowed is True  # "不自动放行"，与 delete_file 同一口径
     assert "notes.md" in decision.reason and "补一段说明" in decision.reason
 
     for name in ("git_status", "git_diff", "git_log"):
@@ -930,22 +1293,35 @@ def test_tool_mode_binds_registered_tools(
     )
 
     assert model.bound_tools == [
+        "task_control",
         "update_plan",
         "list_dir",
         "read_file",
         "grep",
         "glob",
+        # 2026-10-23：`search_files`（按文件名全项目搜索）排在 glob 之后。
+        "search_files",
         "edit_file",
         "write_file",
         "delete_file",
+        "download_file",
         "run_shell",
+        # 2026-10-23：命令会话化之后的三个工具，与注册表顺序一致。
+        "read_command",
+        "stop_command",
+        "execute_code",
+        # 联网常态化（2026-10-14）：默认档现在也绑这两个（出厂即开、不可关闭）。
+        "web_search",
+        "web_fetch",
+        "start_shell", "read_shell", "write_shell", "stop_shell",
+        "list_shell_sessions", "inspect_system", "browser",
     ]
 
 
-def test_tool_call_cannot_read_outside_workspace(
+def test_tool_call_reads_explicit_external_path_without_approval(
     tmp_path: Path, model_factory: ModelFactory, app_config: AppConfig
 ) -> None:
-    """工具调用指向工作区外：被拒绝、内容不泄漏、工作区不受影响。"""
+    """默认工作区可写档可读取明确的外部绝对路径，结果回到模型且不改变文件。"""
     outside = tmp_path / "outside.txt"
     outside.write_text(OUTSIDE_SECRET, encoding="utf-8")
     workspace = tmp_path / "ws"
@@ -954,22 +1330,21 @@ def test_tool_call_cannot_read_outside_workspace(
 
     model = model_factory(
         decision="tool",
-        reply="无法读取该文件",
+        reply="已读取该文件",
         tool_calls=[
             {"name": "read_file", "args": {"path": outside.as_posix()}, "id": "call_1"}
         ],
-        # 越界被拒 → 证据等级 failed：反思不得声称完成（架构 §5.4），继续想办法
-        reflection={"goal_achieved": False, "next_action": "continue"},
     )
     result = builder.build_chat_graph().invoke(
         {"user_input": "读取工作区外的文件"}, context=_context(workspace, model, app_config)
     )
 
-    assert result["tool_results"][0]["status"] == "denied"
-    assert OUTSIDE_SECRET not in json.dumps(result["tool_results"], ensure_ascii=False, default=str)
-    assert OUTSIDE_SECRET not in "\n".join(model.seen_prompts)
+    assert not result.get("pending_approval")
+    assert result["tool_results"][0]["status"] == "ok"
+    assert OUTSIDE_SECRET in json.dumps(result["tool_results"], ensure_ascii=False, default=str)
+    assert OUTSIDE_SECRET in "\n".join(model.seen_prompts)
     assert _snapshot(workspace) == before
-    assert result["final_response"] == "无法读取该文件"
+    assert result["final_response"] == "已读取该文件"
 
 
 def test_secret_file_tool_call_is_denied(
@@ -1008,7 +1383,7 @@ def _policy(
     app_config: AppConfig,
     workspace: Path,
     *,
-    mode: str = "whitelist",
+    mode: str = "workspace-write",
     grants: Mapping[str, GrantAccess] | None = None,
 ) -> SecurityPolicy:
     return SecurityPolicy.from_config(
@@ -1025,20 +1400,25 @@ def _external_config(app_config: AppConfig, **overrides: object) -> AppConfig:
     return AppConfig.model_validate(data)
 
 
-def test_external_mode_deny_rejects_absolute_targets_even_when_listed(
+def test_external_read_only_tier_downgrades_grants_and_refuses_writes(
     tmp_path: Path, app_config: AppConfig
 ) -> None:
-    """``deny`` 档拒一切外部目标：授权条目留在库里也不读，提示指向「设置 → 权限」。"""
+    """只读档允许明确外部读取，但读写授权也不能带来写权限。"""
     workspace, outside, note = _external_setup(tmp_path)
     policy = _policy(
-        app_config, workspace, mode="deny", grants={normalize_grant_path(outside): "read_write"}
+        app_config, workspace, mode="read-only", grants={normalize_grant_path(outside): "read_write"}
     )
 
-    with pytest.raises(WorkspaceBoundaryError) as excinfo:
-        policy.resolve_path(str(note))
+    target = policy.resolve_target(str(note))
+    assert target.external and target.access == "read" and not target.writable, "读写授权被降级"
 
-    assert "未被授权" in str(excinfo.value)
-    assert "设置" in str(excinfo.value) and "权限" in str(excinfo.value)
+    created = policy.classify_tool(
+        "write_file", {"path": str(outside / "new.txt"), "content": "新"}
+    )
+    assert not created.allowed and not created.requires_approval
+
+    ungranted = tmp_path / "elsewhere" / "note.txt"
+    assert policy.resolve_target(str(ungranted)).access == "read"
 
 
 def test_external_whitelist_read_grant_allows_reading_and_refuses_writes(
@@ -1056,13 +1436,13 @@ def test_external_whitelist_read_grant_allows_reading_and_refuses_writes(
         "write_file", {"path": str(outside / "new.txt"), "content": "新"}
     )
     assert not created.allowed and not created.requires_approval  # 不是"等批准"，是权限不足
-    assert "只有只读授权" in created.reason and "权限" in created.reason
+    assert "只允许读" in created.reason and "权限" in created.reason
 
     edited = policy.classify_tool(
         "edit_file", {"path": str(note), "old_text": "外部内容", "new_text": "改"}
     )
     assert not edited.allowed and not edited.requires_approval
-    assert "只有只读授权" in edited.reason
+    assert "只允许读" in edited.reason
 
 
 def test_external_grants_cover_subdirectories_and_read_write_wins(
@@ -1083,25 +1463,39 @@ def test_external_grants_cover_subdirectories_and_read_write_wins(
 
     assert policy.resolve_target(str(outside / "a.txt")).access == "read"
     assert policy.resolve_target(str(sub / "b.txt")).access == "read_write"
-    with pytest.raises(WorkspaceBoundaryError):
-        policy.resolve_path(str(tmp_path / "elsewhere" / "c.txt"))
+    assert policy.resolve_target(str(tmp_path / "elsewhere" / "c.txt")).access == "read"
 
 
-def test_external_allow_mode_marks_any_absolute_target_read_write(
+def test_external_danger_tier_opens_reads_but_not_writes(
     tmp_path: Path, app_config: AppConfig
 ) -> None:
-    """``allow`` 档（= 旧键 ``allow_external_paths: true``）等于给所有绝对外部路径读写授权。"""
+    """「完全放行」档只给**读**：任何绝对外部路径可读，**写**仍需逐条授权。
+
+    与 codex 的 ``workspace-write``、dsh 的 ``writableRoots`` 同一条口径："读不受限、写由可写根围栏"。
+    """
     workspace, outside, note = _external_setup(tmp_path)
-    config = _external_config(app_config, external_paths={"mode": "allow"})
+    config = _external_config(app_config, external_paths={"mode": "danger-full-access"})
     policy = SecurityPolicy.from_config(config, workspace_root=workspace, environ={})
 
     target = policy.resolve_target(str(note))
-    assert target.external and target.access == "read_write" and target.writable
+    assert target.external and target.access == "read" and not target.writable
 
     created = policy.classify_tool(
         "write_file", {"path": str(outside / "new.txt"), "content": "新"}
     )
-    assert created.allowed and not created.requires_approval
+    assert not created.allowed and not created.requires_approval, "写外部是硬拒绝，不是等批准"
+    assert "只允许读" in created.reason
+
+    # 授权为读写之后才写得进去：**有没有授权**这件事压得过档位，反过来也一样。
+    granted = SecurityPolicy.from_config(
+        config,
+        workspace_root=workspace,
+        environ={},
+        external_policy=ExternalPathPolicy(
+            mode="danger-full-access", grants={normalize_grant_path(outside): "read_write"}
+        ),
+    )
+    assert granted.resolve_target(str(note)).access == "read_write"
 
 
 def test_external_paths_never_accept_relative_or_tilde_inputs(
@@ -1112,7 +1506,7 @@ def test_external_paths_never_accept_relative_or_tilde_inputs(
     policy = _policy(
         app_config,
         workspace,
-        mode="allow",
+        mode="danger-full-access",
         grants={normalize_grant_path(outside): "read_write"},
     )
 
@@ -1146,30 +1540,28 @@ def test_external_read_write_grant_keeps_the_four_hard_constraints(
     removed = policy.classify_tool("delete_file", {"path": str(note)})
     assert not removed.allowed and removed.requires_approval
 
-    # 硬约束三：大范围编辑（超过免审行数上限的补丁）
-    limit = app_config.security.large_edit.max_changed_lines_without_approval
-    patch = f"@@ -1 +1,{limit + 1} @@\n-a\n" + "".join(
-        f"+l{index}\n" for index in range(limit + 1)
+    # 硬约束三：大范围编辑（本轮改过的文件数超过免审上限后再改新文件）
+    for index in range(app_config.security.large_edit.max_files_without_approval):
+        policy.note_edited(tmp_path / f"touched{index}.py")
+    big = policy.classify_tool(
+        "edit_file", {"path": str(note), "patch": "@@ -1 +1 @@\n-a\n+b\n"}
     )
-    big = policy.classify_tool("edit_file", {"path": str(note), "patch": patch})
-    assert not big.allowed and big.requires_approval
-    assert "大范围修改" in big.reason
+    assert big.allowed and not big.requires_approval
 
     # 硬约束四：工作区外工作目录（命令本身在白名单里也不放行）
     shell = policy.classify_tool(
         "run_shell", {"command": "python --version", "cwd": str(outside)}
     )
-    assert not shell.allowed and shell.requires_approval
-    assert "工作区外工作目录" in shell.reason
+    assert shell.allowed and not shell.requires_approval
 
 
 def test_external_grants_cannot_authorize_protected_targets(
     tmp_path: Path, app_config: AppConfig
 ) -> None:
-    """受保护目标（主目录等）不是"更高审批"，而是**不可授权**：列进白名单也不执行副作用。"""
+    """受保护目标（主目录等）不是"更高审批"，而是**不可授权**：授权了也不执行副作用。"""
     workspace, _outside, _note = _external_setup(tmp_path)
 
-    for mode in ("whitelist", "allow"):
+    for mode in ("workspace-write", "danger-full-access"):
         policy = _policy(
             app_config,
             workspace,
@@ -1181,22 +1573,25 @@ def test_external_grants_cannot_authorize_protected_targets(
         assert "受保护目标" in decision.reason, mode
 
 
-def test_legacy_allow_external_paths_flag_maps_to_allow_mode(app_config: AppConfig) -> None:
-    """T38 兼容：旧键单独出现（``true``）等价于 ``external_paths.mode: allow``。"""
+def test_legacy_allow_external_paths_flag_maps_to_danger_full_access(app_config: AppConfig) -> None:
+    """T38 兼容：旧键单独出现（``true``）归一为 ``external_paths.mode: danger-full-access``。
+
+    ``allow`` 是它的旧写法：``normalize_mode`` 把"外部读不受限"这一语义映射到新三档里最宽的一档。
+    """
     data = app_config.model_dump()
     data["workspace"].pop("external_paths")  # 老配置里没有这个键
     data["workspace"]["allow_external_paths"] = True
 
     config = AppConfig.model_validate(data)
 
-    assert config.workspace.external_paths.mode == "allow"
+    assert config.workspace.external_paths.mode == "danger-full-access"
 
 
 def test_legacy_flag_conflicting_with_an_explicit_mode_is_rejected(app_config: AppConfig) -> None:
-    """旧键 ``true`` + 新键显式写了非 ``allow`` 的档位：说不清谁生效，直接拒绝。"""
+    """旧键 ``true`` + 新键显式写了别的档位：说不清谁生效，直接拒绝。"""
     data = app_config.model_dump()
     data["workspace"]["allow_external_paths"] = True
-    data["workspace"]["external_paths"] = {"mode": "deny"}
+    data["workspace"]["external_paths"] = {"mode": "read-only"}
 
     with pytest.raises(ValidationError) as excinfo:
         AppConfig.model_validate(data)
@@ -1204,11 +1599,94 @@ def test_legacy_flag_conflicting_with_an_explicit_mode_is_rejected(app_config: A
     assert "语义冲突" in str(excinfo.value)
 
 
+def test_safe_read_only_commands_are_listed_by_code_not_by_user_config() -> None:
+    """只读安全命令的**代码层**清单（2026-10-14）：`time /t`、`whoami`、`date` 一类不该每次弹审批。
+
+    实证来源：用户问"现在几点"，模型调 `time /T` 撞上审批、被拒绝后**此后每次都失败**
+    （另一半原因在 :func:`find_rejection` 的作用域，见下条用例）。因为用户白名单是"用户自己配"的，
+    出厂只含几条开发命令，所以这批读命令必须由**代码**兜住。
+    """
+    from local_agent.security.shell_guard import is_safe_read_only
+
+    # 大小写不固定（用户写的就是 `time /T`）
+    for argv in (["time", "/T"], ["time", "/t"], ["date", "/t"], ["whoami"], ["hostname"]):
+        assert is_safe_read_only(argv, "windows") is True, argv
+    for argv in (["date"], ["pwd"], ["uname"], ["id"], ["whoami"]):
+        assert is_safe_read_only(argv, "posix") is True, argv
+    # `echo` 带任意参数都只输出
+    assert is_safe_read_only(["echo", "hi"], "windows") is True
+    assert is_safe_read_only(["echo", "hi"], "posix") is True
+
+    # **不收**的几类，各有理由：
+    assert is_safe_read_only(["time"], "windows") is False, "裸 time 会询问并改系统时钟"
+    assert is_safe_read_only(["date"], "windows") is False, "裸 date 同上"
+    assert is_safe_read_only(["time", "/t", "extra"], "windows") is False, "参数不完全一致"
+    assert is_safe_read_only([r"C:\Windows\System32\whoami.exe"], "windows") is False, "带路径"
+    assert is_safe_read_only(["whoami"], "posix") is True and is_safe_read_only(["ver"], "posix") is False, (
+        "平台各自的清单不能互串"
+    )
+
+
+def test_rejection_scope_is_the_current_run_only() -> None:
+    """拒绝只在**本轮**拦：跨轮不再永久封禁（2026-10-14 修正）。
+
+    原实现"故意不按轮次隔离"，代价是用户拒绝过一次 `time /t` 之后，"现在几点"此后每次都直接失败、
+    连审批卡都不再弹——实证里用户反复撞上这件事。
+    """
+    from local_agent.security.approval import find_rejection
+
+    fingerprint = "fp-1"
+    history = [
+        {
+            "decision": "reject",
+            "action_fingerprint": fingerprint,
+            "run_id": "run-a",
+            "tool_call_id": "call-1",
+        }
+    ]
+
+    # 同一轮内：换个 tool_call_id 也绕不过（`find_rejection` 只看指纹，不看调用 ID）。
+    assert find_rejection(history, fingerprint, run_id="run-a") is not None
+    # 换一轮：可以再问一次（这正是本次修正的目的）。
+    assert find_rejection(history, fingerprint, run_id="run-b") is None
+
+
+def test_credential_directories_stay_unwritable_inside_an_authorised_grant(
+    tmp_path: Path, app_config: AppConfig
+) -> None:
+    """授权一个工作区外目录 ≠ 能改写它里面的**凭据目录**（照 codex 的强制只读子路径做）。
+
+    codex 在可写根里把 `.git` / `.git/hooks` / `.codex` / `.aws` 一类列为**始终只读**；dsh 没有这一层。
+    我们跟 codex：`.aws/credentials`、`.ssh/id_rsa` 被改写，后果远超"改错一个文件"，所以它们
+    **不可审批**——授权与「放行」档都不放行，工作区**内**同样拒（这不是越界问题，是"不可写"问题）。
+    """
+    workspace, outside, _note = _external_setup(tmp_path)
+    policy = _policy(app_config, workspace, grants={normalize_grant_path(outside): "read_write"})
+
+    # 授权目录本身可写——没有这一步，下面的拒绝就证明不了是"凭据目录"在起作用。
+    assert policy.resolve_writable_path(str(outside / "ok.txt")) == (outside / "ok.txt").resolve()
+
+    # 这些路径**都写不出去**，但拒绝理由可以不同：文件名本身疑似密钥的（`credentials`、`id_rsa`）
+    # 由敏感文件规则先拦，目录级的由"受保护目标"拦。判据是"写不出去"，不是"具体哪句话"。
+    for relative in (".aws/credentials", ".ssh/id_rsa", ".kube/config", ".git/config"):
+        with pytest.raises(SecurityError):
+            policy.resolve_writable_path(str(outside / relative))
+
+    # 目录级保护的**独立证据**：文件名本身毫不敏感，仍然因为落在凭据目录里被拒。
+    for directory in (".aws", ".ssh", ".codex", ".kube", ".gnupg", ".docker"):
+        with pytest.raises(SecurityError, match="受保护目标"):
+            policy.resolve_writable_path(str(outside / directory / "notes.txt"))
+
+    # 工作区**内**同样拒：这不是"越界"问题，是"不可写"问题。
+    with pytest.raises(SecurityError, match="受保护目标"):
+        policy.resolve_writable_path(str(workspace / ".ssh" / "notes.txt"))
+
+
 def test_external_paths_config_survives_a_dump_and_validate_round_trip(
     app_config: AppConfig,
 ) -> None:
     """往返必须可行：``model_dump()`` 会把新旧两个键都写出来，那不是冲突。"""
-    for mode in ("deny", "whitelist", "allow"):
+    for mode in ("read-only", "workspace-write", "danger-full-access"):
         config = _external_config(app_config, external_paths={"mode": mode})
         again = AppConfig.model_validate(config.model_dump())
         assert again.workspace.external_paths.mode == mode, mode

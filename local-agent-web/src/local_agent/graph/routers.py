@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 from pydantic import BaseModel
 
@@ -51,14 +51,15 @@ ROUTE_ASK_USER = "ask_user"
 ROUTE_FINISH = "finish"
 ROUTE_LOOP_LIMIT = "loop_limit"
 ROUTE_MEMORY_WRITE = "memory_write"
+ROUTE_TOOL_FEEDBACK = "tool_feedback"
+ROUTE_TO_SAFETY = "safety"
 
 #: 分类提示的固定标记；提示与测试都用它识别“这是一次分类调用”。
 ROUTE_CLASSIFIER_MARKER = "意图分类器"
 
 #: 工具循环达到上限时的说明（架构 §11.5）。
 LOOP_LIMIT_REPLY = (
-    "已达到本轮的模型调用上限，为避免无限循环我停下来了。"
-    "当前任务尚未完成，请把需求拆得更具体，或直接指出下一步要做什么。"
+    "已达到本轮的模型调用上限，本轮执行已停止。"
 )
 
 #: LLM 分类不可用时的关键词兜底（按从上到下的顺序匹配，返回命中的词）。
@@ -253,7 +254,7 @@ def route_after_decision(state: AgentState) -> str:
     ``task_status`` 还显示 ``running``，用户看到一个半截任务（复审实证）。
     先走反思，由 ``_advance_plan`` 的机械规则决定继续还是收尾（完成一步不等于完成整个任务）。
     """
-    if state.get("task_status") == "failed":
+    if state.get("task_status") in {"failed", "cancelled"}:
         return ROUTE_WITHOUT_TOOLS
     if state.get("pending_tool_calls"):
         return ROUTE_WITH_TOOLS
@@ -294,8 +295,31 @@ def route_after_safety(state: AgentState) -> str:
 
 
 def route_after_tool_execution(state: AgentState) -> str:
-    """闲聊读取后继续让模型形成回答；Agent 工具结果交反思节点。"""
+    """执行完这一批之后的去向。
+
+    还有**排着队的待审批动作**时回到安全门继续问下一个（2026-10-15，B2）。这条回路的意义：
+    同一条回复里有多个需要审批的动作时，一次只弹一张卡，批准并执行完自动接着问下一个——
+    不再把其余调用直接标成 `denied`（那看起来像"被安全拦截"，用户体感是"稍微多改点就被拒"）。
+    """
+    if _has_queued_approval(state):
+        return ROUTE_TO_SAFETY
     return ROUTE_CHAT if state.get("session_mode") == "chat" else ROUTE_TOOL
+
+
+def _has_queued_approval(state: AgentState) -> bool:
+    """队列里是否还有**没处理过**的待审批动作。
+
+    为什么要看"有没有结果记录"：`deferred_tool_calls` 是覆盖语义的普通通道，队列排空之后
+    某个陈旧条目可能仍留在状态里（走审批回路时状态按检查点恢复）。只要那个调用已经产出过
+    工具结果，就不该再回到安全门——否则会为一个已经执行的调用再问一次、甚至再执行一次。
+    """
+    deferred = state.get("deferred_tool_calls") or []
+    if not deferred:
+        return False
+    settled = {
+        record.get("tool_call_id") for record in state.get("tool_results") or []
+    }
+    return any(call.get("id") not in settled for call in deferred)
 
 
 def route_after_approval(state: AgentState) -> str:
@@ -321,15 +345,15 @@ LOOPING_ACTIONS: tuple[str, ...] = ("continue", "retry")
 def completion_router_node(state: AgentState) -> AgentState:
     """架构 §5.3：反思之后唯一决定后续走向。
 
-    本节点的状态改动只有一种情况：**还想继续/重试但已达循环上限**时补一句明确说明，
-    让用户知道任务没做完、为什么停下，而不是看到一个半截回答。
+    **还想继续/重试但已达循环上限**时，仅合成进度说明，不再执行工具。
+    停止原因由调用上限决定，不能根据曾经发生的工具错误推断为权限拒绝。
 
     上限**不覆盖**已经确定的 ``finish`` / ``ask_user``：那一轮反思已经给出可收尾的结论
     （而且是基于机械证据的结论），把它改成"失败"会让正常终止在边界轮次丢失（复审实证：
     ``verified + finish`` 与 ``ask_user`` 都被改成了 ``loop_limit + failed``）。
     """
     if _loop_limit_blocks(state):
-        return {"messages": [AIMessage(content=LOOP_LIMIT_REPLY)], "task_status": "failed"}
+        return {"tool_feedback_required": True, "task_status": "failed"}
     return {}
 
 
@@ -339,6 +363,10 @@ def completion_route(state: AgentState) -> str:
     ``finish`` 且反思给出了记忆候选时，先走 ``memory_write_node``（架构 §5.3）。写入链路要求
     候选经过反思验证，所以这是**唯一**的写入出口——其余分支都不直接写库。
     """
+    if state.get("task_status") == "cancelled":
+        return ROUTE_ASK_USER
+    if state.get("tool_feedback_required"):
+        return ROUTE_TOOL_FEEDBACK
     action = _next_action(state)
     if action in LOOPING_ACTIONS and loop_limit_reached(state):
         return ROUTE_LOOP_LIMIT

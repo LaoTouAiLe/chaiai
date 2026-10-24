@@ -35,6 +35,9 @@ function connectionDto(overrides: Partial<ModelConnectionDto> = {}): ModelConnec
     timeout_seconds: 120,
     retry_count: 2,
     streaming: false,
+    // 2026-10-16：逐连接的"支持图片输入"。生成类型里带默认值的**非空**字段是必填，
+    // 而服务端一定会回这一位 —— 夹具必须照实写，别让 mock 比契约少一个字段。
+    supports_vision: false,
     auth_mode: 'api_key',
     key_status: 'configured',
     is_default: true,
@@ -62,6 +65,9 @@ function connectionBody(overrides: Partial<ModelConnectionInput> = {}): ModelCon
     timeout_seconds: 120,
     retry_count: 2,
     streaming: false,
+    // 2026-10-16：逐连接的"支持图片输入"。生成类型里带默认值的**非空**字段是必填，
+    // 而服务端一定会回这一位 —— 夹具必须照实写，别让 mock 比契约少一个字段。
+    supports_vision: false,
     auth_mode: 'api_key',
     allow_plaintext_http: false,
     ...overrides,
@@ -81,8 +87,8 @@ const healthDto: HealthDto = {
 
 function permissionsDto(overrides: Partial<PermissionsDto> = {}): PermissionsDto {
   return {
-    mode: 'whitelist',
-    default_mode: 'whitelist',
+    mode: 'workspace-write',
+    default_mode: 'workspace-write',
     grants: [],
     store_unavailable: false,
     ...overrides,
@@ -241,15 +247,15 @@ describe('view model adapters', () => {
 
   it('maps the permissions DTO onto the view without inventing a mode', () => {
     const view = toPermissionsView({
-      mode: 'allow',
-      default_mode: 'whitelist',
+      mode: 'danger-full-access',
+      default_mode: 'workspace-write',
       grants: [{ path: 'D:/team/shared', access: 'read_write' }],
       store_unavailable: true,
     })
 
     expect(view).toEqual({
-      mode: 'allow',
-      defaultMode: 'whitelist',
+      mode: 'danger-full-access',
+      defaultMode: 'workspace-write',
       grants: [{ path: 'D:/team/shared', access: 'read_write' }],
       storeUnavailable: true,
     })
@@ -265,10 +271,10 @@ describe('view model adapters', () => {
       [],
       healthDto,
       undefined,
-      permissionsDto({ mode: 'deny', default_mode: 'whitelist', grants: [] }),
+      permissionsDto({ mode: 'read-only', default_mode: 'workspace-write', grants: [] }),
     )
-    expect(settings.permissions?.mode).toBe('deny')
-    expect(settings.permissions?.defaultMode).toBe('whitelist')
+    expect(settings.permissions?.mode).toBe('read-only')
+    expect(settings.permissions?.defaultMode).toBe('workspace-write')
   })
 
   it('formats the context window without pretending to know an exact window it was not given', () => {

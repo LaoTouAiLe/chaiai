@@ -1,4 +1,4 @@
-"""会话地图与分支上下文。路径索引不执行图，追问仍由应用服务提交新输入。"""
+﻿"""会话地图与分支上下文。路径索引不执行图，追问仍由应用服务提交新输入。"""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from local_agent.application.models import (
     ConversationMapView,
     ConversationNodeView,
     SessionSnapshot,
+    SideChatView,
 )
 from local_agent.persistence.conversation_store import Branch, ConversationTurn
 from local_agent.persistence.session_store import Session
@@ -49,7 +50,7 @@ def rows_from_view(service: ApplicationService, session: Session, view: _ThreadV
                 if current else "unknown")
             # 只有本轮终态的检查点可作追问锚点，不能把祖先误绑定到最新一轮。
             anchor = view.checkpoint_id if current and state in {
-                "completed", "failed", "blocked"
+                "completed", "failed", "blocked", "cancelled"
             } and not view.has_live_interrupt and not view.next_nodes else None
             rows.append(ConversationTurn(
                 message.message_id, old.parent_turn_id if old else (rows[-1].turn_id if rows else None),
@@ -86,13 +87,13 @@ def collect(service: ApplicationService, session: Session) -> tuple[list[Convers
                 turn_id = previous.values.get("run_user_message_id")
                 if turn_id not in missing or snapshot.next or previous.has_live_interrupt:
                     continue
-                if str(previous.values.get("task_status")) not in {"completed", "failed"}:
+                if str(previous.values.get("task_status")) not in {"completed", "failed", "cancelled"}:
                     continue
                 row = rows[str(turn_id)]
                 rows[str(turn_id)] = replace(
                     row, checkpoint_id=previous.checkpoint_id,
                     run_id=row.run_id or proj.current_run_id(previous.values),
-                    state="failed" if previous.values.get("task_status") == "failed" else "completed",
+                    state=str(previous.values.get("task_status")),
                 )
                 missing.remove(str(turn_id))
     ordered = sorted(rows.values(), key=lambda row: (row.ordinal, row.turn_id))
@@ -111,10 +112,10 @@ def map_view(service: ApplicationService, session: Session, query: str = "") -> 
         nodes=[ConversationNodeView(
             turn_id=row.turn_id, parent_turn_id=row.parent_turn_id,
             origin_branch_id=row.origin_branch_id, run_id=row.run_id,
-            question=proj.sanitize_text(row.question, service._secrets, hide_private_paths=False),
+            question=proj.sanitize_text(row.question, service._secrets),
             answer_preview=proj.sanitize_text(row.answer_text[:240], service._secrets),
             state=row.state, submitted_at=row.submitted_at, ordinal=row.ordinal,
-            can_continue=row.checkpoint_id is not None and row.state in {"completed", "failed", "blocked"},
+            can_continue=row.checkpoint_id is not None and row.state in {"completed", "failed", "blocked", "cancelled"},
         ) for row in rows],
         branches=[ConversationBranchView(
             branch_id=branch.branch_id, title=proj.sanitize_text(branch.title, service._secrets),
@@ -123,6 +124,18 @@ def map_view(service: ApplicationService, session: Session, query: str = "") -> 
         ) for branch in branches],
         matched_turn_ids=[row.turn_id for row in rows
                           if text and text in (row.question + "\n" + row.answer_text).casefold()],
+        # 侧聊（§21.7）：独立会话，但在图上挂成本会话的关联分支。
+        # 读失败不让整张地图打不开——侧聊只是附注，不是地图的主体。
+        side_chats=[] if session.parent_session_id is not None else [
+            SideChatView(
+                session_id=item.session_id,
+                title=proj.sanitize_text(item.title, service._secrets),
+                origin_turn_id=item.origin_turn_id,
+                created_at=item.created_at,
+            )
+            for item in service._sqlite_access(
+                lambda: service._sessions.side_chats(session.session_id))
+        ],
     )
 
 
@@ -144,7 +157,7 @@ def submission_parent(service: ApplicationService, session: Session, parent_id: 
     parent = next((row for row in rows if row.turn_id == parent_id), None)
     if parent is None:
         raise conflict(session.session_id, "选中的问答不属于这个会话。")
-    if parent.checkpoint_id is None or parent.state not in {"completed", "failed", "blocked"}:
+    if parent.checkpoint_id is None or parent.state not in {"completed", "failed", "blocked", "cancelled"}:
         raise conflict(session.session_id, "该轮尚未结束，或缺少可用的历史检查点。")
     view = service._read_checkpoint(session, parent.checkpoint_id)
     if view is None or view.has_live_interrupt or view.next_nodes or view.values.get("run_user_message_id") != parent_id:

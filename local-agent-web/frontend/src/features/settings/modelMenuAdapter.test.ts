@@ -36,6 +36,8 @@ const connection = (overrides: Partial<Connection> = {}): Connection => ({
   retry_count: 1,
   status: 'verified',
   streaming: true,
+  // 2026-10-16：逐连接的"支持图片输入"（生成类型里是必填，夹具照契约写全）。
+  supports_vision: false,
   temperature: 0.7,
   timeout_seconds: 30,
   transport: 'https',

@@ -12,8 +12,6 @@ import { SettingsDialog } from './SettingsDialog'
 import { useModelSettings } from './useModelSettings'
 import { usePermissions } from './usePermissions'
 import { PreferenceSection } from './PreferenceSection'
-import { CapabilitiesSection } from '../capabilities/CapabilitiesSection'
-import { SkillsSection } from '../skills/SkillsSection'
 import styles from './SettingsDialog.module.css'
 
 export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
@@ -111,10 +109,8 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
       settings={view}
       form={form}
       extraSections={{
-        // 技能管理页（2026-10-16）：与权限分区并列的"带开关的管理列表"，容器自己取数与写入。
-        skills: <SkillsSection />,
-        // 能力（2026-10-19）：从顶栏面板搬进设置，内嵌模式（不叠遮罩、不显示"关闭"）。
-        capabilities: <CapabilitiesSection embedded />,
+        // 技能 / 能力 / MCP 三块 2026-10-22 已移出设置，改由侧栏「能力中心」整页提供
+        // （`features/capabilities/CapabilitiesCenter.tsx`）。这里不再注入，避免同一件事两个入口。
         general: <PreferenceSection group="general" />,
         execution: <PreferenceSection group="execution" />,
         retrieval: <PreferenceSection group="retrieval" />,

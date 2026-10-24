@@ -89,6 +89,15 @@ def report_failure(exc: BaseException, *, note: str = "启动失败") -> None:
 
 def main() -> int:
     """打包产物入口：导入并运行官方入口，任何异常都留下证据后非零退出。"""
+    if getattr(sys, "frozen", False) and sys.argv[1:2] == ["--internal-sandbox-taskkill"]:
+        from local_agent.security.process_cleanup import main as cleanup_main
+
+        return cleanup_main(sys.argv[2:])
+    # 冻结 EXE 不是 Python 解释器，不能用 -I -m 自启。runner 在导入 API、读取用户配置前分流。
+    if getattr(sys, "frozen", False) and sys.argv[1:2] == ["--internal-win-sandbox-run"]:
+        from local_agent.security.win_sandbox import main as sandbox_main
+
+        return sandbox_main(sys.argv[2:])
     try:
         from local_agent.api.__main__ import main as api_main
 

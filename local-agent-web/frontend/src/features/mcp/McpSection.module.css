@@ -1,0 +1,268 @@
+/* 「MCP 外部工具」分区样式。只吃 `--law-*` 设计令牌，深浅色随主题切换。 */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-lg);
+  padding-bottom: var(--law-space-3xl);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--law-space-lg);
+}
+
+.title {
+  margin: 0;
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  font-weight: var(--law-weight-semibold);
+  color: var(--law-text-primary);
+}
+
+.note {
+  margin: var(--law-space-xxs) 0 0;
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-md);
+  color: var(--law-text-secondary);
+}
+
+.ghost {
+  flex: none;
+  padding: var(--law-space-xxs) var(--law-space-sm);
+  font-size: var(--law-text-xs);
+  color: var(--law-text-secondary);
+  background: transparent;
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-sm);
+  cursor: pointer;
+}
+
+.ghost:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.scale {
+  margin: 0;
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-md);
+  color: var(--law-text-secondary);
+}
+
+.error {
+  margin: 0;
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-md);
+  color: var(--law-state-error);
+}
+
+.empty {
+  margin: 0;
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-md);
+  color: var(--law-text-secondary);
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-md);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-sm);
+  padding: var(--law-space-md);
+  background: var(--law-bg-layer-1);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-md);
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--law-space-md);
+}
+
+.cardTitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--law-space-sm);
+}
+
+.serverName {
+  font-size: var(--law-text-sm);
+  font-weight: var(--law-weight-semibold);
+  color: var(--law-text-primary);
+}
+
+.status {
+  padding: 0 var(--law-space-xxs);
+  font-size: var(--law-text-xs);
+  color: var(--law-text-secondary);
+  background: var(--law-bg-layer-2);
+  border-radius: var(--law-radius-sm);
+}
+
+.status[data-status='connected'] {
+  color: var(--law-text-primary);
+}
+
+.status[data-status='failed'] {
+  color: var(--law-state-error);
+}
+
+.count {
+  font-size: var(--law-text-xs);
+  color: var(--law-text-secondary);
+}
+
+.toggle {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--law-space-xxs);
+  font-size: var(--law-text-xs);
+  color: var(--law-text-secondary);
+  white-space: nowrap;
+}
+
+.tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--law-space-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tool {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-xxs);
+  font-size: var(--law-text-xs);
+  color: var(--law-text-secondary);
+}
+
+.toolName {
+  padding: 0 var(--law-space-xxs);
+  font-family: var(--law-font-mono, monospace);
+  background: var(--law-bg-layer-2);
+  border-radius: var(--law-radius-sm);
+}
+
+/* 按需检索的工具必须看得出来：它与"直接可见"是两种不同的可用性。 */
+.exposure {
+  font-size: var(--law-text-xs);
+  color: var(--law-text-secondary);
+}
+
+.exposure[data-exposure='hidden'] {
+  opacity: 0.7;
+}
+
+.headerActions {
+  display: flex;
+  flex: none;
+  gap: var(--law-space-xs);
+}
+
+/* 添加 server 的表单：与卡片同一层背景，只是多一圈边界，避免和列表混在一起。 */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-sm);
+  padding: var(--law-space-md);
+  background: var(--law-bg-layer-1);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-md);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xxs);
+  font-size: var(--law-text-xs);
+  color: var(--law-text-secondary);
+}
+
+.field input,
+.field textarea {
+  padding: var(--law-space-xxs) var(--law-space-sm);
+  font-family: var(--law-font-mono, monospace);
+  font-size: var(--law-text-xs);
+  color: var(--law-text-primary);
+  background: var(--law-bg-layer-2);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--law-radius-sm);
+  resize: vertical;
+}
+
+.formActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.primary {
+  padding: var(--law-space-xxs) var(--law-space-md);
+  font-size: var(--law-text-xs);
+  color: var(--law-text-on-brand);
+  background: var(--law-button-primary-fill);
+  border: none;
+  border-radius: var(--law-radius-sm);
+  cursor: pointer;
+}
+
+.primary:hover:not(:disabled) {
+  background: var(--law-button-primary-hover);
+}
+
+.primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* 工具本身就是开关：点一下停用/启用（写 `disabled_tools`）。 */
+.toolButton {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-xxs);
+  padding: 0;
+  font: inherit;
+  font-size: var(--law-text-xs);
+  color: var(--law-text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.toolButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.toolButton[data-disabled='true'] .toolName {
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.command, .toolName { overflow-wrap: anywhere; white-space: pre-wrap; }
+.card, .form, .field, .cardTitle, .tool, .toolButton { min-width: 0; }
+.field input, .field textarea { box-sizing: border-box; width: 100%; }
+.headerActions, .confirm { display: flex; flex-wrap: wrap; gap: var(--law-space-xs); }
+.command { font-size: var(--law-text-xs); color: var(--law-text-secondary); }
+.envKeys { border: 1px solid var(--law-border-l2); font-size: var(--law-text-xs); color: var(--law-text-secondary); }
+@media (max-width: 700px) {
+  .header, .cardHead { flex-wrap: wrap; }
+  .toolButton { flex-wrap: wrap; text-align: left; }
+  .headerActions { flex-shrink: 1; }
+}

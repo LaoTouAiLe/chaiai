@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 from local_agent.persistence.job_store import (
+    JOB_STATE_CANCELLED,
     JOB_STATE_COMPLETED,
     JOB_STATE_FAILED,
     JOB_STATE_NEEDS_REVIEW,
@@ -43,7 +44,7 @@ from local_agent.workflow_contracts import READONLY_RESEARCH
 
 #: 一轮的**终态**：``task_status`` 落到其中之一，就说明"这一轮已经有结局"（§15.2 的恢复口径）。
 #: 定义在恢复模块里，因为它只被"能否证明终态"这一件事用到（服务层的 `_recover` 也用它）。
-TASK_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({"completed", "failed"})
+TASK_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({"completed", "failed", "cancelled"})
 
 #: 判定取值（三类 + 一类"可恢复"）。写进 `detail` 之外的地方会进测试与事件载荷，因此固定。
 VERDICT_RESUMABLE: Final[str] = "resumable"
@@ -169,6 +170,7 @@ def classify_interrupted_job(job: Job, *, evidence: TurnEvidence | None) -> JobV
         and (evidence.turn_state or "") in TASK_TERMINAL_STATUSES
     ):
         target = (
+            JOB_STATE_CANCELLED if evidence.turn_state == "cancelled" else
             JOB_STATE_COMPLETED if evidence.turn_state == "completed" else JOB_STATE_FAILED
         )
         return JobVerdict(VERDICT_PROVABLE, target, PROVABLE_DETAIL)

@@ -10,6 +10,7 @@
 
 import { CancelledError, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
+import type { components } from './schema.gen'
 
 import { ApiError, getSessionSnapshot } from './client'
 import { readSessionEvents, type EventEnvelope } from './events'
@@ -104,6 +105,9 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
         case 'session_snapshot':
           // 权威替换：写进缓存，并顺手对账尾部（快照里已有完整消息就丢掉尾部，避免重复显示）。
           queryClient.setQueryData(queryKeys.snapshot(sessionId), event.payload)
+          queryClient.setQueriesData<components['schemas']['SessionSummaryView'][]>({ queryKey: ['sessions'] },
+            (previous) => previous?.map((item) => item.session_id === sessionId
+              ? { ...item, title: event.payload.title } : item))
           store.setTail(sessionId, reconcile(current, event.payload))
           return
         case 'message_started':
@@ -134,6 +138,9 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
           // 本轮结束：尾部该收的收掉，剩下的以快照为准。
           reconcileFromServer()
           void queryClient.invalidateQueries({ queryKey: ['sessions'] })
+          // 文件变更账本在这一轮才写完：轮结束时重取一次，"改了哪些文件"立刻是新的。
+          // 不在 tool_completed 上做——一轮里几十次工具就是几十次重取，收益不成比例。
+          void queryClient.invalidateQueries({ queryKey: ['session-changes'] })
           return
         case 'job_queued':
         case 'job_progress':

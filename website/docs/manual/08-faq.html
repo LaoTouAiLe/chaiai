@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>常见问题与自检 · 操作手册 · chaiai</title>
+<meta name="description" content="chaiai 常见问题：页面空白、模型连不上、写入被拒、任务卡住、数据库自检与恢复。" />
+<meta name="color-scheme" content="light" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="../../site.html" aria-label="chaiai 官网">
+      <svg class="brand__mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <defs>
+          <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#F8B65C"/><stop offset="1" stop-color="#E77737"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="18" fill="url(#chaiaiWarm)"/>
+        <path d="m16 27-1-13c-.4-3 1.2-4 3.3-2.2l8.7 7.4a16 16 0 0 1 10 0l8.7-7.4c2.1-1.8 3.7-.8 3.3 2.2l-1 13c3 3.2 4 7.2 4 11 0 8.4-8.2 14-20 14-2.4 0-4.7-.2-7-.7L15 55l2.3-10.2C13.9 42.4 12 39.4 12 36c0-3.5 1.4-6.7 4-9Z" fill="#FFF7E9"/>
+        <path d="m19.3 16.8.8 8.4 5.1-3.5Zm25.4 0-.8 8.4-5.1-3.5Z" fill="#BF6A37"/>
+        <path d="M24 32.5v2M40 32.5v2" fill="none" stroke="#633E2B" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M29.2 38.1c-.7-.8-.2-2.1.9-2.1h3.8c1.1 0 1.6 1.3.9 2.1L33 40a1.4 1.4 0 0 1-2 0Z" fill="#633E2B"/>
+        <path d="M26.5 42.2c1.5 1.7 3.3 1.7 5.5-.3 2.2 2 4 2 5.5.3" fill="none" stroke="#633E2B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>chaiai</span>
+      <span class="brand__divider" aria-hidden="true"></span>
+      <span class="brand__label">文档</span>
+    </a>
+    <nav class="topnav" aria-label="站点导航">
+      <a href="../index.html">文档首页</a>
+      <a href="index.html" aria-current="page">操作手册</a>
+      <a href="../internals/index.html">技术实现</a>
+      <a class="topnav__out" href="../../site.html">返回官网</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout layout--plain">
+  <nav class="sidebar" aria-label="文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="index.html">手册首页</a>
+      <a href="01-install.html">01 安装与第一次启动</a>
+      <a href="02-model.html">02 连接一个模型</a>
+      <a href="03-permissions.html">03 权限三档与目录授权</a>
+      <a href="04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="05-map.html">05 会话地图与分支追问</a>
+      <a href="06-data.html">06 数据中台</a>
+      <a href="07-settings.html">07 设置项与生效时机</a>
+      <a href="08-faq.html" aria-current="page">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="../internals/index.html">概览</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+
+  <main class="doc">
+    <p class="kicker">MANUAL · 第 8 章</p>
+    <h1>常见问题与自检</h1>
+    <p class="lead">先判断是哪一类：页面没起来、模型连不上、写入被拒，还是任务停在半路。每一类都给可执行的下一步。</p>
+
+    <div class="prose">
+      <h2>打开页面是空白，或提示「前端产物不存在」</h2>
+      <p>
+        前端还没构建。在 <code>frontend/</code> 执行 <code>npm ci</code> 与 <code>npm run build</code>，
+        然后刷新；开发态可以改用 <code>npm run dev</code>（访问 5173，<code>/api</code> 自动代理到 8000）。
+        提示「构建目录里没有 index.html」时同理，重新构建即可。
+      </p>
+
+      <h2>启动就退出，或不知道哪里配错了</h2>
+      <pre><code>uv run python -m local_agent.api --diagnose</code></pre>
+      <p>
+        它输出 <code>{"ok": …, "checks": [...]}</code>，逐项给出配置、前端产物、三个数据库、向量库依赖、
+        git / rg、模型配置与作用域检查；<code>ok</code> 为假时进程退出码是 1。
+        它不启动服务、不读密钥，也不证明沙箱或真实回答质量。
+      </p>
+      <p>
+        想换端口改 <code>config.yaml</code> 的 <code>web.port</code>；想换监听地址必须同时打开
+        <code>web.allow_non_loopback</code>，否则启动校验会直接拒绝——这是防止「改一行就暴露到公网」的保护。
+      </p>
+
+      <h2>连不上模型（401 / 403 / 429 / 超时）</h2>
+      <ul>
+        <li>先点连接卡上的「测试连接」，看分项结论落在聊天、工具还是流式这一项。</li>
+        <li>401 / 403 多是密钥或鉴权方式不对；429 是限流；超时看设置里的超时与重试次数。</li>
+        <li>端点与模型 ID 要按供应商文档逐字核对；报错原文由供应商决定，这里不代为解释。</li>
+      </ul>
+
+      <figure>
+        <img src="../assets/img/ui-errors-20261019.png" alt="一轮里出现的三种模型错误：鉴权失败、限流、重试耗尽" width="566" height="300" loading="lazy" />
+        <figcaption>模型错误按轮展示：鉴权失败、限流与重试耗尽分别说明，不会合并成一句「连接失败」。</figcaption>
+      </figure>
+
+      <h2>重启后要重新填密钥</h2>
+      <p>
+        说明这次启动没有可用的设置库，密钥只存在本次进程里（页面会显示「仅本次进程内 · 重启后需重新录入」）。
+        恢复设置库路径后重新填写一次，之后就会持久保存——仍然只写入、不回读。
+      </p>
+
+      <h2>写入被拒绝</h2>
+      <ul>
+        <li>目标是工作区外：需要在「设置 → 权限 → 外部可写目录」里加授权，且当前档位不是「只读」。</li>
+        <li>用了相对路径或 <code>~</code>：外部路径必须写绝对路径。</li>
+        <li>目标是根目录、用户主目录、系统目录或 Git 元数据：这些不能被授权写入。</li>
+        <li>Linux / macOS 上没有 OS 级写边界，拒绝来自服务端判据而不是系统沙箱。</li>
+      </ul>
+
+      <h2>任务一直停在运行中</h2>
+      <p>
+        点「停止生成」。停止会中断本轮，但<strong>不撤销</strong>已经发生的工具调用；停止请求失败时按提示刷新后重试。
+        同一会话的第二个提交不会排队，会直接被拒绝，所以不要靠重复发送来「催」它。
+      </p>
+
+      <h2>结果不确定</h2>
+      <p>
+        按第 4 章的核对流程收尾：刷新 → 查看本轮记录与文件 / 命令结果 → 勾选确认 → 「结束中断任务」。
+        在核对之前，不要重复执行可能带副作用的命令。
+      </p>
+
+      <h2>数据库自检、备份与恢复</h2>
+      <p>先停止服务，再在 <code>local-agent-web/</code> 下执行（路径按实际配置修改，输出用新名字）：</p>
+      <pre><code>.venv/Scripts/python.exe scripts/database_maintenance.py check --database data/checkpoints.sqlite
+.venv/Scripts/python.exe scripts/database_maintenance.py backup --database data/checkpoints.sqlite --output backups/checkpoints-20261019.sqlite
+.venv/Scripts/python.exe scripts/database_maintenance.py restore --backup backups/checkpoints-20261019.sqlite --output data/checkpoints-restored.sqlite
+.venv/Scripts/python.exe scripts/database_maintenance.py check --database data/checkpoints-restored.sqlite</code></pre>
+      <p>
+        确认恢复副本自检通过后，把 <code>config.yaml</code> 的 <code>memory.short_term.path</code>
+        指向恢复出来的文件，再按原命令启动。原库与备份都保留，不直接覆盖；恢复出的未结束任务仍需人工核对，不会自动重跑。
+      </p>
+      <div class="note">
+        <strong>不要删库：</strong>服务启动时会对聊天库做 <code>quick_check</code>，失败就停止并提示保留原库与
+        <code>-wal</code> / <code>-shm</code>。运行中的主 <code>.sqlite</code> 不能只复制一份——已提交内容可能还在 WAL 里，
+        请用上面的备份命令。
+      </div>
+
+      <h2>界面太小 / 动画晃眼</h2>
+      <p>
+        「设置 → 通用与外观」可以改主题（浅色 / 深色 / 跟随系统）、文字大小（小 / 标准 / 大）与界面动画；
+        关掉动画后，页面还会尊重系统的「减少动态效果」设置。
+      </p>
+    </div>
+
+    <nav class="pager" aria-label="翻页">
+      <a href="07-settings.html">
+        <span class="pager__hint">上一篇</span>
+        <span class="pager__title">← 07 设置项与生效时机</span>
+      </a>
+      <a class="pager__next" href="../internals/index.html">
+        <span class="pager__hint">下一篇</span>
+        <span class="pager__title">技术实现说明 →</span>
+      </a>
+    </nav>
+
+    <p class="pagefoot">最后更新 2026-10-19 · 适用版本 v1.0</p>
+  </main>
+</div>
+
+</body>
+</html>

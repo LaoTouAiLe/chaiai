@@ -1,0 +1,25 @@
+# 密钥扫描规则（gitleaks）。
+#
+# 为什么需要文件而不是纯默认规则：本仓库的测试与文档里有大量**形状像密钥的占位符**
+# （`sk-EXAMPLE-not-a-real-key` 一类），它们是"用来验证脱敏行为"的夹具。默认规则会把它们
+# 当成真实泄露，于是 CI 每次都红，久而久之大家就会忽略这条检查——那比没有检查更糟。
+#
+# 因此这里只放宽到"测试、文档与示例文件"这三类路径；`src/` 与 `frontend/src/` 仍按默认规则扫描，
+# 真实凭据写进代码依然会被拦住。
+
+title = "chaiai gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "测试夹具 / 文档示例 / 样例配置里的假密钥"
+paths = [
+  '''local-agent-web/tests/.*''',
+  '''local-agent-web/frontend/src/.*\.test\.tsx?''',
+  '''local-agent-web/frontend/e2e/.*''',
+  '''local-agent-web/docs/.*''',
+  '''docs/.*''',
+  '''.*\.example''',
+  '''.*\.md''',
+]

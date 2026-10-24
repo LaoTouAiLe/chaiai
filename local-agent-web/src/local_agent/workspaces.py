@@ -50,7 +50,10 @@ def validate_workspace(raw_path: str) -> Path:
     """
     text = raw_path.strip().strip('"').strip("'")
     if not text:
-        raise SessionStoreError("请填写工作区绝对路径，例如 E:/projects/demo")
+        # 示例按**平台**给（2026-10-16）：原来写死的是开发机的盘符路径，
+        # 换台机器（尤其 macOS/Linux）照抄会得到一条根本不存在的路径。
+        example = "C:/projects/demo" if os.name == "nt" else "/home/you/projects/demo"
+        raise SessionStoreError(f"请填写工作区绝对路径，例如 {example}")
     if not Path(text).is_absolute():
         raise SessionStoreError(f"工作区必须是绝对路径：{text}")
     return verify_workspace(Path(text))

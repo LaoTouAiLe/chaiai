@@ -23,9 +23,13 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Sequence
+import re
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
+
+from langchain_core.tools import BaseTool
+from langchain_core.utils.function_calling import convert_to_openai_tool
 
 #: CJK 及全角标点等按 1 token 估算的码点区间。
 _WIDE_RANGES: tuple[tuple[int, int], ...] = (
@@ -38,6 +42,12 @@ _WIDE_RANGES: tuple[tuple[int, int], ...] = (
     (0xF900, 0xFAFF),  # CJK 兼容表意
     (0xFF00, 0xFF60),  # 全角字符
     (0xFFE0, 0xFFE6),
+)
+
+# 保持同一组码点范围；由正则引擎扫描，避免每次预算估算都逐字符执行 Python 范围判断。
+# finditer 不建立与正文长度成比例的匹配列表。
+_WIDE_PATTERN = re.compile(
+    "[" + "".join(rf"\U{start:08x}-\U{end:08x}" for start, end in _WIDE_RANGES) + "]"
 )
 
 #: 每条消息的固定包装开销（role、分隔符等）的保守近似。
@@ -67,7 +77,7 @@ def estimate_tokens(text: str) -> int:
     """
     if not text:
         return 0
-    wide = sum(1 for char in text if is_wide_char(char))
+    wide = sum(1 for _ in _WIDE_PATTERN.finditer(text))
     narrow = len(text) - wide
     return wide + math.ceil(narrow / 4)
 
@@ -197,7 +207,12 @@ def _tool_calls_tokens(message: object) -> int:
 
 
 def _tool_schema_text(tool: object) -> str:
-    """工具定义的文本形式：名称 + 描述 + 参数 JSON Schema。"""
+    """按实际绑定结构计数，避免工具说明和参数模型的顶层说明重复累计。"""
+    if isinstance(tool, BaseTool):
+        return json.dumps(convert_to_openai_tool(tool), ensure_ascii=False, default=str)
+    if isinstance(tool, Mapping):
+        return json.dumps(convert_to_openai_tool(dict(tool)), ensure_ascii=False, default=str)
+    # 兼容既有鸭子类型测试工具；真实工具转换失败须暴露，不能退回名称或零而漏算参数。
     parts = [str(getattr(tool, "name", "")), str(getattr(tool, "description", ""))]
     schema = getattr(tool, "args_schema", None)
     if schema is not None:

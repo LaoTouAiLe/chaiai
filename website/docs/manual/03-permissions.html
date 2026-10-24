@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>权限三档与目录授权 · 操作手册 · chaiai</title>
+<meta name="description" content="chaiai 权限三档：只读 / 工作区可写 / 常规免审，外部路径读取与逐目录写入授权。" />
+<meta name="color-scheme" content="light" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="../../site.html" aria-label="chaiai 官网">
+      <svg class="brand__mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <defs>
+          <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#F8B65C"/><stop offset="1" stop-color="#E77737"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="18" fill="url(#chaiaiWarm)"/>
+        <path d="m16 27-1-13c-.4-3 1.2-4 3.3-2.2l8.7 7.4a16 16 0 0 1 10 0l8.7-7.4c2.1-1.8 3.7-.8 3.3 2.2l-1 13c3 3.2 4 7.2 4 11 0 8.4-8.2 14-20 14-2.4 0-4.7-.2-7-.7L15 55l2.3-10.2C13.9 42.4 12 39.4 12 36c0-3.5 1.4-6.7 4-9Z" fill="#FFF7E9"/>
+        <path d="m19.3 16.8.8 8.4 5.1-3.5Zm25.4 0-.8 8.4-5.1-3.5Z" fill="#BF6A37"/>
+        <path d="M24 32.5v2M40 32.5v2" fill="none" stroke="#633E2B" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M29.2 38.1c-.7-.8-.2-2.1.9-2.1h3.8c1.1 0 1.6 1.3.9 2.1L33 40a1.4 1.4 0 0 1-2 0Z" fill="#633E2B"/>
+        <path d="M26.5 42.2c1.5 1.7 3.3 1.7 5.5-.3 2.2 2 4 2 5.5.3" fill="none" stroke="#633E2B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>chaiai</span>
+      <span class="brand__divider" aria-hidden="true"></span>
+      <span class="brand__label">文档</span>
+    </a>
+    <nav class="topnav" aria-label="站点导航">
+      <a href="../index.html">文档首页</a>
+      <a href="index.html" aria-current="page">操作手册</a>
+      <a href="../internals/index.html">技术实现</a>
+      <a class="topnav__out" href="../../site.html">返回官网</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout layout--plain">
+  <nav class="sidebar" aria-label="文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="index.html">手册首页</a>
+      <a href="01-install.html">01 安装与第一次启动</a>
+      <a href="02-model.html">02 连接一个模型</a>
+      <a href="03-permissions.html" aria-current="page">03 权限三档与目录授权</a>
+      <a href="04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="05-map.html">05 会话地图与分支追问</a>
+      <a href="06-data.html">06 数据中台</a>
+      <a href="07-settings.html">07 设置项与生效时机</a>
+      <a href="08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="../internals/index.html">概览</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+
+  <main class="doc">
+    <p class="kicker">MANUAL · 第 3 章</p>
+    <h1>权限三档与目录授权</h1>
+    <p class="lead">档位回答的是「能写到哪」，不是「能不能读」。读外部文件不需要授权，写才需要。</p>
+
+    <div class="prose">
+      <h2>三档分别是什么</h2>
+      <table class="table--perm table--fixed">
+        <thead>
+          <tr><th>档位</th><th>能写到哪里</th><th>Shell</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>只读</td>
+            <td>哪里都不写，连工作区也拒绝新建、修改与删除。</td>
+            <td>命令可以跑，但 Windows 下使用无可写 SID 的受限令牌，写操作会被拒绝。</td>
+          </tr>
+          <tr>
+            <td>工作区可写<br />（出厂默认）</td>
+            <td>工作区内正常读写；外部路径默认只读，下面授权的可写目录可读写。</td>
+            <td>常规命令免批准；破坏性命令与越界请求仍要你点过。</td>
+          </tr>
+          <tr>
+            <td>常规免审</td>
+            <td>文件工具可读取外部绝对路径；向外写仍需逐目录授权。Shell 写范围仍限制在工作区、专属临时目录与已授权目录。</td>
+            <td>常规命令免批准。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <figure>
+        <img src="../assets/img/ui-permissions-20261019.png" alt="设置里的权限分区：三档单选与说明" width="732" height="690" loading="lazy" />
+        <figcaption>「设置 → 权限」：三档单选，下方是出厂默认说明与写侧沙箱解释；外部可写目录在同一页。</figcaption>
+      </figure>
+
+      <p>
+        页面会写明「出厂默认（config.yaml）：工作区可写；在设置库里保存过选择之后，以你的选择为准」。
+        改动从下一轮请求开始生效，正在执行或等待审批的任务保留提交时的档位。
+      </p>
+
+      <h2>读外部文件不需要授权</h2>
+      <ul>
+        <li>本机外部路径可以直接读取、列目录和搜索，不需要先加授权；敏感文件仍受限。</li>
+        <li>必须写<strong>绝对路径</strong>：相对路径、<code>~</code> 与盘符相对路径一律拒绝。</li>
+        <li>目录授权只用于「允许写入」，不控制读取；撤销写入授权后仍然可以读。</li>
+      </ul>
+
+      <h2>允许往工作区外写</h2>
+      <ol>
+        <li>在「外部可写目录」输入框里填一个绝对路径，例如 <code>C:\data\shared</code>。</li>
+        <li>点「添加可写目录」。授权覆盖该目录及其子目录，保存后持续生效。</li>
+        <li>要收回时，在列表里点「撤销写入」。</li>
+      </ol>
+
+      <h2>这些目标授权也不放行</h2>
+      <p>
+        根目录、用户主目录、系统目录与 Git 元数据不能被授权写入；受保护目标与敏感文件也不会因为
+        批准某次调用而放开。破坏性 Shell 命令名单由代码层保证<strong>只能追加、不能取消</strong>。
+      </p>
+
+      <h2>Windows 与非 Windows 的差别</h2>
+      <ul>
+        <li>Windows：各档位都约束命令写入。可写档位的写范围是「工作区 + 专属临时目录 + 显式读写授权目录」，并保护物化时已存在的凭据子树。</li>
+        <li>Linux / macOS：照常运行，但没有 OS 级写边界；界面与工具结果会如实说明这一点，不要把它当成等价的沙箱。</li>
+      </ul>
+
+      <div class="note">
+        <strong>注意：</strong>已识别的破坏性命令在任何档位下都要人工批准，但命令模式无法完整识别任意脚本内部的删除或覆盖。
+        「工作区可写」意味着脚本可以在沙箱允许范围内修改文件——这是授权，不是承诺。
+      </div>
+    </div>
+
+    <nav class="pager" aria-label="翻页">
+      <a href="02-model.html">
+        <span class="pager__hint">上一篇</span>
+        <span class="pager__title">← 02 连接一个模型</span>
+      </a>
+      <a class="pager__next" href="04-rounds.html">
+        <span class="pager__hint">下一篇</span>
+        <span class="pager__title">04 聊天、Agent 与一轮任务 →</span>
+      </a>
+    </nav>
+
+    <p class="pagefoot">最后更新 2026-10-19 · 适用版本 v1.0</p>
+  </main>
+</div>
+
+</body>
+</html>

@@ -1,0 +1,193 @@
+/* 右栏「变更预览」：只放一块 diff，不再套卡片。 */
+/* 覆盖式抽屉（2026-10-22）：不参与布局，打开它不会把对话区挤窄。
+   以前是 flex 兄弟 + 560px，窗口不够宽时整页被"撑开"，用户要滑着找关闭按钮。 */
+.panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 46vw);
+  min-height: 0;
+  border-left: 1px solid var(--law-border-l1);
+  background: var(--law-bg-base);
+  box-shadow: -12px 0 40px rgb(0 0 0 / 12%);
+  animation: panel-in 0.18s ease-out;
+}
+
+@keyframes panel-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0.6;
+  }
+
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* 遮罩：点它等于关闭；视觉上明确"这是浮层，不是新页面"。 */
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 39;
+  background: rgb(15 23 42 / 16%);
+  animation: backdrop-in 0.15s ease-out;
+}
+
+@keyframes backdrop-in {
+  from { opacity: 0; }
+
+  to { opacity: 1; }
+}
+
+.header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--law-space-md);
+  padding: var(--law-space-sm) var(--law-space-lg);
+  border-bottom: 1px solid var(--law-border-l1);
+}
+
+.label {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  min-width: 0;
+  font-size: var(--law-text-xs);
+  letter-spacing: 0.02em;
+  color: var(--law-text-secondary);
+}
+
+/* 文件名贴在标题后面：用户第一眼要知道"这是哪个文件"，而不是只看"变更预览"。 */
+.path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-xxs);
+  color: var(--law-text-tertiary);
+}
+
+/* 口径标注：只解释数字含义，不抢标题。 */
+.scope {
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xxs);
+}
+
+/* 文件上/下导航：贴着关闭按钮左侧。 */
+.nav {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.navButton {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--law-radius-sm);
+  background: transparent;
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xs);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.navButton:hover:not(:disabled) {
+  background: var(--law-surface-sunken);
+  color: var(--law-text-primary);
+}
+
+.navButton:disabled {
+  color: var(--law-border-l2);
+  cursor: default;
+}
+
+.navCount {
+  min-width: 32px;
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-xxs);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.close {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: var(--law-radius-sm);
+  background: transparent;
+  color: var(--law-text-tertiary);
+  font-size: var(--law-text-md);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.close:hover {
+  background: var(--law-surface-sunken);
+  color: var(--law-text-primary);
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--law-space-sm) 0 var(--law-space-xl) var(--law-space-lg);
+}
+
+.empty {
+  margin: 0;
+  padding: var(--law-space-lg) var(--law-space-lg) var(--law-space-lg) 0;
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-sm);
+  color: var(--law-text-tertiary);
+}
+
+.note {
+  margin: var(--law-space-sm) 0;
+  padding-right: var(--law-space-lg);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  color: var(--law-text-tertiary);
+}
+
+/* 账本之外的写入：单独一块，视觉上弱一档，但明确"这些没有被记录"。 */
+.unrecorded {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--law-space-sm) var(--law-space-lg);
+  border-top: 1px solid var(--law-border-l1);
+  background: var(--law-surface-sunken);
+  font-size: var(--law-text-xxs);
+  line-height: var(--law-leading-xxs);
+  color: var(--law-text-tertiary);
+}
+
+.unrecorded p {
+  margin: 0;
+}
+
+.unrecorded ul {
+  margin: var(--law-space-xxs) 0 0;
+  padding-left: var(--law-space-lg);
+}
+
+.unrecorded code {
+  font-family: var(--law-font-mono);
+}
+
+@media (max-width: 1100px) {
+  /* 窄屏只收窄宽度：定位已经是全局 fixed，不必再写一遍。 */
+  .panel {
+    width: min(560px, 94vw);
+  }
+}

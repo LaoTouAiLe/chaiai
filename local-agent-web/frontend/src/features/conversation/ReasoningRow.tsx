@@ -31,9 +31,10 @@ export function ReasoningRow({ text, running, truncated = false }: {
   return (
     <div className={styles.root} data-state={running ? 'running' : 'complete'}>
       <button type="button" className={styles.row} aria-expanded={expanded} aria-controls={bodyId}
-        aria-label={running ? 'Think，正在思考' : 'Think'} onClick={() => setOverride(!expanded)}>
+        aria-label={running ? '思考中' : '思考'} onClick={() => setOverride(!expanded)}>
         <span className={styles.icon} aria-hidden="true">✧</span>
-        <span className={styles.title}>Think</span>
+        {/* 中文界面里只剩这一处英文（2026-10-22）：`Think` 是 Codex 的终端文案，Web 端没必要沿用。 */}
+        <span className={styles.title}>{running ? '思考中' : '思考'}</span>
         <span className={styles.chevron} data-open={expanded}><ChevronRight /></span>
         {!expanded ? <span ref={summaryRef} className={styles.preview} data-running={running} aria-hidden="true">{summary}</span> : null}
       </button>

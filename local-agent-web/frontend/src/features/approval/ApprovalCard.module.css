@@ -1,20 +1,28 @@
+/**
+ * 审批卡（2026-10-22 V3，§5.8）。
+ *
+ * 以前是整块粉红底 + 红描边的"警告块"：颜色压强盖过内容，读起来像报错。
+ * 现在是一张"等待决策的卡片"：白底浮起（阴影），左侧 3px 语义色条负责表达风险等级，
+ * 内容和按钮才是视觉重心。
+ */
 .card {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-md);
-  padding: var(--law-space-lg) var(--law-space-xl);
-  border: 1px solid transparent;
-  border-radius: var(--law-radius-2xl);
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-4) var(--sp-3) var(--sp-5);
+  border: 0;
+  border-left: 3px solid transparent;
+  border-radius: var(--r-overlay);
+  background: var(--c-raised);
+  box-shadow: var(--sh-overlay);
 }
 
 .normal {
-  background: var(--law-state-warn-subtle);
-  border-color: var(--law-state-warn-secondary);
+  border-left-color: var(--c-warn);
 }
 
 .high {
-  background: var(--law-state-error-subtle);
-  border-color: var(--law-state-error-secondary);
+  border-left-color: var(--c-danger);
 }
 
 /* `min-width: 0` 只有在子项也可收缩时才有意义：下面四项全部 `0 0 auto` 时，
@@ -43,33 +51,34 @@
 
 .state {
   flex: 0 0 auto;
-  font-size: var(--law-text-md);
-  line-height: var(--law-leading-md);
-  font-weight: var(--law-weight-medium);
-  color: var(--law-text-primary);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  font-weight: 500;
+  color: var(--c-text-1);
 }
 
+/* 动作名与风险等级改用徽章形态（无描边、浅底），与 Badge 原语同口径 */
 .action {
   flex: 0 0 auto;
-  padding: var(--law-space-xxs) var(--law-space-sm);
-  border-radius: var(--law-radius-xs);
-  background: var(--law-bg-layer-1);
-  border: 1px solid var(--law-border-l2);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-control);
+  background: var(--c-sunken);
+  border: 0;
   font-family: var(--law-font-mono);
-  font-size: var(--law-text-xxs);
-  line-height: var(--law-leading-xxs);
-  color: var(--law-text-primary);
+  font-size: var(--fs-meta);
+  line-height: 18px;
+  color: var(--c-text-1);
 }
 
 .risk {
   flex: 0 0 auto;
-  padding: var(--law-space-xxs) var(--law-space-sm);
-  border-radius: var(--law-radius-xs);
-  background: var(--law-bg-layer-1);
-  color: var(--law-state-error);
-  font-size: var(--law-text-xxs);
-  line-height: var(--law-leading-xxs);
-  font-weight: var(--law-weight-medium);
+  padding: 1px var(--sp-2);
+  border-radius: var(--r-control);
+  background: var(--c-danger-soft);
+  color: var(--c-danger);
+  font-size: var(--fs-meta);
+  line-height: 18px;
+  font-weight: 500;
 }
 
 /* 32 位十六进制审批号实测 204px 宽；不可收缩时会在窄窗把整页撑开。 */
@@ -87,30 +96,30 @@
 }
 
 .summary {
-  color: var(--law-text-primary);
-  font-size: var(--law-text-md);
-  line-height: var(--law-leading-md);
+  color: var(--c-text-1);
+  font-size: var(--fs-title);
+  line-height: var(--lh-title);
   overflow-wrap: anywhere;
 }
 
 .facts {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-sm);
+  gap: var(--sp-2);
   margin: 0;
 }
 
 .fact {
   display: flex;
-  gap: var(--law-space-lg);
+  gap: var(--sp-3);
   align-items: flex-start;
 }
 
 .fact dt {
-  flex: 0 0 36px;
-  color: var(--law-text-caption);
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-sm);
+  flex: 0 0 40px;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-body);
 }
 
 .fact dd {
@@ -118,9 +127,9 @@
   min-width: 0;
   /* 目标路径与参数是不可断行的长串：允许在任意位置折行，而不是溢出卡片。 */
   overflow-wrap: anywhere;
-  color: var(--law-text-secondary);
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
+  color: var(--c-text-1);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
 }
 
 .mono {
@@ -149,39 +158,42 @@
 
 .hint {
   flex: 1 1 auto;
-  color: var(--law-text-secondary);
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-xs);
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
 }
 
 .reject,
 .allow {
-  height: 32px;
-  padding: 0 var(--law-space-2xl);
-  border-radius: var(--law-radius-md);
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
-  font-weight: var(--law-weight-medium);
-  transition: background var(--law-duration-base) var(--law-ease);
+  height: 34px;
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-control);
+  font-family: inherit;
+  font-size: var(--fs-body);
+  font-weight: 500;
+  transition: background var(--dur-hover-out) var(--ease-out);
 }
 
 .reject {
-  border: 1px solid var(--law-border-l3);
-  background: var(--law-bg-layer-1);
-  color: var(--law-text-primary);
+  border: 1px solid var(--c-line);
+  background: var(--c-raised);
+  color: var(--c-text-1);
 }
 
 .reject:hover {
-  background: var(--law-button-ghost-hover);
+  background: var(--c-hover);
+  transition: none;
 }
 
 .allow {
-  background: var(--law-button-primary-fill);
-  color: var(--law-text-on-brand);
+  border: 0;
+  background: var(--c-accent);
+  color: #ffffff;
 }
 
 .allow:hover {
-  background: var(--law-button-primary-hover);
+  background: color-mix(in srgb, var(--c-accent) 88%, #000);
+  transition: none;
 }
 
 .outcome {
@@ -193,7 +205,8 @@
 
 /* 终态收起态：只占一行，结果仍在，输入区上方不再被长期占满。 */
 .collapsed {
-  padding: var(--law-space-md) var(--law-space-xl);
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-4);
 }
 
 .collapsedTarget {
@@ -211,15 +224,15 @@
 .toggle,
 .dismiss {
   flex: 0 0 auto;
-  height: 24px;
-  border: 1px solid var(--law-border-l3);
-  border-radius: var(--law-radius-md);
-  background: var(--law-bg-layer-1);
-  color: var(--law-text-secondary);
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-xs);
+  height: 26px;
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-control);
+  background: var(--c-raised);
+  color: var(--c-text-2);
+  font-family: inherit;
+  font-size: var(--fs-meta);
+  line-height: 1;
   cursor: pointer;
-  transition: background var(--law-duration-base) var(--law-ease);
 }
 
 .toggle {

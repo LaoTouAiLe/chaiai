@@ -72,8 +72,13 @@ def project_file_tool_output(
         truncated=bool(payload.get("truncated")) or squeezed,
         has_more=more, next_start_line=next_line if more else None,
         note=("正文带原始 1 基行号；visible_ranges 为可见范围，partial_lines 为不完整行。"
-              "仅在证据不足时按缺失范围或 next_start_line 续读，不必读完无关内容。"),
+              "仅在证据不足时按缺失范围或 next_start_line 续读，不必读完无关内容。"
+              "无遗漏范围时可传 next_start_char 和 expected_sha256=sha256 按字符续读；"
+              "start_char 为片段在解码后全文件中的 0 基字符位置。"),
     )
+    if squeezed and "next_start_char" in result:
+        result["next_start_char"] = None
+        result["note"] += "本页正文已被压缩，字符续页位置已清空；可从 start_char 调小 max_chars 重读。"
     return result
 
 

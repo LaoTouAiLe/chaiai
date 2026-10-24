@@ -1,4 +1,4 @@
-/* 「能力与档位」面板样式。只用 `--law-*` 设计令牌，深浅色随主题自动切换。 */
+/* 「能力」面板样式。只用 `--law-*` 设计令牌，深浅色随主题自动切换。 */
 
 .overlay {
   position: fixed;
@@ -20,6 +20,33 @@
   border: 1px solid var(--law-border-l2);
   border-radius: var(--law-radius-lg);
   box-shadow: var(--law-shadow-lv3);
+}
+
+/* 嵌进设置分区时不再有遮罩/外壳：版式与其它设置分区一致（标题 + 说明 + 卡片列表）。 */
+.embedded {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-lg);
+  padding-bottom: var(--law-space-3xl);
+}
+
+.embeddedTitle {
+  margin: 0;
+  font-size: var(--law-text-md);
+  line-height: var(--law-leading-md);
+  font-weight: var(--law-weight-semibold);
+  color: var(--law-text-primary);
+}
+
+.embeddedNote {
+  margin: var(--law-space-xxs) 0 0;
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-md);
+  color: var(--law-text-secondary);
+}
+
+.embedded .list {
+  margin-top: 0;
 }
 
 .head {
@@ -66,43 +93,89 @@
   color: var(--law-state-error);
 }
 
-.profile {
-  margin: var(--law-space-lg) 0 0;
+/* 每一项的开关（§16.1）。关掉的那一项也要能一眼看出"现在是什么状态"，所以文字跟着状态走。 */
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  margin: var(--law-space-sm) 0 0;
   font-size: var(--law-text-sm);
   color: var(--law-text-secondary);
-}
-
-.profileValue {
-  font-family: var(--law-font-mono);
-  color: var(--law-text-primary);
-}
-
-/* 档位选择器（§16.6 档位切换）：与 `.close` 同一套外观，等宽字体——档位名是标识符，不是文案。 */
-.profileSelect {
-  padding: var(--law-space-xxs) var(--law-space-sm);
-  font-family: var(--law-font-mono);
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
-  color: var(--law-text-primary);
-  background: var(--law-button-ghost-fill);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-sm);
   cursor: pointer;
 }
 
-.profileSelect:hover {
-  background: var(--law-button-ghost-hover);
+.toggle input {
+  cursor: pointer;
 }
 
-.profileSelect:disabled {
+.toggle:has(input:disabled) {
   opacity: 0.6;
   cursor: default;
 }
 
-/* 设置库不可用时的一句补充说明（控件已退回纯文本，别让用户以为面板坏了）。 */
-.profileNote {
-  margin-left: var(--law-space-sm);
-  font-size: var(--law-text-xs);
+/* 开关外观与「设置 → 偏好」里的布尔项一致（2026-10-19）。 */
+.switch {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+/* input 压在轨道之上：否则轨道会截走指针事件（点击仍能靠 label 生效，但命中目标不对，
+   自动化点不到、焦点环也会落在轨道后面）。 */
+.switch input {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.switchTrack {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--law-surface-selector);
+  transition: background 0.15s ease;
+}
+
+.switchTrack::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--law-bg-layer-1);
+  box-shadow: var(--law-shadow-lv1);
+  transition: transform 0.15s ease;
+}
+
+.switch input:checked + .switchTrack {
+  background: var(--law-button-primary-fill);
+}
+
+.switch input:checked + .switchTrack::after {
+  transform: translateX(16px);
+}
+
+.switch input:focus-visible + .switchTrack {
+  outline: 2px solid var(--law-button-primary-fill);
+  outline-offset: 2px;
+}
+
+.switch input:disabled + .switchTrack {
+  opacity: 0.45;
+}
+
+/* 不可关闭的基础能力：说明为什么没有开关，而不是给一个点不动的控件。 */
+.locked {
+  margin: var(--law-space-sm) 0 0;
+  font-size: var(--law-text-sm);
   color: var(--law-text-caption);
 }
 
