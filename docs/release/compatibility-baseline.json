@@ -46,7 +46,7 @@
     "task_cancelled"
   ],
   "manifest_version": 1,
-  "openapi_sha256": "6bee6a28959123309bfae909308b59886116415ef5190ea667d547809108c6cb",
+  "openapi_sha256": "fa1506e478829341345a12b5f4a7bf96164fdb4d08fbc64db009eae15b614134",
   "package_version": "0.1.0",
   "release_status": "candidate",
   "release_target": "1.0.0"
