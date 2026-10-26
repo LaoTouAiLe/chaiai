@@ -104,13 +104,17 @@ def test_entry_point_writes_everything_into_the_data_dir_when_frozen(
     """不给 ``--config`` 时，冻结形态的库与解析基准都在数据目录——不随当前工作目录漂移。"""
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    # conftest 为每个用例设了 ``CHAIAI_HOME``（隔离真实数据）。本用例验的正是"没有它时
+    # 冻结形态落在 LOCALAPPDATA"，所以先摘掉。
+    monkeypatch.delenv("CHAIAI_HOME", raising=False)
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: None)
 
     assert api_main.main(["--no-open-browser"]) == 0
 
     data_dir = tmp_path / "chaiai"
-    assert (data_dir / "data" / "checkpoints.sqlite").is_file()
-    assert (data_dir / "data" / "model_settings.sqlite").is_file()
+    # 数据根**就是**这个目录（2026-10-26）：不再多一层 ``data/``，与 CODEX_HOME 同一形态。
+    assert (data_dir / "checkpoints.sqlite").is_file()
+    assert (data_dir / "model_settings.sqlite").is_file()
 
 def test_frozen_mode_finds_the_bundled_skills(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """技能目录与 ``chaiai.exe`` 同级（2026-10-20）。

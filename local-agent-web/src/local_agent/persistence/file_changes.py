@@ -405,9 +405,9 @@ class FileChangeStore:
         self._root = Path(root)
 
     @classmethod
-    def under(cls, base_dir: Path) -> FileChangeStore:
-        """与附件存储同一套定位规则：``data/file-changes``。"""
-        return cls(Path(base_dir) / "data" / "file-changes")
+    def under(cls, data_root: Path) -> FileChangeStore:
+        """与附件存储同一套定位规则：``<data_root>/file-changes``（2026-10-26）。"""
+        return cls(Path(data_root) / "file-changes")
 
     def ledger(
         self, connection: sqlite3.Connection, *, lock: Any, session_id: str, workspace_root: Path

@@ -29,7 +29,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from local_agent.api.container import resolve_memory_paths
+from local_agent.api.container import resolve_data_paths
 from local_agent.config import DEFAULT_CONFIG_PATH, AppConfig, ConfigError, load_config
 from local_agent.exceptions import MemoryStoreError
 from local_agent.memory import long_term, medium_term
@@ -150,9 +150,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as exc:
         print(f"配置不可用：{exc}")
         return EXIT_SETUP_PROBLEM
-    # 记忆库路径按配置文件所在目录展开（§8），与 open_runtime / web / cli 同一基准：
+    # 数据路径钉到数据根（2026-10-26），与 open_runtime / web / cli 同一基准：
     # 否则从别的目录执行这里，会把库建到别处并让"记忆是空的"看起来像事实。
-    config = resolve_memory_paths(config, config_path.resolve().parent)
+    config = resolve_data_paths(config)
 
     try:
         statuses = inspect(config) if args.check else initialize(config)

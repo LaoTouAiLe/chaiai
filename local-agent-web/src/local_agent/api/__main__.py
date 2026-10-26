@@ -104,19 +104,32 @@ def main(argv: Sequence[str] | None = None) -> int:
             "v0.4 没有鉴权，只为本机使用设计。",
             file=sys.stderr,
         )
-    frontend = (
-        f"前端产物：{runtime.static_dir}"
-        if runtime.static_dir is not None
-        else "未找到前端产物（只提供 API）：先在 frontend/ 执行 npm run build"
-    )
+    if runtime.static_dir is not None:
+        frontend = f"前端产物：{runtime.static_dir}"
+    else:
+        # 说清**找的是哪个位置**：产物按配置文件所在目录解析（`web.static_dir` 的相对基准），
+        # 所以 `--config` 指到外部目录时就找不到——只写"先在 frontend/ 执行 npm run build"
+        # 会让刚 build 过的人以为命令没生效（2026-10-26 真实进程冒烟撞到）。
+        expected = (config_path.resolve().parent / app_config.web.static_dir).resolve()
+        frontend = (
+            f"未找到前端产物（只提供 API）：{expected} 下没有 index.html。\n"
+            "在该目录执行 `cd frontend && npm run build`，"
+            "或用 web.static_dir 指定一个绝对路径。"
+        )
     setup_hint = (
         ""
         if runtime.service.model_configured()
         else "\n还没有可用的模型连接：打开设置页添加一条（不需要重启服务）。"
     )
-    # 打包形态把"用户数据在哪"直接打出来：朋友用不到命令行，但排障和备份都得知道这个目录。
-    data_dir = app_paths.data_dir()
-    data_hint = "" if data_dir is None else f"\n数据目录：{data_dir}"
+    # 数据根**总是**打出来（2026-10-26）：它是备份/迁移/排障的唯一锚点，两种形态都要知道。
+    data_root = app_paths.data_root_of(app_config)
+    data_hint = f"\n数据目录：{data_root}"
+    # 换根之后旧数据不会自动搬（2026-10-26）。不提示的话，用户看到的只是"会话全没了"。
+    legacy = config_path.resolve().parent / "data"
+    if legacy.is_dir() and legacy.resolve() != (data_root / "data").resolve() and not data_root.is_dir():
+        data_hint += (
+            f"\n检测到旧数据目录：{legacy}（未自动迁移；需要的话手工搬内容到 {data_root}）"
+        )
     print(
         f"local-agent-web v0.4 已启动：http://{web.host}:{web.port}（单进程、单 worker）"
         f"\n{frontend}{data_hint}{setup_hint}",

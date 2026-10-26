@@ -283,7 +283,9 @@ class ShortTermMemoryConfig(_StrictModel):
 
     enabled: bool = True
     backend: Literal["sqlite_checkpoint"] = "sqlite_checkpoint"
-    path: str = "data/checkpoints.sqlite"
+    #: 相对 ``data_root``（2026-10-26）；绝对路径照用。默认值不再是 ``data/...``：
+    #: 数据根本身已经是 ``%LOCALAPPDATA%\chaiai``，再拼一层 ``data`` 只会让路径变长。
+    path: str = "checkpoints.sqlite"
     preserve_checkpoint_messages: bool = True
     prompt_window_messages: int = Field(default=100, gt=0)
 
@@ -293,7 +295,8 @@ class MediumTermMemoryConfig(_StrictModel):
 
     enabled: bool = False
     backend: Literal["chroma"] = "chroma"
-    path: str = "data/chroma"
+    #: 相对 ``data_root``（2026-10-26）。
+    path: str = "chroma"
     collection: str = "agent_memory"
     top_k: int = Field(default=8, gt=0)
     #: 召回的最低语义相似度（越大越相关，**真实余弦**）。
@@ -314,7 +317,8 @@ class LongTermMemoryConfig(_StrictModel):
 
     enabled: bool = True
     backend: Literal["sqlite"] = "sqlite"
-    path: str = "data/memories.sqlite"
+    #: 相对 ``data_root``（2026-10-26）。
+    path: str = "memories.sqlite"
     confidence_threshold: float = Field(default=0.75, ge=0.0, le=1.0)
     importance_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
     aging_enabled: bool = True
@@ -636,7 +640,8 @@ class ModelSettingsConfig(_StrictModel):
       **没有任何一档会把密钥写进文件**——这一点由设置库的表结构保证（没有能放密钥的列）。
     """
 
-    path: str = Field(default="data/model_settings.sqlite", min_length=1)
+    #: 相对 ``data_root``（2026-10-26）；绝对路径照用。
+    path: str = Field(default="model_settings.sqlite", min_length=1)
     credential_store: Literal["auto", "memory"] = "auto"
 
 
@@ -932,6 +937,36 @@ class WorkflowsConfig(_StrictModel):
 
 class AppConfig(_StrictModel):
     """全部配置的根对象。"""
+
+    #: 所有应用数据的根目录（2026-10-26）。**空串 = 平台标准目录**，见
+    #: :func:`local_agent.app_paths.data_root`（Windows 是 ``%LOCALAPPDATA%\chaiai``）。
+    #:
+    #: 为什么是绝对路径而不是"相对配置文件目录"：**数据不能跟着代码走**。源码目录会被
+    #: ``git clean``、重新 clone、换分支，数据留在代码树里就等于"换一份检出换一套数据"。
+    #: 只接受绝对路径（``~`` 会展开）；相对路径又一次随启动目录漂移，正是这个字段要消灭的东西。
+    #:
+    #: 换根之后**旧数据不会自动搬过去**：程序只在启动时把新根与"检测到的旧数据位置"都打出来，
+    #: 搬不搬由用户决定——自动搬一半数据比不搬更坏。
+    data_root: str = ""
+
+    @field_validator("data_root")
+    @classmethod
+    def _data_root_must_be_absolute(cls, value: str) -> str:
+        """只接受绝对路径（``~`` 展开后再判断）；空串表示"用平台标准目录"。
+
+        在这里拒绝而不是等到装配时：一次校验失败应当让服务**启动即报错**，而不是跑起来之后
+        把数据写到某个谁也想不到的地方。
+        """
+        text = str(value or "").strip()
+        if text == "":
+            return ""
+        expanded = Path(text).expanduser()
+        if not expanded.is_absolute():
+            raise ValueError(
+                f"data_root 必须是绝对路径（当前值 {text!r}）：相对路径会随启动目录漂移，"
+                "正是这个字段要消灭的问题"
+            )
+        return str(expanded)
 
     #: ``llm`` 段**可以缺省**（v0.4 起，§15.9）：Web/API 在缺少它时进入"初始设置模式"，
     #: 用户在设置页里加连接即可，不需要伪造一份 YAML 模型段。CLI 与 Streamlit 仍然需要它，

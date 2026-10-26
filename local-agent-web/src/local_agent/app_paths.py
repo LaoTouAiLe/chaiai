@@ -35,7 +35,7 @@ import sys
 from pathlib import Path
 from typing import Final
 
-from local_agent.config import DEFAULT_CONFIG_PATH, DEFAULT_ENV_PATH
+from local_agent.config import DEFAULT_CONFIG_PATH, DEFAULT_ENV_PATH, AppConfig
 
 #: 数据目录名：``%LOCALAPPDATA%/<这个名字>``。与产品名一致，卸载时一眼能认出该删哪个目录。
 APP_DIR_NAME: Final[str] = "chaiai"
@@ -76,6 +76,162 @@ def data_dir() -> Path | None:
     if not local_app_data:
         return None
     return Path(local_app_data) / APP_DIR_NAME
+
+
+#: 覆盖数据根的环境变量（2026-10-26）。与 ``CODEX_HOME`` / ``HERMES_HOME`` 同一位置：
+#: 它在**配置被读出来之前**生效，所以设置库打不开、或者想在两套数据之间切换时仍然有路。
+DATA_ROOT_ENV: Final[str] = "CHAIAI_HOME"
+
+#: 指向自定义数据根的指针文件（2026-10-26）。**固定放在平台默认目录**，不随数据根移动：
+#: 跟随移动的话，改过一次就再也找不到它，下次启动又回到旧位置。
+DATA_ROOT_POINTER: Final[str] = "data-root.txt"
+
+
+def data_root() -> Path:
+    """用户数据的根目录：**两种形态都给同一个绝对路径**（2026-10-26）。
+
+    与 :func:`data_dir` 的分工：那个只在冻结形态返回、源码形态故意返回 ``None``（让调用方
+    回落到相对路径）；数据根不能这样——它必须给一个稳定答案，否则"数据在哪"取决于你怎么
+    启动、从哪个目录启动。这正是把它从"相对配置文件目录"改成绝对路径的理由：
+
+    - 数据与代码解耦：源码目录会被 ``git clean``、重新 clone、换分支，数据不能跟着走；
+    - 可预测：任何工作目录启动都是同一份数据；
+    - 备份/清理有固定锚点，运维脚本不必知道代码放在哪。
+
+    顺序见 :func:`data_root_of`；没有配置上下文时是"环境变量 → 指针文件 → 平台标准目录"。
+    **没有**"相对当前目录"这一档。
+    """
+    override = _env_override()
+    if override is not None:
+        return override
+    pointer = read_data_root_pointer()
+    return pointer if pointer is not None else platform_default_root()
+
+
+def platform_default_root() -> Path:
+    """平台标准数据目录（不含任何覆盖）。
+
+    单独一个函数是因为**指针文件也放在这里**：如果指针文件跟着 ``data_root`` 走，改过一次就
+    再也找不到它，下一次启动又会回到旧位置——那就成了自举死锁。
+    """
+    if sys.platform == "win32":
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            return Path(local_app_data) / APP_DIR_NAME
+    elif sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_DIR_NAME
+    xdg_data_home = os.environ.get("XDG_DATA_HOME", "").strip()
+    base = Path(xdg_data_home) if xdg_data_home else Path.home() / ".local" / "share"
+    return base / APP_DIR_NAME
+
+
+def _env_override() -> Path | None:
+    """``CHAIAI_HOME``：在**读配置之前**就生效，设置库打不开时仍然有路。"""
+    override = os.environ.get(DATA_ROOT_ENV, "").strip()
+    return Path(override).expanduser() if override else None
+
+
+def data_root_pointer() -> Path:
+    """指向自定义数据根的指针文件（固定放在平台标准目录里）。"""
+    return platform_default_root() / DATA_ROOT_POINTER
+
+
+def read_data_root_pointer() -> Path | None:
+    """读指针文件；不存在、为空、内容不是绝对路径都返回 ``None``（回落到默认，不猜）。"""
+    path = data_root_pointer()
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not text:
+        return None
+    candidate = Path(text).expanduser()
+    return candidate if candidate.is_absolute() else None
+
+
+def set_data_root_pointer(target: str | Path) -> Path:
+    """把数据根改到 ``target`` 并落盘，返回规范化后的路径。
+
+    **校验在这里做，不在启动时**：启动才失败意味着"服务起不来，只能手改文件救回来"。
+    所以保存前就要确认这是绝对路径、能创建、能写（写一个探针文件再删掉）。
+
+    目标等于平台默认目录时不写指针文件，而是**删掉它**——否则"恢复默认"会变成写一条与默认
+    相同的记录，日后再改平台默认（换机器、换系统）就跟着错了。
+
+    Raises:
+        ValueError: 不是绝对路径，或该目录不可创建/不可写。
+    """
+    text = str(target).strip()
+    if text == "":
+        raise ValueError("数据目录不能为空；要恢复默认请用「恢复默认位置」")
+    candidate = Path(text).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("数据目录必须是绝对路径：相对路径会随启动目录漂移")
+    if _same_path(candidate, platform_default_root()):
+        reset_data_root_pointer()
+        return platform_default_root()
+    try:
+        candidate.mkdir(parents=True, exist_ok=True)
+        probe = candidate / ".chaiai-write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as exc:
+        raise ValueError(f"这个目录不可写（{type(exc).__name__}），请换一个位置") from exc
+    pointer = data_root_pointer()
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(str(candidate), encoding="utf-8", newline="\n")
+    return candidate
+
+
+def reset_data_root_pointer() -> None:
+    """删掉指针文件 = 回到平台标准目录（幂等）。"""
+    data_root_pointer().unlink(missing_ok=True)
+
+
+def _same_path(left: Path, right: Path) -> bool:
+    """比较两个路径是否指同一处：``resolve()`` 在目标还不存在时会抛错，所以退回字面比较。"""
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+def data_root_source(config: AppConfig) -> str:
+    """数据根**从哪来**：``environment`` / ``settings``（页面改的指针）/ ``config`` / ``default``。
+
+    页面要如实告诉用户"这一项现在由谁决定"：环境变量的优先级最高，那时在页面上改不会生效，
+    必须说清楚，而不是让他改完重启后发现没变。
+    """
+    if _env_override() is not None:
+        return "environment"
+    if read_data_root_pointer() is not None:
+        return "settings"
+    if str(config.data_root or "").strip():
+        return "config"
+    return "default"
+
+
+def data_root_of(config: AppConfig) -> Path:
+    """配置解析出的数据根，按优先级：环境变量 → 指针文件 → ``config.data_root`` → 平台默认。
+
+    为什么**指针优先于 config.yaml**：指针是"用户最近一次在设置页里的选择"，而他可能早就忘了
+    YAML 里还留着一行旧值。页面改完不生效，比"不能改"更糟。
+
+    为什么要有指针这一档：设置库（存偏好的地方）**本身就在数据根下**，把数据根存进设置库等于
+    让一个东西定义它自己的位置——改到新位置后新库是空的，那条偏好丢了，启动又回到旧位置。
+    指针文件放在**平台默认目录**，不随数据根移动，所以读得到。
+
+    放在这里而不是装配层：装配、启动横幅、诊断、服务内部都要回答"数据在哪"，各处自己算一次
+    迟早会分叉（hermes 就因为 HOME 有多条解析路径踩过"写进错误 profile"的坑）。
+    """
+    override = _env_override()
+    if override is not None:
+        return override
+    pointer = read_data_root_pointer()
+    if pointer is not None:
+        return pointer
+    configured = str(config.data_root or "").strip()
+    return Path(configured).expanduser() if configured else platform_default_root()
 
 
 def default_config_path() -> Path:

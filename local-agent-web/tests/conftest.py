@@ -20,12 +20,33 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langchain_core.runnables import RunnableLambda
 from pydantic import Field
 
+from local_agent.api.container import resolve_data_paths
 from local_agent.config import AppConfig, load_config
 from local_agent.graph.routers import ROUTE_CLASSIFIER_MARKER
 from local_agent.memory.summarizer import SUMMARIZE_INSTRUCTION
 from local_agent.reflection.reflector import MEMORY_INTENT_MARKER, PLAN_DRAFT_MARKER
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def isolate_data_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """每个用例一个独立数据根（2026-10-26）。
+
+    数据根默认落在平台标准目录（Windows 是 ``%LOCALAPPDATA%/chaiai``）。不隔离的话，跑测试
+    会直接读写用户**真实**的会话库与设置库——既污染真数据，也让用例之间互相串（一个用例写进去的
+    模型连接，下一个用例能看见）。
+
+    同时把工作目录切到临时目录：有些用例直接 ``load_config`` 后跑图（不走装配层的
+    ``resolve_data_paths``），那些**相对路径**会按进程当前目录打开。之前默认值带 ``data/``
+    前缀，垃圾落在被忽略的 ``data/`` 里看不出来；现在默认值是裸文件名，就会直接躺在仓库根
+    （实测留下了 ``local-agent-web/memories.sqlite``）。
+    """
+    monkeypatch.setenv("CHAIAI_HOME", str(tmp_path / "data-root"))
+    # 数据根的**指针文件**固定落在平台默认目录（不受 CHAIAI_HOME 影响），所以这里也要隔离：
+    # 否则「数据位置」那几条用例会改到本机真实的 `%LOCALAPPDATA%\chaiai\data-root.txt`。
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local-app-data"))
+    monkeypatch.chdir(tmp_path)
 
 
 @pytest.fixture(autouse=True)
@@ -407,7 +428,7 @@ def app_config(monkeypatch: pytest.MonkeyPatch) -> AppConfig:
     # 脚本测试的有界兜底；产品默认None另由自主策略专项覆盖。
     base.agent.max_tool_loops = 20
     monkeypatch.setenv(base.llm.api_key_env, "sk-test-secret")
-    return base.model_copy(
+    configured = base.model_copy(
         update={
             "memory": base.memory.model_copy(
                 update={
@@ -421,3 +442,7 @@ def app_config(monkeypatch: pytest.MonkeyPatch) -> AppConfig:
             "security": base.security.model_copy(update={"safe_delete": False}),
         }
     )
+    # 数据路径钉到临时数据根（2026-10-26）。不解析的话，图内节点会拿**相对路径**按进程当前
+    # 目录打开，测试就会在仓库根留下 `memories.sqlite` 这类文件（默认值不再带 `data/` 前缀，
+    # 所以这些垃圾从"藏在被忽略的 data/ 里"变成"直接躺在仓库根"）。
+    return resolve_data_paths(configured)

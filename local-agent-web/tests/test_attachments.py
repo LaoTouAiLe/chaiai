@@ -41,7 +41,7 @@ def _at(day: int) -> datetime:
 
 
 def test_layout_is_year_month_day_then_session(tmp_path: Path) -> None:
-    """落盘位置：``data/attachments/年/月/日/会话/内容哈希.扩展名``（相对 config.yaml 所在目录）。"""
+    """落盘位置：``<数据根>/attachments/年/月/日/会话/内容哈希.扩展名``（2026-10-26 起基准是数据根）。"""
     store = _store(tmp_path)
 
     saved = store.save(SESSION, PNG, now=_at(16))
@@ -50,7 +50,7 @@ def test_layout_is_year_month_day_then_session(tmp_path: Path) -> None:
     assert saved.attachment_id == f"2026/10/16/{SESSION}/{digest}.png"
     assert saved.media_type == "image/png"
     assert saved.byte_count == len(PNG)
-    assert (tmp_path / "data" / "attachments" / saved.attachment_id).read_bytes() == PNG
+    assert (tmp_path / "attachments" / saved.attachment_id).read_bytes() == PNG
 
 
 @pytest.mark.parametrize(

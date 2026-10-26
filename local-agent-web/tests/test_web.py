@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 from local_agent import web
 from local_agent.api.app import create_app
-from local_agent.api.container import open_runtime
+from local_agent.api.container import open_runtime, resolve_data_paths
 from local_agent.application.errors import ErrorView
 from local_agent.application.models import (
     AssistantMessageView,
@@ -116,9 +116,14 @@ def _new_session(page: Any) -> Any:
 
 
 def _sessions(directory: Path) -> Any:
-    """按页面的工作区重开会话索引，等价于重启服务后再读（只读，不占单实例锁）。"""
+    """按页面的工作区重开会话索引，等价于重启服务后再读（只读，不占单实例锁）。
+
+    路径**从配置解析**而不是自己拼：2026-10-26 起数据落在数据根下（默认平台标准目录），
+    再拼 ``directory/data`` 就会打开另一个空库，把"重启后看不到会话"误报成缺陷。
+    """
+    config = resolve_data_paths(load_config(directory / "config.yaml"))
     database = checkpoint.open_database(
-        directory / "data" / "checkpoints.sqlite", workspace_root=directory.resolve()
+        Path(config.memory.short_term.path), workspace_root=directory.resolve()
     )
     return database.sessions
 

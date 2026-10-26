@@ -3204,9 +3204,9 @@ T64 的两道题、种子、任务指纹、机械校验器与原基线源码保�
 
 **允许保留原文的本机文件**（穷举，此处没列的就是不许）：
 
-- `data/checkpoints.sqlite`——会话、任务、审批、工具结果、事件与 LangGraph Checkpoint 同库；
-- `data/model_settings.sqlite`——设置（档位与偏好）；**连接凭据是加密存储**，不是原文；
-- `data/memories.sqlite` 与 `data/chroma/`——长期记忆及其向量与文本；
+- `<data_root>/checkpoints.sqlite`——会话、任务、审批、工具结果、事件与 LangGraph Checkpoint 同库；
+- `<data_root>/model_settings.sqlite`——设置（档位与偏好）与凭据条目；**凭据引用不含密钥材料**；
+- `<data_root>/memories.sqlite` 与 `<data_root>/chroma/`——长期记忆及其向量与文本；
 - `<工作区>/.local-agent/results/*.txt`——超限检索结果的落盘：**自忽略**（目录内 `.gitignore` 内容为 `*`）
   且是隐藏目录 ⇒ 不进后续检索结果。
 

@@ -33,7 +33,7 @@ from local_agent import config as config_module
 from local_agent.api.container import (
     ApiRuntime,
     open_runtime,
-    resolve_memory_paths,
+    resolve_data_paths,
     resolve_skill_paths,
     resolve_under,
 )
@@ -101,9 +101,9 @@ def load_debug_app(
         runtime=runtime,
         # 侧栏"记忆管理"自己开长期库，因此必须与服务用**同一套解析结果**（§8）：
         # 否则页面会去读另一个库，把"记忆是空的"显示成事实。
-        # 两条路径解析同一口径（2026-10-16）：记忆库与技能发现根都钉到 base_dir。
-        app_config=resolve_skill_paths(resolve_memory_paths(app_config, base_dir), base_dir),
-        # 与 `open_runtime` 同一套相对路径规则（相对配置文件目录，而不是进程当前目录）。
+        # 数据路径钉到数据根、技能发现根钉到 base_dir——与 `open_runtime` 逐字一致（2026-10-26）。
+        app_config=resolve_skill_paths(resolve_data_paths(app_config), base_dir),
+        # 工作区是用户内容，仍按配置文件目录解析（不搬进数据目录）。
         workspace_root=resolve_under(base_dir, app_config.workspace.root),
     )
 

@@ -97,9 +97,13 @@ class AttachmentStore:
         self._root = Path(root)
 
     @classmethod
-    def under(cls, base_dir: Path) -> AttachmentStore:
-        """按 ``base_dir``（= ``config.yaml`` 所在目录）定位：``data/attachments``。"""
-        return cls(Path(base_dir) / "data" / "attachments")
+    def under(cls, data_root: Path) -> AttachmentStore:
+        """按**数据根**定位：``<data_root>/attachments``（2026-10-26）。
+
+        参数从"配置文件所在目录"改成"数据根"：附件是应用自己产生的状态，不能跟着代码走
+        （旧实现在 ``base_dir/data/attachments``，换一份检出就换一套附件）。
+        """
+        return cls(Path(data_root) / "attachments")
 
     @property
     def root(self) -> Path:

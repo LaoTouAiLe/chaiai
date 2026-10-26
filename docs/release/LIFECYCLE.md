@@ -31,15 +31,20 @@
 
 ## 数据分别存在哪里
 
-源码相对路径以配置文件所在目录为基准；分发默认配置基准是 `%LOCALAPPDATA%/chaiai`，
-程序资源在解压目录。配置可改路径，下表默认值不能替代你的实际配置。
+**所有应用数据都在一个根下**（`data_root`，2026-10-26）：默认 Windows 是
+`%LOCALAPPDATA%\chaiai`，macOS 是 `~/Library/Application Support/chaiai`，其它平台是
+`$XDG_DATA_HOME/chaiai` 或 `~/.local/share/chaiai`。源码形态与分发形态**用同一个根**
+（不再相对源码目录：数据不跟着代码走）。可用 `data_root` 或环境变量 `CHAIAI_HOME` 改到
+任意绝对路径，换根后旧数据不会自动搬。程序资源仍在解压目录。配置可改路径，
+下表默认值不能替代你的实际配置。
 
 | 数据 | 默认位置或来源 | 备份与限制 |
 | --- | --- | --- |
-| 会话、Checkpoint、任务、审批、分支 | `memory.short_term.path`：`data/checkpoints.sqlite` | 用 SQLite backup；未结束任务恢复后按页面核对，不自动重跑 |
-| 模型连接、历史配置、选择、应用设置、外部路径授权 | `model_settings.path`：`data/model_settings.sqlite` | 用 SQLite backup；其中凭据引用不包含 Key，恢复库不能恢复 OS Key |
-| 长期记忆 | `memory.long_term.path`：`data/memories.sqlite` | 用 SQLite backup |
-| 中期向量记忆 | `memory.medium_term.path`：`data/chroma` | 停服务后保留完整目录；不由 SQLite 维护脚本处理，不跨模型重建 |
+| 会话、Checkpoint、任务、审批、分支 | `memory.short_term.path`：`<data_root>/checkpoints.sqlite` | 用 SQLite backup；未结束任务恢复后按页面核对，不自动重跑 |
+| 模型连接、历史配置、选择、应用设置、外部路径授权 | `model_settings.path`：`<data_root>/model_settings.sqlite` | 用 SQLite backup；其中凭据引用不包含 Key，恢复库不能恢复其它机器上的条目 |
+| 长期记忆 | `memory.long_term.path`：`<data_root>/memories.sqlite` | 用 SQLite backup |
+| 中期向量记忆 | `memory.medium_term.path`：`<data_root>/chroma` | 停服务后保留完整目录；不由 SQLite 维护脚本处理，不跨模型重建 |
+| 附件、文件变更基线、工具目录缓存、指标 | `<data_root>/attachments`、`file-changes`、`mcp_catalog.sqlite`、`metrics` | 与库同根；整根备份即完整 |
 | YAML、旧环境变量方式的 Key | `config.yaml`、`.env` 或外部环境 | 手动保留私有副本；不要放进公开附件或提交 Git |
 | OS 凭据 | Windows 凭据管理器，服务名 `local-agent-web` | 换机器重新录入；内存模式重启后重新录入 |
 | 本地 Embedding 权重/附属缓存 | 显式 `embedding.cache_dir` | 目录独立；换缓存目录按设置提示重启，不自动搬迁或清理 |
@@ -55,13 +60,15 @@
 示例在源码项目目录执行；日期后缀只是示例，每次换一个不存在的新文件名。数据路径按你的配置替换。
 
 ```powershell
-.venv/Scripts/python.exe scripts/database_maintenance.py check --database data/checkpoints.sqlite
-.venv/Scripts/python.exe scripts/database_maintenance.py backup --database data/checkpoints.sqlite --output backups/chat-before-upgrade.sqlite
-.venv/Scripts/python.exe scripts/database_maintenance.py backup --database data/model_settings.sqlite --output backups/settings-before-upgrade.sqlite
-.venv/Scripts/python.exe scripts/database_maintenance.py backup --database data/memories.sqlite --output backups/memory-before-upgrade.sqlite
+# 默认数据根；改过 data_root 或 CHAIAI_HOME 就换成你的路径
+$root = "$env:LOCALAPPDATA\chaiai"
+.venv/Scripts/python.exe scripts/database_maintenance.py check --database "$root\checkpoints.sqlite"
+.venv/Scripts/python.exe scripts/database_maintenance.py backup --database "$root\checkpoints.sqlite" --output backups/chat-before-upgrade.sqlite
+.venv/Scripts/python.exe scripts/database_maintenance.py backup --database "$root\model_settings.sqlite" --output backups/settings-before-upgrade.sqlite
+.venv/Scripts/python.exe scripts/database_maintenance.py backup --database "$root\memories.sqlite" --output backups/memory-before-upgrade.sqlite
 # 恢复到新路径，原库与备份保留：
-.venv/Scripts/python.exe scripts/database_maintenance.py restore --backup backups/chat-before-upgrade.sqlite --output data/checkpoints-restored.sqlite
-.venv/Scripts/python.exe scripts/database_maintenance.py check --database data/checkpoints-restored.sqlite
+.venv/Scripts/python.exe scripts/database_maintenance.py restore --backup backups/chat-before-upgrade.sqlite --output "$root\checkpoints-restored.sqlite"
+.venv/Scripts/python.exe scripts/database_maintenance.py check --database "$root\checkpoints-restored.sqlite"
 ```
 
 未创建/未启用的库不用伪造空库来备份。三次命令是三个单库快照，不是跨库在线一致快照；

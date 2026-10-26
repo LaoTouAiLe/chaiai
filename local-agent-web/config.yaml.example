@@ -4,6 +4,15 @@
 # API Key 不写在这里：这里只写“存放 Key 的环境变量名”，Key 的值放在 .env。
 # 默认配置对接 DeepSeek；换成其他 OpenAI 兼容端点只需改 llm.base_url 与 llm.model。
 
+# 所有应用数据的根目录（2026-10-26）。
+# 空串 = 平台标准目录：Windows 是 %LOCALAPPDATA%\chaiai，macOS 是
+# ~/Library/Application Support/chaiai，其它平台是 $XDG_DATA_HOME/chaiai 或 ~/.local/share/chaiai。
+# 只接受**绝对路径**（`~` 会展开）：相对路径会随启动目录漂移，正是这个字段要消灭的东西。
+# 也可以设环境变量 CHAIAI_HOME 覆盖它——环境变量在读配置之前生效，设置库打不开时仍然有路。
+# 换根之后旧数据**不会自动搬过去**：启动横幅会打印新根与检测到的旧数据位置，搬不搬由你决定。
+# 下面所有 path 都相对这个根；写绝对路径则原样使用。
+data_root: ""
+
 llm:
   provider: openai_compatible
   base_url: "https://api.deepseek.com"
@@ -72,14 +81,14 @@ memory:
   short_term:
     enabled: true
     backend: "sqlite_checkpoint"
-    path: "data/checkpoints.sqlite"
+    path: "checkpoints.sqlite"     # 相对 data_root（2026-10-26 起不再写 data/ 前缀）
     preserve_checkpoint_messages: true
     prompt_window_messages: 100
 
   medium_term:
     enabled: false                 # v0.1a / v0.1b 保持关闭，节点透传
     backend: "chroma"
-    path: "data/chroma"
+    path: "chroma"                 # 相对 data_root
     collection: "agent_memory"
     top_k: 8
     # 召回的最低语义相似度（真实余弦）。0.53 按默认模型 bge-small-zh-v1.5 实测标定：
@@ -94,7 +103,7 @@ memory:
   long_term:
     enabled: true                  # 默认启用本地 SQLite 长期记忆；不依赖 Embedding 或网络
     backend: "sqlite"
-    path: "data/memories.sqlite"
+    path: "memories.sqlite"        # 相对 data_root
     confidence_threshold: 0.75
     importance_threshold: 0.5
     aging_enabled: true
@@ -428,5 +437,5 @@ workflows:
 # 密钥仍然**不进**任何 DTO、日志、错误消息、导出与截图（脱敏照旧生效）。
 # 已有 config.yaml 时，首次启动会把上面的 llm 段**幂等导入**成一条默认连接，之后以页面为准。
 model_settings:
-  path: "data/model_settings.sqlite"
+  path: "model_settings.sqlite"     # 相对 data_root（2026-10-26）
   credential_store: "auto"         # auto（默认：密钥存本库 settings_meta）| memory（只在进程内，重启需重录）

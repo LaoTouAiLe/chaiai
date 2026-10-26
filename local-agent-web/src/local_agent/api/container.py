@@ -114,32 +114,43 @@ def resolve_under(base_dir: Path, value: str | Path) -> Path:
     return candidate if candidate.is_absolute() else (Path(base_dir) / candidate)
 
 
-def resolve_memory_paths(config: AppConfig, base_dir: Path) -> AppConfig:
-    """把三层记忆库的路径也钉到 ``base_dir`` 上（架构 §8）。
+def resolve_data_paths(config: AppConfig) -> AppConfig:
+    """把**应用数据**的路径钉到数据根上（2026-10-26）。
 
-    为什么这三条要单独收口：它们的消费方是**图内节点**（`graph/nodes.py` 直接拿
-    ``context.app_config.memory.*.path`` 去 ``open_store``），节点拿不到 base_dir，于是它们成了
-    全项目唯一"按进程当前目录解析"的路径。2026-10-09 实测后果：换一个目录启动，聊天库还在原地
-    （它在这里解析过），**长期记忆却换成了另一个库**——正是 T40 的"解压双击"场景。
+    与旧 ``resolve_memory_paths`` 的两点不同：
 
-    语义与 :func:`resolve_under` 逐字一致（绝对路径照用、相对路径拼在基准目录上、不展开 ``~``）。
-    其余键仍由各自的消费方调用 :func:`resolve_under`，本次不改。
+    1. 基准从"配置文件所在目录"换成 **数据根**（绝对路径）。数据不能跟着代码走——源码目录
+       会被 ``git clean``、重新 clone、换分支；
+    2. 覆盖范围从三层记忆库扩到**设置库**，因为它是同一类东西（都是应用自己产生的状态）。
+
+    **只管应用数据**：``workspace.root``（用户的代码目录）、``skills.user_dirs``（用户的技能
+    目录）、``web.static_dir``（产物）仍按配置文件目录解析——把用户的项目搬进数据目录是另一回事。
+
+    为什么这几条要单独收口：消费方是**图内节点**（`graph/nodes.py` 直接拿
+    ``context.app_config.memory.*.path`` 去 ``open_store``），节点拿不到基准目录。2026-10-09
+    实测后果：换一个目录启动，聊天库还在原地、**长期记忆却换成了另一个库**。
+
+    语义与 :func:`resolve_under` 一致：绝对路径照用，相对路径拼在数据根上。
     """
+    root = app_paths.data_root_of(config)
     memory = config.memory
-    resolved = memory.model_copy(
+    resolved_memory = memory.model_copy(
         update={
             "short_term": memory.short_term.model_copy(
-                update={"path": str(resolve_under(base_dir, memory.short_term.path))}
+                update={"path": str(resolve_under(root, memory.short_term.path))}
             ),
             "medium_term": memory.medium_term.model_copy(
-                update={"path": str(resolve_under(base_dir, memory.medium_term.path))}
+                update={"path": str(resolve_under(root, memory.medium_term.path))}
             ),
             "long_term": memory.long_term.model_copy(
-                update={"path": str(resolve_under(base_dir, memory.long_term.path))}
+                update={"path": str(resolve_under(root, memory.long_term.path))}
             ),
         }
     )
-    return config.model_copy(update={"memory": resolved})
+    settings = config.model_settings.model_copy(
+        update={"path": str(resolve_under(root, config.model_settings.path))}
+    )
+    return config.model_copy(update={"memory": resolved_memory, "model_settings": settings})
 
 
 def resolve_skill_paths(config: AppConfig, base_dir: Path) -> AppConfig:
@@ -153,7 +164,7 @@ def resolve_skill_paths(config: AppConfig, base_dir: Path) -> AppConfig:
     相对 = **相对 config.yaml 所在目录**，与进程当前目录无关——原来拒绝相对路径的理由（cwd 漂移）
     在这里不成立。
 
-    与 :func:`resolve_memory_paths` 并列，同样在**三个入口**各调用一次（``open_runtime`` / ``cli`` /
+    与 :func:`resolve_data_paths` 并列，同样在**三个入口**各调用一次（``open_runtime`` / ``cli`` /
     ``web``），保证消费方（清单节点、技能工具、设置页）看到的是同一份路径。
     """
     skills = config.skills
@@ -210,24 +221,28 @@ def open_runtime(
         )
         raise ConfigError(msg)
 
-    database_path = resolve_under(base_dir, app_config.memory.short_term.path)
+    # 数据根先算出来：会话库的路径、锁文件、后面的附件与日志都从它派生。
+    data_root = app_paths.data_root_of(app_config)
+    database_path = resolve_under(data_root, app_config.memory.short_term.path)
     lock = acquire_instance_lock(database_path) if instance_lock else None
     settings: SettingsDatabase | None = None
     #: MCP 连接管理器（2026-10-20）。装配失败时也要关掉：它已经起了后台线程。
     mcp_manager: Any = None
     try:
+        # 工作区是**用户内容**，仍按配置文件目录解析（不搬进数据目录）。
         workspace_root = resolve_under(base_dir, app_config.workspace.root)
-        # 图内节点直接按配置里的路径开记忆库，所以在这里先钉到 base_dir 上（§8）。
-        app_config = resolve_memory_paths(app_config, base_dir)
+        # 图内节点直接按配置里的路径开记忆库，所以在这里先钉到数据根上（§8）。
+        app_config = resolve_data_paths(app_config)
         # 技能发现根里的相对路径同样钉到 base_dir（2026-10-16）：解压到哪个盘都能用。
         app_config = resolve_skill_paths(app_config, base_dir)
         database = checkpoint_module.open_database(database_path, workspace_root=workspace_root)
         settings = _open_settings(app_config, base_dir=base_dir)
         # MCP（2026-10-20；契约 §6.13）：开关关着时返回 None，`mcp` 能力因此不进能力集。
-        mcp_manager = build_mcp_manager(app_config, base_dir=base_dir, settings=settings,
+        mcp_manager = build_mcp_manager(app_config, base_dir=base_dir, data_root=data_root,
+                                        settings=settings,
                                         state_lock=database.checkpointer.lock)
         service = ApplicationService(
-            timing_path=base_dir / "data" / "metrics" / "turn-timings.jsonl",
+            timing_path=data_root / "metrics" / "turn-timings.jsonl",
             graph=builder.build_chat_graph(database.checkpointer),
             app_config=app_config,
             model_adapter=model,
@@ -251,17 +266,17 @@ def open_runtime(
             mcp_manager=mcp_manager,
             # 重载与错误回报都要读这份文件；位置与 config.yaml 同目录。
             mcp_config_path=base_dir / DEFAULT_MCP_PATH,
-            # 附件存储（2026-10-16）：内容落 `data/attachments/年/月/日/会话/`——与三个库同处、
-            # 同样按 `base_dir` 定位，换台机器解压到哪都能用。
-            attachments=AttachmentStore.under(base_dir),
+            # 附件存储（2026-10-16）：内容落 `<data_root>/attachments/年/月/日/会话/`——
+            # 与三个库同处（2026-10-26 起统一从数据根派生，不再各自拼 `base_dir/data`）。
+            attachments=AttachmentStore.under(data_root),
             # 对象存储密钥（2026-10-20）：与模型连接共用设置库里的凭据存储。
             oss_keys=None if settings is None else OssKeyStore(settings.credentials),
             # 任务索引与**会话索引、Checkpoint 同库同连接**（§17.1）；worker 只在
             # `jobs.background=true` 时才起，默认路径与 v0.5 一致。
             # 文件变更账本（2026-10-21）：与 Checkpoint 同库同锁（工具在 executor 线程里写，
-            # 与快照必须串行），基线原文落在 `data/file-changes/<会话>/`。
+            # 与快照必须串行），基线原文落在 `<data_root>/file-changes/<会话>/`。
             file_changes=partial(
-                FileChangeStore.under(base_dir).ledger,
+                FileChangeStore.under(data_root).ledger,
                 database.connection,
                 lock=database.checkpointer.lock,
             ),
@@ -319,6 +334,7 @@ def build_mcp_manager(
     app_config: AppConfig,
     *,
     base_dir: Path,
+    data_root: Path,
     settings: SettingsDatabase | None,
     state_lock: Any = None,
 ) -> Any:
@@ -327,8 +343,9 @@ def build_mcp_manager(
     三个刻意的选择：
 
     - **开关关着时完全不建**：``mcp`` SDK 的导入要 0.5–1 秒，默认配置下不该付这笔钱。
-    - 配置文件与 ``config.yaml`` 同目录（``base_dir``）：源码形态就是仓库里的 ``mcp.json``，
-      冻结形态是 ``%LOCALAPPDATA%/chaiai/mcp.json``。
+    - **配置**文件与 ``config.yaml`` 同目录（``base_dir``）：源码形态就是仓库里的 ``mcp.json``，
+      冻结形态是 ``%LOCALAPPDATA%/chaiai/mcp.json``。它是**用户手写的配置**，所以跟配置文件走；
+      而工具目录缓存（``data_root/mcp_catalog.sqlite``）是应用自己产生的状态，跟数据根走。
     - 解析失败**不阻断启动**：``mcp.json`` 是手写文件，一个逗号错就让整个应用打不开的话，
       用户连改它的入口都没有。这里记警告并当作"没有 server"；错误详情由读取接口回报
       （那里的报错能直接展示给人看）。
@@ -356,7 +373,7 @@ def build_mcp_manager(
         servers,
         config=app_config.mcp,
         state_provider=provider,
-        cache_path=base_dir / "data" / "mcp_catalog.sqlite",
+        cache_path=data_root / "mcp_catalog.sqlite",
     )
     return manager
 
