@@ -25,6 +25,7 @@ import os
 import re
 import socket
 import ssl
+import time
 import zlib
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, wait
@@ -509,6 +510,31 @@ _DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
 _MAX_FETCH_URL_CHARS = 8192
 _DEEPSEEK_FETCH_URL = "https://api.deepseek.com/v1/tools/fetch"
 
+#: 值得重试的 HTTP 状态：官方文档明确 408 / 429 / 5xx 应"等待后重试"，其它 4xx 要改请求才有用，
+#: 重试只会把同一份错误重复三遍。检索与抓取都是只读 POST，重发没有副作用。
+_RETRYABLE_STATUS = frozenset({408, 429}) | frozenset(range(500, 600))
+
+#: 一次调用最多试几次（含首次），以及每次之前的退避秒数。
+#: 搜索是同步调用，别让模型干等：最坏也只多花 1.5 秒。
+_MAX_ATTEMPTS = 3
+_RETRY_BACKOFF = (0.5, 1.0)
+
+#: `Retry-After` 的上限（秒）：对端要我们等一分钟时，宁可失败也不要卡住整个回合。
+_RETRY_AFTER_CAP = 5.0
+
+
+def _retry_delay(attempt: int, error: HTTPError | None = None) -> float:
+    """这一次重试前等多久：优先听 `Retry-After`，否则按固定退避。"""
+    header = error.headers.get("Retry-After") if error is not None and error.headers else None
+    if header:
+        try:
+            wait = float(header)
+        except ValueError:
+            wait = 0.0
+        if 0 < wait <= _RETRY_AFTER_CAP:
+            return wait
+    return _RETRY_BACKOFF[min(attempt, len(_RETRY_BACKOFF) - 1)]
+
 
 def _post_json_api(
     url: str,
@@ -519,6 +545,7 @@ def _post_json_api(
     *,
     service: str,
     status_hint: str,
+    sleep: Callable[[float], None] | None = None,
 ) -> Mapping[str, Any]:
     """向一个 Bearer 鉴权的 JSON API 发 POST，返回解析后的对象。
 
@@ -535,32 +562,50 @@ def _post_json_api(
     Raises:
         WebAccessError: 连接失败、HTTP 错误、响应超限，或返回的不是 JSON 对象。
     """
-    request = Request(
-        url, data=json.dumps(dict(payload)).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "User-Agent": user_agent,
-        },
-        method="POST",
-    )
-    try:
-        opener = build_opener(ProxyHandler({}), _PinnedHTTPHandler(), _PinnedHTTPSHandler(), _NoApiRedirect())
-        with opener.open(request, timeout=timeout) as response:
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
-        if len(raw) > MAX_RESPONSE_BYTES:
-            raise WebAccessError(f"{service}响应超过读取上限")
-        value = json.loads(raw)
-    except HTTPError as exc:
-        # 429 是频率、402 是余额：改请求都没用，所以只说清"该去查什么"
-        raise WebAccessError(f"{service}服务返回 HTTP {exc.code}，{status_hint}") from None
-    except (URLError, TimeoutError, OSError) as exc:
-        raise WebAccessError(f"{service}连接失败（{type(exc).__name__}）") from None
-    except ValueError:
-        raise WebAccessError(f"{service}返回了不可解析的 JSON") from None
-    if not isinstance(value, dict):
-        raise WebAccessError(f"{service}响应不是结果对象")
-    return value
+    body = json.dumps(dict(payload)).encode("utf-8")
+    wait = sleep or time.sleep
+    for attempt in range(_MAX_ATTEMPTS):
+        # 每次重试都重建请求：同一个 Request 被 opener 消费过一次之后不该再交出。
+        request = Request(
+            url, data=body,
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "User-Agent": user_agent,
+            },
+            method="POST",
+        )
+        try:
+            opener = build_opener(
+                ProxyHandler({}), _PinnedHTTPHandler(), _PinnedHTTPSHandler(), _NoApiRedirect()
+            )
+            with opener.open(request, timeout=timeout) as response:
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise WebAccessError(f"{service}响应超过读取上限")
+            value = json.loads(raw)
+        except HTTPError as exc:
+            # 408 / 429 / 5xx 等一会儿再来（官方要求）；402 是余额、401 是凭据、400 是请求本身错，
+            # 这些改请求才有用，重试只会把同一份错误重复三遍。
+            if exc.code in _RETRYABLE_STATUS and attempt + 1 < _MAX_ATTEMPTS:
+                wait(_retry_delay(attempt, exc))
+                continue
+            raise WebAccessError(f"{service}服务返回 HTTP {exc.code}，{status_hint}") from None
+        except (URLError, TimeoutError, OSError) as exc:
+            # 连接层抖动（DNS、TLS 断连、读超时）也值得再试一次：请求是只读的，重发没有副作用。
+            if attempt + 1 < _MAX_ATTEMPTS:
+                wait(_retry_delay(attempt))
+                continue
+            raise WebAccessError(
+                f"{service}连接失败（{type(exc).__name__}，已试 {_MAX_ATTEMPTS} 次）"
+            ) from None
+        except ValueError:
+            raise WebAccessError(f"{service}返回了不可解析的 JSON") from None
+        if not isinstance(value, dict):
+            raise WebAccessError(f"{service}响应不是结果对象")
+        return value
+    # 循环只会从上面的 return / raise 出去；保留一行兜底，避免"函数末尾返回 None"。
+    raise WebAccessError(f"{service}请求未能完成")
 
 
 def _tavily_transport(
