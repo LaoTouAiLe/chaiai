@@ -9,6 +9,8 @@
   与官方文档的透传规则一致。
 - 结果顺序按服务端的 ``rerank_score`` 排好，这里**不重排也不过滤**：契约是"按相关度排序、
   不替用户丢结果"，跳过的只有解析不成 URL 的条目。
+- **空结果不是失败**：官方在"搜索正常结束但没有匹配"时返回 200 + 空数组（且不计费）。这里返回
+  空列表让上层如实说"没搜到"；只有响应结构不对（``results`` 不是数组）才抛错。
 """
 
 from __future__ import annotations
@@ -35,10 +37,16 @@ _MAX_QUERY_CHARS = 128
 def with_filters(
     query: str, *, time_range: str | None, domains: list[str], now: datetime | None = None
 ) -> str:
-    """把档位与域名改写成 DeepSeek 认识的搜索语法；顺序固定为 域名 → 时间。"""
+    """把档位与域名改写成 DeepSeek 认识的搜索语法；顺序固定为 域名 → 时间。
+
+    **不要给 `site:` 加括号**（2026-10-26 实测，同一个 query 只差一对括号）：
+    `deepseek (site:a.com OR site:b.com)` → 200 但 **0 条结果**；
+    `deepseek site:a.com OR site:b.com` → 200 + 10 条，且全部落在两个域内。
+    加括号会让整个域名筛选失效，看起来像"这个主题搜不到东西"。
+    """
     parts = [query]
     if domains:
-        parts.append("(" + " OR ".join(f"site:{domain}" for domain in domains) + ")")
+        parts.append(" OR ".join(f"site:{domain}" for domain in domains))
     if time_range:
         days = _RANGE_DAYS[time_range]
         since = (now or datetime.now(timezone.utc)) - timedelta(days=days)
@@ -113,6 +121,7 @@ def deepseek_search(
             published_at=date[:100] if isinstance(date, str) else None,
             source_id=source_id(url),
         ))
-    if not hits:
-        raise WebAccessError("DeepSeek 没有返回可用来源，本次未取得搜索结果")
+    # 官方语义（2026-10-26 实测确认）：搜索正常结束但没有匹配时返回 **HTTP 200 + 空数组**，且不计费。
+    # 所以"空"是正常答案，不是故障——抛错会让模型以为搜索坏了，进而换后端或反复重试。
+    # 只有"结构不对"（`results` 不是数组）才是失败，上面已经拦掉了。
     return hits
