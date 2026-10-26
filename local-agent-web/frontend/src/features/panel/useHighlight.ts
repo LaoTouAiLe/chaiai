@@ -21,7 +21,7 @@ export function useHighlight(code: string, lang: string): string | null {
     }
     let cancelled = false
     // 只高亮前 20000 字符：再长渲染会很慢，而预览本身也截断在这个量级。
-    void codeToHtml(code.slice(0, 20_000), { lang, theme: 'github-light' })
+    void codeToHtml(code.slice(0, 20_000), { lang, themes: { light: 'github-light', dark: 'github-dark' } })
       .then((result) => { if (!cancelled) setHtml(result) })
       .catch(() => { if (!cancelled) setHtml(null) })
     return () => { cancelled = true }

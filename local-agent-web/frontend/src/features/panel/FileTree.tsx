@@ -92,6 +92,7 @@ export function FileTree({
             className={node.path === selectedPath ? `${styles.fileRow} ${styles.fileRowActive}` : styles.fileRow}
             style={{ paddingLeft: `${String(depth * 14 + 18)}px` }}
             onClick={() => onSelectFile?.(node.path)}
+            aria-current={node.path === selectedPath ? 'true' : undefined}
             title={node.path}
           >
             <FileIcon path={node.path} />

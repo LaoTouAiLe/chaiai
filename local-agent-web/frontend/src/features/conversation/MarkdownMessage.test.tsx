@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { IconCopyButton, MarkdownMessage } from './MarkdownMessage'
 import { copyText } from './clipboard'
+import { FileLinkContext } from './fileLinkContext'
 
 const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 
@@ -22,6 +23,35 @@ afterEach(() => {
 })
 
 describe('MarkdownMessage', () => {
+  it('renders local file links with icons and opens them through the panel action without navigation', () => {
+    const open = vi.fn()
+    render(<FileLinkContext.Provider value={open}>
+      <MarkdownMessage text={'**改动文件**：[浏览器界面](E:/repo/BrowserPane.tsx)、[后端服务](<file:///E:/My%20Project/browsers.py>)、[相对路径](./src/app.ts)、[反斜杠](<E:\\repo\\app.py>)'} />
+    </FileLinkContext.Provider>)
+    const link = screen.getByRole('link', { name: '浏览器界面' })
+    expect(link.querySelector('svg')).not.toBeNull()
+    expect(link).not.toHaveAttribute('target')
+    expect(fireEvent.click(link)).toBe(false)
+    expect(open).toHaveBeenLastCalledWith('E:/repo/BrowserPane.tsx')
+    fireEvent.click(screen.getByRole('link', { name: '后端服务' }))
+    expect(open).toHaveBeenLastCalledWith('E:/My Project/browsers.py')
+    fireEvent.click(screen.getByRole('link', { name: '相对路径' }))
+    expect(open).toHaveBeenLastCalledWith('src/app.ts')
+    fireEvent.click(screen.getByRole('link', { name: '反斜杠' }))
+    expect(open).toHaveBeenLastCalledWith('E:/repo/app.py')
+  })
+
+  it('keeps web links external and blocks script schemes even with a file action available', () => {
+    const open = vi.fn()
+    render(<FileLinkContext.Provider value={open}>
+      <MarkdownMessage text={'[站点](https://example.org/a.py) [恶意链接](javascript:alert%281%29) `README.md`'} />
+    </FileLinkContext.Provider>)
+    expect(screen.getByRole('link', { name: '站点' })).toHaveAttribute('target', '_blank')
+    expect(screen.queryByRole('link', { name: '恶意链接' })).not.toBeInTheDocument()
+    expect(screen.getByText('README.md').tagName).toBe('CODE')
+    expect(open).not.toHaveBeenCalled()
+  })
+
   it('labels a fenced block with its language, falling back to Plain Text', () => {
     // 语言名只做展示（2026-10-21）：一眼看出"这是 python 还是 bash"。
     const first = render(<MarkdownMessage text={'```python\nprint(1)\n```'} />)

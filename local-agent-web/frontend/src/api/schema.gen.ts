@@ -40,6 +40,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/browsers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create */
+        post: operations["create_api_browsers_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/browsers/requests/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Stop */
+        delete: operations["stop_api_browsers_requests__request_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/browsers/{browser_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** State */
+        get: operations["state_api_browsers__browser_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/capabilities": {
         parameters: {
             query?: never;
@@ -1748,6 +1799,207 @@ export interface components {
              * @default auto
              */
             oss_region: string;
+        };
+        /** BrowserCommand */
+        BrowserCommand: {
+            /**
+             * Accept
+             * @default false
+             */
+            accept: boolean;
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "navigate" | "back" | "forward" | "reload" | "stop" | "resize" | "pointer" | "wheel" | "key" | "text" | "dialog";
+            /**
+             * Button
+             * @default none
+             * @enum {string}
+             */
+            button: "left" | "right" | "middle" | "none";
+            /**
+             * Buttons
+             * @default 0
+             */
+            buttons: number;
+            /**
+             * Clicks
+             * @default 1
+             */
+            clicks: number;
+            /**
+             * Code
+             * @default
+             */
+            code: string;
+            /**
+             * Delta X
+             * @default 0
+             */
+            delta_x: number;
+            /**
+             * Delta Y
+             * @default 0
+             */
+            delta_y: number;
+            /**
+             * Event
+             * @default move
+             * @enum {string}
+             */
+            event: "down" | "up" | "move";
+            /**
+             * Height
+             * @default 700
+             */
+            height: number;
+            /**
+             * Key
+             * @default
+             */
+            key: string;
+            /**
+             * Key Code
+             * @default 0
+             */
+            key_code: number;
+            /**
+             * Modifiers
+             * @default 0
+             */
+            modifiers: number;
+            /**
+             * Text
+             * @default
+             */
+            text: string;
+            /**
+             * Url
+             * @default
+             */
+            url: string;
+            /**
+             * Width
+             * @default 520
+             */
+            width: number;
+            /**
+             * X
+             * @default 0
+             */
+            x: number;
+            /**
+             * Y
+             * @default 0
+             */
+            y: number;
+        };
+        /** BrowserFrame */
+        BrowserFrame: {
+            /** Data */
+            data: string;
+            /** Height */
+            height: number;
+            /**
+             * Type
+             * @default frame
+             * @constant
+             */
+            type: "frame";
+            /** Width */
+            width: number;
+        };
+        /** BrowserRequest */
+        BrowserRequest: {
+            /** Request Id */
+            request_id: string;
+            /** Workspace Id */
+            workspace_id?: string | null;
+        };
+        /** BrowserStateMessage */
+        BrowserStateMessage: {
+            /** Browser Id */
+            browser_id: string;
+            /**
+             * Can Back
+             * @default false
+             */
+            can_back: boolean;
+            /**
+             * Can Forward
+             * @default false
+             */
+            can_forward: boolean;
+            /**
+             * Dialog
+             * @default null
+             */
+            dialog: {
+                [key: string]: string;
+            } | null;
+            /**
+             * Error
+             * @default null
+             */
+            error: string | null;
+            /**
+             * Loading
+             * @default false
+             */
+            loading: boolean;
+            /**
+             * Title
+             * @default 新标签页
+             */
+            title: string;
+            /**
+             * Type
+             * @default state
+             * @constant
+             */
+            type: "state";
+            /**
+             * Url
+             * @default about:blank
+             */
+            url: string;
+        };
+        /** BrowserView */
+        BrowserView: {
+            /** Browser Id */
+            browser_id: string;
+            /**
+             * Can Back
+             * @default false
+             */
+            can_back: boolean;
+            /**
+             * Can Forward
+             * @default false
+             */
+            can_forward: boolean;
+            /** Dialog */
+            dialog?: {
+                [key: string]: string;
+            } | null;
+            /** Error */
+            error?: string | null;
+            /**
+             * Loading
+             * @default false
+             */
+            loading: boolean;
+            /**
+             * Title
+             * @default 新标签页
+             */
+            title: string;
+            /**
+             * Url
+             * @default about:blank
+             */
+            url: string;
         };
         /**
          * CancelTaskRequest
@@ -5297,6 +5549,11 @@ export interface components {
             /** Max Search Calls */
             max_search_calls?: number | null;
             /**
+             * Prefetch Pages
+             * @default 2
+             */
+            prefetch_pages: number;
+            /**
              * Provider
              * @default auto
              * @enum {string}
@@ -5578,6 +5835,99 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OssTestResult"];
+                };
+            };
+        };
+    };
+    create_api_browsers_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BrowserRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrowserView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    stop_api_browsers_requests__request_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    state_api_browsers__browser_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                browser_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BrowserView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

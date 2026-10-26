@@ -756,6 +756,344 @@
         "title": "AttachmentsPreferences",
         "type": "object"
       },
+      "BrowserCommand": {
+        "additionalProperties": false,
+        "properties": {
+          "accept": {
+            "default": false,
+            "title": "Accept",
+            "type": "boolean"
+          },
+          "action": {
+            "enum": [
+              "navigate",
+              "back",
+              "forward",
+              "reload",
+              "stop",
+              "resize",
+              "pointer",
+              "wheel",
+              "key",
+              "text",
+              "dialog"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "button": {
+            "default": "none",
+            "enum": [
+              "left",
+              "right",
+              "middle",
+              "none"
+            ],
+            "title": "Button",
+            "type": "string"
+          },
+          "buttons": {
+            "default": 0,
+            "maximum": 7,
+            "minimum": 0,
+            "title": "Buttons",
+            "type": "integer"
+          },
+          "clicks": {
+            "default": 1,
+            "maximum": 3,
+            "minimum": 1,
+            "title": "Clicks",
+            "type": "integer"
+          },
+          "code": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Code",
+            "type": "string"
+          },
+          "delta_x": {
+            "default": 0,
+            "maximum": 10000,
+            "minimum": -10000,
+            "title": "Delta X",
+            "type": "number"
+          },
+          "delta_y": {
+            "default": 0,
+            "maximum": 10000,
+            "minimum": -10000,
+            "title": "Delta Y",
+            "type": "number"
+          },
+          "event": {
+            "default": "move",
+            "enum": [
+              "down",
+              "up",
+              "move"
+            ],
+            "title": "Event",
+            "type": "string"
+          },
+          "height": {
+            "default": 700,
+            "maximum": 1400,
+            "minimum": 200,
+            "title": "Height",
+            "type": "integer"
+          },
+          "key": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Key",
+            "type": "string"
+          },
+          "key_code": {
+            "default": 0,
+            "maximum": 255,
+            "minimum": 0,
+            "title": "Key Code",
+            "type": "integer"
+          },
+          "modifiers": {
+            "default": 0,
+            "maximum": 15,
+            "minimum": 0,
+            "title": "Modifiers",
+            "type": "integer"
+          },
+          "text": {
+            "default": "",
+            "maxLength": 8192,
+            "title": "Text",
+            "type": "string"
+          },
+          "url": {
+            "default": "",
+            "maxLength": 4096,
+            "title": "Url",
+            "type": "string"
+          },
+          "width": {
+            "default": 520,
+            "maximum": 1920,
+            "minimum": 240,
+            "title": "Width",
+            "type": "integer"
+          },
+          "x": {
+            "default": 0,
+            "maximum": 1920,
+            "minimum": 0,
+            "title": "X",
+            "type": "number"
+          },
+          "y": {
+            "default": 0,
+            "maximum": 1400,
+            "minimum": 0,
+            "title": "Y",
+            "type": "number"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "BrowserCommand",
+        "type": "object"
+      },
+      "BrowserFrame": {
+        "properties": {
+          "data": {
+            "title": "Data",
+            "type": "string"
+          },
+          "height": {
+            "title": "Height",
+            "type": "number"
+          },
+          "type": {
+            "const": "frame",
+            "default": "frame",
+            "title": "Type",
+            "type": "string"
+          },
+          "width": {
+            "title": "Width",
+            "type": "number"
+          }
+        },
+        "required": [
+          "data",
+          "width",
+          "height"
+        ],
+        "title": "BrowserFrame",
+        "type": "object"
+      },
+      "BrowserRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
+          }
+        },
+        "required": [
+          "request_id"
+        ],
+        "title": "BrowserRequest",
+        "type": "object"
+      },
+      "BrowserStateMessage": {
+        "properties": {
+          "browser_id": {
+            "title": "Browser Id",
+            "type": "string"
+          },
+          "can_back": {
+            "default": false,
+            "title": "Can Back",
+            "type": "boolean"
+          },
+          "can_forward": {
+            "default": false,
+            "title": "Can Forward",
+            "type": "boolean"
+          },
+          "dialog": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Dialog"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error"
+          },
+          "loading": {
+            "default": false,
+            "title": "Loading",
+            "type": "boolean"
+          },
+          "title": {
+            "default": "新标签页",
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "const": "state",
+            "default": "state",
+            "title": "Type",
+            "type": "string"
+          },
+          "url": {
+            "default": "about:blank",
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "browser_id"
+        ],
+        "title": "BrowserStateMessage",
+        "type": "object"
+      },
+      "BrowserView": {
+        "properties": {
+          "browser_id": {
+            "title": "Browser Id",
+            "type": "string"
+          },
+          "can_back": {
+            "default": false,
+            "title": "Can Back",
+            "type": "boolean"
+          },
+          "can_forward": {
+            "default": false,
+            "title": "Can Forward",
+            "type": "boolean"
+          },
+          "dialog": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dialog"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "loading": {
+            "default": false,
+            "title": "Loading",
+            "type": "boolean"
+          },
+          "title": {
+            "default": "新标签页",
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "default": "about:blank",
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "browser_id"
+        ],
+        "title": "BrowserView",
+        "type": "object"
+      },
       "CancelTaskRequest": {
         "additionalProperties": false,
         "description": "取消当前会话在跑的任务（架构 §15.2、§17.4）。**幂等**：没有可取消的任务时是空操作。\n\n刻意**不带** `client_request_id`：取消不进幂等台账（重复调用本来就是空操作），\n要求一个用不上的幂等键只会让调用方以为\"取消也会被去重\"。",
@@ -9600,6 +9938,124 @@
           }
         },
         "summary": "测试对象存储（上传一张 1×1 测试图并检查公开读）"
+      }
+    },
+    "/api/browsers": {
+      "post": {
+        "operationId": "create_api_browsers_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrowserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create",
+        "tags": [
+          "browsers"
+        ]
+      }
+    },
+    "/api/browsers/requests/{request_id}": {
+      "delete": {
+        "operationId": "stop_api_browsers_requests__request_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "request_id",
+            "required": true,
+            "schema": {
+              "title": "Request Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Stop",
+        "tags": [
+          "browsers"
+        ]
+      }
+    },
+    "/api/browsers/{browser_id}": {
+      "get": {
+        "operationId": "state_api_browsers__browser_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "browser_id",
+            "required": true,
+            "schema": {
+              "title": "Browser Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "State",
+        "tags": [
+          "browsers"
+        ]
       }
     },
     "/api/capabilities": {

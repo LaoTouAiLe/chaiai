@@ -3,8 +3,8 @@
 // 分工（计划 §6.3）：**服务端权威的东西全在这里**（快照、会话列表、工作区），本地 UI 状态在
 // `stores/`。事件流只做两件事：把 `session_snapshot` 写进这里、把增量放进临时尾部（`stores/stream.ts`）。
 
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useRef } from 'react'
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
+import { useCallback, useRef } from 'react'
 
 import {
   ApiError,
@@ -13,6 +13,7 @@ import {
   setSessionMode,
   endInterruptedRequest,
   createSession,
+  createSideChat,
   addMcpServer,
   editMcpServer,
   deleteMcpServer,
@@ -81,10 +82,10 @@ export function useWorkspaceFiles(
   })
 }
 /** 工作区文件名搜索（§21.6）：空串不发请求。 */
-export function useSearchWorkspaceFiles(q: string) {
+export function useSearchWorkspaceFiles(q: string, workspaceId?: string) {
   return useQuery({
-    queryKey: ['workspace', 'file-search', q],
-    queryFn: () => searchWorkspaceFiles(q),
+    queryKey: ['workspace', 'file-search', workspaceId ?? '', q],
+    queryFn: () => searchWorkspaceFiles(q, workspaceId),
     enabled: q.trim().length >= 1,
     staleTime: 5000,
   })
@@ -475,13 +476,50 @@ export function useEndInterruptedRequest() {
  *   第二条消息会被静默丢弃（或被判成 `IDEMPOTENCY_CONFLICT`）。
  * 所以键与它当时对应的文本绑在一起记。
  */
-export function useSubmitMessage(sessionId: string | null, context: SubmissionContext = {}) {
+// 同一标签的创建请求在切换标签/主会话时复用，直到结果写入标签状态或标签被关闭。
+const sideChatCreations = new WeakMap<QueryClient, Map<string, Promise<string>>>()
+
+export function useSideChatCreation(parentSessionId: string | null) {
+  const client = useQueryClient()
+  const create = useCallback((tabId: string): Promise<string> => {
+    if (parentSessionId === null) return Promise.reject(new Error('还没有打开主会话'))
+    let requests = sideChatCreations.get(client)
+    if (!requests) {
+      requests = new Map()
+      sideChatCreations.set(client, requests)
+    }
+    const key = JSON.stringify([parentSessionId, tabId])
+    const existing = requests.get(key)
+    if (existing) return existing
+    const request = createSideChat(parentSessionId).then(created => created.session_id).catch(error => {
+      if (requests.get(key) === request) requests.delete(key)
+      throw error
+    })
+    requests.set(key, request)
+    return request
+  }, [client, parentSessionId])
+  const forget = useCallback((tabId: string) => {
+    sideChatCreations.get(client)?.delete(JSON.stringify([parentSessionId, tabId]))
+  }, [client, parentSessionId])
+  return { create, forget }
+}
+
+type PendingMessage = { id: string; signature: string; context: SubmissionContext }
+// 页签卸载后仍保留未确认请求；不同应用/测试的 QueryClient 之间不共享。
+const pendingMessages = new WeakMap<QueryClient, Map<string, PendingMessage>>()
+
+export function useSubmitMessage(sessionId: string | null, context: SubmissionContext = {}, networkMode: 'online' | 'always' = 'online') {
   const queryClient = useQueryClient()
-  const pending = useRef(new Map<string, { id: string; signature: string; context: SubmissionContext }>())
 
   const mutation = useMutation({
+    networkMode,
     mutationFn: async (request: { sessionId: string; text: string; context: SubmissionContext; attachments?: readonly string[] }) => {
-      const existing = pending.current.get(request.sessionId)
+      let pending = pendingMessages.get(queryClient)
+      if (!pending) {
+        pending = new Map()
+        pendingMessages.set(queryClient, pending)
+      }
+      const existing = pending.get(request.sessionId)
       const text = request.text
       // 附件也进签名（2026-10-16）：与后端 `_digest` 同一条口径——"同一段文字、换一张图再发"
       // 是两个不同的请求，不能被当成上一次的重放（那样图就永远发不出去）。
@@ -490,7 +528,7 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
       const same = existing?.signature === signature
       const requestId = same ? existing.id : newRequestId()
       const boundContext = same ? existing.context : request.context
-      pending.current.set(request.sessionId, { id: requestId, signature, context: boundContext })
+      pending.set(request.sessionId, { id: requestId, signature, context: boundContext })
       let result
       try {
         result = await submitMessage(request.sessionId, text, requestId, {
@@ -499,11 +537,12 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
         })
       } catch (error) {
         // 明确拒绝且没有执行时，刷新后可换观测版本；网络中断仍保留原请求的上下文与幂等键。
-        if (error instanceof ApiError && error.code === 'CONVERSATION_CONFLICT') pending.current.delete(request.sessionId)
+        if (error instanceof ApiError && error.code === 'CONVERSATION_CONFLICT'
+          && pending.get(request.sessionId)?.id === requestId) pending.delete(request.sessionId)
         throw error
       }
       // 成功后换新键；未确认执行结果的失败保留原上下文，明确的路径拒绝已在上面清除。
-      pending.current.delete(request.sessionId)
+      if (pending.get(request.sessionId)?.id === requestId) pending.delete(request.sessionId)
       return result
     },
     onSuccess: (result, request) => {
@@ -536,6 +575,12 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
         context: { ...context, ...(request.context ?? {}) },
         attachments: request.attachments,
       }, options)
+    },
+    // Promise 回调在切换标签、组件卸载后仍会完成，侧聊据此恢复所属标签的失败草稿。
+    mutateAsync: (request: { text: string; attachments?: readonly string[]; context?: SubmissionContext }) => {
+      if (sessionId === null) return Promise.reject(new Error('还没有打开会话'))
+      return mutation.mutateAsync({ sessionId, text: request.text,
+        context: { ...context, ...(request.context ?? {}) }, attachments: request.attachments })
     },
     isPending: belongsHere && mutation.isPending,
     isError: belongsHere && mutation.isError,

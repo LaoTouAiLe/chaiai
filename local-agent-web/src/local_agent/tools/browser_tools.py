@@ -12,6 +12,7 @@ import os
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -73,8 +74,10 @@ def checked_url(url: str) -> str:
 class BrowserSession:
     """当前对话独占的浏览器宿主与 CDP 连接。"""
     capability = "page_control"
+    on_message: Callable[[dict[str, Any]], None] | None = None
 
-    def __init__(self, policy: SecurityPolicy, *, visible: bool, timeout: float) -> None:
+    def __init__(self, policy: SecurityPolicy, *, visible: bool, timeout: float,
+                 on_message: Callable[[dict[str, Any]], None] | None = None) -> None:
         """用独立配置启动浏览器；启动异常或取消时关闭进程。"""
         available, hint = browser_availability()
         if not available:
@@ -90,6 +93,7 @@ class BrowserSession:
         self.targets: dict[str, str] = {}
         self.downloads: dict[str, dict[str, Any]] = {}
         self.errors: list[str] = []
+        self.on_message = on_message
         profile = self.directory / "profile"
         args = [str(browser_executable()), f"--user-data-dir={profile}",
                 "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
@@ -168,6 +172,8 @@ class BrowserSession:
             if not raw:
                 raise RuntimeError("浏览器连接已关闭，请重新打开")
             response = json.loads(raw)
+            if self.on_message is not None:
+                self.on_message(response)
             if response.get("method") == "Browser.downloadWillBegin":
                 item = response["params"]
                 self.downloads[item["guid"]] = {**item, "state": "inProgress"}

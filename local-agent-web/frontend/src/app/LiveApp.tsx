@@ -17,6 +17,7 @@ import { Composer } from '../components/Composer'
 import { Sidebar } from '../components/Sidebar'
 import { TopBar } from '../components/TopBar'
 import { Conversation } from '../features/conversation/Conversation'
+import { FileLinkContext } from '../features/conversation/fileLinkContext'
 import { WorkflowStatus } from '../features/workflow/WorkflowStatus'
 import { mapWorkflow } from '../features/workflow/adapters'
 import { toolLabel } from '../features/tool/display'
@@ -116,7 +117,7 @@ export function LiveApp() {
     try { localStorage.setItem('panel.open', next ? '1' : '0') } catch { /* 存不了就只是记不住 */ }
   }
   // 从对话流的改动条点进来时，指定面板要打开哪个文件的 diff。
-  const [panelFocus, setPanelFocus] = useState<{ tab: 'changes'; path: string } | null>(null)
+  const [panelFocus, setPanelFocus] = useState<{ sessionId: string | null; tab: 'changes' | 'files'; path: string } | null>(null)
   // 换会话就收起右栏（2026-10-23 用户要求）：文件树、改动、侧聊全是"这个会话"的，
   // 留在屏幕上会让人以为看的是新会话的东西。
   useEffect(() => {
@@ -617,6 +618,10 @@ export function LiveApp() {
   />
 
   return (
+    <FileLinkContext.Provider value={path => {
+      setPanelFocus({ sessionId: activeSessionId, tab: 'files', path })
+      setPanelOpenPersisted(true)
+    }}>
     <div className={styles.app} data-scenario="live">
       <Sidebar
         workspaces={sidebar}
@@ -907,7 +912,7 @@ export function LiveApp() {
                 // 点改动条里的文件 → 打开右栏并直接展开它的 diff（2026-10-22 恢复原来的行为）。
                 onSelect={(path) => {
                   setChangesPath(path)
-                  setPanelFocus({ tab: 'changes', path })
+                  setPanelFocus({ sessionId: activeSessionId, tab: 'changes', path })
                   setPanelOpenPersisted(true)
                 }}
               />
@@ -965,27 +970,24 @@ export function LiveApp() {
           if (activeSessionId !== null) void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(activeSessionId) })
         }} /> : null}
       </main>
-      {/* 右栏工作面板（§21.6）：与中栏并列，只读。 */}
-      {panelOpen ? (
-        // 换会话就整体重建：右栏状态按会话存，切过去是「新会话自己的」那套页签，
-        // 而不是把上一个会话的页签带过来（那会指向不存在的工作区路径）。
-        <PanelShell
-          key={activeSessionId ?? 'none'}
-          workspaceId={workspaceId}
-          sessionId={activeSessionId}
-          trace={trace}
-          onOpenStep={(turnId) => {
-            // 与「会话地图」的"定位到这一轮"走同一条路径：切回对话并让该轮进入视野。
-            if (activeSessionId === null) return
-            setMapChat(null)
-            setFollowup(null)
-            setFocusTurn({ sessionId: activeSessionId, turnId })
-            setTab('conversation')
-          }}
-          focus={panelFocus}
-          onClose={() => { setPanelOpenPersisted(false); setPanelFocus(null) }}
-        />
-      ) : null}
+      {/* 面板自行处理退场，关闭后卸载内容。会话变化仍重建独立的页签状态。 */}
+      <PanelShell
+        key={activeSessionId ?? 'none'}
+        open={panelOpen}
+        workspaceId={workspaceId}
+        sessionId={activeSessionId}
+        trace={trace}
+        onOpenStep={(turnId) => {
+          // 与「会话地图」的"定位到这一轮"走同一条路径：切回对话并让该轮进入视野。
+          if (activeSessionId === null) return
+          setMapChat(null)
+          setFollowup(null)
+          setFocusTurn({ sessionId: activeSessionId, turnId })
+          setTab('conversation')
+        }}
+        focus={panelFocus?.sessionId === activeSessionId ? panelFocus : null}
+        onClose={() => { setPanelOpenPersisted(false); setPanelFocus(null) }}
+      />
       {paletteOpen ? (
         <CommandPalette
           onClose={() => setPaletteOpen(false)}
@@ -1009,5 +1011,6 @@ export function LiveApp() {
         />
       ) : null}
     </div>
+    </FileLinkContext.Provider>
   )
 }

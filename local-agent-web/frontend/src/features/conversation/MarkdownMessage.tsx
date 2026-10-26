@@ -7,12 +7,15 @@
 // 3. 复制失败要如实说：`navigator.clipboard` 在非安全上下文可能不存在，那时按钮显示"复制失败"，
 //    而不是假装成功（用户会去粘贴一个空内容，还以为是模型的问题）。
 
-import { useState, type ComponentPropsWithoutRef, type ReactNode } from 'react'
-import Markdown from 'react-markdown'
+import { useContext, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react'
+import Markdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
 import { Copy } from '../../components/icons'
 import { copyText } from './clipboard'
+import { FileIcon } from '../panel/fileIcon'
+import { FileLinkContext } from './fileLinkContext'
+import { filePathFromHref } from './fileLinks'
 import styles from './MarkdownMessage.module.css'
 
 /** 把渲染出来的子节点还原成纯文本（代码块复制用）。 */
@@ -115,6 +118,17 @@ function InlineCode({ children, className }: ComponentPropsWithoutRef<'code'>) {
 }
 
 function Link({ children, href, title }: ComponentPropsWithoutRef<'a'>) {
+  const openFile = useContext(FileLinkContext)
+  const path = href ? filePathFromHref(href) : null
+  if (path !== null) {
+    if (!openFile) return <span title={title ?? path}>{children}</span>
+    return <a className={`${styles.link} ${styles.fileLink}`} href={href} title={title ?? `在右侧打开：${path}`}
+      onClick={event => { event.preventDefault(); openFile(path) }}
+      onAuxClick={event => { if (event.button === 1) { event.preventDefault(); openFile(path) } }}>
+      <FileIcon path={path} /><span>{children}</span>
+    </a>
+  }
+  if (!href) return <span>{children}</span>
   // 外链在新标签打开并摘掉 referrer：本页面是没有鉴权的本机页面，不该把地址泄露给目标站点。
   return (
     <a className={styles.link} href={href} title={title} target="_blank" rel="noreferrer noopener">
@@ -138,6 +152,7 @@ export function MarkdownMessage({ text }: { text: string }) {
           呈现形式）。`remark-gfm` 只增加语法解析，不改变上面第 1 条"不解析原始 HTML"的口径。 */}
       <Markdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={(url, key) => key === 'href' && filePathFromHref(url) !== null ? url : defaultUrlTransform(url)}
         components={{ pre: CodeBlock, code: InlineCode, a: Link, img: InertImage }}
       >
         {text}

@@ -103,6 +103,19 @@
   text-decoration: underline;
 }
 
+.fileLink {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  max-width: 100%;
+  vertical-align: baseline;
+  text-decoration: none;
+}
+
+.fileLink:hover > span:last-child { text-decoration: underline; }
+.fileLink > span:first-child { flex-shrink: 0; align-self: center; }
+.fileLink:focus-visible { outline-offset: 3px; border-radius: var(--law-radius-xs); }
+
 .imagePlaceholder {
   color: var(--law-text-secondary);
 }

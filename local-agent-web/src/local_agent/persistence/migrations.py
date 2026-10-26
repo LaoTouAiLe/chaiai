@@ -439,6 +439,21 @@ ALTER TABLE sessions ADD COLUMN origin_turn_id TEXT;
 CREATE INDEX idx_sessions_parent ON sessions (parent_session_id);
 """
 
+_CHAT_V14_TERMINAL_SQL = """
+CREATE TABLE IF NOT EXISTS terminal_audit (
+    approval_id TEXT PRIMARY KEY,
+    terminal_id TEXT,
+    workspace_root TEXT NOT NULL,
+    shell TEXT NOT NULL,
+    permission_mode TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+"""
+
 _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SESSIONS_SQL),
     (2, _CHAT_V2_SQL),
@@ -497,20 +512,7 @@ _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (12, _CHAT_V12_CRON_SQL),
     (13, _CHAT_V13_SIDE_CHAT_SQL),
     # 14（不是 13）：13 上面那条已经用掉了，同号的第二条会被 `_apply` 跳过（见 CHAT_SCHEMA_VERSION 注释）。
-    (14, """
-        CREATE TABLE terminal_audit (
-            approval_id TEXT PRIMARY KEY,
-            terminal_id TEXT,
-            workspace_root TEXT NOT NULL,
-            shell TEXT NOT NULL,
-            permission_mode TEXT NOT NULL,
-            fingerprint TEXT NOT NULL,
-            decision TEXT NOT NULL,
-            status TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-    """),
+    (14, _CHAT_V14_TERMINAL_SQL),
 )
 
 #: 长期库 v3（T52）：给 ``facts`` 与 ``task_conclusions`` 加 ``origin`` 列（架构 §10.3、§16.2）。
@@ -624,6 +626,10 @@ def _apply(
             _apply_vision_columns(connection, target)
             version = target
             continue
+        if script == _CHAT_V14_TERMINAL_SQL:
+            _apply_terminal_audit_v14(connection, target)
+            version = target
+            continue
         if script == _CHAT_V10_CHILDREN_SQL:
             connection.commit()
             try:
@@ -644,6 +650,34 @@ def _apply(
         version = target
     connection.commit()
     return version
+
+
+def _apply_terminal_audit_v14(connection: sqlite3.Connection, target: int) -> None:
+    """接纳已建表但未记 v14 的旧库；校验结构后，与版本登记同事务提交。"""
+    names = (
+        "approval_id", "terminal_id", "workspace_root", "shell", "permission_mode",
+        "fingerprint", "decision", "status", "created_at", "updated_at",
+    )
+    connection.commit()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(_CHAT_V14_TERMINAL_SQL)
+        columns = connection.execute("PRAGMA table_info(terminal_audit)").fetchall()
+        kind = connection.execute(
+            "SELECT type FROM sqlite_master WHERE name='terminal_audit'"
+        ).fetchone()
+        expected = [(name, "TEXT", int(index >= 2), int(index == 0))
+                    for index, name in enumerate(names)]
+        actual = [(row[1], str(row[2]).upper(), row[3], row[5]) for row in columns]
+        if kind is None or kind[0] != "table" or actual != expected:
+            raise sqlite3.DatabaseError("terminal_audit 表结构不兼容，未登记 v14；请先检查数据库")
+        connection.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", (target, _now())
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
 
 
 def _apply_sessions_v9(connection: sqlite3.Connection, script: str, target: int) -> None:

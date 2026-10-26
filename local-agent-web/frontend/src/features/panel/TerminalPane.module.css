@@ -1,10 +1,56 @@
-.pane { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; gap: var(--sp-2); }
-.toolbar { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: center; }
-.toolbar select { min-width: 0; flex: 1; padding: var(--sp-1); color: var(--c-text-1); background: var(--c-panel); border: 1px solid var(--c-line); border-radius: var(--r-control); }
-.note { margin: 0; color: var(--c-text-2); font-size: var(--fs-meta); overflow-wrap: anywhere; }
-.approval { padding: var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-panel); font-size: var(--fs-body); overflow-y: auto; }
-.approval dl { margin-block: var(--sp-3); }
-.approval dt { color: var(--c-text-2); }
-.approval dd { margin: 0 0 var(--sp-2); overflow-wrap: anywhere; font-family: monospace; }
-.screen { display: flex; flex-direction: column; flex: 1; gap: var(--sp-2); min-height: 0; }
-.emulator { flex: 1; min-height: 100px; min-width: 0; overflow: hidden; padding: 4px; background: #16181d; border-radius: var(--r-control); }
+.pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  gap: var(--sp-3);
+  overflow-y: auto;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+}
+
+.toolbar select {
+  min-width: 0;
+  flex: 1;
+  min-height: 32px;
+  padding: var(--sp-1) var(--sp-2);
+  color: var(--c-text-1);
+  background: var(--c-panel);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-control);
+  font: inherit;
+  font-size: var(--fs-body);
+}
+
+.note {
+  margin: 0;
+  color: var(--c-text-2);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  overflow-wrap: anywhere;
+}
+
+.approval {
+  flex-shrink: 0;
+  padding: var(--sp-4);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-overlay);
+  background: var(--c-panel);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+.approval > strong { color: var(--c-text-1); font-size: var(--fs-ui); }
+.approval > p { margin-top: var(--sp-2); color: var(--c-text-2); }
+.approval dl { margin-block: var(--sp-4); }
+.approval dt { margin-bottom: var(--sp-1); color: var(--c-text-3); font-size: var(--fs-meta); }
+.approval dd { margin: 0 0 var(--sp-3); color: var(--c-text-1); overflow-wrap: anywhere; font-family: var(--font-mono-code); }
+.approval > .toolbar { margin-top: var(--sp-4); }
+
+.screen { display: flex; flex-direction: column; flex: 1; gap: var(--sp-2); min-height: 200px; }
+.emulator { flex: 1; min-height: 160px; min-width: 0; overflow: hidden; padding: var(--sp-2); background: #16181d; border-radius: var(--r-control); }

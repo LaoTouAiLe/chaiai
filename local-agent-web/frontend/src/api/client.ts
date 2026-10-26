@@ -147,6 +147,19 @@ export function getSessionSnapshot(sessionId: string): Promise<components['schem
 
 type Schemas = components['schemas']
 
+export type BrowserDto = Schemas['BrowserView']
+export type BrowserInput = Partial<Schemas['BrowserCommand']> & Pick<Schemas['BrowserCommand'], 'action'>
+export type BrowserMessage = Schemas['BrowserFrame'] | Schemas['BrowserStateMessage']
+
+export function createBrowser(requestId: string, workspaceId: string | null): Promise<BrowserDto> {
+  return request('/api/browsers', { method: 'POST', body: JSON.stringify({ request_id: requestId, workspace_id: workspaceId }) })
+}
+
+export async function closeBrowser(requestId: string): Promise<void> {
+  const response = await fetch(`/api/browsers/requests/${encodeURIComponent(requestId)}`, { method: 'DELETE', keepalive: true })
+  if (!response.ok) throw await apiErrorFromResponse(response)
+}
+
 export type TerminalDto = Schemas['TerminalView']
 
 export function listTerminals(workspaceId: string): Promise<Schemas['TerminalList']> {

@@ -16,6 +16,7 @@ from typing import Any, Final
 
 from pydantic import TypeAdapter
 
+from local_agent.application.browser_models import BrowserCommand, BrowserFrame, BrowserStateMessage
 from local_agent.application.events import EventEnvelope
 
 #: 事件联合在 `components.schemas` 里的登记名；前端按这个名字引用。
@@ -37,3 +38,6 @@ def merge_event_schemas(document: dict[str, Any]) -> None:
     schemas = document.setdefault("components", {}).setdefault("schemas", {})
     for name, payload in payloads.items():
         schemas.setdefault(name, payload)
+    # WebSocket 消息同样只维护一份传输契约，供前端生成类型。
+    for model in (BrowserCommand, BrowserFrame, BrowserStateMessage):
+        schemas[model.__name__] = model.model_json_schema(ref_template="#/components/schemas/{model}")

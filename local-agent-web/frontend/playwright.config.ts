@@ -22,6 +22,7 @@ export default defineConfig({
   // 而那是配置错误不是产品缺陷。
   testIgnore: [
     '**/terminal-live.spec.ts',
+    '**/browser-live.spec.ts',
     '**/mcp-live.spec.ts',
     '**/conversation-live.spec.ts',
     '**/conversation-streaming.spec.ts',

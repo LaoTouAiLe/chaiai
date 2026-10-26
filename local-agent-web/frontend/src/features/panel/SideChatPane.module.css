@@ -66,7 +66,7 @@
   padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--c-line);
   border-radius: var(--r-panel);
-  background: var(--c-surface);
+  background: var(--c-canvas);
   color: var(--c-text-1);
   font-family: inherit;
   font-size: var(--fs-chat);
@@ -111,6 +111,25 @@
   line-height: var(--lh-meta);
 }
 
+.err {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+
+.connection, .sendError {
+  flex: 0 0 auto;
+  margin: var(--sp-2) var(--sp-3) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-control);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  overflow-wrap: anywhere;
+}
+.connection { color: var(--c-text-2); background: var(--c-panel); }
+.sendError { color: var(--c-danger); background: var(--c-danger-soft); }
+
 /* ---- 对齐主对话（2026-10-23）-----------------------------------------
    主对话是「外壳带边框 + 输入框透明」（Composer.module.css 的 .input 是 border: 0），
    侧聊原来是「输入框自己带边框」，所以两边看着是两套东西。 */
@@ -119,12 +138,14 @@
   padding: var(--sp-2);
   border: 1px solid var(--c-line);
   border-radius: var(--r-panel);
-  background: var(--c-surface);
+  background: var(--c-canvas);
+  transition: border-color var(--dur-hover-out) ease, box-shadow var(--dur-hover-out) ease;
   align-items: flex-end;
 }
 
 .composer:focus-within {
   border-color: var(--c-accent);
+  box-shadow: 0 0 0 2px var(--c-accent-soft);
 }
 
 .input {

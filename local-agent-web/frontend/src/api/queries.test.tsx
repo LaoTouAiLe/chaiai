@@ -1,32 +1,157 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, renderHook, waitFor } from '@testing-library/react'
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { useResolveApproval, useSubmitMessage } from './queries'
+import { useResolveApproval, useSideChatCreation, useSubmitMessage } from './queries'
 import { ApiError } from './client'
+import { onlineManager } from '@tanstack/react-query'
 
-const mock = vi.hoisted(() => ({ submit: vi.fn(), resolve: vi.fn(), nextId: vi.fn() }))
+const mock = vi.hoisted(() => ({ submit: vi.fn(), resolve: vi.fn(), nextId: vi.fn(), createSideChat: vi.fn() }))
 vi.mock('./client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./client')>()),
   submitMessage: mock.submit,
   resolveApproval: mock.resolve,
   newRequestId: mock.nextId,
+  createSideChat: mock.createSideChat,
 }))
 
-function wrapper({ children }: { children: ReactNode }) {
-  return <QueryClientProvider client={new QueryClient()}>{children}</QueryClientProvider>
+it('attempts local side-chat requests while offline and rejects instead of queuing until reconnect', async () => {
+  onlineManager.setOnline(false)
+  mock.submit.mockRejectedValueOnce(new Error('offline request failed'))
+  const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } })
+  const localWrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  const { result, unmount } = renderHook(() => useSubmitMessage('side', {}, 'always'), { wrapper: localWrapper })
+  try {
+    await act(async () => {
+      await expect(result.current.mutateAsync({ text: 'offline draft' })).rejects.toThrow('offline request failed')
+    })
+    expect(mock.submit).toHaveBeenCalledOnce()
+  } finally {
+    onlineManager.setOnline(true)
+    unmount()
+    client.clear()
+  }
+})
+
+function Wrapper({ children }: { children: ReactNode }) {
+  const [client] = useState(() => new QueryClient())
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>
 }
+const wrapper = Wrapper
 
 beforeEach(() => {
   mock.submit.mockReset()
   mock.resolve.mockReset()
   mock.nextId.mockReset()
+  mock.createSideChat.mockReset()
   let next = 0
   mock.nextId.mockImplementation(() => `req-${String(++next)}`)
 })
 
+describe('side chat creation lifecycle', () => {
+  it('reuses pending and completed creation across pane unmounts until the tab records it', async () => {
+    const client = new QueryClient()
+    const stableWrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    let complete: (value: { session_id: string }) => void = () => {}
+    mock.createSideChat.mockImplementationOnce(() => new Promise(resolve => { complete = resolve }))
+    const first = renderHook(() => useSideChatCreation('main'), { wrapper: stableWrapper })
+    const pending = first.result.current.create('sidechat-1')
+    first.unmount()
+    const second = renderHook(() => useSideChatCreation('main'), { wrapper: stableWrapper })
+    expect(second.result.current.create('sidechat-1')).toBe(pending)
+    complete({ session_id: 'side-1' })
+    await expect(pending).resolves.toBe('side-1')
+    expect(second.result.current.create('sidechat-1')).toBe(pending)
+    expect(mock.createSideChat).toHaveBeenCalledOnce()
+    second.result.current.forget('sidechat-1')
+    mock.createSideChat.mockResolvedValueOnce({ session_id: 'side-2' })
+    await expect(second.result.current.create('sidechat-1')).resolves.toBe('side-2')
+    second.unmount()
+    client.clear()
+  })
+
+  it('allows an explicit retry after creation fails', async () => {
+    mock.createSideChat.mockRejectedValueOnce(new Error('offline'))
+    mock.createSideChat.mockResolvedValueOnce({ session_id: 'side' })
+    const { result } = renderHook(() => useSideChatCreation('main'), { wrapper })
+    await expect(result.current.create('tab-1')).rejects.toThrow('offline')
+    await expect(result.current.create('tab-1')).resolves.toBe('side')
+    expect(mock.createSideChat).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not let a closed creation failure discard a newer creation for that key', async () => {
+    let rejectFirst: (error: Error) => void = () => {}
+    mock.createSideChat.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject }))
+    mock.createSideChat.mockResolvedValueOnce({ session_id: 'new-side' })
+    const { result } = renderHook(() => useSideChatCreation('main'), { wrapper })
+    const first = result.current.create('tab-1').catch(error => error)
+    result.current.forget('tab-1')
+    const second = result.current.create('tab-1')
+    rejectFirst(new Error('late failure'))
+    await first
+    expect(result.current.create('tab-1')).toBe(second)
+    await expect(second).resolves.toBe('new-side')
+    expect(mock.createSideChat).toHaveBeenCalledTimes(2)
+  })
+
+  it('isolates creation by tab and parent session', async () => {
+    mock.createSideChat.mockResolvedValue({ session_id: 'side' })
+    const { result, rerender } = renderHook(({ parent }) => useSideChatCreation(parent), { initialProps: { parent: 'main-a' }, wrapper })
+    await result.current.create('tab-1')
+    await result.current.create('tab-2')
+    rerender({ parent: 'main-b' })
+    await result.current.create('tab-1')
+    expect(mock.createSideChat.mock.calls).toEqual([['main-a'], ['main-a'], ['main-b']])
+  })
+})
+
 describe('useSubmitMessage session boundary', () => {
+  it('keeps an uncertain request key and context after unmounting the sending pane', async () => {
+    const client = new QueryClient()
+    const stableWrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    let rejectFirst: (error: Error) => void = () => {}
+    mock.submit.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject }))
+    const first = renderHook(() => useSubmitMessage('side', { expected_snapshot_id: 'cp1' }), { wrapper: stableWrapper })
+    let submitted: Promise<unknown>
+    act(() => { submitted = first.result.current.mutateAsync({ text: '同一次请求' }).catch(error => error) })
+    await waitFor(() => expect(mock.submit).toHaveBeenCalledOnce())
+    first.unmount()
+    await act(async () => { rejectFirst(new Error('response lost')); await submitted })
+    mock.submit.mockResolvedValue({ status: 'completed' })
+    const second = renderHook(() => useSubmitMessage('side', { expected_snapshot_id: 'cp2' }), { wrapper: stableWrapper })
+    await act(async () => { await second.result.current.mutateAsync({ text: '同一次请求' }) })
+    expect(mock.submit.mock.calls[1]?.slice(2)).toEqual(['req-1', { expected_snapshot_id: 'cp1' }])
+    await act(async () => { await second.result.current.mutateAsync({ text: '同一次请求' }) })
+    expect(mock.submit.mock.calls[2]?.[2]).toBe('req-2')
+    second.unmount()
+    client.clear()
+  })
+
+  it('does not share uncertain requests between QueryClients', async () => {
+    mock.submit.mockRejectedValue(new Error('response lost'))
+    const first = renderHook(() => useSubmitMessage('side'), { wrapper })
+    await act(async () => { await expect(first.result.current.mutateAsync({ text: '同样文字' })).rejects.toThrow() })
+    first.unmount()
+    const second = renderHook(() => useSubmitMessage('side'), { wrapper })
+    await act(async () => { await expect(second.result.current.mutateAsync({ text: '同样文字' })).rejects.toThrow() })
+    expect(mock.submit.mock.calls.map(call => call[2])).toEqual(['req-1', 'req-2'])
+  })
+
+  it('does not clear a newer message retry key when an older response arrives late', async () => {
+    let completeFirst: (value: unknown) => void = () => {}
+    mock.submit.mockImplementationOnce(() => new Promise(resolve => { completeFirst = resolve }))
+    mock.submit.mockRejectedValue(new Error('response lost'))
+    const { result } = renderHook(() => useSubmitMessage('side'), { wrapper })
+    let first: Promise<unknown>
+    act(() => { first = result.current.mutateAsync({ text: '旧消息' }) })
+    await waitFor(() => expect(mock.submit).toHaveBeenCalledOnce())
+    await act(async () => { await expect(result.current.mutateAsync({ text: '新消息' })).rejects.toThrow() })
+    await act(async () => { completeFirst({ status: 'completed' }); await first })
+    await act(async () => { await expect(result.current.mutateAsync({ text: '新消息' })).rejects.toThrow() })
+    expect(mock.submit.mock.calls.map(call => call[2])).toEqual(['req-1', 'req-2', 'req-2'])
+  })
+
   it('binds workflow parameters to the retry key and assigns a new key after editing the scope', async () => {
     mock.submit.mockRejectedValue(new Error('network interrupted'))
     const { result, rerender } = renderHook(({ pattern }) => useSubmitMessage('s1', {

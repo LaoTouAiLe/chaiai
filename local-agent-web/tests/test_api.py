@@ -2325,6 +2325,8 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/sessions/{session_id}/changes/diff",
         # v0.6 T62：任务中心（只读索引，不读会话 Checkpoint，§17.6）
         "/api/tasks",
+        # 需要人工核对的任务：终局由人来写（不自动重跑）。
+        "/api/tasks/{job_id}/review",
         # §21.5：定时任务管理、立即运行与运行记录。
         "/api/cron/jobs",
         "/api/cron/jobs/{job_id}",
@@ -2335,11 +2337,17 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/terminals/requests",
         "/api/terminals/requests/{approval_id}/decision",
         "/api/terminals/{terminal_id}",
+        "/api/browsers",
+        "/api/browsers/{browser_id}",
+        "/api/browsers/requests/{request_id}",
         "/api/sessions/{session_id}/archive",
         "/api/sessions/{session_id}/restore",
         "/api/sessions/{session_id}/events",
         "/api/sessions/{session_id}/messages",
         "/api/sessions/{session_id}/conversation-map",
+        # 侧聊：长在某一轮上的短对话，以及把它提升成正式会话。
+        "/api/sessions/{session_id}/side-chats",
+        "/api/sessions/{session_id}/promote",
         "/api/sessions/{session_id}/turns/{turn_id}",
         "/api/sessions/{session_id}/branches/{branch_id}",
         "/api/sessions/{session_id}/branches/{branch_id}/select",

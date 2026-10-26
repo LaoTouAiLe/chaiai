@@ -19,6 +19,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
+from local_agent.api.browsers import build_browser_router
 from local_agent.api.container import ApiRuntime
 from local_agent.api.routes import build_router, status_for_code
 from local_agent.api.schema_extras import merge_event_schemas
@@ -26,6 +27,7 @@ from local_agent.api.security import LocalBoundaryMiddleware
 from local_agent.api.sse import build_events_router
 from local_agent.api.static import mount_frontend
 from local_agent.api.terminals import build_terminal_router
+from local_agent.application.browsers import BrowserManager
 from local_agent.application.cron import CronScheduler
 from local_agent.application.errors import ApplicationError
 
@@ -61,6 +63,7 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
     # 定时任务的调度线程随应用启停（§21.5）。**不**放在 ApplicationService 构造里：
     # 每个测试都会新建 service，那样每建一个就泄漏一个后台线程。
     scheduler = CronScheduler(runtime.service)
+    browsers = BrowserManager(runtime.service)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -69,10 +72,14 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
         try:
             scheduler.start()
             terminals.start()
+            browsers.start()
             yield
         finally:
             try:
-                terminals.close()
+                try:
+                    browsers.close()
+                finally:
+                    terminals.close()
             finally:
                 scheduler.stop()
                 runtime.service.cron_scheduler = None
@@ -125,6 +132,8 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
     app.include_router(build_router(runtime))
     app.include_router(build_events_router(runtime))
     app.include_router(build_terminal_router(runtime))
+    app.include_router(build_browser_router(browsers))
+    app.state.browsers = browsers
     mount_frontend(app, runtime.static_dir)
 
     # SSE 事件面不在路由的 `response_model` 里，但在**装配点**补进文档：这样真实服务的
