@@ -76,16 +76,42 @@ def test_finished_child_tasks_survive_reopen_without_model_or_tool_replay(tmp_pa
         reopened.connection.close()
 
 
+def _seed_legacy_session(connection, root, *, kind: str = "interactive") -> str:
+    """在**旧版本**库上直接插一行会话，返回它的 id。
+
+    为什么不用 `SessionStore`：它的 INSERT / SELECT 都按**当前** schema 写，包含
+    `parent_session_id`（v13 才加）这类列，在 v9 的库上必然报 `no column named ...`。
+    这几条用例的前提恰恰是"库还停在旧版本"，所以只能裸 SQL，并且事后用同样的裸查询比对。
+    """
+    stamp = "2026-10-01T00:00:00+00:00"
+    connection.execute(
+        "INSERT INTO sessions (session_id, thread_id, title, workspace_root, project_id,"
+        " created_at, updated_at, status, mode, archived, kind)"
+        " VALUES ('s-legacy', 't-legacy', '旧会话', ?, 'p-legacy', ?, ?, 'idle', 'agent', 0, ?)",
+        (str(root), stamp, stamp, kind),
+    )
+    connection.commit()
+    return "s-legacy"
+
+
+def _legacy_rows(connection) -> list[tuple]:
+    """旧库里那几列的快照：迁移只该加列，不该动这些值。"""
+    return connection.execute(
+        "SELECT session_id, thread_id, title, status, mode, archived, kind FROM sessions"
+        " ORDER BY session_id"
+    ).fetchall()
+
+
 @pytest.mark.parametrize("foreign_keys", [0, 1])
 def test_v10_identity_index_migration_preserves_v9_rows_and_is_idempotent(tmp_path, foreign_keys):
     connection = sqlite3.connect(tmp_path / "old.sqlite")
     try:
         connection.execute(f"PRAGMA foreign_keys={foreign_keys}")
         assert migrations._apply(connection, migrations._CHAT_MIGRATIONS[:9]) == 9
-        from local_agent.persistence.session_store import SessionStore
-        sessions = SessionStore(connection, workspace_root=tmp_path)
-        session = sessions.create(kind="subagent")
-        old_job = JobStore(connection).create(session_id=session.session_id)
+        # 用裸 SQL 造这一行（原因见 helper 注释），并留一份"迁移前"的快照。
+        session_id = _seed_legacy_session(connection, tmp_path, kind="subagent")
+        before = _legacy_rows(connection)
+        old_job = JobStore(connection).create(session_id=session_id)
         # 断言"升到最新"而不是某个具体版本号：这条测的是 v10 迁移的可重复性，
         # 写死 10 会在每次新增迁移（如 v12 定时任务）时误报。
         assert migrations.apply_migrations(connection) == migrations.apply_migrations(connection) == migrations.CHAT_SCHEMA_VERSION
@@ -93,7 +119,7 @@ def test_v10_identity_index_migration_preserves_v9_rows_and_is_idempotent(tmp_pa
         store.link_children(old_job.job_id, "run", ["run:child:1", "run:child:2"])
         store.link_children(old_job.job_id, "run", ["run:child:1", "run:child:2"])
         assert store.child_links(old_job.job_id) == [("run", "run:child:1"), ("run", "run:child:2")]
-        assert sessions.get(session.session_id) == session and store.get(old_job.job_id) == old_job
+        assert _legacy_rows(connection) == before and store.get(old_job.job_id) == old_job
         with pytest.raises(JobStoreError):
             store.link_children(old_job.job_id, "other", ["other:child:1"])
         assert not connection.execute("PRAGMA foreign_key_check").fetchall()
@@ -244,7 +270,8 @@ def test_v10_failure_rolls_back_table_index_and_version(tmp_path):
         assert not connection.execute("SELECT name FROM sqlite_master WHERE name='job_children_run'").fetchall()
         connection.execute("DROP TRIGGER fail_v10")
         connection.commit()
-        assert migrations.apply_migrations(connection) == 10
+        # 断言"升到最新"而不是写死 10：后续每加一条迁移（12 定时任务、14 终端审计）都会让写死值误报。
+        assert migrations.apply_migrations(connection) == migrations.CHAT_SCHEMA_VERSION
     finally:
         connection.close()
 

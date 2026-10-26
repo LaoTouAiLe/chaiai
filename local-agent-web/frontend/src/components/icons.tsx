@@ -115,6 +115,26 @@ export function Copy({ size = 12 }: IconProps) {
   )
 }
 
+/**
+ * 引用一段内容继续追问（2026-10-26）。
+ *
+ * 用一对引号而不是对话气泡：气泡已经表示"消息"，引号表示"把这段拎出来"，两个概念不能混。
+ */
+export function Quote({ size = 12 }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <path
+        d="M5.1 2.6C3.4 3.4 2.4 4.7 2.4 6.2c0 1.3.8 2.2 1.9 2.2 1 0 1.7-.6 1.7-1.5 0-.8-.6-1.4-1.3-1.4-.2 0-.4 0-.5.1.3-.7.9-1.3 1.8-1.8l-.9-1.2Z"
+        fill="currentColor"
+      />
+      <path
+        d="M9.8 2.6C8.1 3.4 7.1 4.7 7.1 6.2c0 1.3.8 2.2 1.9 2.2 1 0 1.7-.6 1.7-1.5 0-.8-.6-1.4-1.3-1.4-.2 0-.4 0-.5.1.3-.7.9-1.3 1.8-1.8l-.9-1.2Z"
+        fill="currentColor"
+      />
+    </svg>
+  )
+}
+
 export function Pencil({ size = 12 }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 12 12" aria-hidden="true" focusable="false">

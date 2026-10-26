@@ -13,6 +13,7 @@ import { PlanStrip } from '../features/plan/PlanStrip'
 import { ModelMenu } from '../features/settings/ModelMenu'
 import { useGeneralPreferences } from '../features/settings/preferencesContext'
 import { ContextMeter, MeterPanel } from './ContextMeter'
+import { quotePreview } from '../features/conversation/quote'
 import { ImagePlus } from './icons'
 import styles from './Composer.module.css'
 
@@ -50,6 +51,14 @@ export interface ComposerActions {
    * 回读多一次往返、还得处理"刚传完就刷新"的时序。字节的权威仍在服务端，这里只是缩略图。
    */
   onAttachFile?: (file: File) => Promise<{ id: string; previewUrl: string }>
+  /**
+   * 待发的引用（2026-10-26，追问）。由宿主持有：发送时由它拼进正文，清空也在它那边。
+   *
+   * 这里只负责**显示与取消**：输入框上方一条单行引用，超出用省略号。省略即没有引用条
+   * （原型与侧边对话不受影响）。
+   */
+  quote?: string | null
+  onClearQuote?: () => void
   /** Whether sending is possible right now: non-empty draft and no turn in flight. */
   canSend: boolean
   /** Real shell only: the model chip opens or closes the session selector. */
@@ -122,6 +131,8 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
   const [pending, setPending] = useState<readonly PendingAttachment[]>([])
   const [attachError, setAttachError] = useState<string | null>(null)
   const [attachBusy, setAttachBusy] = useState(false)
+  // 待发引用（2026-10-26）：状态在宿主（它负责拼进正文），这里只用来显示与取消。
+  const quote = actions?.quote ?? ''
 
   /** 粘贴与选图走**同一条路**：两者都只是"拿到若干 File"，处理方式必须一样。 */
   async function attachFiles(files: readonly File[]) {
@@ -220,6 +231,23 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                   </li>
                 ))}
               </ul>
+            )}
+            {/* 待发引用（2026-10-26，追问）：只留一条，再点追问会替换掉上一条（引用是"当前
+                在问的那段"，不是收件箱，排队反而让用户分不清自己在问哪段）。 */}
+            {quote === '' ? null : (
+              <div className={styles.quote} role="note" aria-label="引用内容">
+                <span className={styles.quoteMark} aria-hidden="true">“</span>
+                <span className={styles.quoteText}>{quotePreview(quote)}</span>
+                <button
+                  type="button"
+                  className={styles.quoteRemove}
+                  aria-label="取消引用"
+                  title="取消引用"
+                  onClick={actions?.onClearQuote}
+                >
+                  ×
+                </button>
+              </div>
             )}
             {phase === null ? null : (
               <div className={styles.phase} role="status">

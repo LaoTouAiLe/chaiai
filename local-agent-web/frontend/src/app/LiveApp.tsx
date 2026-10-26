@@ -18,6 +18,7 @@ import { Sidebar } from '../components/Sidebar'
 import { TopBar } from '../components/TopBar'
 import { Conversation } from '../features/conversation/Conversation'
 import { FileLinkContext } from '../features/conversation/fileLinkContext'
+import { composeQuotedMessage } from '../features/conversation/quote'
 import { WorkflowStatus } from '../features/workflow/WorkflowStatus'
 import { mapWorkflow } from '../features/workflow/adapters'
 import { toolLabel } from '../features/tool/display'
@@ -156,6 +157,13 @@ export function LiveApp() {
   } | null>(null)
   const [mapChat, setMapChat] = useState<{ sessionId: string; turnId: string } | null>(null)
   const [focusTurn, setFocusTurn] = useState<{ sessionId: string; turnId: string } | null>(null)
+  /**
+   * 待发引用（2026-10-26，追问）：点轮尾追问或拖选正文得到的一段文字。
+   *
+   * 只留一条、按会话不隔离——它是一次性的输入附属物，切换会话时清掉（见下面的 effect），
+   * 免得把一个会话的引用带到另一个会话去。
+   */
+  const [quote, setQuote] = useState<string | null>(null)
   // 工具行的展开态：**纯界面状态**，不来自快照。T32 的结构化 diff 就在展开后才可见
   // （`ToolRow` 收起时只有一行摘要），所以真会话必须能让用户按需展开。
   const [expandedTools, setExpandedTools] = useState<ReadonlySet<string>>(() => new Set())
@@ -266,6 +274,8 @@ export function LiveApp() {
   useEffect(() => { setRecoveryConfirm(false) }, [activeSessionId, snapshot?.snapshot_id, snapshot?.interrupted_request_id])
   // 切换会话时清掉"正在对比的文件"：那是上一个会话的路径，留着会让右栏显示别人的文件名。
   useEffect(() => { setChangesPath(null) }, [activeSessionId])
+  // 同理清掉待发引用（2026-10-26）：它指向的是**上一个会话**里的某段回答。
+  useEffect(() => { setQuote(null) }, [activeSessionId])
   const failedWithoutDetail = snapshot?.session_state === 'failed' && (snapshot.errors ?? []).length === 0
 
   // 审批卡直接由快照派生：**刷新恢复不需要任何额外机制**——快照本来就由 Checkpoint 投影，
@@ -490,16 +500,25 @@ export function LiveApp() {
     // 返回 false = **这次提交没有被接受**（没有发请求）。调用方据此保留待发图片，
     // 不能先清队列再问——2026-10-20 实测过"文字还在、图片没了"。
     if (activeSessionId === null || (draft.trim() === '' && attachmentIds.length === 0) || running || awaitingApproval || interrupted || submit.isPending || createSession.isPending || setSessionMode.isPending) return false
-    const text = draft
+    // 引用拼进正文（2026-10-26）：它落在**当前这条用户消息**里，前面的历史前缀一字不变，
+    // 因此不影响提示缓存的命中；代价是它此后成为历史的一部分、每轮都带着（见 quote.ts）。
+    const text = composeQuotedMessage(quote, draft)
+    const sentDraft = draft
+    const sentQuote = quote
     // 先清草稿：提交的幂等键重试由用户发起（见 queries.ts），草稿不该在失败后被吞掉，
     // 但也不该在成功后又发一遍——所以这里清掉，失败时用户可以重新输入。
     setDraft(activeSessionId, '')
+    setQuote(null)
     submit.mutate({ text, attachments: attachmentIds }, {
       onSuccess: () => { setFollowup(null); setFocusTurn(null) },
       onError: () => {
         // 服务端可能先进入待审批，或另一页面抢先提交。只有用户尚未写新草稿时才恢复原文；
         // 绝不拿旧请求覆盖用户在执行期间刚写的内容。
-        if ((useUiStore.getState().drafts[activeSessionId] ?? '') === '') setDraft(activeSessionId, text)
+        // 恢复的是**原草稿与原引用**，不是拼好的正文——否则引用块会被塞回输入框里。
+        if ((useUiStore.getState().drafts[activeSessionId] ?? '') === '') {
+          setDraft(activeSessionId, sentDraft)
+          setQuote(sentQuote)
+        }
       },
     })
     return true
@@ -586,6 +605,9 @@ export function LiveApp() {
         if (activeSessionId !== null) setDraft(activeSessionId, text)
       },
       onSend: send,
+      // 待发引用（2026-10-26）：宿主拼进正文、宿主清空；Composer 只负责显示那一行。
+      quote,
+      onClearQuote: () => setQuote(null),
       // 图片入口（2026-10-16）：粘贴与选图都走这一条（Composer 负责排队，LiveApp 只负责上传）。
       onAttachFile: attachFile,
       onToggleModelMenu: () => {
@@ -902,6 +924,8 @@ export function LiveApp() {
         ) : (
           <Conversation scenario={displayScenario} autoFollow onToggleTool={toggleTool} errorActions={errorActions}
             onDetachCommand={detachRunningCommand}
+            // 追问（2026-10-26）：轮尾按钮与拖选浮层都只交出文本，怎么带进消息由宿主决定。
+            onQuote={setQuote}
             focusTurnId={focusTurn?.sessionId === activeSessionId ? focusTurn.turnId : null}
             // 每轮末尾的改动摘要（2026-10-21）：它是对话流里的一条，不占固定空间。
             renderTurnChanges={(turnId) => (

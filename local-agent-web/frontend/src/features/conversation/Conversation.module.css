@@ -279,6 +279,37 @@
   color: var(--law-text-primary);
 }
 
+/* 拖选浮层（2026-10-26）：跟随选区，用视口坐标定位——滚动时收起而不是重算，见组件的滚动监听。 */
+.selectionBar {
+  position: fixed;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  transform: translate(-50%, -100%);
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-sm);
+  background: var(--law-bg-layer-1);
+  box-shadow: var(--law-shadow-lv2);
+}
+
+.selectionAction {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--law-radius-sm);
+  color: var(--law-text-tertiary);
+  transition: background var(--law-duration-fast) var(--law-ease);
+}
+
+.selectionAction:hover {
+  background: var(--law-hover-solid);
+  color: var(--law-text-primary);
+}
+
 .assistantTime {
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);

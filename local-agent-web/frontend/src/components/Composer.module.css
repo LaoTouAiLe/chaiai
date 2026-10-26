@@ -273,6 +273,47 @@
 
 /* 待发图片（2026-10-16）：粘贴或选图之后排在输入框上方，发送前可逐张移除。
    缩略图用**本地** object URL，字节的权威在服务端（这里只是预览）。 */
+/* 待发引用（2026-10-26，追问）：单行、超出省略——引用可能是整条回答，摆成多行会挤掉输入区。 */
+.quote {
+  display: flex;
+  align-items: center;
+  gap: var(--law-space-sm);
+  margin: 0 0 var(--law-space-sm);
+  padding: var(--law-space-xs) var(--law-space-md);
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-sm);
+  background: var(--law-bg-layer-1);
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+}
+
+.quoteMark {
+  flex: 0 0 auto;
+  color: var(--law-text-tertiary);
+}
+
+.quoteText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quoteRemove {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--law-radius-sm);
+  color: var(--law-text-tertiary);
+}
+
+.quoteRemove:hover {
+  background: var(--law-hover-solid);
+  color: var(--law-text-primary);
+}
+
 .attachments {
   display: flex;
   align-items: center;

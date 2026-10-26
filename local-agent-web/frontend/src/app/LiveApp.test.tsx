@@ -169,6 +169,15 @@ vi.mock('../api/queries', () => ({
   // §17.4 的停止：运行中的主按钮换成它。默认"没有在跑"，所以绝大多数用例照旧看到发送按钮。
   useCancelTask: () => ({ mutate: mock.cancelMutate, isPending: mock.cancelPending,
     isError: mock.cancelError !== null, error: mock.cancelError }),
+  // 需要人工核对的任务：终局由人写（`POST /tasks/{id}/review`）。这个夹具里没有待核对任务，
+  // 只需要存在——缺了它整个 describe 块都会因为 "No export defined" 而全红。
+  useCloseTaskReview: () => ({ mutate: vi.fn(), isPending: false, isError: false, error: null }),
+  // 右栏 PanelShell 会直接 import 这几个（侧聊创建、文件树、文件搜索、产物详情）：
+  // 桩必须存在，否则整个用例块在模块求值阶段就因 "No export defined" 全红。
+  useSideChatCreation: () => ({ create: () => Promise.resolve('side'), forget: vi.fn() }),
+  useWorkspaceFiles: () => ({ data: undefined, isLoading: false, isError: false }),
+  useSearchWorkspaceFiles: () => ({ data: undefined, isLoading: false, isError: false }),
+  useArtifactsDetail: () => ({ data: undefined, isLoading: false, isError: false }),
   useSelectWorkspace: () => ({ mutate: mock.workspaceMutate }),
   usePickWorkspaceDirectory: () => ({ mutate: mock.pickMutate, isPending: false, error: null }),
   useSubmitMessage: () => ({ mutate: mock.mutate, isPending: false, isError: false, reset: mock.submitReset }),
@@ -463,6 +472,26 @@ describe('LiveApp pending approval', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
     expect(useUiStore.getState().drafts.s1).toBe('执行期间的新草稿')
+  })
+
+  it('sends the quoted answer as a Markdown quote and clears the quote row', () => {
+    mock.sessionState = 'idle'
+    mock.messages = [
+      { message_id: 'u1', kind: 'user', created_at: '2026-10-26T00:00:00Z', text: '这段怎么理解' },
+      { message_id: 'a1', kind: 'assistant', created_at: '2026-10-26T00:00:01Z',
+        text: '第一段回答\n\n第二段回答', complete: true },
+    ]
+    renderApp()
+
+    fireEvent.click(screen.getByRole('button', { name: '追问' }))
+    expect(screen.getByRole('note', { name: '引用内容' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+    const payload = mock.mutate.mock.calls[0]?.[0] as { text: string }
+    // 引用是 Markdown 引用块（空行写成 `>`，否则引用块会被空行截断），问题跟在后面空一行。
+    expect(payload.text).toBe('> 第一段回答\n>\n> 第二段回答\n\n保留这段草稿')
+    // 发出后引用条消失：它是这条消息的一部分，不是常驻状态。
+    expect(screen.queryByRole('note', { name: '引用内容' })).not.toBeInTheDocument()
   })
 
   it('selects a session model with both observed and target versions', () => {

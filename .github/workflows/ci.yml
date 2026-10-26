@@ -2,11 +2,11 @@
 #
 # 三个 job 各自独立，任何一个红都不阻塞另外两个——但合并前要求全绿：
 #   1. backend  ：后端 pytest（Windows 跑，因为写侧沙箱与命令相关用例只对 Windows 有意义）
-#   2. frontend ：前端类型检查 + lint + 生产构建
+#   2. frontend ：前端类型检查 + lint + 单测 + 生产构建
 #   3. secrets  ：密钥扫描（规则见仓库根的 .gitleaks.toml）
 #
-# **前端单测（vitest）暂时没进 CI**：本地在无头环境里跑 `vitest run` 会挂起（只打出 RUN 横幅后不动），
-# 原因未查清。等能在 CI 里稳定跑起来再加，不要先加一条会常态红的检查。
+# 前端单测（vitest）已进 CI（2026-10-26）：之前那次"挂起"是本地执行环境把进程判成常驻服务，
+# 不是 vitest 本身的问题——`vitest run` 在无头环境里 26 秒跑完 587 条。
 
 name: CI
 
@@ -77,6 +77,9 @@ jobs:
 
       - name: lint
         run: npx eslint .
+
+      - name: 单元测试
+        run: npm test
 
       - name: 生产构建（确认产物能打出来）
         run: npm run build

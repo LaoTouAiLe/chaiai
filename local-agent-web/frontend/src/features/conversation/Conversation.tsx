@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 
 import { ConversationRail } from './ConversationRail'
 import type { RailQuestion } from './ConversationRail'
-import { Bulb, Pencil } from '../../components/icons'
+import { Bulb, Pencil, Quote as QuoteIcon } from '../../components/icons'
 import { ScrollToBottom } from '../../components/ScrollToBottom'
 import { IconCopyButton, MarkdownMessage } from './MarkdownMessage'
 import { splitSideChatPrompt } from './sideChat'
@@ -48,6 +48,12 @@ interface ConversationProps {
   renderTurnChanges?: (turnId: string) => ReactNode
   /** 把正在跑的命令转入后台（2026-10-21）。省略即原型行为：行上没有这个按钮。 */
   onDetachCommand?: (commandId: string) => Promise<boolean>
+  /**
+   * 引用一段回答继续追问（2026-10-26）。省略即原型态：轮尾没有「追问」按钮、拖选也不浮按钮。
+   *
+   * 只传文本，不传"这是哪条消息"：引用最终会拼进用户消息正文，界面与契约都不需要区分来源。
+   */
+  onQuote?: (text: string) => void
 }
 
 export interface ErrorActions {
@@ -229,7 +235,9 @@ function AssistantMessage({ text, at, reasoning, reasoningTruncated, reasoningRu
       {reasoning ? <ReasoningRow text={reasoning} running={reasoningRunning ?? false} truncated={reasoningTruncated} /> : null}
       {/* 正文按 Markdown 渲染（T30）：**不**解析原始 HTML，代码块自带复制。
           用 div 而不是 p：Markdown 会输出自己的块级元素，p 里嵌 p 是非法结构。 */}
-      {text !== '' ? <div className={styles.assistantText} data-streaming={streaming || undefined}>
+      {/* `data-quotable`（2026-10-26）：拖选浮层只认这个标记内的选区——工具行、来源列表里
+          选中的文字不属于"回答正文"，不该弹出追问。 */}
+      {text !== '' ? <div className={styles.assistantText} data-streaming={streaming || undefined} data-quotable>
         <MarkdownMessage text={text} />
       </div> : null}
       {/* 复制按钮已上移到"每轮一组"（`TurnActions`）：原来每个助手段落各一个，一轮下来七八个
@@ -511,13 +519,67 @@ function ToolGroup({
 }
 
 /** 每轮**一组**操作按钮（不再每个助手段落一个）。整轮没有正文时不渲染。 */
-function TurnActions({ text }: { text: string }) {
+function TurnActions({ text, onQuote }: { text: string; onQuote?: (text: string) => void }) {
   if (text.trim() === '') return null
   return (
     <div className={styles.actions}>
       <IconCopyButton text={text} className={styles.action} />
+      {onQuote === undefined ? null : (
+        <button
+          type="button"
+          className={styles.action}
+          title="引用这段回答继续追问"
+          aria-label="追问"
+          onClick={() => onQuote(text)}
+        >
+          <QuoteIcon />
+        </button>
+      )}
     </div>
   )
+}
+
+/** 拖选正文后浮出的小工具条：复制这段、引用这段继续追问。 */
+function SelectionBar({ picked, onQuote, onDismiss }: {
+  picked: PickedSelection
+  onQuote: (text: string) => void
+  onDismiss: () => void
+}) {
+  return (
+    <div
+      className={styles.selectionBar}
+      style={{ left: picked.x, top: picked.y }}
+      role="toolbar"
+      aria-label="选中内容的操作"
+      data-quote-bar
+      // 按住时不要清掉选区：按钮的 click 依赖浏览器还没把选区收起（虽然文案已经先存了一份）。
+      onMouseDown={(event) => event.preventDefault()}
+    >
+      <IconCopyButton text={picked.text} className={styles.selectionAction} />
+      <button
+        type="button"
+        className={styles.selectionAction}
+        title="引用这段内容继续追问"
+        // 与轮尾那个「追问」分开命名：两个入口引用范围不同（整条回答 / 选中片段），
+        // 读屏与测试都不该拿到两个同名按钮。
+        aria-label="引用这段追问"
+        onClick={() => {
+          onQuote(picked.text)
+          onDismiss()
+        }}
+      >
+        <QuoteIcon />
+      </button>
+    </div>
+  )
+}
+
+/** 一次拖选的快照：文本在选中当时就固定下来，后续选区被浏览器收起也不影响。 */
+interface PickedSelection {
+  text: string
+  /** 视口坐标：浮层是 `position: fixed`，跟着选区走，不跟文档走。 */
+  x: number
+  y: number
 }
 
 /**
@@ -565,11 +627,13 @@ function EmptyArt() {
  * Loading and empty replace the flow rather than sitting above it: a skeleton
  * next to real messages would claim both are the same kind of thing.
  */
-export function Conversation({ scenario, autoFollow = false, onToggleTool, focusTurnId, errorActions, onEditMessage, renderTurnChanges, onDetachCommand }: ConversationProps) {
+export function Conversation({ scenario, autoFollow = false, onToggleTool, focusTurnId, errorActions, onEditMessage, renderTurnChanges, onDetachCommand, onQuote }: ConversationProps) {
   const loading = scenario.loading ?? null
   const empty = scenario.empty ?? null
   const scrollRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
+  /** 一次拖选的快照（2026-10-26）：文本在选中当时就固定下来，之后选区被浏览器收起也不影响。 */
+  const [picked, setPicked] = useState<PickedSelection | null>(null)
   const turnStats = new Map((scenario.turnStats ?? []).map((item) => [item.afterMessageId, item.stats]))
   const turns = useMemo(
     () => (loading === null && empty === null ? partitionTurns(scenario.messages) : []),
@@ -585,6 +649,47 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
       label: text !== '' ? text : (first.attachments?.length ?? 0) > 0 ? '图片消息' : '空消息',
     }]
   }), [turns])
+
+  // 追问的选区浮层（2026-10-26）。监听挂在 document 上而不是滚动容器上：拖到容器外再松手
+  // 也该出按钮，而那种 `mouseup` 只有 document 一定收得到。
+  useEffect(() => {
+    if (onQuote === undefined) return
+    const dismiss = () => setPicked(null)
+    const onMouseUp = (event: MouseEvent) => {
+      // 点在浮层自己身上：交给它自己的 onClick，别在这里先把状态清掉。
+      const target = event.target instanceof Element ? event.target : null
+      if (target?.closest('[data-quote-bar]') != null) return
+      const selection = window.getSelection()
+      const text = selection?.toString().trim() ?? ''
+      if (selection === null || text === '' || selection.rangeCount === 0) {
+        dismiss()
+        return
+      }
+      const range = selection.getRangeAt(0)
+      const anchor = range.commonAncestorContainer
+      const element = anchor.nodeType === Node.ELEMENT_NODE
+        ? (anchor as Element)
+        : anchor.parentElement
+      // 只认回答正文：工具行、来源列表里选中的文字不属于"这段回答"。
+      if (element === null || element.closest('[data-quotable]') === null) {
+        dismiss()
+        return
+      }
+      const rect = range.getBoundingClientRect()
+      if (rect.width === 0 && rect.height === 0) {
+        dismiss()
+        return
+      }
+      setPicked({ text, x: rect.left + rect.width / 2, y: rect.top - 8 })
+    }
+    document.addEventListener('mouseup', onMouseUp)
+    // 浮层用的是视口坐标：一滚动就会停在错的位置，所以直接收起，不追着选区重算。
+    window.addEventListener('scroll', dismiss, true)
+    return () => {
+      document.removeEventListener('mouseup', onMouseUp)
+      window.removeEventListener('scroll', dismiss, true)
+    }
+  }, [onQuote])
 
   useEffect(() => {
     if (autoFollow) followRef.current = true
@@ -726,7 +831,7 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
                   {stats === undefined && turn.answerParts.join('').trim() === '' ? null : (
                     <div className={styles.footer}>
                       {stats === undefined ? <span /> : <TurnStats stats={stats} />}
-                      <TurnActions text={turn.answerParts.join('\n\n')} />
+                      <TurnActions text={turn.answerParts.join('\n\n')} onQuote={onQuote} />
                     </div>
                   )}
                 </div>
@@ -746,6 +851,16 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
     {/* 「滑到最底」（2026-10-21）：往上翻历史之后，一键回到最新一轮。
         与自动跟随（`followRef`）不冲突——点它滚到底时 onScroll 会把跟随重新打开。 */}
     <ScrollToBottom paneRef={scrollRef} resetKey={scenario.sessionId ?? scenario.id} offsetBottom={14} />
+    {picked === null || onQuote === undefined ? null : (
+      <SelectionBar
+        picked={picked}
+        onQuote={onQuote}
+        onDismiss={() => {
+          setPicked(null)
+          window.getSelection()?.removeAllRanges()
+        }}
+      />
+    )}
     </div>
   )
 }

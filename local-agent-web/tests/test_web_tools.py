@@ -976,3 +976,18 @@ def test_keeps_search_snippet_when_prefetch_fails() -> None:
 
     assert [hit.snippet for hit in result.results] == ["搜索摘要一", "搜索摘要二"]
     assert result.note is None or "已预抓取" not in result.note
+
+
+def test_html_backend_rejects_domain_filter_instead_of_ignoring_it() -> None:
+    """HTML 兼容后端不保证站内筛选：实测 Bing 直接忽略 `site:`（2026-10-26）。
+
+    悄悄拼进 query 会让调用方以为筛选生效，实际拿到的是泛结果——所以与 `time_range` 同一口径，
+    显式拒绝并给替代方案。
+    """
+    html = '<li class="b_algo"><h2><a href="https://example.com/">test</a></h2></li>'
+    with pytest.raises(web_tools.WebAccessError, match="站内筛选"):
+        web_tools.search(
+            "test", config=WebAccessConfig(provider="bing_html"),
+            transport=lambda url, *_: web_tools.WebResponse(url, 200, "text/html", html),
+            domains=["example.com"],
+        )

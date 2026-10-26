@@ -137,6 +137,40 @@ describe('Composer input state', () => {
   })
 })
 
+describe('Composer 追问引用（2026-10-26）', () => {
+  function renderQuoted(quote: string | null, onClearQuote = vi.fn()) {
+    return render(
+      <Composer
+        session={shellScenario.session}
+        plan={shellScenario.plan}
+        meter={shellScenario.context}
+        takeover={shellScenario.takeover}
+        modelMenu={shellScenario.modelMenu}
+        state={shellScenario.composer}
+        actions={{ draft: '', onDraftChange: () => {}, onSend: () => true, canSend: false, quote, onClearQuote }}
+      />,
+    )
+  }
+
+  it('shows the quoted text as one line above the input and lets the user drop it', () => {
+    const clear = vi.fn()
+    renderQuoted('第一段\n\n第二段', clear)
+
+    // 引用可能是整条回答：摆成多行会挤掉输入区，所以压成一行。
+    const bar = screen.getByRole('note', { name: '引用内容' })
+    expect(bar).toHaveTextContent('第一段 第二段')
+    expect(bar).not.toHaveTextContent('\n')
+
+    fireEvent.click(screen.getByRole('button', { name: '取消引用' }))
+    expect(clear).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders no quote row when nothing is quoted', () => {
+    renderQuoted(null)
+    expect(screen.queryByRole('note', { name: '引用内容' })).not.toBeInTheDocument()
+  })
+})
+
 describe('Composer 图片（2026-10-16）', () => {
   /** 真接线（带 `actions`）的渲染：只测与图片有关的那条路。 */
   function renderWired(

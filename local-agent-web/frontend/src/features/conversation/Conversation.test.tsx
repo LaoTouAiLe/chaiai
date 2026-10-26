@@ -322,3 +322,52 @@ describe('Conversation', () => {
     expect(log.scrollTop).toBe(100)
   })
 })
+
+describe('Conversation 追问（2026-10-26）', () => {
+  const messages = [
+    { kind: 'user' as const, id: 'u1', text: '这段怎么理解', at: '' },
+    { kind: 'assistant' as const, id: 'a1', text: '第一段回答\n\n第二段回答', at: '' },
+  ]
+  const scenario = { ...shellScenario, messages, stats: null }
+
+  it('quotes the whole turn from the footer button', () => {
+    const quoted: string[] = []
+    render(<Conversation scenario={scenario} onQuote={(text) => quoted.push(text)} />)
+
+    fireEvent.click(screen.getByRole('button', { name: '追问' }))
+    expect(quoted).toEqual(['第一段回答\n\n第二段回答'])
+  })
+
+  it('offers 引用这段追问 when text inside an answer is selected', () => {
+    const quoted: string[] = []
+    render(<Conversation scenario={scenario} onQuote={(text) => quoted.push(text)} />)
+
+    const paragraph = screen.getByText('第一段回答')
+    const range = document.createRange()
+    range.selectNodeContents(paragraph)
+    // jsdom 不做布局：矩形全 0 会被当成"看不见的选区"而收起浮层，所以给一个非零矩形。
+    const original = Range.prototype.getBoundingClientRect
+    Range.prototype.getBoundingClientRect = () => ({
+      left: 100, top: 100, right: 180, bottom: 116, width: 80, height: 16,
+      x: 100, y: 100, toJSON: () => ({}),
+    }) as unknown as DOMRect
+    const selection = window.getSelection()
+    try {
+      selection?.removeAllRanges()
+      selection?.addRange(range)
+      fireEvent.mouseUp(document.body)
+
+      fireEvent.click(screen.getByRole('button', { name: '引用这段追问' }))
+      expect(quoted).toEqual(['第一段回答'])
+    } finally {
+      Range.prototype.getBoundingClientRect = original
+      selection?.removeAllRanges()
+    }
+  })
+
+  it('keeps both quote entrances hidden in prototype mode', () => {
+    // 省略 `onQuote` = 原型态（静态基线、地图抽屉）：既没有追问按钮，也没有选区浮层。
+    render(<Conversation scenario={scenario} />)
+    expect(screen.queryByRole('button', { name: '追问' })).not.toBeInTheDocument()
+  })
+})

@@ -827,11 +827,17 @@ def search(
         )
     if time_range:
         raise WebAccessError("当前 HTML 兼容搜索不支持精确时间筛选；请配置 Tavily，或将日期写入查询后自行核对来源时间")
+    if domain_list:
+        # 实测（2026-10-26，Bing）：把 `site:` 拼进 query 后返回的仍是泛结果，host 完全不受限，
+        # 加不加括号都一样。悄悄拼进去等于骗调用方"筛选生效了"，所以与 `time_range` 同一口径：显式拒绝。
+        raise WebAccessError(
+            "当前 HTML 兼容搜索不支持站内筛选（实测 Bing 会忽略 site:）；"
+            "请改用 Tavily 或 DeepSeek 搜索 API，或把站点名写进查询后自行核对来源"
+        )
     spec = provider_for(provider)
     # 查询清洗（2026-10-23）：只删榜单/分享噪声，关键词与顺序不动。原句仍留在 ``query``，
     # 实际执行的句子进 ``executed_query``——两者一起才能核对"到底搜了什么"。
     cleanup = clean_query(text)
-    site_suffix = (" (" + " OR ".join(f"site:{domain}" for domain in domain_list) + ")") if domain_list else ""
 
     def run_search(executed_text: str) -> list[WebSearchHit]:
         endpoint = f"{check_url(spec.endpoint, resolve=False)}?q={_quote(executed_text)}"
@@ -848,7 +854,7 @@ def search(
 
     def search_once(query_text: str) -> tuple[list[WebSearchHit], bool, str]:
         # 缓存键用实际执行的那句：清洗后"1 纪念…"与"纪念…"共享同一份结果。
-        executed_text = query_text + site_suffix
+        executed_text = query_text
         key = (provider, executed_text, limit, tuple(domain_list))
         found, hit_cache = _SEARCH_CACHE.fetch(key, lambda: run_search(executed_text))
         return found, hit_cache, executed_text

@@ -13,7 +13,8 @@ from local_agent.tools.tool_registry import ToolRegistry
 
 
 @pytest.mark.parametrize("name,args,hint", [
-    ("edit_file", {"old_text": "missing", "new_text": "x"}, "没有精确匹配"),
+    # 文案在 2026-10-2x 改过：现在会说明"已按 CRLF/LF 归一化重试仍找不到"，不再只说"没有精确匹配"。
+    ("edit_file", {"old_text": "missing", "new_text": "x"}, "没有匹配"),
     ("edit_file", {"path": "repeat.txt", "old_text": "alpha", "new_text": "x"}, "匹配到 2 处"),
     ("edit_file", {"old_text": "a = 1", "new_text": "a = 1"}, "没有需要修改"),
     ("edit_file", {"old_text": "a = 1", "new_text": "a = 2", "expected_sha256": "0" * 64}, "重新读取"),

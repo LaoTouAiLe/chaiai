@@ -390,6 +390,30 @@ def test_sdk_single_request_and_timeout_with_mock_transport(tmp_path):
         client.close()
 
 
+def _seed_legacy_session(connection, root) -> str:
+    """在 v8 的库上直接插一行会话，返回它的 id。
+
+    不能用 `SessionStore`：它的 INSERT/SELECT 都按当前 schema 写（`kind` 是 v9 才加的列），
+    在 v8 的库上必然报 `no column named ...`。所以裸 SQL 造、裸 SQL 比。
+    """
+    stamp = "2026-10-01T00:00:00+00:00"
+    connection.execute(
+        "INSERT INTO sessions (session_id, thread_id, title, workspace_root, project_id,"
+        " created_at, updated_at, status, mode, archived)"
+        " VALUES ('s-legacy', 't-legacy', '旧会话', ?, 'p-legacy', ?, ?, 'idle', 'agent', 0)",
+        (str(root), stamp, stamp),
+    )
+    connection.commit()
+    return "s-legacy"
+
+
+def _legacy_rows(connection) -> list[tuple]:
+    """旧库里那几列的快照：迁移只该加列，不该动这些值。"""
+    return connection.execute(
+        "SELECT session_id, thread_id, title, status, mode, archived FROM sessions ORDER BY session_id"
+    ).fetchall()
+
+
 @pytest.mark.parametrize("foreign_keys", [0, 1])
 def test_v9_preserves_parent_rows_foreign_keys_indexes_and_is_idempotent(tmp_path, foreign_keys):
     connection = sqlite3.connect(tmp_path / "chat.sqlite")
@@ -397,15 +421,17 @@ def test_v9_preserves_parent_rows_foreign_keys_indexes_and_is_idempotent(tmp_pat
         connection.execute(f"PRAGMA foreign_keys={foreign_keys}")
         assert migrations._apply(connection, migrations._CHAT_MIGRATIONS[:8]) == 8
         store = SessionStore(connection, workspace_root=tmp_path)
-        session = store.create()
-        job = JobStore(connection).create(session_id=session.session_id)
+        # 裸 SQL 造行（v8 的库还没有 `kind` 列，`SessionStore` 的读写都会碰它 → 必然失败）。
+        session_id = _seed_legacy_session(connection, tmp_path)
+        before = _legacy_rows(connection)
+        job = JobStore(connection).create(session_id=session_id)
         connection.execute("INSERT INTO conversation_branches VALUES (?, 'b', 'old', NULL, NULL, NULL, 0, 1)",
-                           (session.session_id,))
+                           (session_id,))
         connection.commit()
         assert migrations.apply_migrations(connection) == migrations.apply_migrations(connection) == migrations.CHAT_SCHEMA_VERSION
-        assert store.get(session.session_id) == session
+        assert _legacy_rows(connection) == before
         assert JobStore(connection).get(job.job_id) == job
-        assert connection.execute("SELECT session_id FROM conversation_branches").fetchone()[0] == session.session_id
+        assert connection.execute("SELECT session_id FROM conversation_branches").fetchone()[0] == session_id
         assert not connection.execute("PRAGMA foreign_key_check").fetchall()
         assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == foreign_keys
         assert store.create(kind="subagent").kind == "subagent"
