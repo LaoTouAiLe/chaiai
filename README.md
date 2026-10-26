@@ -14,7 +14,7 @@
 
 ![对话与工具执行](docs/assets/screenshots/conversation.png)
 
-*界面截图使用仓库内的夹具场景渲染（演示数据，非真实会话）。*
+*截图为真实界面：在一个临时演示工作区里跑的一轮任务，包含工具调用、记忆写入与改动账本。*
 
 ## 它解决的问题
 
@@ -62,13 +62,12 @@ uv run python -m local_agent.api
 - 一轮任务由模型自己决定调用哪些工具、调几次；过程、思考、参数、输出、耗时都在页面上
 - **审批卡**是关键动作的闸门：写文件、跑命令、启动终端都要你点「允许一次」，批准只对那一次生效
 - 只读工具可以并行；改动会在对话里内联成 diff，不用切页签
-
-![改动内联预览](docs/assets/screenshots/changes.png)
-
 - 运行中可随时停止；停止只中断这一轮，**不撤销已经发生的副作用**，页面会明确告诉你哪些已执行
-- 失败如实报告，不伪装成成功：
+- 失败如实报告，不伪装成成功
 
-![失败如实报告](docs/assets/screenshots/errors.png)
+右栏工作面板可以一边看对话、一边对照改动：
+
+![右栏工作面板：改动与 diff](docs/assets/screenshots/changes.png)
 
 ### 文件与命令
 
@@ -94,6 +93,8 @@ uv run python -m local_agent.api
 | 中期 | 对话摘要的向量 | 语义召回（可选依赖：Chroma + Embedding），阈值可调 |
 
 记忆不是黑盒：数据中台能看到写入了什么、召回了什么、每次调用的 token 与缓存命中。
+
+![数据中台：调用用量、缓存命中与记忆](docs/assets/screenshots/data-center.png)
 
 ### 联网检索
 
