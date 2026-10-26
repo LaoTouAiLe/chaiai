@@ -26,6 +26,11 @@ from local_agent.tools.web_identity import source_id
 #: ``time_range`` → 回溯天数。DeepSeek 只认 ``after:YYYY-MM-DD``，所以把档位换算成日期。
 _RANGE_DAYS: dict[str, int] = {"day": 1, "week": 7, "month": 30, "year": 365}
 
+#: 官方上限：``count`` 1～50（超出直接 400，错误码 `invalid_request_error`），
+#: ``query`` 1～128 个 Unicode 字符。两者都不能由用户配置直接顶上去。
+_MAX_COUNT = 50
+_MAX_QUERY_CHARS = 128
+
 
 def with_filters(
     query: str, *, time_range: str | None, domains: list[str], now: datetime | None = None
@@ -41,6 +46,26 @@ def with_filters(
     return " ".join(parts)
 
 
+def fitted_query(
+    query: str, *, time_range: str | None, domains: list[str], now: datetime | None = None,
+) -> str:
+    """拼好筛选语法后压到官方的 128 字符上限。
+
+    **不能直接截整串**：`after:2026-10-25` 与 `site:` 是操作符，从后面截会把它们切坏。
+    所以先算出后缀（筛选项），只压缩基础查询词；后缀本身超长就如实报错，不发一个必然 400 的请求。
+    """
+    suffix = with_filters("", time_range=time_range, domains=domains, now=now).strip()
+    base = (query or "").strip()
+    if not suffix:
+        return base[:_MAX_QUERY_CHARS]
+    room = _MAX_QUERY_CHARS - len(suffix) - 1
+    if room < 1:
+        raise WebAccessError(
+            f"筛选条件过长（{len(suffix)} 字符），压不进 128 字符的查询上限；请减少站点或改用更短的时间范围"
+        )
+    return f"{base[:room]} {suffix}"
+
+
 def deepseek_search(
     query: str, *, key: str, limit: int, timeout: float, user_agent: str,
     time_range: str | None, domains: list[str], transport: ApiTransport,
@@ -53,9 +78,12 @@ def deepseek_search(
         validate_url: 与 Tavily 同一条：只做 scheme 形状校验，不做 DNS 解析。
     """
     payload: dict[str, Any] = {
-        "query": with_filters(query, time_range=time_range, domains=domains, now=now),
-        "count": limit,
-        # 正文由 web_fetch 单独取：搜索阶段只要摘要，省响应体积也省一次按次计费后的无用载荷。
+        "query": fitted_query(query, time_range=time_range, domains=domains, now=now),
+        # 官方 `count` 是 1～50：用户把 `max_results` 调大时钳到上限，别让配置顶出 400。
+        "count": max(1, min(int(limit), _MAX_COUNT)),
+        # 正文由 web_fetch 单独取。注意：按官方的计费口径，**按请求次数计费**，`count` 与
+        # `need_content` 都不影响单次价格（只有 200 且 results 非空才计费）——这里只为省响应体积，
+        # 不省费用；真要省钱只能少发请求。
         "need_content": False,
     }
     response = transport(payload, key, timeout, user_agent)

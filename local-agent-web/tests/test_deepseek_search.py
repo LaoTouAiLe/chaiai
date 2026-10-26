@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 from local_agent.config import WebAccessConfig
-from local_agent.tools.deepseek_search import with_filters
+from local_agent.tools.deepseek_search import fitted_query, with_filters
 from local_agent.tools.web_tools import WebAccessError, WebResponse, search
 
 _FIXED_NOW = datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)
@@ -108,3 +108,17 @@ def test_transport_pins_endpoint_and_auth_header(monkeypatch) -> None:
     assert seen[0].get_method() == "POST"
     assert seen[0].get_header("Authorization") == "Bearer fake-credential"
     assert b"fake-credential" not in seen[0].data
+
+def test_long_query_is_trimmed_without_cutting_the_operators() -> None:
+    """官方 query 上限 128 字符：压缩只动基础查询词，`site:` 与 `after:` 必须完好。
+
+    直接截整串的话，掐掉的会是末尾的 `after:`——那等于悄悄取消了时间筛选。
+    """
+    text = fitted_query(
+        "长" * 200, time_range="month", domains=["a.example", "b.example"], now=_FIXED_NOW,
+    )
+
+    assert len(text) <= 128
+    # 固定 now=2026-10-26，回溯 30 天 ⇒ after:2026-09-26（时间筛选永远在末尾）
+    assert text.endswith("after:2026-09-26")
+    assert "site:a.example" in text and "site:b.example" in text

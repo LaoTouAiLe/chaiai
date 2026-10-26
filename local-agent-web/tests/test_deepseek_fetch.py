@@ -130,3 +130,11 @@ def test_prefetch_never_uses_the_remote_fetcher(monkeypatch) -> None:
 
     assert remote_calls == []
     assert filled == 1 and enriched[0].snippet.startswith("本机预抓取到的正文")
+
+def test_remote_fetch_rejects_urls_with_embedded_credentials() -> None:
+    """URL 里带用户名/密码时**不外发**：那等于把凭据一起交给对方，官方也不接受这种地址。"""
+    with pytest.raises(WebAccessError, match="用户名或密码"):
+        fetch(
+            "https://user:secret@example.com/a", config=_REMOTE_ONLY, api_key="ds-key",
+            api_fetch_transport=_remote(),
+        )

@@ -503,6 +503,10 @@ class _NoApiRedirect(HTTPRedirectHandler):
 #: 不该由一个能被页面改写的值决定（与 HTML 兼容后端的端点同一口径）。
 _TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 _DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
+
+#: 官方限制（2026-10-26 文档）：Fetch 的 ``url`` ≤ 8192 字符，且**不能带用户名或密码**——
+#: 带上就等于把凭据连同地址一起发给对方，属于我们自己必须挡住的那一类。
+_MAX_FETCH_URL_CHARS = 8192
 _DEEPSEEK_FETCH_URL = "https://api.deepseek.com/v1/tools/fetch"
 
 
@@ -900,6 +904,13 @@ def _deepseek_document(
     与本地路径的三点不同，都写进 ``note`` 让模型和用户都看得见：地址由对方抓取、只回正文、
     最终地址不在本地校验。**失败不回退本机**：选了远端后端就按远端的结果如实报告。
     """
+    parts = urlsplit(target)
+    if parts.username or parts.password:
+        raise WebAccessError(
+            "URL 里带用户名或密码：DeepSeek 抓取不接受这种地址（会把凭据一起发给对方）"
+        )
+    if len(target) > _MAX_FETCH_URL_CHARS:
+        raise WebAccessError(f"URL 超过 {_MAX_FETCH_URL_CHARS} 字符：DeepSeek 抓取不接受")
     key = (api_key or "").strip() or os.environ.get(config.deepseek_api_key_env, "").strip()
     if not key:
         raise WebAccessError(
