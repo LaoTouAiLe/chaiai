@@ -23,7 +23,8 @@ from langgraph.types import Command
 
 from local_agent.config import AppConfig, load_config
 from local_agent.exceptions import MemoryStoreError, SessionStoreError
-from local_agent.graph import builder, nodes
+from local_agent.graph import answer, builder, nodes
+from local_agent.graph import memory as graph_memory
 from local_agent.graph.state import (
     ErrorEvent,
     ReflectionResult,
@@ -444,7 +445,7 @@ def test_rejection_still_has_an_answer_when_the_explanation_model_fails(
     def fail(*_args, **_kwargs):
         raise RuntimeError("explanation unavailable")
 
-    monkeypatch.setattr(nodes, "stream_answer", fail)
+    monkeypatch.setattr(answer, "stream_answer", fail)
     result = graph.invoke(Command(resume={"decision": "reject", "reason": "先保留"}),
                           config=_config(THREAD), context=context)
     assert target.exists()
@@ -1077,7 +1078,7 @@ def test_empty_reply_on_a_later_turn_keeps_earlier_history(
         del context
         raise MemoryStoreError("长期库打不开（测试故意触发）")
 
-    monkeypatch.setattr(nodes, "long_term_store", _boom)
+    monkeypatch.setattr(graph_memory, "long_term_store", _boom)
 
     _run(graph, _context_for(tmp_path, model_factory(decision="chat", reply="第一轮的回答"), config), "第一轮随便聊聊")
     second = model_factory(
@@ -1115,7 +1116,7 @@ def test_next_turn_prompt_uses_the_corrected_reply(
         del context
         raise MemoryStoreError("长期库打不开（测试故意触发）")
 
-    monkeypatch.setattr(nodes, "long_term_store", _boom)
+    monkeypatch.setattr(graph_memory, "long_term_store", _boom)
     first = model_factory(
         decision="chat",
         reply="好的，我记住了",
@@ -1173,7 +1174,7 @@ def test_compression_summarises_the_corrected_reply(
         del context
         raise MemoryStoreError("长期库打不开（测试故意触发）")
 
-    monkeypatch.setattr(nodes, "long_term_store", _boom)
+    monkeypatch.setattr(graph_memory, "long_term_store", _boom)
     first = model_factory(
         decision="chat",
         reply="好的，我记住了",

@@ -27,6 +27,8 @@ from local_agent.config import AgentsConfig, AppConfig
 from local_agent.context import agents_loader, prompt_context
 from local_agent.exceptions import MemoryStoreError
 from local_agent.graph import builder, nodes, projection, routers
+from local_agent.graph import memory as graph_memory
+from local_agent.graph import reflection as graph_reflection
 from local_agent.graph.routers import ROUTE_CLASSIFIER_MARKER, RouteDecision
 from local_agent.reflection.reflector import ReflectionDecision
 
@@ -1282,7 +1284,7 @@ def test_chat_memory_failure_keeps_checkpoint_messages_for_audit(
         del context
         raise MemoryStoreError("长期库打不开（测试故意触发）")
 
-    monkeypatch.setattr(nodes, "long_term_store", _boom)
+    monkeypatch.setattr(graph_memory, "long_term_store", _boom)
     memory_path = tmp_path / "data" / "memories.sqlite"
     model = model_factory(
         decision="chat",
@@ -1490,7 +1492,7 @@ def test_medium_write_failure_does_not_block_long_term_write(
     (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
     memory_path = tmp_path / "data" / "memories.sqlite"
     stub = _StubMediumStore(fail_write=True)
-    monkeypatch.setattr(nodes, "medium_term_store", lambda context: stub)
+    monkeypatch.setattr(graph_memory, "medium_term_store", lambda context: stub)
     config = _config_with_medium_term(tmp_path, _config_with_long_term(app_config, memory_path))
 
     result = builder.build_chat_graph().invoke(
@@ -1519,13 +1521,13 @@ def test_long_store_failure_does_not_block_medium_write(
     (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
     memory_path = tmp_path / "data" / "memories.sqlite"
     stub = _StubMediumStore()
-    monkeypatch.setattr(nodes, "medium_term_store", lambda context: stub)
+    monkeypatch.setattr(graph_memory, "medium_term_store", lambda context: stub)
 
     def _boom(context: RuntimeContext) -> None:
         del context
         raise MemoryStoreError("长期库打不开（测试故意触发）")
 
-    monkeypatch.setattr(nodes, "long_term_store", _boom)
+    monkeypatch.setattr(graph_memory, "long_term_store", _boom)
     config = _config_with_medium_term(tmp_path, _config_with_long_term(app_config, memory_path))
 
     result = builder.build_chat_graph().invoke(
@@ -1566,7 +1568,7 @@ def test_partial_write_is_not_marked_complete(
             del kwargs
             raise MemoryStoreError("结论写入失败（测试故意触发）")
 
-    monkeypatch.setattr(nodes, "long_term_store", lambda context: _BrokenLongStore())
+    monkeypatch.setattr(graph_memory, "long_term_store", lambda context: _BrokenLongStore())
     config = _config_with_long_term(app_config, memory_path)
 
     result = builder.build_chat_graph().invoke(
@@ -1589,7 +1591,7 @@ def test_zero_write_candidate_is_not_marked_complete(
     """候选的目标层没启用 → 零写入 → **不登记完成**（复审实证：只按 satisfied 会误登记）。"""
     (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
     stub = _StubMediumStore()
-    monkeypatch.setattr(nodes, "medium_term_store", lambda context: stub)
+    monkeypatch.setattr(graph_memory, "medium_term_store", lambda context: stub)
     config = _config_with_medium_term(tmp_path, app_config)  # 只启用中期，长期保持关闭
     model = model_factory(
         decision="tool",
@@ -1667,7 +1669,7 @@ def test_chat_write_failure_is_disclosed_in_the_answer(
         del context
         raise MemoryStoreError("长期库打不开（测试故意触发）")
 
-    monkeypatch.setattr(nodes, "long_term_store", _boom)
+    monkeypatch.setattr(graph_memory, "long_term_store", _boom)
     model = model_factory(
         decision="chat",
         reply="好的，我记住了",
@@ -2298,7 +2300,7 @@ def test_recall_node_passes_through_when_disabled(
     def _forbidden(context: RuntimeContext) -> object:
         raise AssertionError("记忆关闭时不应该打开中期记忆库")
 
-    monkeypatch.setattr(nodes, "medium_term_store", _forbidden)
+    monkeypatch.setattr(graph_memory, "medium_term_store", _forbidden)
     context = _context(tmp_path, model_factory, app_config, decision="chat")
 
     result = builder.build_chat_graph().invoke({"user_input": "你好"}, context=context)
@@ -2320,7 +2322,7 @@ def test_recall_node_injects_memory_into_prompt(
             _memory_hit("别的项目的记忆", scope_key="others"),
         ]
     )
-    monkeypatch.setattr(nodes, "medium_term_store", lambda context: store)
+    monkeypatch.setattr(graph_memory, "medium_term_store", lambda context: store)
     context = _context(
         tmp_path, model_factory, _config_with_medium_term(tmp_path, app_config), decision="chat"
     )
@@ -2350,7 +2352,7 @@ def test_recall_node_records_error_event_and_keeps_turn_alive(
     def _boom(context: RuntimeContext) -> object:
         raise MemoryStoreError("中期记忆 collection 与当前 embedding 配置不兼容")
 
-    monkeypatch.setattr(nodes, "medium_term_store", _boom)
+    monkeypatch.setattr(graph_memory, "medium_term_store", _boom)
     context = _context(
         tmp_path,
         model_factory,
@@ -2406,7 +2408,7 @@ def test_recall_failure_replaces_restate_advice(
         del context
         raise MemoryStoreError("长期库打不开（测试故意触发）")
 
-    monkeypatch.setattr(nodes, "long_term_store", _boom)
+    monkeypatch.setattr(graph_memory, "long_term_store", _boom)
     reader = model_factory(decision="chat", reply="这次没查到。你也可以直接告诉我工具名。")
 
     result = builder.build_chat_graph().invoke(
@@ -2620,7 +2622,7 @@ def test_unconfirmed_side_effect_asks_the_user_to_verify(
     这类调用不能靠 State 证明"恰好执行过一次"，所以即使本轮工具结果看起来正常，也要停下来。
     """
     (tmp_path / "note.txt").write_text("内容甲", encoding="utf-8")
-    monkeypatch.setattr(nodes, "unconfirmed_calls", lambda state: ["call-ghost"])
+    monkeypatch.setattr(graph_reflection, "unconfirmed_calls", lambda state: ["call-ghost"])
     model = model_factory(
         decision="tool",
         reply="读完了",
@@ -2692,7 +2694,7 @@ def test_recall_failure_is_not_reported_as_no_memory(
         del context
         raise MemoryStoreError("长期库打不开（测试故意触发）")
 
-    monkeypatch.setattr(nodes, "long_term_store", _boom)
+    monkeypatch.setattr(graph_memory, "long_term_store", _boom)
     reader = model_factory(decision="chat", reply="好的")
 
     result = builder.build_chat_graph().invoke(

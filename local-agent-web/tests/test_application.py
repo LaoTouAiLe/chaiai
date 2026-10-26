@@ -27,6 +27,7 @@ from local_agent.application.service import ApplicationService
 from local_agent.config import AppConfig
 from local_agent.exceptions import MemoryStoreError
 from local_agent.graph import builder, nodes
+from local_agent.graph import memory as graph_memory
 from local_agent.graph.routers import ROUTE_CLASSIFIER_MARKER
 from local_agent.persistence import checkpoint
 from local_agent.persistence.checkpoint import ChatDatabase
@@ -1650,7 +1651,7 @@ def test_service_projects_memory_write_failure_without_a_false_promise(
             return original_store(context)
         raise MemoryStoreError("测试触发的长期库故障")
 
-    monkeypatch.setattr(nodes, "long_term_store", unavailable)
+    monkeypatch.setattr(graph_memory, "long_term_store", unavailable)
     harness = _harness(
         tmp_path, model_factory, config,
         decision="tool", reply="读取已完成",
