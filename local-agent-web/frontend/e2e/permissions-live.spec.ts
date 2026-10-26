@@ -31,7 +31,8 @@ test('三档写入真实设置库并在刷新后恢复，旧沙箱开关与接�
   // 静态托管的 GET 兜底会使未知 PUT 返回 405；两者都表示没有这条可执行接口。
   expect([404, 405]).toContain(retired.status())
   await expect(dialog).toContainText('受保护子树的写拒绝项建立失败时会阻止命令执行')
-  await page.screenshot({ path: '../docs/ui-reference/permissions-review-live-20261015.png' })
+  // 截图落在 `test-results/`（已忽略）：原先写进 `docs/ui-reference/`，该目录 2026-10-26 已移除。
+  await page.screenshot({ path: 'test-results/screenshots/permissions-review-live-20261015.png' })
 })
 
 test('外部目录只授予写权限，旧只读记录可移除，授权可持久化和撤销', async ({ page }) => {
@@ -60,7 +61,7 @@ test('外部目录只授予写权限，旧只读记录可移除，授权可持�
     dialog = await openPermissions()
     await expect(dialog.getByRole('button', { name: /^撤销写入授权 / })).toHaveCount(1)
     await dialog.getByRole('textbox', { name: '外部可写目录', exact: true }).scrollIntoViewIfNeeded()
-    await page.screenshot({ path: '../docs/ui-reference/permissions-external-read-live-20261015.png' })
+    await page.screenshot({ path: 'test-results/screenshots/permissions-external-read-live-20261015.png' })
     for (const name of [/^移除只读记录 /, /^撤销写入授权 /]) {
       const removed = page.waitForResponse(response => response.url().includes('/api/permissions/grants?') && response.request().method() === 'DELETE')
       await dialog.getByRole('button', { name }).click()

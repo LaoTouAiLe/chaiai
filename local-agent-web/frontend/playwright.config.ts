@@ -8,9 +8,10 @@ applyLocalBrowserPath()
  * Visual baseline runs against the **built** bundle, never the dev server: the
  * screenshots must be reproducible from a locked dependency set.
  *
- * Every capture pins the same conditions as the T25 reference set (see
- * `local-agent-web/docs/ui-reference/README.md` §2.3): Chinese locale, Shanghai
- * timezone, `deviceScaleFactor=1`, light theme and reduced motion.
+ * Every capture pins the same conditions as the T25 reference set: Chinese
+ * locale, Shanghai timezone, `deviceScaleFactor=1`, light theme and reduced
+ * motion. (Its original spec, `docs/ui-reference/README.md` §2.3, was removed
+ * from the repo on 2026-10-26 together with the screenshots.)
  */
 const PORT = 4173
 const HOST = '127.0.0.1'

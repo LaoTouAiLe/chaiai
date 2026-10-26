@@ -2,8 +2,8 @@
  * Inline monochrome icons.
  *
  * They inherit `currentColor` and carry no product marks: v0.4 must not reuse
- * the reference's brand or proprietary icon assets
- * (`local-agent-web/docs/ui-reference/README.md` §4).
+ * the reference's brand or proprietary icon assets. (That rule came from
+ * `docs/ui-reference/README.md` §4, removed 2026-10-26; the rule still holds.)
  */
 
 interface IconProps {

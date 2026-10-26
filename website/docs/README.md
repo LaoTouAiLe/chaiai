@@ -1,7 +1,7 @@
 # 对外文档规范（website/docs/）
 
 官网由 `website/` 统一管理：`site.html` 是首页，`docs/` 是文档站。两者都手写静态 HTML，
-挂到任意静态服务器即可。仓库里的 `local-agent-web/docs/`（audits / ui-reference / release）是**内部记录**，
+挂到任意静态服务器即可。仓库里的 `docs/`（audits / lessons / release）是**内部记录**，
 不对外发布，两处不要互相链接。
 
 ## 1. 形态：多页手写 HTML，不做构建

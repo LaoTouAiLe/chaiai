@@ -60,9 +60,9 @@ function readWindow(start: number, texts: readonly string[], totalLines: number,
  * Early visual checkpoint 1 — complete file diff.
  *
  * Two hunks, additions and deletions, and one deliberately long added line.
- * The reference baseline only had single-line mutations
- * (`local-agent-web/docs/ui-reference/README.md` §5), so this prototype is the
- * project's own baseline and must be confirmed before it is called done.
+ * The reference baseline only had single-line mutations (its doc,
+ * `docs/ui-reference/README.md` §5, was removed 2026-10-26), so this prototype
+ * is the project's own baseline and must be confirmed before it is called done.
  */
 export const diffScenario: ConversationScenario = {
   id: 'diff',

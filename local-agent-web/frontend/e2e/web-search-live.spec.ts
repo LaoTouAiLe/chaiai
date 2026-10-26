@@ -35,7 +35,8 @@ for (const title of ['百度热榜验收', '哔哩哔哩热榜验收', 'MCP联�
     }
     if (title === 'MCP联网验收') {
       await panel.scrollIntoViewIfNeeded()
-      await page.screenshot({ path: '../docs/ui-reference/web-sources-live-20261015.png' })
+      // 落在 `test-results/`（已忽略）：原目标 `docs/ui-reference/` 已于 2026-10-26 移除。
+      await page.screenshot({ path: 'test-results/screenshots/web-sources-live-20261015.png' })
     }
   })
 }
