@@ -250,6 +250,7 @@ def test_denied_tool_is_returned_to_main_model(tmp_path, app_config) -> None:
 
 def test_web_budget_stops_calls_in_the_same_batch_and_returns_feedback(tmp_path, app_config, monkeypatch) -> None:
     from local_agent.tools import web_tools
+    from local_agent.tools.web_cache import TtlCache
 
     contacted = []
 
@@ -258,14 +259,18 @@ def test_web_budget_stops_calls_in_the_same_batch_and_returns_feedback(tmp_path,
         return web_tools.WebResponse(url, 200, "text/html", '<h2><a href="https://example.com/">Source</a></h2>')
 
     monkeypatch.setattr(web_tools, "_default_transport", transport)
+    monkeypatch.setattr(web_tools, "_system_resolver", lambda _host: ["93.184.216.34"])
+    monkeypatch.setattr(web_tools, "_SEARCH_CACHE", TtlCache())
     app_config.web_access.provider = "bing_html"
     app_config.web_access.max_search_calls = 1
+    app_config.web_access.prefetch_pages = 1
     model = LoopModel(messages=iter([]), script=[
         _tools(_call("web_search", "one", query="first"), _call("web_search", "two", query="second")),
         AIMessage(content="已停止补查；现有资料不足。"),
     ])
     result = _run(tmp_path, app_config, model)
-    assert len(contacted) == 1
+    # 一次检索可以附带正文预抓取；预算限制的是 web_search 调用，不能把预抓取算成第二次检索。
+    assert contacted == ["https://www.bing.com/search?q=first", "https://example.com/"]
     assert [event.status for event in result["tool_events"] if event.tool_name != "task_control"] == ["ok", "error"]
     assert "检索预算已用完" in model.seen_prompts[-1]
     assert result["final_response"] == "已停止补查；现有资料不足。"

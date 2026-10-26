@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from math import ceil
 from typing import Annotated
 
 import httpx
@@ -175,8 +176,7 @@ def test_roomy_enough_request_does_not_buy_a_summary_due_to_duplicate_descriptio
         def invoke(self, messages):
             pytest.fail("实际输入未达到阈值，不应购买摘要")
 
-    app_config.memory.compression.enabled = True
-    app_config.llm.context_window_tokens = 20000
+    app_config.memory.compression.enabled = False
     app_config.llm.max_tokens = 4096
     context = builder.build_runtime_context(
         app_config=app_config, model_adapter=MustNotSummarize(), workspace_root=tmp_path,
@@ -195,7 +195,33 @@ def test_roomy_enough_request_does_not_buy_a_summary_due_to_duplicate_descriptio
         ])
     state = {"agent_loop_version": 1, "run_id": "r", "run_user_message_id": "r:user",
              "mode": "tool", "messages": messages}
+    tools = context.tool_registry.tools_for("tool", context.agent_capabilities)
+    wire_tokens = sum(
+        estimate_tokens(json.dumps(convert_to_openai_tool(candidate), ensure_ascii=False))
+        for candidate in tools
+    )
+    duplicated_tokens = sum(
+        estimate_tokens("\n".join((candidate.name, candidate.description,
+                                  json.dumps(candidate.args_schema.model_json_schema(),
+                                             ensure_ascii=False))))
+        for candidate in tools
+    )
+    assert wire_tokens < duplicated_tokens
+
+    # 先测非工具部分，把阈值放在真实出站与旧重复计数之间；工具清单增长不应让测试失真。
+    uncompressed = nodes.compression_node(state, Runtime(context=context))
+    usage = uncompressed["token_usage"]
+    fixed_tokens = usage.prompt_tokens - usage.tool_definition_tokens
+    target = fixed_tokens + (wire_tokens + duplicated_tokens) // 2
+    compression = context.app_config.memory.compression
+    context.app_config.llm.context_window_tokens = (
+        context.app_config.llm.max_tokens + ceil(target / compression.trigger_ratio)
+    )
+    compression.enabled = True
     result = nodes.compression_node(state, Runtime(context=context))
+    threshold = result["context_budget"].prompt_budget_tokens * compression.trigger_ratio
+    assert fixed_tokens + wire_tokens < threshold < fixed_tokens + duplicated_tokens
+    assert result["token_usage"].tool_definition_tokens == wire_tokens
     assert not result["context_budget"].triggered
     assert "compression_count" not in result and "tool_output_overrides" not in result
     assert result["context_budget"].summary_covered_messages == 0
