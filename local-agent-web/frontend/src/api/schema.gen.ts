@@ -1215,13 +1215,16 @@ export interface paths {
          * 联网检索凭据状态
          * @description 当前有没有可用的检索服务凭据，以及它来自设置库还是旧环境变量。
          *
+         *     ``provider`` 缺省 ``tavily``（升级前只有这一个后端）：旧页面不传参时语义不变。
+         *     两个后端**各占一条密钥**，读哪条由这个参数决定。
+         *
          *     返回值里**没有密钥**（连掩码都没有）：页面只需要知道"已配置 / 未配置"就能决定是提示录入
          *     还是提示可以开始检索。
          */
         get: operations["get_web_search_credential_api_web_search_credential_get"];
         /**
          * 保存联网检索凭据
-         * @description 写入（覆盖）Tavily 密钥：**保存即生效**，下一轮检索就用它。
+         * @description 写入（覆盖）指定后端的密钥：**保存即生效**，下一轮检索就用它。
          *
          *     空白密钥被拒（422）："清空"用 DELETE 表达，两种意图不该共用一个入口。
          */
@@ -1229,7 +1232,7 @@ export interface paths {
         post?: never;
         /**
          * 删除联网检索凭据
-         * @description 删除已保存的密钥；**不存在也算成功**（幂等）。
+         * @description 删除指定后端已保存的密钥；**不存在也算成功**（幂等）。
          *
          *     删掉之后旧环境变量仍然有效——如实报告由返回的 ``source`` 承担，本条路径不假装
          *     "删了就一定没有凭据了"。
@@ -5099,7 +5102,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "read" | "list" | "search" | "edit" | "write" | "delete" | "shell" | "delegation";
+            kind: "read" | "list" | "search" | "edit" | "write" | "delete" | "shell" | "delegation" | "web";
             /** Matches */
             matches?: components["schemas"]["SearchMatchView"][];
             /** Paths */
@@ -5509,8 +5512,8 @@ export interface components {
          *
          *     只放**能安全回灌**的字段：``enabled`` 不在这里——它是**能力开关**的地盘（2026-10-14 起
          *     `web` 是锁定能力，运行期由 `apply_capability_gates` 回灌，见 ``WebAccessConfig`` 的说明）；
-         *     ``tavily_api_key_env`` 与 ``user_agent`` 也不在这里：前者是旧配置的密钥**变量名**（密钥本身走
-         *     凭据存储，见 ``model_settings.web_search``），后者不是用户要调的旋钮。
+         *     ``tavily_api_key_env`` / ``deepseek_api_key_env`` 与 ``user_agent`` 也不在这里：前者们是旧配置的
+         *     密钥**变量名**（密钥本身走凭据存储，见 ``model_settings.web_search``），后者不是用户要调的旋钮。
          *
          *     上下界与 ``WebAccessConfig`` **逐项一致**：偏好值经 ``model_copy(update=...)`` 落到运行期配置，
          *     那条路径不做二次校验，所以写在模型上的约束就是最后一道。
@@ -5532,6 +5535,12 @@ export interface components {
              * @enum {string}
              */
             domain_policy: "allow" | "allowlist";
+            /**
+             * Fetch Provider
+             * @default local
+             * @enum {string}
+             */
+            fetch_provider: "local" | "deepseek";
             /**
              * Max Chars
              * @default 8000
@@ -5558,7 +5567,7 @@ export interface components {
              * @default auto
              * @enum {string}
              */
-            provider: "auto" | "tavily" | "bing_html" | "duckduckgo_html";
+            provider: "auto" | "tavily" | "deepseek" | "bing_html" | "duckduckgo_html";
             /**
              * Timeout Seconds
              * @default 15
@@ -5567,7 +5576,7 @@ export interface components {
         };
         /**
          * WebSearchKeyRequest
-         * @description 录入 / 覆盖联网检索的服务凭据（Tavily）。
+         * @description 录入 / 覆盖联网检索的服务凭据（哪一条由 query 的 ``provider`` 决定：Tavily / DeepSeek）。
          *
          *     形状只挡空值：**内容不在这里做任何校验**（长度上限只是防"把整篇文档粘进来"），
          *     密钥对不对只有发起一次真实检索才知道——那件事由用户自己决定何时做。
@@ -5578,14 +5587,17 @@ export interface components {
         };
         /**
          * WebSearchKeyView
-         * @description 联网检索的服务凭据（Tavily）状态。
+         * @description 联网检索的服务凭据（Tavily / DeepSeek）状态。
          *
          *     **只回答"有没有"，不回读密钥**（§6.8 第 2 条）——与模型连接的密钥同一条口径。
          *
-         *     三个字段回答三个不同的问题，不能合并：
+         *     四个字段回答四个不同的问题，不能合并：
+         *     ``provider`` = 这是**哪个后端**的密钥（两个 API 后端各占一条，页面据此确认读写的是同一格）；
          *     ``configured`` = 现在能不能构造出检索请求；``source`` = 这份密钥**从哪来**
          *     （``settings`` 设置库 / ``environment`` 旧环境变量 / ``none`` 都没有）；
          *     ``store`` = 设置库那边**能不能存下来**（``memory`` 表示只在本进程内有效、重启后要重新录入）。
+         *
+         *     取值与 ``config.ApiSearchProvider`` 同源；本模块不导入配置层，所以就地写一份字面量。
          */
         WebSearchKeyView: {
             /**
@@ -5595,6 +5607,12 @@ export interface components {
             configured: boolean;
             /** Note */
             note?: string | null;
+            /**
+             * Provider
+             * @default tavily
+             * @enum {string}
+             */
+            provider: "tavily" | "deepseek";
             /**
              * Source
              * @default none
@@ -8557,7 +8575,9 @@ export interface operations {
     };
     get_web_search_credential_api_web_search_credential_get: {
         parameters: {
-            query?: never;
+            query?: {
+                provider?: "tavily" | "deepseek";
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -8573,11 +8593,22 @@ export interface operations {
                     "application/json": components["schemas"]["WebSearchKeyView"];
                 };
             };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
         };
     };
     set_web_search_credential_api_web_search_credential_put: {
         parameters: {
-            query?: never;
+            query?: {
+                provider?: "tavily" | "deepseek";
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -8619,7 +8650,9 @@ export interface operations {
     };
     delete_web_search_credential_api_web_search_credential_delete: {
         parameters: {
-            query?: never;
+            query?: {
+                provider?: "tavily" | "deepseek";
+            };
             header?: never;
             path?: never;
             cookie?: never;

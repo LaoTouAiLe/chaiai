@@ -426,7 +426,7 @@ class PermissionsModeRequest(_Request):
 
 
 class WebSearchKeyRequest(_Request):
-    """录入 / 覆盖联网检索的服务凭据（Tavily）。
+    """录入 / 覆盖联网检索的服务凭据（哪一条由 query 的 ``provider`` 决定：Tavily / DeepSeek）。
 
     形状只挡空值：**内容不在这里做任何校验**（长度上限只是防"把整篇文档粘进来"），
     密钥对不对只有发起一次真实检索才知道——那件事由用户自己决定何时做。

@@ -605,6 +605,65 @@ def test_web_sources_come_from_successful_tool_payloads_only(status: str) -> Non
         assert row.web_sources[0].retrieved_at == payload["retrieved_at"]
 
 
+def test_web_search_gets_a_structured_outcome_instead_of_the_placeholder() -> None:
+    """网页检索的卡片要有内容（2026-10-26）：此前它被当成"认不出的 JSON"，只剩一句占位文案。"""
+    payload = {"query": "MCP", "provider": "deepseek", "truncated": False, "results": [
+        {"title": "MCP 文档", "url": "https://modelcontextprotocol.io/introduction",
+         "source": "modelcontextprotocol.io"},
+        {"title": "MCP 规范", "url": "https://spec.example.com/", "source": "spec.example.com"},
+    ]}
+    state = _state(messages=[ToolMessage(content=json.dumps(payload), tool_call_id="web")],
+                   tool_results=[], tool_events=[{
+                       "tool_call_id": "web", "tool_name": "web_search", "run_id": "run-1", "status": "ok",
+                   }])
+    row = proj.project_tool_rows(state)[0][1]
+
+    assert row.outcome is not None and row.outcome.kind == "web"
+    assert row.outcome.target == "MCP"
+    assert row.outcome.summary == "2 条来源 · 后端 deepseek"
+    assert "MCP 文档 · modelcontextprotocol.io" in (row.outcome.text or "")
+    # 卡片自己有了摘要，就不再退回"该结果格式暂无可展示的详情"
+    assert row.output_preview == "2 条来源 · 后端 deepseek"
+
+
+def test_web_search_failure_keeps_the_generic_renderer() -> None:
+    """失败结果不是成功形状：必须走通用渲染，别用"0 条来源"盖掉真实原因。"""
+    message = "DeepSeek 搜索未配置凭据：请在设置页录入"
+    state = _state(
+        messages=[ToolMessage(content=message, tool_call_id="web")],
+        tool_results=[{
+            "tool_call_id": "web", "tool_name": "web_search", "run_id": "run-1",
+            "status": "error", "truncated": False, "output_preview": message,
+        }],
+        tool_events=[{
+            "tool_call_id": "web", "tool_name": "web_search", "run_id": "run-1", "status": "error",
+        }],
+    )
+    row = proj.project_tool_rows(state)[0][1]
+
+    assert row.outcome is None
+    assert "凭据" in (row.output_preview or "")
+
+
+def test_web_fetch_outcome_reports_size_and_bounded_body() -> None:
+    payload = {"url": "https://example.com/a", "title": "示例页", "text": "# 示例页\n\n正文",
+               "total_chars": 11, "truncated": False,
+               "note": "正文由 DeepSeek 抓取服务返回（Markdown 纯文本）"}
+    state = _state(messages=[ToolMessage(content=json.dumps(payload), tool_call_id="page")],
+                   tool_results=[], tool_events=[{
+                       "tool_call_id": "page", "tool_name": "web_fetch", "run_id": "run-1", "status": "ok",
+                   }])
+    row = proj.project_tool_rows(state)[0][1]
+
+    assert row.outcome is not None and row.outcome.kind == "web"
+    assert row.outcome.target == "示例页"
+    assert row.outcome.summary == "11 字符"
+    body = row.outcome.text or ""
+    assert body.startswith("# 示例页")
+    # 来源说明必须跟着正文一起出现：读者要能判断这段正文是谁读的
+    assert "DeepSeek 抓取" in body
+
+
 def test_web_citation_flags_follow_the_turn_when_call_ids_are_reused() -> None:
     from local_agent.tools.web_identity import source_id
 

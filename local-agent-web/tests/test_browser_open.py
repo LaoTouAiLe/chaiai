@@ -96,20 +96,50 @@ def test_entry_point_opens_the_browser_unless_disabled(
     assert called == []
 
 
-def test_frozen_entry_opens_the_data_dir_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """打包形态照样打开浏览器，且目标仍是回环地址（数据目录口径不影响这一条）。"""
-    called: list[str] = []
+def test_frozen_entry_opens_the_desktop_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """打包形态**先开窗口**（2026-10-26 起），不再弹外部浏览器；数据目录口径不变。"""
+    windows: list[tuple[str, int]] = []
+    browsers: list[str] = []
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: None)
+    monkeypatch.setattr(api_main.desktop_window, "window_available", lambda: True)
+    monkeypatch.setattr(
+        api_main.desktop_window,
+        "run",
+        lambda app, *, host, port, **kwargs: windows.append((host, port)) or 0,
+    )
     monkeypatch.setattr(
         api_main.browser_open,
         "open_when_ready",
-        lambda url, *, host, port: called.append(url),
+        lambda url, *, host, port: browsers.append(url),
     )
 
     assert api_main.main([]) == 0
 
-    assert called == ["http://127.0.0.1:8000"]
+    assert windows == [("127.0.0.1", 8000)]
+    assert browsers == []
     assert (tmp_path / "chaiai" / "data" / "checkpoints.sqlite").is_file()
     assert app_paths.data_dir() == tmp_path / "chaiai"
+
+
+def test_frozen_entry_falls_back_to_the_browser_without_window_support(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """没有窗口依赖（例如缺 WebView2）时如实降级到浏览器，不能"双击没反应"。"""
+    browsers: list[str] = []
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: None)
+    monkeypatch.setattr(api_main.desktop_window, "window_available", lambda: False)
+    monkeypatch.setattr(
+        api_main.browser_open,
+        "open_when_ready",
+        lambda url, *, host, port: browsers.append(url),
+    )
+
+    assert api_main.main([]) == 0
+
+    assert browsers == ["http://127.0.0.1:8000"]

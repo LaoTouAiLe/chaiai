@@ -42,14 +42,16 @@ def test_the_shipped_skills_folder_exists_and_is_copied_into_the_package() -> No
     为什么内容不进设置库：技能是 `SKILL.md` + 资源文件——要能编辑、能被 git diff、能被用户自己往里
     加一条；库里只存"哪个被用户关掉了"（`agent.skills.disabled` 例外表）。这条守的是两者不跑偏。
     """
+    # 技能源的**唯一**位置是仓库根的 `skills/`（2026-10-20 去重：原先 `packaging/skills`
+    # 与它逐字节重复，改一处忘另一处就会漂移，那份副本已删）。
     root = SCRIPT.parents[1]
-    skills = root / "packaging" / "skills"
+    skills = root.parent / "skills"
 
     assert skills.is_dir() and any(skills.iterdir()), "仓库里要有一份可发布的技能"
 
     text = SCRIPT.read_text(encoding="utf-8")
     assert "SKILLS_SOURCE" in text and "_copy_skills()" in text
-    assert '"packaging" / "skills"' in text
+    assert 'PROJECT_ROOT.parent / "skills"' in text
 
 
 def test_the_example_config_points_at_a_relative_skills_folder() -> None:

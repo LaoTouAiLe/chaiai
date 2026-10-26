@@ -242,6 +242,33 @@ function ResultCard({ card }: { card: Extract<ToolCardView, { kind: 'result' }> 
   )
 }
 
+/**
+ * 网页检索 / 读取（2026-10-26）。
+ *
+ * 与 `ResultCard` 分开的理由是**续读方式不同**：文件按行区间重读，网页正文按 `start_char` 续取，
+ * 把后者写进"按行区间读取"的提示里就是错的。正文本身仍走 `pre`，因为服务端给的是纯文本
+ * （远端抓取是 Markdown 源码），保留原有换行比套一层排版更重要。
+ */
+function WebCard({ card }: { card: Extract<ToolCardView, { kind: 'web' }> }) {
+  const lines = card.body === '' ? [] : card.body.split('\n')
+  const lineWindow = useLineWindow(lines.length)
+  return (
+    <CardShell
+      label="网页结果"
+      title={card.target === '' ? '网页结果' : card.target}
+      meta={card.summary}
+    >
+      {card.body === ''
+        ? null
+        : <pre className={styles.terminal}>{windowOf(lines, lineWindow.shown).join('\n')}</pre>}
+      <MoreLines lineWindow={lineWindow} />
+      {card.truncated ? (
+        <p className={styles.note}>正文较长，这里是服务端给的有界预览；需要更多时让助手按 start_char 续读。</p>
+      ) : null}
+    </CardShell>
+  )
+}
+
 function TodoCard({ card }: { card: Extract<ToolCardView, { kind: 'todo' }> }) {
   const done = card.items.filter((item) => item.status === 'completed').length
   return (
@@ -339,6 +366,8 @@ export function ToolCard({ card }: { card: ToolCardView }) {
       return <TerminalCard card={card} />
     case 'result':
       return <ResultCard card={card} />
+    case 'web':
+      return <WebCard card={card} />
     case 'todo':
       return <TodoCard card={card} />
     case 'delegation':

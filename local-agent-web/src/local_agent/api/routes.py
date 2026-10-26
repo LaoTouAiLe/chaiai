@@ -1061,13 +1061,18 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     # 数值型偏好（条数上限、域名策略等）走 `/preferences`，这里只有密钥这一件事。
 
     @router.get("/web-search/credential", response_model=WebSearchKeyView, summary="联网检索凭据状态")
-    def get_web_search_credential() -> WebSearchKeyView:
+    def get_web_search_credential(
+        provider: Literal["tavily", "deepseek"] = "tavily",
+    ) -> WebSearchKeyView:
         """当前有没有可用的检索服务凭据，以及它来自设置库还是旧环境变量。
+
+        ``provider`` 缺省 ``tavily``（升级前只有这一个后端）：旧页面不传参时语义不变。
+        两个后端**各占一条密钥**，读哪条由这个参数决定。
 
         返回值里**没有密钥**（连掩码都没有）：页面只需要知道"已配置 / 未配置"就能决定是提示录入
         还是提示可以开始检索。
         """
-        return service.web_search_key_view()
+        return service.web_search_key_view(provider)
 
     @router.put(
         "/web-search/credential",
@@ -1075,12 +1080,15 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         responses=_WEB_CREDENTIAL_WRITE_RESPONSES,
         summary="保存联网检索凭据",
     )
-    def set_web_search_credential(payload: WebSearchKeyRequest) -> WebSearchKeyView:
-        """写入（覆盖）Tavily 密钥：**保存即生效**，下一轮检索就用它。
+    def set_web_search_credential(
+        payload: WebSearchKeyRequest,
+        provider: Literal["tavily", "deepseek"] = "tavily",
+    ) -> WebSearchKeyView:
+        """写入（覆盖）指定后端的密钥：**保存即生效**，下一轮检索就用它。
 
         空白密钥被拒（422）："清空"用 DELETE 表达，两种意图不该共用一个入口。
         """
-        return service.save_web_search_key(payload.api_key)
+        return service.save_web_search_key(payload.api_key, provider)
 
     @router.delete(
         "/web-search/credential",
@@ -1088,13 +1096,15 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         responses=_WEB_CREDENTIAL_WRITE_RESPONSES,
         summary="删除联网检索凭据",
     )
-    def delete_web_search_credential() -> WebSearchKeyView:
-        """删除已保存的密钥；**不存在也算成功**（幂等）。
+    def delete_web_search_credential(
+        provider: Literal["tavily", "deepseek"] = "tavily",
+    ) -> WebSearchKeyView:
+        """删除指定后端已保存的密钥；**不存在也算成功**（幂等）。
 
         删掉之后旧环境变量仍然有效——如实报告由返回的 ``source`` 承担，本条路径不假装
         "删了就一定没有凭据了"。
         """
-        return service.clear_web_search_key()
+        return service.clear_web_search_key(provider)
 
     @router.get("/preferences", response_model=PreferencesView, summary="应用偏好与配置概览")
     def get_preferences() -> PreferencesView:

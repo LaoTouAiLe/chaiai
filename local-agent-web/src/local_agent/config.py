@@ -643,7 +643,18 @@ class ModelSettingsConfig(_StrictModel):
 #: 外部内容访问的 provider 闭集：结构化 API 与 HTML 兼容检索。
 #:
 #: auto 根据 Tavily 凭据是否存在选后端；无凭据使用 Bing HTML 兼容搜索。显式指定后端时不静默切换。
-WebAccessProvider = Literal["auto", "tavily", "bing_html", "duckduckgo_html"]
+#:
+#: ``deepseek``（2026-10-26）是**显式选择**的后端：它有自己的密钥条目，不参与 ``auto`` 的判定——
+#: 加进来只多一个可选值，已有配置（``auto`` / ``tavily`` / 两个网页版）的解算结果一个不变。
+WebAccessProvider = Literal["auto", "tavily", "deepseek", "bing_html", "duckduckgo_html"]
+
+#: 需要密钥的后端子集（页面据此决定"检索方式"下面是哪一格密钥）。
+#: 两个网页版后端不需要密钥，``auto`` 不是具体后端，因此都不在此列。
+ApiSearchProvider = Literal["tavily", "deepseek"]
+
+#: 网页抓取的后端（2026-10-26）。与 ``WebAccessProvider`` **分开**是刻意的：搜索与抓取是两个
+#: 独立的决定——"用 DeepSeek 搜、正文仍由本机读"是合理组合（不必把每条要读的 URL 都外发）。
+FetchProvider = Literal["local", "deepseek"]
 
 
 def clean_domain_list(values: tuple[str, ...], field: str) -> tuple[str, ...]:
@@ -694,6 +705,16 @@ class WebAccessConfig(_StrictModel):
     enabled: bool = True
     provider: WebAccessProvider = "auto"
     tavily_api_key_env: str = Field(default="TAVILY_API_KEY", min_length=1)
+    #: DeepSeek 搜索（``POST /v1/tools/search``）的旧环境变量路径，与 ``tavily_api_key_env`` 同一口径：
+    #: 设置库里没有那条密钥时才读它。密钥本体不进配置文件。搜索与抓取共用这一条（同一个 API Key）。
+    deepseek_api_key_env: str = Field(default="DEEPSEEK_API_KEY", min_length=1)
+    #: 正文从哪来：``local`` = 本机直接取回并抽取（默认，与加这个开关之前的行为完全一致）；
+    #: ``deepseek`` = 交给 ``POST /v1/tools/fetch``，由对方返回 Markdown 正文。
+    #:
+    #: 选 ``deepseek`` 的代价是 URL 会发出去、按次计费、且**最终地址不在本地校验**（对方可能自己
+    #: 跟随重定向）。没有凭据或对方没取到正文时**如实失败**，不静默回退到本机抓取——与
+    #: "显式指定后端失败不隐式切换"同一口径。
+    fetch_provider: FetchProvider = "local"
     max_search_calls: int | None = Field(default=None, ge=1)
     max_read_pages: int | None = Field(default=None, ge=1)
     max_reads_per_page: int | None = Field(default=None, ge=1)

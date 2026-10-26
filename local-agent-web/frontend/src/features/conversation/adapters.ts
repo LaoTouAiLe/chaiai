@@ -178,6 +178,16 @@ function outcomeCard(tool: ToolUse, outcome: ToolOutcome): ToolCardView {
         truncated: outcome.truncated,
       }
     }
+    case 'web':
+      // 网页检索 / 读取（2026-10-26）：服务端已经把"搜了什么、回了几条、正文或前几条标题"整理成
+      // 有界字段，页面只照搬——不在这里重新解析 URL 列表，也不按 provider 猜结构。
+      return {
+        kind: 'web',
+        target: outcome.target ?? '',
+        summary: outcome.summary ?? '',
+        body: outcome.text ?? '',
+        truncated: outcome.truncated,
+      }
     case 'shell':
       return {
         kind: 'terminal',

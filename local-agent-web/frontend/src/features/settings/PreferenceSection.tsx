@@ -33,7 +33,8 @@ export const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'context_lines', label: '上下文行数', note: '匹配结果附近保留的代码行数，允许为 0。', min: 0 },
   ],
   web_access: [
-    { key: 'provider', label: '检索方式', note: '自动：配了 Tavily 密钥就用 API，否则用网页版检索。显式指定后，失败不会静默换后端。', options: [['auto', '自动'], ['tavily', 'Tavily API'], ['bing_html', 'Bing 网页版'], ['duckduckgo_html', 'DuckDuckGo 网页版']] },
+    { key: 'provider', label: '检索方式', note: '自动：配了 Tavily 密钥就用 Tavily，否则用网页版检索（DeepSeek 不参与自动判定，要显式选）。显式指定后，失败不会静默换后端；选 API 后端时别忘了在下面录入对应的密钥。', options: [['auto', '自动'], ['tavily', 'Tavily API'], ['deepseek', 'DeepSeek 搜索 API'], ['bing_html', 'Bing 网页版'], ['duckduckgo_html', 'DuckDuckGo 网页版']] },
+    { key: 'fetch_provider', label: '网页抓取方式', note: '本机抓取：正文由本机取回并抽取（默认，不额外计费）。DeepSeek 抓取：交给其抓取接口返回 Markdown，页面由对方读取——URL 会发出去、按次计费，且最终地址与内容类型不在本机校验。选了就必须有 DeepSeek 密钥；失败如实报错，不回退本机。搜索后的摘要预抓取始终走本机，不受此项影响。', options: [['local', '本机抓取'], ['deepseek', 'DeepSeek 抓取 API']] },
     { key: 'max_results', label: '检索结果条数上限', note: '模型未指定条数时用它（1–20）。', min: 1, max: 20 },
     { key: 'max_chars', label: '单次取回正文上限（字符）', note: '超过即截断，并在结果里说明；模型可按 start_char 续读（500–100000）。', min: 500, max: 100000 },
     { key: 'prefetch_pages', label: '结果预抓取条数', note: '搜索后自动抓取前几条的正文首段填进摘要，省掉模型再抓一次；0 = 关闭。每条最多 600 字、超时 3 秒，抓不到就退回原摘要（0–5）。', min: 0, max: 5, optional: true },
@@ -248,8 +249,12 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
         </span>
       </label>)}
     </fieldset>
-    {/* 密钥不在偏好里（偏好会随 Checkpoint 走）：它有自己的接口，单独一块。 */}
-    {group === 'web_access' ? <WebSearchKeyField /> : null}
+    {/* 密钥不在偏好里（偏好会随 Checkpoint 走）：它有自己的接口，单独一块。
+        按**草稿里选中的后端**显示对应那格：只有显式选 DeepSeek 才切到 DeepSeek 的密钥，
+        其余一律是 Tavily 那格（自动与两个网页版都维持本功能上线时的样子）。 */}
+    {group === 'web_access'
+      ? <WebSearchKeyField provider={String(fields.provider) === 'deepseek' ? 'deepseek' : 'tavily'} />
+      : null}
     {group === 'attachments' ? <OssCredentialField /> : null}
     {group === 'embedding' ? <p className={styles.note}>测试使用当前分区草稿及其他分区的已保存值，不保存草稿、不写入记忆。本地模型可能下载权重；远端接口会发送一条固定测试文本并可能产生少量费用。</p> : null}
     <div className={styles.actionBar}>

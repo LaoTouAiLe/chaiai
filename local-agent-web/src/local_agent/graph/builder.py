@@ -460,6 +460,7 @@ def build_runtime_context(
     external_policy: ExternalPathPolicy | None = None,
     agent_switches: Mapping[str, bool] | None = None,
     web_search_api_key: str | None = None,
+    web_deepseek_api_key: str | None = None,
     tool_registry: ToolRegistry | None = None,
     model_capabilities: ModelCapabilities | None = None,
     user_id: str | None = None,
@@ -504,6 +505,7 @@ def build_runtime_context(
         web_search_api_key: 检索服务（Tavily）的密钥明文，应用层每轮现取后传进来（凭据存储 →
             旧环境变量）。**它只进工具闭包**，不放进 ``RuntimeContext``：上下文会随委派子任务
             ``replace``、也会被诊断读取，密钥没有理由在那里露面。
+        web_deepseek_api_key: DeepSeek 搜索的密钥，口径同上（两条各存一份，工具按 provider 取）。
         tool_registry: 工具注册表；省略时按策略构造。
         model_capabilities: 模型能力；省略时现探测一次（架构 §11.7）。
         user_id: 逻辑用户；单机单用户时为 ``None``。
@@ -568,9 +570,10 @@ def build_runtime_context(
     registry = tool_registry or ToolRegistry.build(
         policy,
         web_access=app_config.web_access,
-        # 联网检索的服务凭据（Tavily）：应用层在装配这一轮时现取（凭据存储 → 旧环境变量），
+        # 联网检索的服务凭据（Tavily / DeepSeek）：应用层在装配这一轮时现取（凭据存储 → 旧环境变量），
         # 这里只把它转交给工具闭包——**不进 RuntimeContext、不进快照**，密钥没有落点。
         web_search_api_key=web_search_api_key,
+        web_deepseek_api_key=web_deepseek_api_key,
         git=app_config.git,
         # 技能段必须传进来：漏传的话工具会退回"默认关闭"的配置，而快照读的是真实配置——
         # 2026-10-09 的真实运行验收撞到的正是这个：**清单里列出了技能，`skill_load` 却说没有**。

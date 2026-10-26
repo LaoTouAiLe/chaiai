@@ -30,8 +30,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture(autouse=True)
 def isolate_search_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
-    """离线回归不因开发机配置了搜索密钥而意外调用真实收费接口。"""
+    """离线回归不因开发机配置了搜索密钥而意外调用真实收费接口。
+
+    两个 API 后端各有自己的变量名，漏删一个就会出现"本机配了 DeepSeek 密钥，测试却按
+    ``configured=false`` 断言"的假失败。
+    """
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
 
 
 def build_legacy_graph(*args: Any, **kwargs: Any) -> Any:

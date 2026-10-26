@@ -127,6 +127,20 @@ export type ToolCardView =
     truncated: boolean
   }
   | {
+    /**
+     * 网页检索 / 读取（2026-10-26）。与 `result` 分开：正文不是等宽代码，截断后的续读方式是
+     * 按 `start_char` 继续取，而不是像文件那样按行区间重读。
+     */
+    kind: 'web'
+    /** 搜索词或页面标题；投影层给不出时为空串。 */
+    target: string
+    /** 一行事实：`11 条来源 · 后端 deepseek`、`3200 字符 · 已跟随重定向`。 */
+    summary: string
+    /** 有界正文：读取到的正文，或前几条命中标题（每行一条，末尾可带说明）。 */
+    body: string
+    truncated: boolean
+  }
+  | {
     kind: 'todo'
     items: readonly { text: string; status: 'completed' | 'in_progress' | 'pending' }[]
   }

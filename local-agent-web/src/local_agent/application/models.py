@@ -237,16 +237,20 @@ CredentialStoreState = Literal["local", "os", "memory", "unavailable"]
 
 
 class WebSearchKeyView(_Dto):
-    """联网检索的服务凭据（Tavily）状态。
+    """联网检索的服务凭据（Tavily / DeepSeek）状态。
 
     **只回答"有没有"，不回读密钥**（§6.8 第 2 条）——与模型连接的密钥同一条口径。
 
-    三个字段回答三个不同的问题，不能合并：
+    四个字段回答四个不同的问题，不能合并：
+    ``provider`` = 这是**哪个后端**的密钥（两个 API 后端各占一条，页面据此确认读写的是同一格）；
     ``configured`` = 现在能不能构造出检索请求；``source`` = 这份密钥**从哪来**
     （``settings`` 设置库 / ``environment`` 旧环境变量 / ``none`` 都没有）；
     ``store`` = 设置库那边**能不能存下来**（``memory`` 表示只在本进程内有效、重启后要重新录入）。
+
+    取值与 ``config.ApiSearchProvider`` 同源；本模块不导入配置层，所以就地写一份字面量。
     """
 
+    provider: Literal["tavily", "deepseek"] = "tavily"
     configured: bool = False
     source: Literal["settings", "environment", "none"] = "none"
     store: CredentialStoreState = "unavailable"
@@ -443,7 +447,7 @@ class PlanView(_Dto):
 
 ToolStatus = Literal["pending", "running", "ok", "error", "denied", "unknown"]
 
-ToolOutcomeKind = Literal["read", "list", "search", "edit", "write", "delete", "shell", "delegation"]
+ToolOutcomeKind = Literal["read", "list", "search", "edit", "write", "delete", "shell", "delegation", "web"]
 
 FileDiffLineKind = Literal["context", "add", "del"]
 
@@ -591,8 +595,10 @@ class ToolOutcomeView(_Dto):
     不能把一段任意文本当成已知工具的结构。
     """
 
+    #: ``web``（2026-10-26）= 网页检索 / 读取：``target`` 是搜索词或页面标题，``text`` 是有界正文
+    #: 或前几条命中标题。页面按它渲染"结果"卡；不与 ``read`` 混用，后者带文件行号语义。
     kind: ToolOutcomeKind
-    #: 规范化目标（工作区相对路径或命令 cwd）；投影层给不出时为空。
+    #: 规范化目标（工作区相对路径、命令 cwd、搜索词或页面标题）；投影层给不出时为空。
     target: str | None = None
     #: 一行结果摘要（变更行数、条目数、退出码、字节数……）。
     summary: str | None = None

@@ -48,6 +48,7 @@ from urllib.request import (
 from langchain_core.tools import BaseTool, tool
 
 from local_agent.config import WebAccessConfig
+from local_agent.tools.deepseek_search import deepseek_search, with_filters
 from local_agent.tools.result_types import WebFetchResult, WebSearchHit, WebSearchResult
 from local_agent.tools.tavily_search import ApiTransport, tavily_search
 from local_agent.tools.web_cache import TtlCache
@@ -154,8 +155,26 @@ class WebResponse:
 
 #: transport 契约：``(url, timeout_seconds, user_agent) -> WebResponse``；失败抛 ``WebAccessError``。
 WebTransport = Callable[[str, float, str], WebResponse]
+#: 远端抓取的 transport 契约：``(url, key, timeout_seconds, user_agent) -> JSON 对象``。
+DeepseekFetchTransport = Callable[[str, str, float, str], Mapping[str, Any]]
 #: 域名解析器契约：``(host) -> list[ip]``；注入它让 SSRF 判定在测试里完全确定。
 Resolver = Callable[[str], Sequence[str]]
+
+
+@dataclass(frozen=True)
+class _RetrievedDocument:
+    """抓取阶段的统一产物：截断、版本、续读与片段选取都不必知道正文是怎么来的。
+
+    本地路径会填 ``final_url`` 与 ``structure``；远端路径这两项恒为 ``None``——DeepSeek 只返回
+    ``title`` 与 Markdown 正文，最终地址、状态码、内容类型都由对方决定，本地没有可校验的对象。
+    ``note`` 放"这份正文的来源要交代清楚"的说明，由 :func:`fetch` 与截断说明一起输出。
+    """
+
+    title: str | None
+    body: str
+    final_url: str | None = None
+    structure: str | None = None
+    note: str | None = None
 
 
 def _system_resolver(host: str) -> list[str]:
@@ -480,12 +499,45 @@ class _NoApiRedirect(HTTPRedirectHandler):
         return None
 
 
-def _tavily_transport(
-    payload: Mapping[str, Any], key: str, timeout: float, user_agent: str,
+#: 三个 JSON API 端点。都是**本模块的常量**：不由模型给，也不做成配置项——换成别的域名的请求
+#: 不该由一个能被页面改写的值决定（与 HTML 兼容后端的端点同一口径）。
+_TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+_DEEPSEEK_SEARCH_URL = "https://api.deepseek.com/v1/tools/search"
+_DEEPSEEK_FETCH_URL = "https://api.deepseek.com/v1/tools/fetch"
+
+
+def _post_json_api(
+    url: str,
+    payload: Mapping[str, Any],
+    key: str,
+    timeout: float,
+    user_agent: str,
+    *,
+    service: str,
+    status_hint: str,
 ) -> Mapping[str, Any]:
+    """向一个 Bearer 鉴权的 JSON API 发 POST，返回解析后的对象。
+
+    三条安全口径只在这一处实现，三个调用点共用：**不走代理**（``ProxyHandler({})``，请求内容
+    不被本机代理看见或改写）、**不跟随重定向**（``_NoApiRedirect``，凭据只发给固定的那个端点）、
+    **响应有上限**（``MAX_RESPONSE_BYTES``，含解压前的字节数）。
+
+    Args:
+        service: 错误消息里的服务名（"Tavily 搜索" / "DeepSeek 抓取"…）。几条路径共用一个实现后，
+            异常消息必须指名道姓——否则"服务返回 HTTP 401"分不清是哪条路出的事。
+        status_hint: HTTP 错误时要用户查什么。三个服务的排错重点不同（额度 / 余额 / 频率），
+            所以由调用方给，不在这里猜。
+
+    Raises:
+        WebAccessError: 连接失败、HTTP 错误、响应超限，或返回的不是 JSON 对象。
+    """
     request = Request(
-        "https://api.tavily.com/search", data=json.dumps(dict(payload)).encode("utf-8"),
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "User-Agent": user_agent},
+        url, data=json.dumps(dict(payload)).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "User-Agent": user_agent,
+        },
         method="POST",
     )
     try:
@@ -493,17 +545,49 @@ def _tavily_transport(
         with opener.open(request, timeout=timeout) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
         if len(raw) > MAX_RESPONSE_BYTES:
-            raise WebAccessError("Tavily 搜索响应超过读取上限")
+            raise WebAccessError(f"{service}响应超过读取上限")
         value = json.loads(raw)
     except HTTPError as exc:
-        raise WebAccessError(f"Tavily 搜索服务返回 HTTP {exc.code}，请检查服务凭据、额度或可用性") from None
+        # 429 是频率、402 是余额：改请求都没用，所以只说清"该去查什么"
+        raise WebAccessError(f"{service}服务返回 HTTP {exc.code}，{status_hint}") from None
     except (URLError, TimeoutError, OSError) as exc:
-        raise WebAccessError(f"Tavily 搜索连接失败（{type(exc).__name__}）") from None
+        raise WebAccessError(f"{service}连接失败（{type(exc).__name__}）") from None
     except ValueError:
-        raise WebAccessError("Tavily 搜索返回了不可解析的 JSON") from None
+        raise WebAccessError(f"{service}返回了不可解析的 JSON") from None
     if not isinstance(value, dict):
-        raise WebAccessError("Tavily 搜索响应不是结果对象")
+        raise WebAccessError(f"{service}响应不是结果对象")
     return value
+
+
+def _tavily_transport(
+    payload: Mapping[str, Any], key: str, timeout: float, user_agent: str,
+) -> Mapping[str, Any]:
+    """Tavily 搜索（``POST /search``）。"""
+    return _post_json_api(
+        _TAVILY_SEARCH_URL, payload, key, timeout, user_agent,
+        service="Tavily 搜索", status_hint="请检查服务凭据、额度或可用性",
+    )
+
+
+def _deepseek_transport(
+    payload: Mapping[str, Any], key: str, timeout: float, user_agent: str,
+) -> Mapping[str, Any]:
+    """DeepSeek 搜索（``POST /v1/tools/search``）。"""
+    return _post_json_api(
+        _DEEPSEEK_SEARCH_URL, payload, key, timeout, user_agent,
+        service="DeepSeek 搜索", status_hint="请检查服务凭据、余额或调用频率",
+    )
+
+
+def _deepseek_fetch_transport(
+    url: str, key: str, timeout: float, user_agent: str,
+) -> Mapping[str, Any]:
+    """DeepSeek 抓取（``POST /v1/tools/fetch``）：请求体只有目标地址。"""
+    return _post_json_api(
+        _DEEPSEEK_FETCH_URL, {"url": url}, key, timeout, user_agent,
+        service="DeepSeek 抓取",
+        status_hint="请检查服务凭据、余额、调用频率，或目标站点是否被其安全策略拒绝",
+    )
 
 
 def _is_text_like(content_type: str) -> bool:
@@ -578,7 +662,11 @@ def _prefetch_snippets(
         return hits, 0
 
     budget = min(float(config.timeout_seconds), PREFETCH_TIMEOUT_SECONDS)
-    page_config = config.model_copy(update={"timeout_seconds": budget, "max_chars": PREFETCH_CHARS})
+    # ``fetch_provider`` 固定 ``local``：预抓取只是"省掉模型再读一次"的增强动作（失败就沿用搜索
+    # 摘要），不能因为用户在设置里选了远端抓取，就让每次搜索悄悄多出几条按次计费的请求。
+    page_config = config.model_copy(update={
+        "timeout_seconds": budget, "max_chars": PREFETCH_CHARS, "fetch_provider": "local",
+    })
     targets = hits[:count]
 
     def grab(hit: WebSearchHit) -> str | None:
@@ -622,6 +710,7 @@ def search(
     api_transport: ApiTransport | None = None,
     environ: Mapping[str, str] | None = None,
     api_key: str | None = None,
+    deepseek_api_key: str | None = None,
     resolver: Resolver | None = None,
 ) -> WebSearchResult:
     """检索网页，返回结构化来源（标题、URL、来源站点），**不返回正文**。
@@ -630,6 +719,9 @@ def search(
         api_key: 显式传入的 Tavily 密钥（来自设置库，见 ``model_settings.web_search``）。
             省略时回落到 ``tavily_api_key_env`` 指的环境变量——"保留旧环境变量取密钥路径"，
             与模型连接同一口径。
+        deepseek_api_key: DeepSeek 搜索的密钥，取值规则同上（``deepseek_api_key_env``）。
+            **只在 ``provider="deepseek"`` 时用到**：它不参与 ``auto`` 的判定，因此配了这条
+            密钥也不会改变已有用户走哪个后端。
 
     Raises:
         WebAccessError: 开关关闭、query 为空、或网络/解析失败。
@@ -647,9 +739,31 @@ def search(
         raise WebAccessError("time_range 只接受 day/week/month/year")
     env = os.environ if environ is None else environ
     key = (api_key or "").strip() or env.get(config.tavily_api_key_env, "").strip()
+    deepseek_key = (deepseek_api_key or "").strip() or env.get(config.deepseek_api_key_env, "").strip()
     provider = config.provider
     if provider == "auto":
+        # ``auto`` 的口径**不动**：只看 Tavily 凭据。DeepSeek 是新后端，要用户显式选——
+        # 否则"刚录了一条 DeepSeek 密钥"就会悄悄改掉老用户的后端，那正是契约禁止的静默切换。
         provider = "tavily" if key else "bing_html"
+    if provider == "deepseek":
+        if not deepseek_key:
+            raise WebAccessError(
+                f"DeepSeek 搜索未配置凭据：请在设置页录入，或设置 {config.deepseek_api_key_env}"
+            )
+        # 与请求用同一个 now：跨零点时"报出来的查询"和"实际发出去的查询"不能差一天。
+        now = datetime.now(timezone.utc)
+        executed = with_filters(text, time_range=time_range, domains=domain_list, now=now)
+        hits = deepseek_search(
+            text, key=deepseek_key, limit=limit, timeout=float(config.timeout_seconds),
+            user_agent=config.user_agent, time_range=time_range, domains=domain_list,
+            transport=api_transport or _deepseek_transport,
+            validate_url=lambda value: check_url(value, resolve=False), now=now,
+        )
+        return WebSearchResult(
+            query=text, results=hits, provider=provider, executed_query=executed,
+            retrieved_at=datetime.now(timezone.utc).isoformat(),
+            truncated=len(hits) >= limit,
+        )
     if provider == "tavily":
         if not key:
             raise WebAccessError(f"Tavily 搜索未配置凭据：请设置 {config.tavily_api_key_env}")
@@ -729,40 +843,21 @@ def search(
     )
 
 
-def fetch(
-    url: str,
+def _local_document(
+    target: str,
     *,
     config: WebAccessConfig,
-    transport: WebTransport | None = None,
-    max_chars: int | None = None,
-    resolver: Resolver | None = None,
-    query: str = "",
-    start_char: int = 0,
-    expected_version: str | None = None,
-    json_pointer: str = "",
-    json_fields: list[str] | None = None,
-) -> WebFetchResult:
-    """取回单个 URL 的正文并抽成纯文本。
+    transport: WebTransport | None,
+    validate: Callable[[str], str],
+    json_pointer: str,
+    json_fields: list[str] | None,
+) -> _RetrievedDocument:
+    """本机取回并抽取正文（默认路径，行为与 2026-10-26 之前完全一致）。
 
     Args:
-        resolver: 注入的域名解析器（测试用）；``None`` 走系统解析。
-
-    Raises:
-        WebAccessError: 开关关闭、URL 被 SSRF 边界拒绝、类型不支持或网络失败。
+        validate: 已经过 SSRF 与域名策略检查的校验函数。重定向前后都要用它——一次重定向就可能
+            把目标从公网带到本机，所以**最终地址**也要再校验一次。
     """
-    if not config.enabled:
-        raise WebAccessError("外部访问未启用（web_access.enabled=false）")
-    if not isinstance(json_pointer, str) or (json_pointer and not json_pointer.startswith("/")):
-        raise WebAccessError("json_pointer 必须为空或以 / 开头的 JSON Pointer；字段必须来自实际 json_structure")
-    if json_fields and (len(json_fields) > 20 or any(not isinstance(field, str) or (field and not field.startswith("/")) for field in json_fields)):
-        raise WebAccessError("json_fields 最多接受 20 个以 / 开头的相对 JSON Pointer（空串表示当前值）")
-
-    def validate(value: str) -> str:
-        checked = check_url(value, resolver=resolver)
-        _require_allowed_domain(checked, config)
-        return checked
-
-    target = validate(url)
     token = _redirect_validator.set(validate)
     try:
         response = (transport or _default_transport)(
@@ -770,8 +865,8 @@ def fetch(
         )
     finally:
         _redirect_validator.reset(token)
-    # **最终地址必须再校验一次**：重定向可能把我们带到本机或内网。这一步放在这里而不是只放在默认
-    # transport 里——注入的 transport（测试、将来的其它实现）同样不能绕过这条边界。
+    # 这一步放在这里而不是只放在默认 transport 里：注入的 transport（测试、将来的其它实现）
+    # 同样不能绕过这条边界。
     if response.url and response.url != target:
         validate(response.url)
     if not _is_text_like(response.content_type):
@@ -786,32 +881,141 @@ def fetch(
         raise WebAccessError(
             "网页没有返回可读取正文，可能需要 JavaScript、登录或被站点限制；本次没有取得可用内容。"
         )
+    return _RetrievedDocument(
+        title=title, body=body,
+        final_url=response.url if response.url != target else None,
+        structure=structure,
+    )
+
+
+def _deepseek_document(
+    target: str,
+    *,
+    config: WebAccessConfig,
+    api_key: str | None,
+    transport: DeepseekFetchTransport | None,
+) -> _RetrievedDocument:
+    """交给 DeepSeek 的 ``POST /v1/tools/fetch`` 取回 Markdown 正文。
+
+    与本地路径的三点不同，都写进 ``note`` 让模型和用户都看得见：地址由对方抓取、只回正文、
+    最终地址不在本地校验。**失败不回退本机**：选了远端后端就按远端的结果如实报告。
+    """
+    key = (api_key or "").strip() or os.environ.get(config.deepseek_api_key_env, "").strip()
+    if not key:
+        raise WebAccessError(
+            f"DeepSeek 抓取未配置凭据：请在设置页录入，或设置 {config.deepseek_api_key_env}"
+        )
+    response = (transport or _deepseek_fetch_transport)(
+        target, key, float(config.timeout_seconds), config.user_agent,
+    )
+    body = response.get("content")
+    if not isinstance(body, str) or not body.strip():
+        raise WebAccessError(
+            "DeepSeek 没有返回可读取正文：目标可能不可用、被站点策略拦截或不是可解析的内容；"
+            "本次没有取得可用内容。"
+        )
+    title = response.get("title")
+    return _RetrievedDocument(
+        title=title.strip()[:500] if isinstance(title, str) and title.strip() else None,
+        body=body,
+        note=(
+            "正文由 DeepSeek 抓取服务返回（Markdown 纯文本）：页面由对方读取，"
+            "最终地址与内容类型未在本地校验；要核对原始响应请把「网页抓取方式」改成本机抓取。"
+        ),
+    )
+
+
+def fetch(
+    url: str,
+    *,
+    config: WebAccessConfig,
+    transport: WebTransport | None = None,
+    max_chars: int | None = None,
+    resolver: Resolver | None = None,
+    query: str = "",
+    start_char: int = 0,
+    expected_version: str | None = None,
+    json_pointer: str = "",
+    json_fields: list[str] | None = None,
+    api_key: str | None = None,
+    api_fetch_transport: DeepseekFetchTransport | None = None,
+) -> WebFetchResult:
+    """取回单个 URL 的正文并抽成纯文本。
+
+    正文来源由 ``config.fetch_provider`` 决定，两条路径共用后面的截断、版本与续读逻辑：
+    ``local``（默认）本机取回并抽取；``deepseek`` 交给远端返回 Markdown。
+
+    Args:
+        resolver: 注入的域名解析器（测试用）；``None`` 走系统解析。
+        api_key: DeepSeek 抓取的密钥（``fetch_provider="deepseek"`` 时才用到）。
+            省略时回落到 ``deepseek_api_key_env`` 指的环境变量，与检索同一口径。
+        api_fetch_transport: 远端抓取的 transport（测试注入用）；省略走真实 HTTP。
+
+    Raises:
+        WebAccessError: 开关关闭、URL 被 SSRF 边界拒绝、类型不支持、未配置凭据或网络失败。
+    """
+    if not config.enabled:
+        raise WebAccessError("外部访问未启用（web_access.enabled=false）")
+    if not isinstance(json_pointer, str) or (json_pointer and not json_pointer.startswith("/")):
+        raise WebAccessError("json_pointer 必须为空或以 / 开头的 JSON Pointer；字段必须来自实际 json_structure")
+    if json_fields and (len(json_fields) > 20 or any(not isinstance(field, str) or (field and not field.startswith("/")) for field in json_fields)):
+        raise WebAccessError("json_fields 最多接受 20 个以 / 开头的相对 JSON Pointer（空串表示当前值）")
+
+    def validate(value: str) -> str:
+        checked = check_url(value, resolver=resolver)
+        _require_allowed_domain(checked, config)
+        return checked
+
+    target = validate(url)
+    if config.fetch_provider == "deepseek":
+        # 远端只回 Markdown：JSON 的结构化读取能力在那边不存在，说清怎么换回来，而不是悄悄忽略参数。
+        if json_pointer or json_fields:
+            raise WebAccessError(
+                "DeepSeek 抓取只返回 Markdown 正文，不保留 JSON 原文，因此不支持 json_pointer / "
+                "json_fields；要按结构读 JSON 请把「网页抓取方式」改成本机抓取"
+            )
+        document = _deepseek_document(
+            target, config=config, api_key=api_key, transport=api_fetch_transport,
+        )
+    else:
+        document = _local_document(
+            target, config=config, transport=transport, validate=validate,
+            json_pointer=json_pointer, json_fields=json_fields,
+        )
+    body = document.body
     limit = max(500, min(int(max_chars or config.max_chars), HARD_MAX_CHARS))
     version = content_version(body)
     if expected_version and expected_version != version:
         raise WebAccessError("网页正文已变化，不能把上次内容与当前续读拼成同一版本；请重新从开头读取")
     text, start, next_start, selected = select_window(body, query=query, start=start_char, limit=limit)
     truncated = next_start is not None
-    note: str | None = None
+    # 说明按"来源 → 截断 → 片段选取"顺序追加。以前是后一句直接覆盖前一句，加了远端来源说明后
+    # 那样会把"正文不是本机读的"这件事吞掉，所以改成拼接。
+    notes: list[str] = []
+    if document.note:
+        notes.append(document.note)
     if truncated:
-        note = (
+        notes.append(
             f"本次返回截断正文（全文 {len(body)} 字符）；"
             "续读使用 next_start_char，并携带本次 content_version 作为 expected_version。"
             "实时变化中的页面（榜单、动态列表）在两次读取之间就可能改版，那时续读会被拒绝——"
             "请清空 expected_version 从开头重读，不要把两次结果当同一份。"
         )
     if selected:
-        note = "已按 query 选取原文片段，不是完整正文；需要完整列表或表格时清空 query 后按 start_char 续读。"
+        notes.append(
+            "已按 query 选取原文片段，不是完整正文；需要完整列表或表格时清空 query 后按 start_char 续读。"
+        )
+    final_url = document.final_url
     return WebFetchResult(
         url=target,
-        final_url=response.url if response.url != target else None,
-        title=title,
+        final_url=final_url,
+        title=document.title,
         text=text,
         truncated=truncated,
-        note=note,
+        note="".join(notes) or None,
         retrieved_at=datetime.now(timezone.utc).isoformat(),
-        source_id=source_id(response.url or target), total_chars=len(body), start_char=start,
-        next_start_char=next_start, content_version=version, json_structure=structure,
+        source_id=source_id(final_url or target), total_chars=len(body), start_char=start,
+        next_start_char=next_start, content_version=version, json_structure=document.structure,
         selected_by_query=selected,
     )
 
@@ -849,15 +1053,18 @@ def build_web_tools(
     transport: WebTransport | None = None,
     resolver: Resolver | None = None,
     api_key: str | None = None,
+    deepseek_api_key: str | None = None,
 ) -> list[BaseTool]:
     """构造 ``web_search`` / ``web_fetch``。
 
-    工具**总是被构造**（能力覆盖校验要求登记的工具都在注册表里）。Profile 决定模型能否看到工具；
+    工具**总是被构造**（能力覆盖校验要求登记的工具都在工具注册表里）。Profile 决定模型能否看到工具；
     运行上下文先将能力开关回灌 ``web_access.enabled``，旧配置值不再独立决定能否联网。
 
     Args:
         api_key: Tavily 密钥（由应用层在装配每轮上下文时从设置库取；**不进任何 DTO 与日志**）。
             省略时按环境变量判后端，与"没配设置库"的旧路径一致。
+        deepseek_api_key: DeepSeek 的密钥，取值规则同上。检索与抓取共用这一条（同一个 API Key），
+            只在显式选了 ``deepseek`` 的对应后端时用到。
     """
 
     provider = config.provider
@@ -865,10 +1072,19 @@ def build_web_tools(
         provider = "tavily" if ((api_key or "").strip() or
                                 os.environ.get(config.tavily_api_key_env, "").strip()) else "bing_html"
     search_doc = _SEARCH_DOC + f"当前检索后端：{provider}。"
-    search_doc += "time_range 仅 Tavily 支持；HTML 兼容后端请将日期写入 query 并核对来源时间。"
+    search_doc += "time_range 在 Tavily 与 DeepSeek 后端可用；HTML 兼容后端请将日期写入 query 并核对来源时间。"
     # 省略条数/字数时用**配置里的值**（`web_access.max_results` / `max_chars`）：工具签名默认 `None`
     # 而不是写死 5 / 8000，否则页面上改的那两个值永远不会生效。
     search_doc += "max_results 省略时使用设置里的条数上限。"
+
+    # 抓取后端与检索后端是两个独立设置：模型必须知道正文是谁读的，否则会把远端的脱敏/丢失
+    # 当成原页面如此。远端抓取只回 Markdown，所以结构化读取那两句在这条路径上不成立。
+    fetch_doc = _FETCH_DOC + f"当前抓取后端：{config.fetch_provider}。"
+    if config.fetch_provider == "deepseek":
+        fetch_doc += (
+            "正文由远端返回 Markdown 纯文本，不支持 json_pointer / json_fields；"
+            "需要按结构读 JSON 时请让用户把「网页抓取方式」改成本机抓取。"
+        )
 
     @tool("web_search", description=search_doc)
     def web_search(
@@ -878,10 +1094,11 @@ def build_web_tools(
     ) -> str:
         """检索网页，返回结构化来源。"""
         result = search(query, config=config, transport=transport, max_results=max_results,
-                        time_range=time_range, domains=domains, api_key=api_key, resolver=resolver)
+                        time_range=time_range, domains=domains, api_key=api_key,
+                        deepseek_api_key=deepseek_api_key, resolver=resolver)
         return result.model_dump_json()
 
-    @tool("web_fetch", description=_FETCH_DOC)
+    @tool("web_fetch", description=fetch_doc)
     def web_fetch(
         url: str, max_chars: int | None = None, query: str = "", start_char: int = 0,
         expected_version: str | None = None, json_pointer: str = "", json_fields: list[str] | None = None,
@@ -890,7 +1107,7 @@ def build_web_tools(
         result = fetch(
             url, config=config, transport=transport, max_chars=max_chars, resolver=resolver,
             query=query, start_char=start_char, expected_version=expected_version,
-            json_pointer=json_pointer, json_fields=json_fields,
+            json_pointer=json_pointer, json_fields=json_fields, api_key=deepseek_api_key,
         )
         return result.model_dump_json()
 

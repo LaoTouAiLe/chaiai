@@ -86,7 +86,9 @@ Agent 工具与无人值守审批保持原规则。[完整契约](../ARCHITECTUR
 
 联网搜索默认 `web_access.provider: auto`：配置了独立的 `TAVILY_API_KEY` 就使用 Tavily，否则使用 Bing HTML 兼容搜索。
 Tavily 密钥从 [Tavily 控制台](https://app.tavily.com/) 注册获取，放入本目录 `.env` 的 `TAVILY_API_KEY=你的密钥` 后重启服务；它与模型密钥不同。
-显式指定 `provider: tavily` 而未配置密钥会明确报错，不静默换服务。HTML 兼容搜索不支持精确时间筛选，且可能出现无关结果或站点限制。
+`provider: deepseek` 用 DeepSeek 搜索 API（`POST /v1/tools/search`，按次计费：每 1000 次成功请求 5 元，失败与无结果不计费）。它的密钥在「设置 → 联网检索」里单独录入，也可以落到 `.env` 的 `DEEPSEEK_API_KEY`（与模型连接同一个 Key 即可）；两条密钥各存一条，互不覆盖。
+显式指定 `provider: tavily` 或 `deepseek` 而未配置对应密钥会明确报错，不静默换服务；`auto` 只认 Tavily，DeepSeek 必须显式选。HTML 兼容搜索不支持精确时间筛选，且可能出现无关结果或站点限制。
+正文来源是另一个设置 `web_access.fetch_provider`：`local`（默认）本机取回并抽取，`deepseek` 交给 `POST /v1/tools/fetch` 返回 Markdown（同一个 DeepSeek 密钥）。远端路径按次计费、URL 会外发、最终地址不在本机校验，且不支持 `json_pointer` / `json_fields`；失败如实报错不回退。搜索后的摘要预抓取始终走本机。
 页面按轮展示“搜索结果”“已读取”“回答引用”及实际来源；动态页面读取尚未实现，失败会交给模型说明。
 本批实现、复验命令与真实问题结果见「联网实施记录」——**该记录与当时的截图都未归档**（原链接指向的文件从未提交过）。
 

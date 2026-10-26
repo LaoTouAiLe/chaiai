@@ -77,6 +77,14 @@ class _ScriptedStreamModel:
         finally:
             self.closed = True
 
+    def bind(self, **_kwargs: Any) -> _ScriptedStreamModel:
+        """模型适配器在调用前会先 `bind(...)` 固定本轮参数（2026-10-26 起）；桩返回自身即可。
+
+        缺这个方法时，节点拿到的是 ``AttributeError``，就会走失败路径——那正是本组用例
+        一度报「failed 而非 cancelled」的原因，不是取消语义真的坏了。
+        """
+        return self
+
     def invoke(self, messages: Any) -> AIMessage:
         self.invoke_calls += 1
         return AIMessage(content="".join(self.chunks))

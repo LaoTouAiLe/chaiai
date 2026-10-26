@@ -799,32 +799,37 @@ export function testMemoryPreferences(values: PreferenceValues, expectedVersion:
 
 export type WebSearchKeyDto = components['schemas']['WebSearchKeyView']
 
+/** 需要密钥的检索后端：两个后端各占一条密钥，页面按当前选中的后端读写对应那条。 */
+export type WebSearchProvider = 'tavily' | 'deepseek'
+
 /**
- * 联网检索的服务凭据（Tavily）状态。
+ * 联网检索的服务凭据状态。
  *
  * 返回值里**没有密钥**（连掩码都没有）：页面只据此决定是提示"去录入"还是"可以开始检索"，
  * 以及是否存在设置库里（`store`）。读取失败时服务端会如实说明，不假装"已配置"。
+ *
+ * `provider` 缺省 `tavily`：升级前只有这一个后端，不传参的调用语义不变。
  */
-export function getWebSearchKey(): Promise<WebSearchKeyDto> {
-  return request<WebSearchKeyDto>('/api/web-search/credential')
+export function getWebSearchKey(provider: WebSearchProvider = 'tavily'): Promise<WebSearchKeyDto> {
+  return request<WebSearchKeyDto>(`/api/web-search/credential?provider=${provider}`)
 }
 
 /**
- * 写入（覆盖）检索服务凭据：**保存即生效**，下一轮检索就用它。
+ * 写入（覆盖）指定后端凭据：**保存即生效**，下一轮检索就用它。
  *
  * 只写不回读：要替换就再写一次，要清空走 `clearWebSearchKey`——"清空"与"改成空白"是两种意图，
  * 服务端也只接受前者来表达删除（空白密钥是 422）。
  */
-export function setWebSearchKey(apiKey: string): Promise<WebSearchKeyDto> {
-  return request<WebSearchKeyDto>('/api/web-search/credential', {
+export function setWebSearchKey(apiKey: string, provider: WebSearchProvider = 'tavily'): Promise<WebSearchKeyDto> {
+  return request<WebSearchKeyDto>(`/api/web-search/credential?provider=${provider}`, {
     method: 'PUT',
     body: JSON.stringify({ api_key: apiKey }),
   })
 }
 
 /** 删除已保存的凭据（幂等）。删掉之后旧环境变量仍然有效，返回的 `source` 会如实反映这一点。 */
-export function clearWebSearchKey(): Promise<WebSearchKeyDto> {
-  return request<WebSearchKeyDto>('/api/web-search/credential', { method: 'DELETE' })
+export function clearWebSearchKey(provider: WebSearchProvider = 'tavily'): Promise<WebSearchKeyDto> {
+  return request<WebSearchKeyDto>(`/api/web-search/credential?provider=${provider}`, { method: 'DELETE' })
 }
 
 /** 对象存储密钥状态（2026-10-20）：只报"有没有"，不回读密钥。 */

@@ -291,6 +291,31 @@ describe('mapTool', () => {
     expect(row.card).toMatchObject({ kind: 'terminal', truncated: true })
   })
 
+  it('gives a web result its own card instead of the generic placeholder', () => {
+    // 2026-10-26：网页工具此前不在服务端的识别表里，卡片只剩"该结果格式暂无可展示的详情"。
+    // 现在服务端给出搜索词、条数与有界正文，页面只照搬，不在这里重新解析 URL 列表。
+    const row = mapTool(
+      toolMessage('ok', {
+        tool_name: 'web_search',
+        outcome: {
+          kind: 'web', background: false,
+          target: 'MCP',
+          summary: '2 条来源 · 后端 deepseek',
+          text: 'MCP 文档 · modelcontextprotocol.io',
+          total: 2,
+          truncated: false,
+        },
+      }).tool,
+    )
+
+    expect(row.card).toMatchObject({
+      kind: 'web',
+      target: 'MCP',
+      summary: '2 条来源 · 后端 deepseek',
+      body: 'MCP 文档 · modelcontextprotocol.io',
+    })
+  })
+
   it('renders a mutation as a result card with the summary and the bounded body', () => {
     const row = mapTool(
       toolMessage('ok', {

@@ -8202,7 +8202,8 @@
               "write",
               "delete",
               "shell",
-              "delegation"
+              "delegation",
+              "web"
             ],
             "title": "Kind",
             "type": "string"
@@ -9370,7 +9371,7 @@
       },
       "WebAccessPreferences": {
         "additionalProperties": false,
-        "description": "联网检索的运行期偏好（\"设置 → 联网检索\"页签）。\n\n只放**能安全回灌**的字段：``enabled`` 不在这里——它是**能力开关**的地盘（2026-10-14 起\n`web` 是锁定能力，运行期由 `apply_capability_gates` 回灌，见 ``WebAccessConfig`` 的说明）；\n``tavily_api_key_env`` 与 ``user_agent`` 也不在这里：前者是旧配置的密钥**变量名**（密钥本身走\n凭据存储，见 ``model_settings.web_search``），后者不是用户要调的旋钮。\n\n上下界与 ``WebAccessConfig`` **逐项一致**：偏好值经 ``model_copy(update=...)`` 落到运行期配置，\n那条路径不做二次校验，所以写在模型上的约束就是最后一道。",
+        "description": "联网检索的运行期偏好（\"设置 → 联网检索\"页签）。\n\n只放**能安全回灌**的字段：``enabled`` 不在这里——它是**能力开关**的地盘（2026-10-14 起\n`web` 是锁定能力，运行期由 `apply_capability_gates` 回灌，见 ``WebAccessConfig`` 的说明）；\n``tavily_api_key_env`` / ``deepseek_api_key_env`` 与 ``user_agent`` 也不在这里：前者们是旧配置的\n密钥**变量名**（密钥本身走凭据存储，见 ``model_settings.web_search``），后者不是用户要调的旋钮。\n\n上下界与 ``WebAccessConfig`` **逐项一致**：偏好值经 ``model_copy(update=...)`` 落到运行期配置，\n那条路径不做二次校验，所以写在模型上的约束就是最后一道。",
         "properties": {
           "allowed_domains": {
             "default": [],
@@ -9395,6 +9396,15 @@
               "allowlist"
             ],
             "title": "Domain Policy",
+            "type": "string"
+          },
+          "fetch_provider": {
+            "default": "local",
+            "enum": [
+              "local",
+              "deepseek"
+            ],
+            "title": "Fetch Provider",
             "type": "string"
           },
           "max_chars": {
@@ -9459,6 +9469,7 @@
             "enum": [
               "auto",
               "tavily",
+              "deepseek",
               "bing_html",
               "duckduckgo_html"
             ],
@@ -9478,7 +9489,7 @@
       },
       "WebSearchKeyRequest": {
         "additionalProperties": false,
-        "description": "录入 / 覆盖联网检索的服务凭据（Tavily）。\n\n形状只挡空值：**内容不在这里做任何校验**（长度上限只是防\"把整篇文档粘进来\"），\n密钥对不对只有发起一次真实检索才知道——那件事由用户自己决定何时做。",
+        "description": "录入 / 覆盖联网检索的服务凭据（哪一条由 query 的 ``provider`` 决定：Tavily / DeepSeek）。\n\n形状只挡空值：**内容不在这里做任何校验**（长度上限只是防\"把整篇文档粘进来\"），\n密钥对不对只有发起一次真实检索才知道——那件事由用户自己决定何时做。",
         "properties": {
           "api_key": {
             "maxLength": 512,
@@ -9494,7 +9505,7 @@
         "type": "object"
       },
       "WebSearchKeyView": {
-        "description": "联网检索的服务凭据（Tavily）状态。\n\n**只回答\"有没有\"，不回读密钥**（§6.8 第 2 条）——与模型连接的密钥同一条口径。\n\n三个字段回答三个不同的问题，不能合并：\n``configured`` = 现在能不能构造出检索请求；``source`` = 这份密钥**从哪来**\n（``settings`` 设置库 / ``environment`` 旧环境变量 / ``none`` 都没有）；\n``store`` = 设置库那边**能不能存下来**（``memory`` 表示只在本进程内有效、重启后要重新录入）。",
+        "description": "联网检索的服务凭据（Tavily / DeepSeek）状态。\n\n**只回答\"有没有\"，不回读密钥**（§6.8 第 2 条）——与模型连接的密钥同一条口径。\n\n四个字段回答四个不同的问题，不能合并：\n``provider`` = 这是**哪个后端**的密钥（两个 API 后端各占一条，页面据此确认读写的是同一格）；\n``configured`` = 现在能不能构造出检索请求；``source`` = 这份密钥**从哪来**\n（``settings`` 设置库 / ``environment`` 旧环境变量 / ``none`` 都没有）；\n``store`` = 设置库那边**能不能存下来**（``memory`` 表示只在本进程内有效、重启后要重新录入）。\n\n取值与 ``config.ApiSearchProvider`` 同源；本模块不导入配置层，所以就地写一份字面量。",
         "properties": {
           "configured": {
             "default": false,
@@ -9511,6 +9522,15 @@
               }
             ],
             "title": "Note"
+          },
+          "provider": {
+            "default": "tavily",
+            "enum": [
+              "tavily",
+              "deepseek"
+            ],
+            "title": "Provider",
+            "type": "string"
           },
           "source": {
             "default": "none",
@@ -13709,8 +13729,24 @@
     },
     "/api/web-search/credential": {
       "delete": {
-        "description": "删除已保存的密钥；**不存在也算成功**（幂等）。\n\n删掉之后旧环境变量仍然有效——如实报告由返回的 ``source`` 承担，本条路径不假装\n\"删了就一定没有凭据了\"。",
+        "description": "删除指定后端已保存的密钥；**不存在也算成功**（幂等）。\n\n删掉之后旧环境变量仍然有效——如实报告由返回的 ``source`` 承担，本条路径不假装\n\"删了就一定没有凭据了\"。",
         "operationId": "delete_web_search_credential_api_web_search_credential_delete",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "default": "tavily",
+              "enum": [
+                "tavily",
+                "deepseek"
+              ],
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -13746,8 +13782,24 @@
         "summary": "删除联网检索凭据"
       },
       "get": {
-        "description": "当前有没有可用的检索服务凭据，以及它来自设置库还是旧环境变量。\n\n返回值里**没有密钥**（连掩码都没有）：页面只需要知道\"已配置 / 未配置\"就能决定是提示录入\n还是提示可以开始检索。",
+        "description": "当前有没有可用的检索服务凭据，以及它来自设置库还是旧环境变量。\n\n``provider`` 缺省 ``tavily``（升级前只有这一个后端）：旧页面不传参时语义不变。\n两个后端**各占一条密钥**，读哪条由这个参数决定。\n\n返回值里**没有密钥**（连掩码都没有）：页面只需要知道\"已配置 / 未配置\"就能决定是提示录入\n还是提示可以开始检索。",
         "operationId": "get_web_search_credential_api_web_search_credential_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "default": "tavily",
+              "enum": [
+                "tavily",
+                "deepseek"
+              ],
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -13758,13 +13810,39 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "联网检索凭据状态"
       },
       "put": {
-        "description": "写入（覆盖）Tavily 密钥：**保存即生效**，下一轮检索就用它。\n\n空白密钥被拒（422）：\"清空\"用 DELETE 表达，两种意图不该共用一个入口。",
+        "description": "写入（覆盖）指定后端的密钥：**保存即生效**，下一轮检索就用它。\n\n空白密钥被拒（422）：\"清空\"用 DELETE 表达，两种意图不该共用一个入口。",
         "operationId": "set_web_search_credential_api_web_search_credential_put",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "provider",
+            "required": false,
+            "schema": {
+              "default": "tavily",
+              "enum": [
+                "tavily",
+                "deepseek"
+              ],
+              "title": "Provider",
+              "type": "string"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
             "application/json": {

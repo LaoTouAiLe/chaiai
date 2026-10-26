@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from local_agent.config import (
     AppConfig,
     EmbeddingConfig,
+    FetchProvider,
     WebAccessProvider,
     clean_domain_list,
 )
@@ -87,14 +88,17 @@ class WebAccessPreferences(_Preference):
 
     只放**能安全回灌**的字段：``enabled`` 不在这里——它是**能力开关**的地盘（2026-10-14 起
     `web` 是锁定能力，运行期由 `apply_capability_gates` 回灌，见 ``WebAccessConfig`` 的说明）；
-    ``tavily_api_key_env`` 与 ``user_agent`` 也不在这里：前者是旧配置的密钥**变量名**（密钥本身走
-    凭据存储，见 ``model_settings.web_search``），后者不是用户要调的旋钮。
+    ``tavily_api_key_env`` / ``deepseek_api_key_env`` 与 ``user_agent`` 也不在这里：前者们是旧配置的
+    密钥**变量名**（密钥本身走凭据存储，见 ``model_settings.web_search``），后者不是用户要调的旋钮。
 
     上下界与 ``WebAccessConfig`` **逐项一致**：偏好值经 ``model_copy(update=...)`` 落到运行期配置，
     那条路径不做二次校验，所以写在模型上的约束就是最后一道。
     """
 
     provider: WebAccessProvider = "auto"
+    #: 正文从哪来（2026-10-26）：``local`` 本机抓取 / ``deepseek`` 交给 DeepSeek fetch API。
+    #: 与 ``provider`` 分开：搜索和抓取可以各选一个，默认 ``local`` 不改变任何已有行为。
+    fetch_provider: FetchProvider = "local"
     max_results: int = Field(default=5, ge=1, le=20)
     max_chars: int = Field(default=8_000, ge=500, le=100_000)
     #: 搜索后自动抓取前 N 条的正文首段（2026-10-23）；上下界与 ``WebAccessConfig`` 一致。
@@ -254,7 +258,7 @@ def initial_preferences(config: AppConfig) -> PreferenceValues:
         ),
         web_access=WebAccessPreferences(
             **config.web_access.model_dump(include={
-                "provider", "max_results", "max_chars", "prefetch_pages",
+                "provider", "fetch_provider", "max_results", "max_chars", "prefetch_pages",
                 "max_search_calls", "max_read_pages", "max_reads_per_page",
                 "timeout_seconds", "domain_policy", "denied_domains", "allowed_domains",
             }),
@@ -302,7 +306,7 @@ def apply_runtime_preferences(config: AppConfig, values: RuntimePreferences) -> 
             "medium_term": medium,
             "long_term": config.memory.long_term.model_copy(update=values.memory.model_dump()),
         }),
-        # 联网检索：只覆盖设置页管的那几项，``enabled`` / ``tavily_api_key_env`` / ``user_agent``
+        # 联网检索：只覆盖设置页管的那几项，``enabled`` / 两个 ``*_api_key_env`` / ``user_agent``
         # 仍取启动配置——``enabled`` 随后由能力开关回灌（``apply_capability_gates``）。
         "web_access": config.web_access if values.web_access is None else (
             config.web_access.model_copy(update=values.web_access.model_dump())

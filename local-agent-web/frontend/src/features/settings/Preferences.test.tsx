@@ -20,7 +20,7 @@ function fixture(): PreferencesDto {
     general: { ...generalDefaults },
     execution: { max_tool_loops: 20, max_retries_per_step: 2, shell_timeout_seconds: 60, shell_max_output_chars: 30000, safe_delete: true },
     retrieval: { enabled: true, max_files: 2000, max_results: 8, timeout_seconds: 10, context_lines: 20 },
-    web_access: { provider: 'auto' as const, max_results: 5, max_chars: 8000, prefetch_pages: 2, max_search_calls: 4, max_read_pages: 6, max_reads_per_page: 3, timeout_seconds: 15, domain_policy: 'allow' as const, denied_domains: [], allowed_domains: [] },
+    web_access: { provider: 'auto' as const, fetch_provider: 'local' as const, max_results: 5, max_chars: 8000, prefetch_pages: 2, max_search_calls: 4, max_read_pages: 6, max_reads_per_page: 3, timeout_seconds: 15, domain_policy: 'allow' as const, denied_domains: [], allowed_domains: [] },
     memory: { enabled: true, confidence_threshold: .75, importance_threshold: .5, aging_enabled: true, forget_after_days: 180 },
     medium_term: { enabled: false, top_k: 8, min_score: .53, decay_half_life_days: 30 },
     embedding: { enabled: false, provider: 'onnx_local' as const, model: 'unit-test', cache_dir: 'E:/models', local_files_only: true, base_url: '', api_key_env: '', allow_plaintext_http: false },
@@ -237,6 +237,7 @@ describe('应用偏好', () => {
     await screen.findByText('未配置')
 
     fireEvent.change(screen.getByRole('spinbutton', { name: '检索结果条数上限' }), { target: { value: '9' } })
+    fireEvent.change(screen.getByRole('combobox', { name: '网页抓取方式' }), { target: { value: 'deepseek' } })
     fireEvent.change(screen.getByRole('combobox', { name: '域名策略' }), { target: { value: 'allowlist' } })
     fireEvent.change(screen.getByRole('textbox', { name: '拒绝的域名' }), { target: { value: 'bad.example.com, worse.example.com' } })
     fireEvent.click(screen.getByRole('button', { name: '保存' }))
@@ -244,6 +245,9 @@ describe('应用偏好', () => {
     // 数组字段必须**拆成数组**再发：发字符串会被服务端按形状拒掉
     expect(mock.save.mock.calls[0][0].web_access).toMatchObject({
       max_results: 9,
+      // 抓取后端与检索后端是两个独立字段：改一个不能顺手改另一个
+      provider: 'auto',
+      fetch_provider: 'deepseek',
       domain_policy: 'allowlist',
       denied_domains: ['bad.example.com', 'worse.example.com'],
     })
@@ -252,11 +256,26 @@ describe('应用偏好', () => {
     fireEvent.change(screen.getByLabelText('Tavily API Key'), { target: { value: 'tvly-123' } })
     fireEvent.click(screen.getByRole('button', { name: '保存密钥' }))
     await screen.findByText('已保存，下一次检索生效')
-    expect(mock.saveKey).toHaveBeenCalledWith('tvly-123')
+    expect(mock.saveKey).toHaveBeenCalledWith('tvly-123', 'tavily')
     expect(screen.getByText('已配置（设置在本地设置库）')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: '删除已保存密钥' }))
     await waitFor(() => expect(mock.clearKey).toHaveBeenCalledTimes(1))
     await screen.findByText('未配置')
+  })
+
+  it('switches the credential block to DeepSeek when that backend is selected', async () => {
+    mock.key.mockImplementation(async (provider: string) =>
+      ({ provider, configured: false, source: 'none', store: 'local', note: null }))
+    host(<PreferenceSection group="web_access" />)
+    // 默认 auto：仍然只给 Tavily 那格（本功能上线时的样子，新增后端不改变它）
+    expect(await screen.findByLabelText('Tavily API Key')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('combobox', { name: '检索方式' }), { target: { value: 'deepseek' } })
+
+    // 切到 DeepSeek 后，凭据块换成 DeepSeek 那格，并去读 deepseek 这条状态（两条各存各的）
+    expect(await screen.findByLabelText('DeepSeek 搜索 API Key')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Tavily API Key')).not.toBeInTheDocument()
+    await waitFor(() => expect(mock.key).toHaveBeenCalledWith('deepseek'))
   })
 
   it('never offers to delete a key that comes from the environment', async () => {

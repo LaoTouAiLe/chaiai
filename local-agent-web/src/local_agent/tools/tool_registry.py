@@ -62,6 +62,7 @@ class ToolRegistry:
         *,
         web_access: WebAccessConfig | None = None,
         web_search_api_key: str | None = None,
+        web_deepseek_api_key: str | None = None,
         git: GitConfig | None = None,
         git_available: bool | None = None,
         skills: SkillsConfig | None = None,
@@ -99,6 +100,7 @@ class ToolRegistry:
             web_access: 外部访问配置；省略时按默认（关闭）构造，工具存在但不会可见。
             web_search_api_key: 检索服务（Tavily）的密钥明文，由应用层装配每轮上下文时从凭据存储取出。
                 省略表示只有旧环境变量这条路。**它只进工具闭包**：不进任何 DTO、快照或日志。
+            web_deepseek_api_key: DeepSeek 搜索的密钥，口径同上；两条各存一份，工具按 provider 取。
             git: Git 配置；省略时按默认（关闭 + 默认超时/上限）构造。
             git_available: 本机是否存在 ``git``；省略时用 :func:`~local_agent.tools.git_tools.git_availability`
                 探测一次（测试与脚本可以注入确定的结果）。
@@ -129,7 +131,11 @@ class ToolRegistry:
                 *build_terminal_tools(policy),
                 *build_browser_tools(policy),
                 *build_host_tools(policy),
-                *build_web_tools(web_access or WebAccessConfig(), api_key=web_search_api_key),
+                *build_web_tools(
+                    web_access or WebAccessConfig(),
+                    api_key=web_search_api_key,
+                    deepseek_api_key=web_deepseek_api_key,
+                ),
                 *build_git_tools(
                     policy,
                     timeout_seconds=git_config.timeout_seconds,

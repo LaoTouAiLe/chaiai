@@ -29,7 +29,9 @@ def _cli(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_controlled_baseline_matches_actual_contracts() -> None:
-    expected = json.loads((PROJECT / "docs/release/compatibility-baseline.json").read_text("utf-8"))
+    # 文档统一在仓库根的 docs/（2026-10-25 起）；本文件在 local-agent-web/tests/ 下。
+    baseline_path = PROJECT.parent / "docs/release/compatibility-baseline.json"
+    expected = json.loads(baseline_path.read_text("utf-8"))
     assert changed_contracts(expected, compatibility_manifest()) == []
     assert _cli("--check").returncode == 0
 

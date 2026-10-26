@@ -184,7 +184,7 @@ from local_agent.model_settings.preferences import (
     complete_preferences,
     initial_preferences,
 )
-from local_agent.model_settings.web_search import WebSearchKeyStore
+from local_agent.model_settings.web_search import DEFAULT_PROVIDER, WebSearchKeyStore
 from local_agent.oss_storage import OssStorageError
 from local_agent.performance import span as timing_span
 from local_agent.performance import trace_turn
@@ -2049,38 +2049,46 @@ class ApplicationService:
             )
         return self._mcp
 
-    # ---- 联网检索的服务凭据（Tavily）----------------------------------------
+    # ---- 联网检索的服务凭据（Tavily / DeepSeek）------------------------------
     # 数值型偏好（条数上限、域名策略…）走 `RuntimePreferences.web_access`；这里只管**密钥**一件事。
     # 密钥与模型连接同一条口径（§6.8）：只进设置库或进程内存，读取接口只报"有没有"。
+    # 2026-10-26：两个 API 后端各占一条密钥，页面按当前选中的后端读写对应那条——换后端不覆盖另一个。
 
-    def web_search_key_view(self) -> WebSearchKeyView:
-        """当前凭据状态：有没有、从哪来、能不能存在设置库里。
+    def _search_env_name(self, provider: str) -> str:
+        """旧环境变量路径的变量名：两个 API 后端各有自己的名字，不共用一条。"""
+        web = self._app_config.web_access
+        return web.deepseek_api_key_env if provider == "deepseek" else web.tavily_api_key_env
+
+    def web_search_key_view(self, provider: str = DEFAULT_PROVIDER) -> WebSearchKeyView:
+        """指定后端的凭据状态：有没有、从哪来、能不能存在设置库里。
 
         没有设置库时**不报错**：返回 ``configured=false`` 且 ``store="unavailable"``——页面要能
         打开这一页并如实说明"这里录入也存不下来"，而不是整页打不开。
         """
-        env_name = self._app_config.web_access.tavily_api_key_env
+        env_name = self._search_env_name(provider)
         if self._web_search is None:
             # 没有设置库 = 没有凭据存储：只剩旧环境变量这条路（取值规则仍走同一个实现，不另写一份）。
+            present = bool(WebSearchKeyStore().resolve(env_name=env_name, provider=provider))
             return WebSearchKeyView(
-                configured=bool(WebSearchKeyStore().resolve(env_name=env_name)),
-                source="environment" if WebSearchKeyStore().resolve(env_name=env_name) else "none",
+                provider=provider, configured=present,
+                source="environment" if present else "none",
                 store="unavailable",
                 note="设置库不可用：密钥只能来自环境变量，页面无法保存。",
             )
-        stored = self._sqlite_access(self._web_search.stored)
+        stored = self._sqlite_access(partial(self._web_search.stored, provider))
         if stored:
             return WebSearchKeyView(
-                configured=True, source="settings", store=self._key_store_kind(), note=self._key_store_note()
+                provider=provider, configured=True, source="settings",
+                store=self._key_store_kind(), note=self._key_store_note(),
             )
-        present = bool(WebSearchKeyStore().resolve(env_name=env_name))
+        present = bool(WebSearchKeyStore().resolve(env_name=env_name, provider=provider))
         return WebSearchKeyView(
-            configured=present, source="environment" if present else "none",
+            provider=provider, configured=present, source="environment" if present else "none",
             store=self._key_store_kind(), note=self._key_store_note(),
         )
 
-    def save_web_search_key(self, api_key: str) -> WebSearchKeyView:
-        """写入（覆盖）Tavily 密钥，返回保存后的状态视图。
+    def save_web_search_key(self, api_key: str, provider: str = DEFAULT_PROVIDER) -> WebSearchKeyView:
+        """写入（覆盖）指定后端的密钥，返回保存后的状态视图。
 
         Raises:
             ApplicationError: 没有可用的凭据存储（``SETTINGS_STORE_UNAVAILABLE``），
@@ -2088,28 +2096,30 @@ class ApplicationService:
         """
         store = self._require_web_search()
         try:
-            self._sqlite_access(partial(store.set, api_key))
+            self._sqlite_access(partial(store.set, api_key, provider=provider))
         except CredentialStoreError as exc:
             raise app_errors.model_settings_invalid(detail=str(exc), occurred_at=_now()) from exc
         # 刚录入的密钥必须立刻进入脱敏集合：它可能立刻出现在检索诊断或工具输出里。
         self._refresh_secrets()
-        return self.web_search_key_view()
+        return self.web_search_key_view(provider)
 
-    def clear_web_search_key(self) -> WebSearchKeyView:
-        """删除已保存的密钥（幂等），返回删除后的状态视图。"""
+    def clear_web_search_key(self, provider: str = DEFAULT_PROVIDER) -> WebSearchKeyView:
+        """删除指定后端已保存的密钥（幂等），返回删除后的状态视图。"""
         store = self._require_web_search()
-        self._sqlite_access(store.clear)
-        return self.web_search_key_view()
+        self._sqlite_access(partial(store.clear, provider=provider))
+        return self.web_search_key_view(provider)
 
-    def web_search_api_key(self) -> str | None:
+    def web_search_api_key(self, provider: str = DEFAULT_PROVIDER) -> str | None:
         """装配运行期工具用的密钥明文：**不进任何 DTO、日志或异常消息**。
 
         取值顺序与模型连接一致：凭据存储 → 旧环境变量。没有设置库时只看环境变量。
         """
-        env_name = self._app_config.web_access.tavily_api_key_env
+        env_name = self._search_env_name(provider)
         if self._web_search is None:
-            return WebSearchKeyStore().resolve(env_name=env_name)
-        return self._sqlite_access(partial(self._web_search.resolve, env_name=env_name))
+            return WebSearchKeyStore().resolve(env_name=env_name, provider=provider)
+        return self._sqlite_access(
+            partial(self._web_search.resolve, env_name=env_name, provider=provider)
+        )
 
     def _key_store_kind(self) -> CredentialStoreState:
         if self._web_search is None:
@@ -3821,9 +3831,11 @@ class ApplicationService:
             agent_switches=agent_switches,
             # 用户禁用的技能同样每一轮现取（技能管理页，2026-10-16）：清单与技能工具都照它过滤。
             disabled_skills=self._disabled_skills(),
-            # 联网检索的服务凭据（Tavily）也在装配这一轮时现取：刚在设置页录入的密钥，下一轮
-            # 检索就该用它。**明文只走这条内存通道**，不进快照、DTO 与日志（§6.8 第 2 条）。
+            # 联网检索的服务凭据（Tavily / DeepSeek）也在装配这一轮时现取：刚在设置页录入的密钥，
+            # 下一轮检索就该用它。**明文只走这条内存通道**，不进快照、DTO 与日志（§6.8 第 2 条）。
+            # 两条都取：选哪个后端是配置的事，工具层按 provider 用对应那条。
             web_search_api_key=self.web_search_api_key(),
+            web_deepseek_api_key=self.web_search_api_key("deepseek"),
             # MCP（2026-10-20；契约 §6.13）：目录与开关**每轮现取**——刚在设置里打开某台 server，
             # 下一轮就该能用它的工具。搜过的工具（会话级）从 Checkpoint 读回来，跨轮保留。
             mcp=self._mcp_binding(session),

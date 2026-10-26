@@ -276,9 +276,21 @@ profiles:
 web_access:
   enabled: true
   # auto：配置搜索密钥时用 Tavily，否则用 Bing HTML 兼容搜索；故障不隐式切换收费服务。
-  # 可显式选择 tavily / bing_html / duckduckgo_html。HTML 兼容搜索不支持精确时间筛选。
+  # 可显式选择 tavily / deepseek / bing_html / duckduckgo_html。HTML 兼容搜索不支持精确时间筛选。
+  # deepseek（2026-10-26）按次计费（每 1000 次成功请求 5 元，失败与无结果不计费）：
+  # 它**不参与 auto 的判定**（否则刚录一条密钥就会悄悄改掉已有用户的后端），要显式选；
+  # 选了却没有密钥时如实失败，不静默换后端。
   provider: "auto"
   tavily_api_key_env: "TAVILY_API_KEY"
+  # DeepSeek 搜索的旧环境变量路径：设置页没录入专用密钥时才读它。
+  # 变量名可以与模型连接共用一个（同一个 API Key 两端都能用）。
+  deepseek_api_key_env: "DEEPSEEK_API_KEY"
+  # 正文从哪来（2026-10-26），与 provider 分开——搜索和抓取可以各选一个：
+  #   local    本机直接取回并抽取（默认，与加这个开关之前完全一致）
+  #   deepseek 交给 POST /v1/tools/fetch，由对方返回 Markdown；URL 会发出去、按次计费，
+  #            且最终地址与内容类型不在本机校验。失败如实报错，不回退本机抓取。
+  # 搜索后的摘要预抓取（prefetch_pages）始终走本机，不受此项影响。
+  fetch_provider: "local"
   # 每轮硬上限；失败也消耗尝试次数，刷新和恢复不会重置。足够回答时应提前结束。
   max_search_calls: null
   max_read_pages: null

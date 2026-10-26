@@ -13,7 +13,8 @@ from local_agent.release_contracts import (
     compatibility_manifest,
 )
 
-BASELINE = Path(__file__).resolve().parents[1] / "docs/release/compatibility-baseline.json"
+# 文档统一在仓库根的 docs/（2026-10-25 起）；本脚本在 local-agent-web/scripts/ 下，所以多上一层。
+BASELINE = Path(__file__).resolve().parents[2] / "docs/release/compatibility-baseline.json"
 
 
 def main(argv: Sequence[str] | None = None) -> int:

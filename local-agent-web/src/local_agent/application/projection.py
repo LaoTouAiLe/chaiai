@@ -258,6 +258,9 @@ TOOL_DETAIL_STREAM_CHARS: Final[int] = 2000
 TOOL_DETAIL_PATHS: Final[int] = 200
 #: 结构化 diff 的展示上限（行）：超出就不再累积，并如实标记 `truncated`。
 TOOL_DIFF_LINES: Final[int] = 400
+#: 网页检索卡片里列出的前几条标题（2026-10-26）：卡片只回答"命中了什么"，完整来源由
+#: `_web_sources` 另行渲染——两边都列全量会让同一批结果在页面上出现两遍。
+WEB_DETAIL_HITS: Final[int] = 5
 
 #: unified diff 的 hunk 头：`@@ -old_start[,old_count] +new_start[,new_count] @@`。
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -858,6 +861,61 @@ def _tool_outcome(
             kind="delete",
             target=path,
             summary=sanitize_text(summary, secrets),
+        )
+
+    if tool_name in {"web_search", "web_fetch"}:
+        # 网页工具的详情（2026-10-26）。此前它们不在识别表里，卡片只剩一句"该结果格式暂无可展示
+        # 的详情"——而工具其实回了不少东西，只是被当成"认不出的 JSON"隐去了。
+        #
+        # 这里**只在形状可识别时**产出：失败结果的载荷是 `{"error": ...}` 或残缺对象，必须让它
+        # 走 `None` 分支，由通用渲染器配 `_public_error_text` 说明真实原因；否则会被
+        # "0 条来源"盖掉。所以先按关键字段是否存在 + 类型对不对把关，不按有没有内容猜。
+        if tool_name == "web_search":
+            hits_raw = payload.get("results")
+            if not isinstance(hits_raw, list):
+                return None
+            hits = _mappings(hits_raw)
+            provider = _optional_str(payload.get("provider")) or ""
+            summary = f"{len(hits)} 条来源"
+            if provider:
+                summary = f"{summary} · 后端 {provider}"
+            lines: list[str] = []
+            for item in hits[:WEB_DETAIL_HITS]:
+                title = sanitize_text(str(item.get("title") or ""), secrets).strip()
+                source = sanitize_text(str(item.get("source") or ""), secrets).strip()
+                if title:
+                    lines.append(f"{title} · {source}" if source else title)
+            if note:
+                lines.append(f"说明：{sanitize_text(note, secrets)}")
+            text, clipped = _bounded("\n".join(lines), TOOL_DETAIL_TEXT_CHARS)
+            return ToolOutcomeView(
+                kind="web",
+                target=_optional_sanitized(payload.get("query"), secrets),
+                summary=sanitize_text(summary, secrets),
+                text=text or None,
+                total=len(hits),
+                truncated=clipped or bool(payload.get("truncated")),
+            )
+
+        # web_fetch：正文本身就是最有用的东西，摘要只说体积。
+        if not isinstance(payload.get("url"), str) or not isinstance(payload.get("text"), str):
+            return None
+        total_chars = _int_of(payload.get("total_chars"))
+        summary = f"{total_chars if total_chars is not None else len(str(payload.get('text') or ''))} 字符"
+        if _optional_str(payload.get("final_url")):
+            summary = f"{summary} · 已跟随重定向"
+        parts = [sanitize_text(str(payload.get("text") or ""), secrets)]
+        if note:
+            parts.append(f"说明：{sanitize_text(note, secrets)}")
+        text, clipped = _bounded("\n\n".join(parts), TOOL_DETAIL_TEXT_CHARS)
+        return ToolOutcomeView(
+            kind="web",
+            target=_optional_sanitized(payload.get("title"), secrets)
+            or _optional_sanitized(payload.get("url"), secrets),
+            summary=sanitize_text(summary, secrets),
+            text=text or None,
+            total=total_chars,
+            truncated=clipped or bool(payload.get("truncated")),
         )
 
     # `execute_code` 与 `run_shell` 共用同一张终端卡（2026-10-22）：它本质也是"跑一段东西"，

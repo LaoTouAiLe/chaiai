@@ -293,12 +293,16 @@ def test_preferences_save_conflict_validation_and_safe_overview(api: tuple[TestC
 
 
 def test_web_search_preferences_and_credential_are_settings_backed(
-    api: tuple[TestClient, ApiRuntime], tmp_path: Path
+    api: tuple[TestClient, ApiRuntime], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """联网检索的两件事各走各的入口：数值偏好走 `/preferences`，密钥走 `/web-search/credential`。
 
     这一条盯住四件容易做错的事：初值来自配置、越界值当面拒、**密钥不回读**、删除幂等。
     """
+    # 装配 runtime 时会重新加载本机 `.env`，把 conftest 里那次隔离覆盖掉；而兜底读环境变量
+    # 正是设计的一部分（"删了设置库那条，环境变量仍然有效"）。这里再删一次，否则开发机配了
+    # `DEEPSEEK_API_KEY` 时"删完应为未配置"永远不成立。
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     client, runtime = api
     view = client.get("/api/preferences").json()
     web = view["values"]["web_access"]
@@ -324,7 +328,7 @@ def test_web_search_preferences_and_credential_are_settings_backed(
     # 凭据：只报状态、不回读；空白用 DELETE 表达，所以空白密钥是 422
     secret = "tvly-offline-secret-value"
     assert client.get("/api/web-search/credential").json() == {
-        "configured": False, "source": "none", "store": "local", "note": None,
+        "provider": "tavily", "configured": False, "source": "none", "store": "local", "note": None,
     }
     blank = client.put("/api/web-search/credential", json={"api_key": "   "})
     assert blank.status_code == 422 and blank.json()["error"]["code"] == MODEL_SETTINGS_INVALID
@@ -338,8 +342,21 @@ def test_web_search_preferences_and_credential_are_settings_backed(
     # 只有设置库一处落盘：会话库（Checkpoint / 台账）里不该出现它
     assert secret not in (tmp_path / "data" / "checkpoints.sqlite").read_bytes().decode("utf-8", "ignore")
 
+    # 两个 API 后端各占一条密钥（2026-10-26）：写一条不覆盖另一条，删一条也不连带删另一条
+    deepseek_secret = "ds-offline-secret-value"
+    written = client.put("/api/web-search/credential?provider=deepseek", json={"api_key": deepseek_secret})
+    assert written.status_code == 200, written.text
+    assert written.json()["provider"] == "deepseek" and written.json()["configured"] is True
+    assert deepseek_secret not in written.text
+    assert client.get("/api/web-search/credential").json()["configured"] is True
+
     assert client.delete("/api/web-search/credential").status_code == 200
     assert client.get("/api/web-search/credential").json()["configured"] is False
+    assert client.get("/api/web-search/credential?provider=deepseek").json()["configured"] is True
+    removed = client.delete("/api/web-search/credential?provider=deepseek")
+    assert removed.status_code == 200 and removed.json()["provider"] == "deepseek", removed.text
+    assert runtime.service._web_search.stored("deepseek") is None
+    assert client.get("/api/web-search/credential?provider=deepseek").json()["configured"] is False
     assert client.delete("/api/web-search/credential").status_code == 200  # 不存在也算成功（幂等）
 
 
