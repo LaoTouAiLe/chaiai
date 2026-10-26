@@ -324,10 +324,14 @@ def test_restart_rebuilds_the_same_request_bytes(
 
     assert latest is not None
     assert latest.canonical_text == seen_snapshot  # 快照块字节级一致
-    assert (
-        nodes._stable_prompt(state, _context(workspace, model, app_config)).system_prompt
-        == seen_prefix
-    )
+    stable = nodes._stable_prompt(state, _context(workspace, model, app_config)).system_prompt
+    # 重建出的稳定前缀必须逐字节等于原请求的**前缀**。
+    #
+    # 2026-10-26 核对：`chat_node` 在稳定前缀之后追加一段**常量**阶段指令
+    # （`_CHAT_ANSWER_INSTRUCTION`，`745cd27` 引入），它不来自 State、也不随重启变化。
+    # 拿稳定前缀直接比整条 system，会把这段常量当成"重建丢了内容"——这条用例当时就是
+    # 这么红的，代码没问题、期望过时。
+    assert seen_prefix == stable + "\n\n" + nodes._CHAT_ANSWER_INSTRUCTION
 
 
 # ---- 4. 快照只存在于出站请求 -------------------------------------------------

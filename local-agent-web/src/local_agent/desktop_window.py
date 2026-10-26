@@ -132,7 +132,9 @@ def _show_console(handle: int | None) -> None:
         import ctypes
 
         ctypes.windll.user32.ShowWindow(handle, 5)  # SW_SHOW
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001, S110 - 显示控制台是纯装饰动作
+        # 没有控制台句柄、或 API 调用被策略拦下时会失败。它不承载任何功能，
+        # 失败也不影响窗口与页面，所以刻意静默；记录日志只会给正常启动添噪。
         pass
 
 

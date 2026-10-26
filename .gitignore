@@ -33,3 +33,5 @@ replay_pid*.log
 .preview-*.png
 # 应用运行时写在当前目录的偏好快照（含本机绝对路径）
 pref.json
+# 浏览器自动化工具（playwright-cli 等）的页面快照：调试用的临时产物
+.playwright-cli/

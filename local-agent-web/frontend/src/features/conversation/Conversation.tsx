@@ -6,6 +6,7 @@ import type { RailQuestion } from './ConversationRail'
 import { Bulb, Pencil, Quote as QuoteIcon } from '../../components/icons'
 import { ScrollToBottom } from '../../components/ScrollToBottom'
 import { IconCopyButton, MarkdownMessage } from './MarkdownMessage'
+import { splitQuotedMessage } from './quote'
 import { splitSideChatPrompt } from './sideChat'
 import { RunActivity } from './RunActivity'
 import { ReasoningRow } from './ReasoningRow'
@@ -112,6 +113,9 @@ function UserMessage({
   const shown = submitted ?? text
   // 侧聊首轮：把注入的上下文折起来，只显示用户真正问的那句（§21.7）。
   const { context: injectedContext, question: shownQuestion } = splitSideChatPrompt(shown)
+  // 追问引用（2026-10-26）：引用是消息正文的一部分，气泡必须把它和用户自己写的问题分开显示，
+  // 否则那段 `>` 看起来就是用户打的字。
+  const { quote: quoted, question: askedText } = splitQuotedMessage(shownQuestion)
 
   return (
     <div className={styles.userRow}>
@@ -125,7 +129,14 @@ function UserMessage({
                 <pre className={styles.userContextBody}>{injectedContext}</pre>
               </details>
             )}
-            {shownQuestion === '' ? null : shownQuestion}
+            {/* 有引用时先摆引用块、再摆用户自己写的问题（2026-10-26）。分开渲染的理由不是好看：
+                引用是**从旧回答里摘出来的内容**，混在正文里会被读成"用户自己说的话"。 */}
+            {shownQuestion === '' ? null : quoted === null ? shownQuestion : (
+              <>
+                <blockquote className={styles.userQuote}>{quoted}</blockquote>
+                {askedText === '' ? null : <div className={styles.userQuestion}>{askedText}</div>}
+              </>
+            )}
             {pictures.length === 0 ? null : (
               <ul className={styles.userImages} aria-label="随这条消息发送的图片">
                 {pictures.map((src) => (
@@ -147,7 +158,10 @@ function UserMessage({
               文字按钮会跟时间戳挤在同一行。 */}
           <div className={styles.userActions}>
             <IconCopyButton text={shownQuestion} className={styles.userAction} />
-            {onEdit === undefined ? null : (
+            {/* 带引用的消息**不给编辑**（2026-10-26）：编辑框是纯文本 textarea，只能把
+                `> ……` 原文摆出来——那段引用会重新变成"用户自己打的字"，正是气泡里刚分清楚的东西。
+                要编辑就重发一条，或者复制后自己改。 */}
+            {onEdit === undefined || quoted !== null ? null : (
               <button
                 type="button"
                 className={styles.userAction}

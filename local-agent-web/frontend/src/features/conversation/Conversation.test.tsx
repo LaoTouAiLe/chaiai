@@ -365,6 +365,41 @@ describe('Conversation 追问（2026-10-26）', () => {
     }
   })
 
+  it('renders the quoted part of a sent message as its own block', () => {
+    // 存储里只有纯文本：气泡必须重新认出开头的引用块，否则那段 `>` 看起来就是用户打的字。
+    render(<Conversation scenario={{
+      ...scenario,
+      messages: [
+        { kind: 'user' as const, id: 'u1', text: '> 被引用的旧内容\n\n这是啥？', at: '' },
+        { kind: 'assistant' as const, id: 'a1', text: '回答', at: '' },
+      ],
+    }} />)
+
+    const block = screen.getByText('被引用的旧内容')
+    expect(block.tagName).toBe('BLOCKQUOTE')
+    // 问题不在引用块里：引用是旧内容、问题是这次问的，两者必须能分开读。
+    expect(block).not.toHaveTextContent('这是啥？')
+    expect(screen.getByText('这是啥？')).toBeInTheDocument()
+  })
+
+  it('does not offer 编辑 on a message that carries a quote', () => {
+    render(<Conversation
+      scenario={{
+        ...scenario,
+        messages: [
+          { kind: 'user' as const, id: 'u1', text: '> 被引用的旧内容\n\n这是啥？', at: '' },
+          { kind: 'assistant' as const, id: 'a1', text: '回答', at: '' },
+        ],
+      }}
+      onEditMessage={() => true}
+    />)
+
+    // 复制照旧可用（用户气泡一个、轮尾一个）；编辑不出现——编辑框只能显示 `> ……` 原文，
+    // 那段引用会重新变成用户打的字。
+    expect(screen.getAllByRole('button', { name: '复制' }).length).toBeGreaterThan(0)
+    expect(screen.queryByRole('button', { name: '编辑这条提问' })).not.toBeInTheDocument()
+  })
+
   it('keeps both quote entrances hidden in prototype mode', () => {
     // 省略 `onQuote` = 原型态（静态基线、地图抽屉）：既没有追问按钮，也没有选区浮层。
     render(<Conversation scenario={scenario} />)

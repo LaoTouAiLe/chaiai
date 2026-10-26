@@ -597,6 +597,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/preferences/schema": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 设置页可改字段清单
+         * @description 后端管得着的偏好字段、各自的输入类型与上下界。
+         *
+         *     与 `GET /preferences` 的分工：那个回答"现在是什么值"（随保存变化），这个回答
+         *     "能改哪些、各是什么形状"（只随代码变化）。混在一起会让元信息跟着每次保存抖动。
+         *
+         *     纯反射、不读运行时状态，所以直接在这里调用而不经 `service`——没有可注入的东西。
+         *
+         *     用途：前端测试拿它比对那份手写的字段表，**漏接一个字段就红**。此前缺这个机制，
+         *     后端加了可改字段、页面上没有输入框，测试仍然全绿。
+         */
+        get: operations["get_preferences_schema_api_preferences_schema_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions": {
         parameters: {
             query?: never;
@@ -1090,6 +1118,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/storage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 数据位置
+         * @description 所有 SQLite、向量库、附件与日志的根目录，以及这个值**由谁决定**。
+         *
+         *     与 `/preferences` 分开是刻意的：数据根**不能**存在设置库里（设置库自己就在它下面），
+         *     改完必须重启；而偏好的语义是"下一次新任务生效"。两者混在一起会让"什么时候生效"说不清。
+         */
+        get: operations["get_storage_location_api_storage_get"];
+        /**
+         * 修改数据位置
+         * @description 改到指定目录：**重启后才生效**，且新位置是空的——旧数据不会自动搬过去。
+         *
+         *     路径在这里校验（绝对、能创建、能写），不等到启动：启动才失败意味着服务起不来。
+         */
+        put: operations["set_storage_location_api_storage_put"];
+        post?: never;
+        /**
+         * 恢复默认数据位置
+         * @description 删掉指针文件，回到平台标准目录；同样要重启才生效。
+         */
+        delete: operations["delete_storage_location_api_storage_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/tasks": {
         parameters: {
             query?: never;
@@ -1408,6 +1469,35 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AgentsPreferences
+         * @description 项目规则（``AGENTS.md``）的读取口径（2026-10-26：从"高级只读"搬进可改）。
+         *
+         *     只搬三项**用户能判断**的：读不读、单份上限、总上限。
+         *
+         *     不搬 ``filenames`` 与 ``precedence``：前者决定"哪些文件算规则"，改错就再也读不到自己写的
+         *     那份；后者是"近的目录覆盖远的"这条语义，不是旋钮。
+         *
+         *     症状锚点：规则写在 AGENTS.md 里却没生效，最常见的原因就是**被上限截断了**——这时用户
+         *     需要一个能看到并调高的入口，而不是去翻 YAML。
+         */
+        AgentsPreferences: {
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Max File Chars
+             * @default 20000
+             */
+            max_file_chars: number;
+            /**
+             * Max Total Chars
+             * @default 60000
+             */
+            max_total_chars: number;
+        };
         /**
          * ApprovalDecisionRequest
          * @description 审批决定。
@@ -2181,6 +2271,40 @@ export interface components {
              * @enum {string}
              */
             status: "completed" | "awaiting_approval" | "failed" | "running" | "cancelled";
+        };
+        /**
+         * CompressionPreferences
+         * @description 上下文压缩（2026-10-26：从"高级只读概览"搬进可改）。
+         *
+         *     只放**用户能凭结果判断**的四项：开不开、什么时候压、压完保留多少。
+         *
+         *     其余预算项（工具步字符预算、单条工具结果阈值、摘要上限）刻意留在只读：它们改错的症状是
+         *     "某段输出莫名其妙被截断"，用户既看不出原因、也不知道该调哪个，只会把界面变成一堆旋钮。
+         *
+         *     上下界与 ``CompressionConfig`` 一致（偏好值经 ``model_copy(update=…)`` 回灌，那条路径不再
+         *     二次校验，所以写在这里的约束就是最后一道）。
+         */
+        CompressionPreferences: {
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Preserve Recent Turns
+             * @default 8
+             */
+            preserve_recent_turns: number;
+            /**
+             * Retain Ratio
+             * @default 0.16
+             */
+            retain_ratio: number;
+            /**
+             * Trigger Ratio
+             * @default 0.8
+             */
+            trigger_ratio: number;
         };
         /**
          * CompressionView
@@ -4144,9 +4268,65 @@ export interface components {
             /** Steps */
             steps?: components["schemas"]["PlanStepView"][];
         };
+        /**
+         * PreferenceFieldView
+         * @description 一个可改字段的**机械信息**：键、输入类型、上下界、候选项、能否留空。
+         *
+         *     文案（``label`` / ``note``）与条件显示（"选了对象存储才出现端点"）**刻意不在这里**：
+         *     它们是产品语义，pydantic 推不出来，只在页面侧维护。这份清单的用途是让"后端加了字段、
+         *     页面没接"变成一次失败的测试，而不是一个靠人记住的约定。
+         */
+        PreferenceFieldView: {
+            /** Key */
+            key: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "bool" | "int" | "float" | "text" | "choice";
+            /** Maximum */
+            maximum?: number | null;
+            /**
+             * Maximum Exclusive
+             * @default false
+             */
+            maximum_exclusive: boolean;
+            /** Minimum */
+            minimum?: number | null;
+            /**
+             * Minimum Exclusive
+             * @default false
+             */
+            minimum_exclusive: boolean;
+            /**
+             * Nullable
+             * @default false
+             */
+            nullable: boolean;
+            /**
+             * Options
+             * @default []
+             */
+            options: string[];
+        };
+        /**
+         * PreferenceGroupView
+         * @description 设置页的一个分区（与左栏分组一一对应）。
+         */
+        PreferenceGroupView: {
+            /**
+             * Fields
+             * @default []
+             */
+            fields: components["schemas"]["PreferenceFieldView"][];
+            /** Group */
+            group: string;
+        };
         /** PreferenceValues */
         PreferenceValues: {
+            agents?: components["schemas"]["AgentsPreferences"] | null;
             attachments?: components["schemas"]["AttachmentsPreferences"] | null;
+            compression?: components["schemas"]["CompressionPreferences"] | null;
             embedding?: components["schemas"]["EmbeddingPreferences"] | null;
             execution: components["schemas"]["ExecutionPreferences"];
             general?: components["schemas"]["GeneralPreferences"];
@@ -4160,6 +4340,24 @@ export interface components {
             /** Expected Version */
             expected_version: number;
             values: components["schemas"]["PreferenceValues"];
+        };
+        /**
+         * PreferencesSchemaView
+         * @description 设置页可改字段的权威清单。
+         *
+         *     ``version`` 是**反射格式**的版本，字段增减不需要改它；只有这份清单自身的形状变了才 +1。
+         */
+        PreferencesSchemaView: {
+            /**
+             * Groups
+             * @default []
+             */
+            groups: components["schemas"]["PreferenceGroupView"][];
+            /**
+             * Version
+             * @default 1
+             */
+            version: number;
         };
         /** PreferencesView */
         PreferencesView: {
@@ -4744,6 +4942,53 @@ export interface components {
             step_id: string;
             /** Title */
             title: string;
+        };
+        /**
+         * StorageLocationRequest
+         * @description 把数据根改到指定目录（2026-10-26）。
+         *
+         *     这里只挡空值：绝对路径、可创建、可写这些**文件系统层面**的判断在服务里做（要真的去建目录
+         *     并写探针），放在传输层会把 I/O 塞进校验器。非法路径返回 422，文案由服务给出。
+         */
+        StorageLocationRequest: {
+            /** Data Root */
+            data_root: string;
+        };
+        /**
+         * StorageView
+         * @description 数据根（所有 SQLite、向量库、附件、日志的家）及其来源。
+         *
+         *     为什么**不能**存在设置库里：设置库自己就在数据根下。把数据根写进设置库，就等于让一个东西
+         *     定义它自己的位置——改到新位置后新库是空的，那条偏好丢了，启动又回到旧位置。所以它走一个
+         *     固定放在平台默认目录的**指针文件**，与 ``CODEX_HOME`` / ``HERMES_HOME`` 同一性质，
+         *     只是可以在页面上改。
+         */
+        StorageView: {
+            /** Data Root */
+            data_root: string;
+            /** Default Root */
+            default_root: string;
+            /** Disk Free Bytes */
+            disk_free_bytes?: number | null;
+            /**
+             * Low Disk
+             * @default false
+             */
+            low_disk: boolean;
+            /** Note */
+            note?: string | null;
+            /**
+             * Restart Required
+             * @default false
+             */
+            restart_required: boolean;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "environment" | "settings" | "config" | "default";
+            /** Used Bytes */
+            used_bytes?: number | null;
         };
         /**
          * SubmitMessageRequest
@@ -7115,6 +7360,26 @@ export interface operations {
             };
         };
     };
+    get_preferences_schema_api_preferences_schema_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PreferencesSchemaView"];
+                };
+            };
+        };
+    };
     list_sessions_api_sessions_get: {
         parameters: {
             query?: {
@@ -8364,6 +8629,88 @@ export interface operations {
             };
             /** @description 没有可用的设置库，改动存不下来 */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    get_storage_location_api_storage_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageView"];
+                };
+            };
+        };
+    };
+    set_storage_location_api_storage_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageLocationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageView"];
+                };
+            };
+            /** @description 路径不合法、不可写，或当前由环境变量决定 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    delete_storage_location_api_storage_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageView"];
+                };
+            };
+            /** @description 无法恢复默认位置 */
+            422: {
                 headers: {
                     [name: string]: unknown;
                 };

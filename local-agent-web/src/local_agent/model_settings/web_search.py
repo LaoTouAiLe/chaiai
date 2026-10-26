@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from typing import Final
 
 from local_agent.exceptions import CredentialStoreError
 from local_agent.model_settings.credentials import CredentialKind, CredentialStore
@@ -38,7 +39,10 @@ PROVIDER_CREDENTIAL_REFS: Mapping[str, str] = {
 }
 
 #: 不传 ``provider`` 时的后端：升级前只有 Tavily，旧调用点的语义因此保持不变。
-DEFAULT_PROVIDER = "tavily"
+#:
+#: 标成 ``Literal`` 而不是裸 ``str``：应用层的服务方法拿它当参数默认值，而 ``WebSearchKeyView.provider``
+#: 是收窄的字面量联合——写成 ``str`` 会让"默认值"在类型上通不过，只能靠 ignore 遮住。
+DEFAULT_PROVIDER: Final = "tavily"
 
 
 def credential_ref(provider: str) -> str:

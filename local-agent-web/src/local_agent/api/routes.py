@@ -56,6 +56,7 @@ from local_agent.api.schemas import (
     SessionModeRequest,
     SkillRootRequest,
     SkillToggleRequest,
+    StorageLocationRequest,
     SubmitMessageRequest,
     WebSearchKeyRequest,
 )
@@ -85,10 +86,12 @@ from local_agent.application.models import (
     McpView,
     ModelConnectionView,
     PermissionsView,
+    PreferencesSchemaView,
     SessionChangesView,
     SessionSnapshot,
     SessionSummaryView,
     SkillsView,
+    StorageView,
     TaskCenterView,
     WebSearchKeyView,
     WorkspaceRef,
@@ -106,6 +109,7 @@ from local_agent.model_settings.preferences import (
     PreferencesRequest,
     PreferencesView,
 )
+from local_agent.model_settings.preferences_schema import preferences_schema
 from local_agent.persistence.job_store import JobStoreError
 
 #: 公开错误码 → HTTP 状态码。**显式列出**；表里没有的一律 500。
@@ -1109,6 +1113,56 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     @router.get("/preferences", response_model=PreferencesView, summary="应用偏好与配置概览")
     def get_preferences() -> PreferencesView:
         return service.preferences_view()
+
+    @router.get(
+        "/preferences/schema",
+        response_model=PreferencesSchemaView,
+        summary="设置页可改字段清单",
+    )
+    def get_preferences_schema() -> PreferencesSchemaView:
+        """后端管得着的偏好字段、各自的输入类型与上下界。
+
+        与 `GET /preferences` 的分工：那个回答"现在是什么值"（随保存变化），这个回答
+        "能改哪些、各是什么形状"（只随代码变化）。混在一起会让元信息跟着每次保存抖动。
+
+        纯反射、不读运行时状态，所以直接在这里调用而不经 `service`——没有可注入的东西。
+
+        用途：前端测试拿它比对那份手写的字段表，**漏接一个字段就红**。此前缺这个机制，
+        后端加了可改字段、页面上没有输入框，测试仍然全绿。
+        """
+        return preferences_schema()
+
+    @router.get("/storage", response_model=StorageView, summary="数据位置")
+    def get_storage_location() -> StorageView:
+        """所有 SQLite、向量库、附件与日志的根目录，以及这个值**由谁决定**。
+
+        与 `/preferences` 分开是刻意的：数据根**不能**存在设置库里（设置库自己就在它下面），
+        改完必须重启；而偏好的语义是"下一次新任务生效"。两者混在一起会让"什么时候生效"说不清。
+        """
+        return service.storage_location()
+
+    @router.put(
+        "/storage",
+        response_model=StorageView,
+        responses={422: {"model": ErrorResponse, "description": "路径不合法、不可写，或当前由环境变量决定"}},
+        summary="修改数据位置",
+    )
+    def set_storage_location(payload: StorageLocationRequest) -> StorageView:
+        """改到指定目录：**重启后才生效**，且新位置是空的——旧数据不会自动搬过去。
+
+        路径在这里校验（绝对、能创建、能写），不等到启动：启动才失败意味着服务起不来。
+        """
+        return service.save_storage_location(payload.data_root)
+
+    @router.delete(
+        "/storage",
+        response_model=StorageView,
+        responses={422: {"model": ErrorResponse, "description": "无法恢复默认位置"}},
+        summary="恢复默认数据位置",
+    )
+    def delete_storage_location() -> StorageView:
+        """删掉指针文件，回到平台标准目录；同样要重启才生效。"""
+        return service.reset_storage_location()
 
     @router.put("/preferences", response_model=PreferencesView, summary="保存应用偏好", responses={
         409: {"model": ErrorResponse, "description": "设置版本已更新，草稿未覆盖现有设置"},

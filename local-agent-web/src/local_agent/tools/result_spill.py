@@ -35,7 +35,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar, cast
 
 from local_agent.exceptions import SecurityError
 from local_agent.security.path_guard import resolve_within_workspace
@@ -118,9 +118,12 @@ _OFFLOAD_MIN_CHARS = 4000
 _OFFLOAD_PREVIEW_CHARS = 2000
 
 
+_ToolContent = TypeVar("_ToolContent")
+
+
 def offload_tool_result(
-    content: object, *, policy: SecurityPolicy, tool_name: str
-) -> object:
+    content: _ToolContent, *, policy: SecurityPolicy, tool_name: str
+) -> _ToolContent:
     """把**超预算**的工具结果正文落盘，换成"预览 + locator"（2026-10-22）。
 
     为什么在这个位置做：工具返回的形状各不相同（``content`` / ``stdout`` / ``text``），
@@ -170,7 +173,9 @@ def offload_tool_result(
     )
     payload["spilled"] = True
     payload["spill_path"] = ref.locator
-    return json.dumps(payload, ensure_ascii=False)
+    # 走到这里 `content` 一定是 `str`（上面已排除非 str 输入），返回的也是 str：
+    # 这处 cast 只是把"泛型入参"和"确定是 str 的产物"对上，不是掩盖类型问题。
+    return cast(_ToolContent, json.dumps(payload, ensure_ascii=False))
 
 
 def _save_result(

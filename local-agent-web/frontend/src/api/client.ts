@@ -832,6 +832,31 @@ export function clearWebSearchKey(provider: WebSearchProvider = 'tavily'): Promi
   return request<WebSearchKeyDto>(`/api/web-search/credential?provider=${provider}`, { method: 'DELETE' })
 }
 
+export type StorageLocationDto = components['schemas']['StorageView']
+
+/**
+ * 数据位置（2026-10-26）：所有 SQLite、向量库、附件与日志的根目录。
+ *
+ * 与偏好分开的原因：数据根**不能**存在设置库里（设置库自己就在它下面），而且改完必须重启，
+ * 偏好的语义是"下一次新任务生效"。所以它走一个固定放在平台默认目录的指针文件。
+ */
+export function getStorageLocation(): Promise<StorageLocationDto> {
+  return request<StorageLocationDto>('/api/storage')
+}
+
+/** 改数据根：**重启后生效**，新位置是空的（旧数据不自动搬）。非法/不可写路径返回 422。 */
+export function setStorageLocation(dataRoot: string): Promise<StorageLocationDto> {
+  return request<StorageLocationDto>('/api/storage', {
+    method: 'PUT',
+    body: JSON.stringify({ data_root: dataRoot }),
+  })
+}
+
+/** 恢复平台默认目录（删掉指针文件）；同样要重启。 */
+export function resetStorageLocation(): Promise<StorageLocationDto> {
+  return request<StorageLocationDto>('/api/storage', { method: 'DELETE' })
+}
+
 /** 对象存储密钥状态（2026-10-20）：只报"有没有"，不回读密钥。 */
 export function getOssCredential(): Promise<components['schemas']['OssCredentialView']> {
   return request<components['schemas']['OssCredentialView']>('/api/attachments/oss/credential')

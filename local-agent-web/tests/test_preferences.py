@@ -5,9 +5,12 @@ import pytest
 
 from local_agent.config import AppConfig
 from local_agent.model_settings.preferences import (
+    AgentsPreferences,
+    CompressionPreferences,
     PreferenceConflict,
     advanced_preferences,
     apply_runtime_preferences,
+    complete_preferences,
     initial_preferences,
 )
 from local_agent.model_settings.store import open_settings_database
@@ -280,3 +283,59 @@ def test_oss_backend_requires_endpoint_bucket_and_public_url() -> None:
         oss_public_base_url="https://cdn.example.com",
     )
     assert ok.backend == "oss" and ok.oss_key_prefix == "chaiai/"
+
+
+def test_compression_preferences_reach_the_runtime_config(app_config: AppConfig) -> None:
+    """压缩四项从"高级只读"搬进可改之后，必须真的回灌到运行配置（2026-10-26）。
+
+    只改字段表、`apply_runtime_preferences` 没接的话，页面显示"已保存"，每轮却仍在用
+    config.yaml 里的值——"存了但不生效"是设置页最坏的一种失败。
+    """
+    values = complete_preferences(initial_preferences(app_config), app_config)
+    assert values.compression is not None
+    values = values.model_copy(update={"compression": CompressionPreferences(
+        enabled=False, trigger_ratio=0.5, preserve_recent_turns=3, retain_ratio=0.1,
+    )})
+
+    config = apply_runtime_preferences(app_config, values)
+
+    assert config.memory.compression.enabled is False
+    assert config.memory.compression.trigger_ratio == 0.5
+    assert config.memory.compression.preserve_recent_turns == 3
+    assert config.memory.compression.retain_ratio == 0.1
+    # 没搬出来的预算项保持原值：只搬一半比不搬更坏（用户以为调了，实际没调）
+    assert (
+        config.memory.compression.summary_max_chars
+        == app_config.memory.compression.summary_max_chars
+    )
+
+
+def test_compression_retain_ratio_must_stay_below_the_trigger() -> None:
+    """保留比例 ≥ 触发比例等于"压完立刻再触发"：拒绝，而不是静默改成合法值。"""
+    with pytest.raises(ValueError, match="保留比例必须小于触发比例"):
+        CompressionPreferences(trigger_ratio=0.5, retain_ratio=0.5)
+
+
+def test_agents_preferences_reach_the_runtime_config(app_config: AppConfig) -> None:
+    """项目规则三项回灌到运行配置（2026-10-26）。
+
+    ``filenames`` 不搬：它是"哪些文件算规则"，改错就再也读不到用户写的那份。
+    """
+    values = complete_preferences(initial_preferences(app_config), app_config)
+    assert values.agents is not None
+    values = values.model_copy(update={"agents": AgentsPreferences(
+        enabled=False, max_file_chars=1_000, max_total_chars=5_000,
+    )})
+
+    config = apply_runtime_preferences(app_config, values)
+
+    assert config.agents.enabled is False
+    assert config.agents.max_file_chars == 1_000
+    assert config.agents.max_total_chars == 5_000
+    assert config.agents.filenames == app_config.agents.filenames
+
+
+def test_agents_total_budget_must_cover_one_file() -> None:
+    """总上限小于单份上限 = 一份规则都读不全：拒绝，不给"静默只生效一半"的配置。"""
+    with pytest.raises(ValueError, match="不能小于单份上限"):
+        AgentsPreferences(max_file_chars=5_000, max_total_chars=1_000)

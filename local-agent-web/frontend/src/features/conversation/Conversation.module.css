@@ -54,6 +54,30 @@
   overflow-wrap: anywhere;
 }
 
+/* 追问引用块（2026-10-26）：抄豆包——浅底圆角块，与用户自己写的问题在视觉上分层。
+   底色用 `--c-raised` 而不是半透明：气泡本身是 `--c-bubble`，浅底与深底两套主题下都能拉开一档。 */
+.userQuote {
+  /* `blockquote` 自带 `margin: 1em 40px`，这里整体覆盖，否则引用块会缩进成另一列。 */
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-control);
+  /* 深色主题下 `--c-raised` 与气泡（#1e2a42）亮度接近，只靠底色分不清，
+     所以补一条 hairline：两套主题都有一道明确边界。 */
+  border: 1px solid var(--c-line);
+  background: var(--c-raised);
+  color: var(--c-text-2);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+  /* 引用来自回答正文，可能有多段：保留换行，不要压成一行。 */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 引用之后用户自己写的那句：单独成块只为保留换行（气泡本身不设 `pre-wrap`）。 */
+.userQuestion {
+  white-space: pre-wrap;
+}
+
 .userTime {
   color: var(--law-text-caption);
   font-size: var(--law-text-xs);

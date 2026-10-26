@@ -21,6 +21,7 @@ from local_agent.tools.image_tools import (
     read_image,
 )
 
+
 def _png_head(width: int, height: int) -> bytes:
     """一个**真实形状**的 PNG 头（IHDR 前 8 字节宽高）：尺寸检查读的就是这里。"""
     return (

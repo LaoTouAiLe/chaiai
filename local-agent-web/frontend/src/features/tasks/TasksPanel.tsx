@@ -10,6 +10,7 @@
 
 import { useEffect, useState } from 'react'
 
+import { useBodyScrollLock } from '../../components/useBodyScrollLock'
 import type { TaskState, TasksView } from '../../fixtures/types'
 import {
   TASK_FILTERS,
@@ -58,6 +59,8 @@ const ROW_NOTE: Partial<Record<TaskState, string>> = {
 }
 
 export function TasksPanel({ view, errorText = null, onOpenSession, onClose, onCloseReview }: TasksPanelProps) {
+  // 挂载即打开（父组件条件渲染）：锁住背后页面，否则滚到底会带动会话区（2026-10-26）。
+  useBodyScrollLock()
   const [filter, setFilter] = useState<TaskFilter>('all')
   const [now, setNow] = useState(Date.now)
   const counts = view === null ? null : taskFilterCounts(view)

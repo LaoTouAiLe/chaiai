@@ -108,11 +108,12 @@ def read_image(
             f"这不是受支持的图片（按文件头判断）。{SUPPORTED_NOTE}；"
             "如果它是文本或 HTML，请改用 read_file。"
         )
-    size = image_dimensions(data)
-    if size is not None and max(size) > MAX_IMAGE_EDGE:
+    # 不能用 `size`：上面那个 `size` 是文件字节数（int），这里要的是像素尺寸（tuple|None）。
+    dimensions = image_dimensions(data)
+    if dimensions is not None and max(dimensions) > MAX_IMAGE_EDGE:
         # 端点对单边有硬上限（8192px）；超了整轮请求会被 400 拒绝，不如在这里就说明白。
         raise ValueError(
-            f"这张图是 {size[0]}×{size[1]} 像素，单边超过端点上限 {MAX_IMAGE_EDGE}px："
+            f"这张图是 {dimensions[0]}×{dimensions[1]} 像素，单边超过端点上限 {MAX_IMAGE_EDGE}px："
             "直接交给模型会让整轮请求被拒绝。请先把它缩小（系统画图工具或缩图命令都行，"
             f"长边压到 {MAX_IMAGE_EDGE} 以内），或改看它的截图版本。"
         )

@@ -10,22 +10,28 @@ import { PreferenceSection } from './PreferenceSection'
 import { PreferencesProvider } from './PreferencesProvider'
 import { GeneralContext, generalDefaults, preferencesKey } from './preferencesContext'
 
-const mock = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), test: vi.fn(), key: vi.fn(), saveKey: vi.fn(), clearKey: vi.fn() }))
+const mock = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), test: vi.fn(), key: vi.fn(), saveKey: vi.fn(), clearKey: vi.fn(), pick: vi.fn() }))
 vi.mock('../../api/client', async original => ({
   ...await original<typeof import('../../api/client')>(), getPreferences: mock.get, savePreferences: mock.save, testMemoryPreferences: mock.test,
   getWebSearchKey: mock.key, setWebSearchKey: mock.saveKey, clearWebSearchKey: mock.clearKey,
+  pickWorkspaceDirectory: mock.pick,
 }))
 function fixture(): PreferencesDto {
   const values = {
     general: { ...generalDefaults },
     execution: { max_tool_loops: 20, max_retries_per_step: 2, shell_timeout_seconds: 60, shell_max_output_chars: 30000, safe_delete: true },
+    // 项目规则（2026-10-26）：三项从"高级只读"搬进独立分区。
+    agents: { enabled: true, max_file_chars: 20000, max_total_chars: 60000 },
     retrieval: { enabled: true, max_files: 2000, max_results: 8, timeout_seconds: 10, context_lines: 20 },
     web_access: { provider: 'auto' as const, fetch_provider: 'local' as const, max_results: 5, max_chars: 8000, prefetch_pages: 2, max_search_calls: 4, max_read_pages: 6, max_reads_per_page: 3, timeout_seconds: 15, domain_policy: 'allow' as const, denied_domains: [], allowed_domains: [] },
     memory: { enabled: true, confidence_threshold: .75, importance_threshold: .5, aging_enabled: true, forget_after_days: 180 },
     medium_term: { enabled: false, top_k: 8, min_score: .53, decay_half_life_days: 30 },
+    // 压缩（2026-10-26）：从"高级只读"搬进独立分区，与后端 `CompressionPreferences` 同形。
+    compression: { enabled: true, trigger_ratio: .8, preserve_recent_turns: 8, retain_ratio: .16 },
     embedding: { enabled: false, provider: 'onnx_local' as const, model: 'unit-test', cache_dir: 'E:/models', local_files_only: true, base_url: '', api_key_env: '', allow_plaintext_http: false },
   }
-  return { version: 0, writable: true, values, defaults: structuredClone(values), advanced: { compression_trigger_ratio: .8 } }
+  // `advanced` 只剩内部预算（压缩的开关/比例/保留轮数已搬进 `compression` 组，2026-10-26）。
+  return { version: 0, writable: true, values, defaults: structuredClone(values), advanced: { tool_step_budget_chars: 160000 } }
 }
 function host(node: ReactNode, data = fixture()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -36,6 +42,7 @@ function host(node: ReactNode, data = fixture()) {
 beforeEach(() => {
   mock.get.mockReset(); mock.save.mockReset(); mock.test.mockReset(); vi.unstubAllGlobals()
   mock.key.mockReset(); mock.saveKey.mockReset(); mock.clearKey.mockReset()
+  mock.pick.mockReset()
   mock.key.mockResolvedValue({ configured: false, source: 'none', store: 'local', note: null })
 })
 
@@ -196,7 +203,7 @@ describe('应用偏好', () => {
 
   it('shows advanced values as read-only and disables writes when no settings store exists', () => {
     const first = host(<PreferenceSection group="advanced" />)
-    expect(screen.getByText('压缩触发比例')).toBeInTheDocument()
+    expect(screen.getByText('工具步字符预算')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '保存' })).not.toBeInTheDocument()
     first.unmount()
     host(<PreferenceSection group="memory" />, { ...fixture(), writable: false })
@@ -276,6 +283,49 @@ describe('应用偏好', () => {
     expect(await screen.findByLabelText('DeepSeek 搜索 API Key')).toBeInTheDocument()
     expect(screen.queryByLabelText('Tavily API Key')).not.toBeInTheDocument()
     await waitFor(() => expect(mock.key).toHaveBeenCalledWith('deepseek'))
+  })
+
+  it('fills a path field from the native directory picker', async () => {
+    // 2026-10-26：路径类字段不再只靠手输。选择器返回的绝对路径直接进草稿，
+    // 之后按普通字段一起保存。
+    mock.pick.mockResolvedValue({ path: 'D:/chaiai-models' })
+    host(<PreferenceSection group="embedding" />)
+
+    fireEvent.click(screen.getByRole('button', { name: '选择模型缓存目录' }))
+
+    await waitFor(() => expect(screen.getByRole('textbox', { name: '模型缓存目录' })).toHaveValue('D:/chaiai-models'))
+  })
+
+  it('leaves the draft untouched when the directory picker is cancelled', async () => {
+    // 取消是正常操作：`path: null` 不该清空已有值，也不该弹错误。
+    mock.pick.mockResolvedValue({ path: null })
+    host(<PreferenceSection group="embedding" />)
+
+    fireEvent.click(screen.getByRole('button', { name: '选择模型缓存目录' }))
+
+    await waitFor(() => expect(mock.pick).toHaveBeenCalled())
+    expect(screen.getByRole('textbox', { name: '模型缓存目录' })).toHaveValue('E:/models')
+  })
+
+  it('saves compression settings as their own group', async () => {
+    // 2026-10-26：压缩的四项原来只在"高级配置"里只读展示。搬出来后必须真的能存——
+    // 只改前端字段表、后端没这一组的话，保存会被"未知字段"拒掉。
+    const data = fixture()
+    mock.save.mockImplementation(async values => ({ ...data, values, version: 1 }))
+    host(<PreferenceSection group="compression" />, data)
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: '压缩触发比例' }), { target: { value: '0.7' } })
+    fireEvent.change(screen.getByRole('spinbutton', { name: '压缩后保留最近轮数' }), { target: { value: '5' } })
+    fireEvent.click(screen.getByRole('button', { name: '保存' }))
+
+    await screen.findByText('已保存，下一次新任务生效')
+    expect(mock.save.mock.calls[0][0].compression).toMatchObject({
+      trigger_ratio: 0.7,
+      preserve_recent_turns: 5,
+      // 没动的项保持原值：整组提交不能让其余字段回到默认
+      enabled: true,
+      retain_ratio: 0.16,
+    })
   })
 
   it('never offers to delete a key that comes from the environment', async () => {

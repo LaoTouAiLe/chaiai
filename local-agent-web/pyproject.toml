@@ -102,6 +102,10 @@ module = [
   # 异常导出；这里跳过它，调用点自己把异常收敛成 `FileOperationError`。
   "send2trash",
   "send2trash.*",
+  # 定时任务（2026-10-26）：croniter 不自带类型存根，call site 只用了 `is_valid` / `get_next`，
+  # 输入输出都是原始类型；为它单独引入 `types-croniter` 不值得。
+  "croniter",
+  "croniter.*",
 ]
 follow_imports = "skip"
 ignore_missing_imports = true

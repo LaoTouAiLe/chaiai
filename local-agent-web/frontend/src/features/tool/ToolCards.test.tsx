@@ -74,6 +74,30 @@ describe('ToolCard', () => {
     expect(screen.getByText('45')).toBeInTheDocument()
   })
 
+  /**
+   * 网页检索（2026-10-26）：卡片要说清「搜了什么、回了几条、后端是谁」。
+   *
+   * 卡片单独构造而不进 `tools` fixture：那个场景被会话视图与轨迹视图共用，加一条工具消息
+   * 会连带改掉它们对行数的断言，代价大于收益。
+   */
+  it('renders a web search as a result card with its query, backend and hits', () => {
+    const card: ToolCardView = {
+      kind: 'web',
+      target: 'DeepSeek 搜索 API 计费',
+      summary: '5 条来源 · 后端 deepseek',
+      body: 'DeepSeek 搜索 API 文档 · api-docs.deepseek.com\n计费说明 · platform.deepseek.com',
+      truncated: false,
+    }
+    render(<ToolCard card={card} />)
+
+    // 卡片类型只体现在 `aria-label` 上（可见标题是搜索词），所以按 region 取名断言。
+    expect(screen.getByRole('region', { name: '网页结果' })).toBeInTheDocument()
+    expect(screen.getByText('DeepSeek 搜索 API 计费')).toBeInTheDocument()
+    expect(screen.getByText('5 条来源 · 后端 deepseek')).toBeInTheDocument()
+    // 前几条命中按「标题 · 站点」逐行列出：用户据此判断要不要再读全文。
+    expect(screen.getByText(/DeepSeek 搜索 API 文档 · api-docs\.deepseek\.com/)).toBeInTheDocument()
+  })
+
   it('groups matches by file and states that the list was truncated', () => {
     const card = cardOf('search')
     render(<ToolCard card={card} />)

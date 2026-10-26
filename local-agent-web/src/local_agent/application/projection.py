@@ -879,15 +879,17 @@ def _tool_outcome(
             summary = f"{len(hits)} 条来源"
             if provider:
                 summary = f"{summary} · 后端 {provider}"
-            lines: list[str] = []
+            # 变量名不能叫 `lines`：同一个函数前面的 `read_file` 分支已经用这个名字存"总行数"
+            # （`int | None`）。同作用域重名会让类型检查与后来读代码的人都分不清这两者。
+            hit_lines: list[str] = []
             for item in hits[:WEB_DETAIL_HITS]:
                 title = sanitize_text(str(item.get("title") or ""), secrets).strip()
                 source = sanitize_text(str(item.get("source") or ""), secrets).strip()
                 if title:
-                    lines.append(f"{title} · {source}" if source else title)
+                    hit_lines.append(f"{title} · {source}" if source else title)
             if note:
-                lines.append(f"说明：{sanitize_text(note, secrets)}")
-            text, clipped = _bounded("\n".join(lines), TOOL_DETAIL_TEXT_CHARS)
+                hit_lines.append(f"说明：{sanitize_text(note, secrets)}")
+            text, clipped = _bounded("\n".join(hit_lines), TOOL_DETAIL_TEXT_CHARS)
             return ToolOutcomeView(
                 kind="web",
                 target=_optional_sanitized(payload.get("query"), secrets),

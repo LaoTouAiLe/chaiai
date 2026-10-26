@@ -15,6 +15,8 @@
   width: min(680px, 100%);
   max-height: 80vh;
   overflow: auto;
+  /* 滚到边界就停住，不把滚轮沿 DOM 链传给背后的会话区（2026-10-26）。 */
+  overscroll-behavior: contain;
   padding: var(--sp-6);
   background: var(--c-canvas);
   /* 去描边、统一浮层高度（2026-10-22 V6，与设置弹窗同口径） */

@@ -9,6 +9,7 @@
 // 展示组件不认识 fetch：数据由 `CapabilitiesSection` 取好、映射成视图模型后传进来（与
 // `PermissionSection` 同一分工）。
 
+import { useBodyScrollLock } from '../../components/useBodyScrollLock'
 import type { CapabilityReason, CapabilitiesView } from '../../fixtures/types'
 import styles from './CapabilitiesPanel.module.css'
 
@@ -46,6 +47,8 @@ export function CapabilitiesPanel({
   onClose,
   embedded = false,
 }: CapabilitiesPanelProps) {
+  // 只有弹窗形态锁滚动：内嵌（能力中心整页）时它有祖先滚动容器，锁 body 反而会让整页不能滚。
+  useBodyScrollLock(!embedded)
   // 能改开关的条件：① 有人接线（真宿主）；② 设置库可用（否则改动存不下来，§16.1 的降级口径）；
   // ③ 服务端给了可开关集（页面不自己拼能力名）。三条缺一条就退回纯文本，不给点不动的控件。
   const onToggle = actions?.onToggle ?? null

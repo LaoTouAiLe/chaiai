@@ -104,6 +104,9 @@ def test_frozen_entry_opens_the_desktop_window(
     browsers: list[str] = []
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    # 本用例验的是"冻结形态的数据根就是 LOCALAPPDATA/chaiai"，而 conftest 给每个用例设了
+    # `CHAIAI_HOME` 做隔离（优先级更高）。先摘掉它，否则数据会落在临时隔离目录里。
+    monkeypatch.delenv("CHAIAI_HOME", raising=False)
     monkeypatch.setattr(uvicorn, "run", lambda app, **kwargs: None)
     monkeypatch.setattr(api_main.desktop_window, "window_available", lambda: True)
     monkeypatch.setattr(
@@ -121,7 +124,8 @@ def test_frozen_entry_opens_the_desktop_window(
 
     assert windows == [("127.0.0.1", 8000)]
     assert browsers == []
-    assert (tmp_path / "chaiai" / "data" / "checkpoints.sqlite").is_file()
+    # 2026-10-26 起库直接落在数据根下，不再多一层 `data/`。
+    assert (tmp_path / "chaiai" / "checkpoints.sqlite").is_file()
     assert app_paths.data_dir() == tmp_path / "chaiai"
 
 

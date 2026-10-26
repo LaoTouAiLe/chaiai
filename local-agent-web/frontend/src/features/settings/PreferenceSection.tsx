@@ -1,14 +1,17 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { getPreferences, savePreferences, testMemoryPreferences } from '../../api/client'
+import { getPreferences, pickWorkspaceDirectory, savePreferences, testMemoryPreferences } from '../../api/client'
 import type { MemoryProbeDto, PreferencesDto, PreferenceValues } from '../../api/client'
 import { generalDefaults, preferencesKey } from './preferencesContext'
 import { OssCredentialField } from './OssCredentialField'
+import { StorageLocationField } from './StorageLocationField'
 import { WebSearchKeyField } from './WebSearchKeyField'
 import styles from './PreferenceSection.module.css'
 
-export type PreferenceGroup = 'general' | 'execution' | 'retrieval' | 'web_access' | 'attachments' | 'memory' | 'medium_term' | 'embedding' | 'advanced'
-export type Field = { key: string; label: string; note: string; min?: number; max?: number; step?: number | 'any'; type?: 'text'; providers?: readonly string[]; required?: boolean; unlimited?: boolean; optional?: boolean; options?: readonly (readonly [string, string])[]; when?: readonly (readonly [string, string])[] }
+export type PreferenceGroup = 'general' | 'storage' | 'execution' | 'agents' | 'retrieval' | 'web_access' | 'attachments' | 'memory' | 'medium_term' | 'compression' | 'embedding' | 'advanced'
+// `type: 'path'`（2026-10-26）表示"这是一个本机目录"：输入框旁边带「选择…」，走原生目录选择器。
+// 让人手输绝对路径是不合理的——拼错一个字符只会得到"目录不存在"，而用户并不知道自己打错了哪里。
+export type Field = { key: string; label: string; note: string; min?: number; max?: number; step?: number | 'any'; type?: 'text' | 'path'; providers?: readonly string[]; required?: boolean; unlimited?: boolean; optional?: boolean; options?: readonly (readonly [string, string])[]; when?: readonly (readonly [string, string])[] }
 // 字段表对外导出（2026-10-23）：设置项搜索要读同一份清单做索引，避免另建一份索引后与表单漂移。
 export const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
   general: [
@@ -18,12 +21,23 @@ export const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'send_shortcut', label: '发送快捷键', note: 'Shift+Enter 始终换行；Ctrl+Enter 在 macOS 上也支持 Command+Enter。', options: [['enter', 'Enter 发送'], ['ctrl_enter', 'Ctrl / ⌘ + Enter']] },
     { key: 'reasoning_expanded', label: '默认展开 Think', note: '仅展示模型实际返回的思考内容，每条消息仍可单独折叠。' },
   ],
+  // 数据位置（2026-10-26）：唯一一项，但**不走偏好那条路**——它存在设置库里会形成自举死锁
+  // （设置库自己就在数据根下），而且改完要重启。表单由 `StorageLocationField` 自己渲染、
+  // 自己保存，所以这里刻意留空。
+  storage: [],
   execution: [
     { key: 'max_tool_loops', label: '每轮工具循环上限', note: '留空表示不限，由模型决定继续或结束。', min: 1, unlimited: true },
     { key: 'max_retries_per_step', label: '重复失败反馈阈值', note: '超过后反馈给模型，不强制停止或转交用户。', min: 0 },
     { key: 'shell_timeout_seconds', label: '命令超时（秒）', note: '留空表示默认不限时；命令仍可取消或单独指定超时。', min: 1, unlimited: true },
     { key: 'shell_max_output_chars', label: '命令输出上限（字符）', note: '限制保留的命令输出长度。', min: 1 },
     { key: 'safe_delete', label: '安全删除（移入系统回收站）', note: '删除文件时移进系统回收站（Windows 资源管理器里那个；macOS / Linux 也走各自的系统回收站），可以在那里「还原」到原位置，而不是立即抹掉。移不进回收站时会报错并保留文件，不会退化成直接删除。只对文件工具生效，终端里的删除命令不受它管辖。' },
+  ],
+  agents: [
+    // 2026-10-26：这三项原来只在"高级配置"里只读。搬出来的锚点是"规则写了却没生效"——
+    // 最常见的原因就是被字符上限截断，而那时用户需要一个能看到并调高的入口。
+    { key: 'enabled', label: '读取项目规则（AGENTS.md）', note: '开启后把工作区里的 AGENTS.md 注入上下文；关闭不影响其它记忆与技能。' },
+    { key: 'max_file_chars', label: '单份规则字符上限', note: '超出部分不注入。规则文件很长时按需调高，调太小会让后半段规则悄悄失效。', min: 1 },
+    { key: 'max_total_chars', label: '规则总字符上限', note: '所有规则文件合计的上限，不能小于单份上限；超出部分同样不注入。', min: 1 },
   ],
   retrieval: [
     { key: 'enabled', label: '启用任务前自动检索', note: '控制工具任务开始前的自动代码检索；不影响模型主动调用 grep / glob。' },
@@ -69,28 +83,39 @@ export const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'min_score', label: '最低语义相似度', note: '0–1；阈值取决于向量模型，换模型后需要重新标定。', min: 0, max: 1, step: 'any' },
     { key: 'decay_half_life_days', label: '时间衰减半衰期（天）', note: '每经过此天数，记忆的时间评分降为一半；不会删除记录。', min: 1 },
   ],
+  compression: [
+    // 2026-10-26：这四项原来只在"高级配置"里只读展示。搬出来的理由是它们**能凭结果判断**——
+    // 用户看到"答到一半被摘要了"就能想到调触发比例；而工具预算、摘要上限那些改错的症状是
+    // "某段输出莫名被截断"，既看不出原因也无从选择，仍留在只读概览。
+    { key: 'enabled', label: '启用上下文压缩', note: '接近上下文窗口时把较早的对话压成摘要；关闭后长会话会直接触达窗口上限并被拒绝。' },
+    { key: 'trigger_ratio', label: '压缩触发比例', note: '已用输入额度占「窗口 − 输出预留」的比例，达到即压缩。调高会拖到更晚才压，调低会更频繁地摘要。', min: 0, max: 1, step: 'any' },
+    { key: 'preserve_recent_turns', label: '压缩后保留最近轮数', note: '这些轮原样保留，其余压成摘要；调大保留更多原文，但压缩会更频繁。', min: 1 },
+    { key: 'retain_ratio', label: '摘要保留比例', note: '摘要目标占原内容的比例，必须小于触发比例。调大保留更多细节，占用也更多。', min: 0, max: 1, step: 'any' },
+  ],
   embedding: [
     { key: 'enabled', label: '启用 Embedding', note: '启用向量生成能力；保存本身不会下载模型或调用接口。' },
     { key: 'provider', label: '向量生成方式', note: '本地 ONNX 使用模型缓存；兼容 API 使用已配置的密钥环境变量。', options: [['onnx_local', '本地 ONNX'], ['openai_compatible', 'OpenAI 兼容 API']] },
     { key: 'model', label: '向量模型名称', note: '填写所选提供方支持的模型名称；已有集合会检查模型兼容性。', type: 'text', required: true },
-    { key: 'cache_dir', label: '模型缓存目录', note: '本机可写的绝对路径；已加载缓存路径后，更换目录需保存并重启后端，再测试和运行任务。首次加载可能下载模型。', type: 'text', required: true, providers: ['onnx_local'] },
+    { key: 'cache_dir', label: '模型缓存目录', note: '点「选择…」挑一个本机可写目录；已加载缓存路径后，更换目录需保存并重启后端，再测试和运行任务。首次加载可能下载模型。', type: 'path', required: true, providers: ['onnx_local'] },
     { key: 'local_files_only', label: '仅使用本地缓存', note: '禁止联网下载；缺少权重时测试或召回会明确失败。', providers: ['onnx_local'] },
     { key: 'base_url', label: 'Embedding API 端点', note: '仅接受 HTTP(S) 地址，不允许内嵌密钥、查询参数或片段。', type: 'text', required: true, providers: ['openai_compatible'] },
     { key: 'api_key_env', label: 'API Key 环境变量名', note: '填写变量名称，不能填写密钥。密钥放在本机 .env 或环境变量中，修改后重启后端加载。', type: 'text', required: true, providers: ['openai_compatible'] },
     { key: 'allow_plaintext_http', label: '允许非本机端点明文 HTTP', note: '只在你确认可信网络中的明文传输风险时勾选；HTTPS 与本机回环 HTTP 无需勾选。', providers: ['openai_compatible'] },
   ],
 }
-export const TITLES: Record<PreferenceGroup, string> = { general: '通用与外观', execution: '任务执行', retrieval: '任务前自动代码检索', web_access: '联网检索', attachments: '图片与附件', memory: '长期记忆', medium_term: '中期记忆', embedding: '向量库与 Embedding', advanced: '高级配置概览' }
+export const TITLES: Record<PreferenceGroup, string> = { general: '通用与外观', storage: '数据位置', execution: '任务执行', agents: '项目规则', retrieval: '任务前自动代码检索', web_access: '联网检索', attachments: '图片与附件', memory: '长期记忆', medium_term: '中期记忆', compression: '上下文压缩', embedding: '向量库与 Embedding', advanced: '高级配置概览' }
 export const ADVANCED: Record<string, string> = {
-  compression_enabled: '启用压缩', compression_trigger_ratio: '压缩触发比例',
-  preserve_recent_turns: '保留最近轮数', preserve_recent_tool_steps: '保留最近工具步数',
+  // 压缩与 AGENTS 的可改项已搬进各自分区（2026-10-26），这里只剩**内部预算**和"关掉就没有会话"
+  // 的短期记忆开关——它们要么改错只会得到莫名截断，要么根本不该由页面关闭。
+  preserve_recent_tool_steps: '保留最近工具步数',
   tool_step_budget_chars: '工具步字符预算', tool_result_keep_chars: '单条工具结果字符阈值',
   summary_max_chars: '摘要字符上限', short_term_enabled: '短期记忆',
-  agents_enabled: 'AGENTS 规则', agents_max_file_chars: '单份规则字符上限',
-  agents_max_total_chars: '规则总字符上限',
 }
 type Draft = { base: PreferencesDto; fields: Record<string, string | boolean> }
-function fieldsFor(view: PreferencesDto, group: Exclude<PreferenceGroup, 'advanced'>, defaults = false) {
+function fieldsFor(view: PreferencesDto, group: PreferenceGroup, defaults = false) {
+  // `advanced` 与 `storage` 都不是偏好分组：前者只有只读概览，后者走独立接口（存在设置库里会
+  // 形成自举死锁）。它们没有可编辑字段，所以按空表处理而不是让类型穿透到调用点。
+  if (group === 'advanced' || group === 'storage') return {}
   return Object.fromEntries(Object.entries((defaults ? view.defaults : view.values)[group] ?? generalDefaults).map(([key, value]) => [key, typeof value === 'boolean' ? value : String(value)]))
 }
 
@@ -144,6 +169,23 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
     </section>
   }
   const fields = draft?.fields ?? fieldsFor(view, group)
+  /**
+   * 打开**本机原生**目录选择器，把选中的绝对路径填进草稿（2026-10-26）。
+   *
+   * 复用 `/api/workspaces/pick`：它是唯一能唤起系统选择框的入口（宿主能力，不是业务接口）。
+   * "选一个目录"和"选工作区"在机制上完全相同，没必要为前者再开一条通道。
+   *
+   * 取消（返回 `path: null`）是正常操作：不改草稿、也不报错。
+   */
+  const chooseDirectory = async (key: string) => {
+    try {
+      const picked = await pickWorkspaceDirectory()
+      // `!= null` 同时排掉 null 与 undefined（契约里 path 是可选的）：两者都表示"用户取消了"。
+      if (picked.path != null && picked.path !== '') change(key, picked.path)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : '打开目录选择器失败')
+    }
+  }
   const change = (key: string, value: string | boolean) => {
     setDraft(current => {
       const next = { ...(current?.fields ?? fieldsFor(view, group)), [key]: value }
@@ -160,7 +202,8 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
   }
   const draftValues = (): PreferenceValues => {
     const base = draft?.base ?? view
-    const original = base.values[group] ?? generalDefaults
+    // `storage` 没有偏好字段（它走独立接口），不会走到提交那条路；这里给空兜底只为类型收窄。
+    const original = group === 'storage' ? generalDefaults : (base.values[group] ?? generalDefaults)
     const numericKeys = new Set(Object.entries(original).filter(([, value]) => typeof value === 'number').map(([key]) => key))
     // 域名清单是**数组**：输入框里是"a.com, b.com"，提交前拆回数组——否则会以字符串发出去，
     // 被服务端按形状拒掉（422），用户看到的是"保存失败"却不知道自己哪里填错了。
@@ -215,7 +258,11 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
   }}>
     <header className={styles.head}>
       <h3 className={styles.title}>{TITLES[group]}</h3>
-      <p className={styles.note}>{group === 'general' ? '保存后立即生效；恢复初始值使用应用默认外观。' : group === 'embedding' ? '普通模型参数保存后从下一次新任务生效；更换本地缓存目录可能需要重启后端，准备状态会说明。正在执行或等待审批的任务保留原值。初值来自加载的 config.yaml。' : '保存后从下一次新任务生效；正在执行或等待审批的任务保留原值。初值来自加载的 config.yaml。'} 设置写入本地设置库。</p>
+      {/* 数据位置（2026-10-26）走独立接口与指针文件，所以它的生效时机和存放位置都与偏好不同，
+          文案必须单独写——沿用"下一次新任务生效 / 写入设置库"会直接说错。 */}
+      <p className={styles.note}>{group === 'storage'
+        ? '改完要重启后端才生效。这一项不写入设置库，而是记在一个固定位置的指针文件里——数据根不能存在设置库中（设置库自己就住在它下面）。'
+        : `${group === 'general' ? '保存后立即生效；恢复初始值使用应用默认外观。' : group === 'embedding' ? '普通模型参数保存后从下一次新任务生效；更换本地缓存目录可能需要重启后端，准备状态会说明。正在执行或等待审批的任务保留原值。初值来自加载的 config.yaml。' : '保存后从下一次新任务生效；正在执行或等待审批的任务保留原值。初值来自加载的 config.yaml。'} 设置写入本地设置库。`}</p>
     </header>
     {(group === 'embedding' || group === 'medium_term') && resources?.restart_required ? <p role="alert" className={styles.error}>新缓存目录需重启后端生效。配置已保留，请重启后测试，再开始使用中期记忆的新任务。</p> : null}
     {group === 'retrieval' || group === 'web_access' || group === 'memory' || group === 'medium_term' || group === 'embedding' ? <p className={styles.note}>修改这些参数会改变模型收到的内容，可能影响回答质量与缓存命中率。</p> : null}
@@ -232,22 +279,30 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
     </> : null}
     {!view.writable ? <p role="alert">设置库不可用，当前只读。</p> : null}
     <fieldset disabled={busy || !view.writable} className={styles.fields}>
-      {visibleFields.map(field => <label key={field.key} id={`field-${group}-${field.key}`} className={`${styles.field} ${field.type === 'text' ? styles.fieldWide : ''}`}>
+      {visibleFields.map(field => {
+        // 路径类字段（2026-10-26）走整行宽；手输仍然保留（粘贴路径很常见），但不再是唯一入口。
+        const wide = field.type === 'text' || field.type === 'path'
+        return <label key={field.key} id={`field-${group}-${field.key}`} className={`${styles.field} ${wide ? styles.fieldWide : ''}`}>
         <span className={styles.fieldText}>
           <strong>{field.label}</strong>
           <small>{field.note}</small>
         </span>
-        <span className={`${styles.control} ${field.type === 'text' ? styles.controlWide : ''}`}>
+        <span className={`${styles.control} ${wide ? styles.controlWide : ''}`}>
           {field.options ? <select aria-label={field.label} value={String(fields[field.key])} onChange={event => change(field.key, event.target.value)}>
             {field.options.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
           </select> : typeof fields[field.key] === 'boolean' ? <span className={styles.switch}>
             <input type="checkbox" aria-label={field.label} checked={Boolean(fields[field.key])} onChange={event => change(field.key, event.target.checked)} />
             <span className={styles.switchTrack} aria-hidden="true" />
-          </span> : field.type === 'text' ?
-            <input type="text" required={field.required && Boolean(fields.enabled)} aria-label={field.label} value={String(fields[field.key] ?? '')} onChange={event => change(field.key, event.target.value)} /> :
+          </span> : wide ?
+            (field.type === 'path'
+              ? <span className={styles.pathRow}>
+                <input type="text" required={field.required && Boolean(fields.enabled)} aria-label={field.label} value={String(fields[field.key] ?? '')} onChange={event => change(field.key, event.target.value)} />
+                <button type="button" className={styles.pathButton} aria-label={`选择${field.label}`} onClick={() => void chooseDirectory(field.key)}>选择…</button>
+              </span>
+              : <input type="text" required={field.required && Boolean(fields.enabled)} aria-label={field.label} value={String(fields[field.key] ?? '')} onChange={event => change(field.key, event.target.value)} />) :
             <input type="number" required={!field.unlimited && !field.optional} aria-label={field.label} placeholder={field.unlimited ? '不限' : undefined} min={field.min} max={field.max} step={field.step ?? 1} value={String(fields[field.key] ?? '')} onChange={event => change(field.key, event.target.value)} />}
         </span>
-      </label>)}
+      </label>})}
     </fieldset>
     {/* 密钥不在偏好里（偏好会随 Checkpoint 走）：它有自己的接口，单独一块。
         按**草稿里选中的后端**显示对应那格：只有显式选 DeepSeek 才切到 DeepSeek 的密钥，
@@ -256,7 +311,11 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
       ? <WebSearchKeyField provider={String(fields.provider) === 'deepseek' ? 'deepseek' : 'tavily'} />
       : null}
     {group === 'attachments' ? <OssCredentialField /> : null}
+    {/* 数据位置（2026-10-26）：独立接口 + 独立保存按钮，不参与上面的草稿/保存流程。 */}
+    {group === 'storage' ? <StorageLocationField /> : null}
     {group === 'embedding' ? <p className={styles.note}>测试使用当前分区草稿及其他分区的已保存值，不保存草稿、不写入记忆。本地模型可能下载权重；远端接口会发送一条固定测试文本并可能产生少量费用。</p> : null}
+    {/* 数据位置自带保存按钮（走独立接口），这里不再给它一套"保存 / 取消 / 恢复初始值"。 */}
+    {group === 'storage' ? null : (
     <div className={styles.actionBar}>
       <div className={styles.feedback}>
         {error ? <p role="alert" className={styles.error}>{error} <button type="button" disabled={busy} onClick={() => { void query.refetch().then(result => { if (!result.isError) { setDraft(null); setError(null); setProbe(null) } }) }}>重新读取并放弃草稿</button></p> : null}
@@ -274,5 +333,6 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
         {group === 'embedding' ? <button type="submit" data-action="test" disabled={busy || !view.writable}>{operation === 'test' ? '正在测试…' : '测试当前配置'}</button> : null}
       </div>
     </div>
+    )}
   </form>
 }

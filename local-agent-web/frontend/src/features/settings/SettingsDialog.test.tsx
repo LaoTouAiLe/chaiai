@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { settingsEmptyScenario, settingsModelsScenario } from '../../fixtures/scenarios'
@@ -35,6 +35,7 @@ function permissionActions(overrides: Partial<PermissionActions> = {}): Permissi
     onAddGrant: vi.fn(),
     onRevokeGrant: vi.fn(),
     onReload: vi.fn(),
+    onPickDirectory: vi.fn(),
     ...overrides,
   }
 }
@@ -61,6 +62,19 @@ function expandCard(name: string): HTMLElement {
 }
 
 describe('SettingsDialog', () => {
+  it('locks page scrolling while open and restores it on close', () => {
+    // 2026-10-26：设置里滚到边界后继续滚，背后的会话列表与输入框跟着动。
+    // `.overlay` 本身不可滚动，`overscroll-behavior: contain` 挡不住它空白处的滚轮，
+    // 所以打开期间直接锁 body——这条钉住"锁了，关掉要还回去"。
+    const previous = document.body.style.overflow
+    const { unmount } = render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} />)
+
+    expect(document.body.style.overflow).toBe('hidden')
+
+    unmount()
+    expect(document.body.style.overflow).toBe(previous)
+  })
+
   it('covers every connection state in one list', () => {
     render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} />)
     expect(screen.getAllByRole('article')).toHaveLength(6)
@@ -221,6 +235,22 @@ describe('SettingsDialog · 权限分区（T38）', () => {
 
     await user.click(screen.getByRole('button', { name: '移除只读记录 E:/design-assets' }))
     expect(actions.onRevokeGrant).toHaveBeenCalledWith('E:/design-assets')
+  })
+
+  it('fills the writable directory from the picker instead of a typed absolute path', async () => {
+    // 2026-10-26：这三处路径输入（模型缓存目录、数据位置、外部可写目录）都不该只靠手打。
+    // 选择器由容器注入，`PermissionSection` 自己不认识 fetch。
+    // `onPickDirectory` 是可选成员，直接写 `vi.fn()` 会被推断成普通函数（拿不到 `.mockResolvedValue`），
+    // 所以显式构造一个异步桩再合并进去。
+    const pick = vi.fn(async () => 'E:/design-assets')
+    await openPermissions(
+      withPermissions(permissionsOf({ mode: 'workspace-write', grants: [] })),
+      { ...permissionActions(), onPickDirectory: pick },
+    )
+
+    await userEvent.setup().click(screen.getByRole('button', { name: '选择外部可写目录' }))
+
+    await waitFor(() => expect(screen.getByLabelText('外部可写目录')).toHaveValue('E:/design-assets'))
   })
 
   it('adds a writable directory without asking for a redundant read level', async () => {

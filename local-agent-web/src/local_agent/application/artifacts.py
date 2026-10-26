@@ -230,9 +230,11 @@ def _scan(
             incomplete = True
             notices.append(f"正文只扫描了前 {TURN_TEXT_LIMIT} 轮，更早的消息没有列出。")
             break
-        session = by_id.get(session_id)
-        if session is None:
+        # 不能复用 `session` 这个名字：它在外层已是 `Session`，而 `.get()` 给的是 `Session | None`。
+        matched = by_id.get(session_id)
+        if matched is None:
             continue
+        session = matched
         text = f"{question}\n{answer}"[:TEXT_LIMIT]
         for entry_kind, location, title, external in _text_entries(text, session.workspace_root):
             add(session, entry_kind, location, title, "message", external=external,
@@ -260,9 +262,11 @@ def _scan(
         incomplete = True
         notices.append(f"附件目录只扫描了前 {FILE_SCAN_LIMIT} 个文件，更早的没有列出。")
     for session_id, path in attachment_files:
-        session = by_id.get(session_id)
-        if session is None:
+        # 同上：`.get()` 可能给 `None`，不复用外层的 `session` 名字。
+        matched = by_id.get(session_id)
+        if matched is None:
             continue
+        session = matched
         store = service._attachments
         location = path.relative_to(store.root).as_posix() if store is not None else path.name
         stamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()

@@ -24,6 +24,13 @@ export interface PermissionActions {
   onAddGrant: (path: string, access: ExternalPathAccess) => void
   onRevokeGrant: (path: string) => void
   onReload: () => void
+  /**
+   * 唤起本机目录选择器并返回绝对路径；取消返回 `null`（2026-10-26）。
+   *
+   * 由容器注入而不是在这里直接调：本组件按约定不认识 fetch，只有容器才碰 `/api/*`。
+   * 省略表示"这个宿主不提供选择器"——那时按钮不渲染，输入框照旧可用。
+   */
+  onPickDirectory?: () => Promise<string | null>
 }
 
 interface PermissionSectionProps {
@@ -90,12 +97,25 @@ export function PermissionSection({
   actions,
 }: PermissionSectionProps) {
   const [draftPath, setDraftPath] = useState('')
+  const [picking, setPicking] = useState(false)
 
   const submitGrant = () => {
     const path = draftPath.trim()
     if (path === '') return
     actions?.onAddGrant(path, 'read_write')
     setDraftPath('')
+  }
+
+  /** 唤起本机目录选择器（2026-10-26）：取消时保持输入框原样，不报错。 */
+  const pickDirectory = async () => {
+    if (actions?.onPickDirectory === undefined) return
+    setPicking(true)
+    try {
+      const picked = await actions.onPickDirectory()
+      if (picked !== null && picked !== '') setDraftPath(picked)
+    } finally {
+      setPicking(false)
+    }
   }
 
   return (
@@ -228,6 +248,19 @@ export function PermissionSection({
                   disabled={busy}
                   onChange={(event) => setDraftPath(event.target.value)}
                 />
+                {/* 目录选择（2026-10-26）：手打绝对路径拼错一个字符只会得到"路径不合法"，
+                    而用户根本看不出错在哪。宿主没提供选择器时按钮不渲染，输入框照旧可用。 */}
+                {actions?.onPickDirectory === undefined ? null : (
+                  <button
+                    type="button"
+                    className={styles.action}
+                    aria-label="选择外部可写目录"
+                    disabled={busy || picking}
+                    onClick={() => void pickDirectory()}
+                  >
+                    {picking ? '选择中…' : '选择…'}
+                  </button>
+                )}
                 <button
                   type="button"
                   className={styles.primary}

@@ -5,6 +5,7 @@
 
 import { useCallback, useMemo, useState } from 'react'
 
+import { pickWorkspaceDirectory } from '../../api/client'
 import type { ModelConnectionDto, ModelConnectionInput } from '../../api/client'
 import { toSettingsView } from '../../api/viewModels'
 import { ConnectionForm } from './ConnectionForm'
@@ -112,13 +113,16 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
         // 技能 / 能力 / MCP 三块 2026-10-22 已移出设置，改由侧栏「能力中心」整页提供
         // （`features/capabilities/CapabilitiesCenter.tsx`）。这里不再注入，避免同一件事两个入口。
         general: <PreferenceSection group="general" />,
+        storage: <PreferenceSection group="storage" />,
         execution: <PreferenceSection group="execution" />,
+        agents: <PreferenceSection group="agents" />,
         retrieval: <PreferenceSection group="retrieval" />,
         web_access: <PreferenceSection group="web_access" />,
         // 图片与附件（2026-10-20）：目前只有"图片上下文轮数"；存储后端等 OSS 接入后再加。
         attachments: <PreferenceSection group="attachments" />,
         memory: <PreferenceSection group="memory" />,
         medium_term: <PreferenceSection group="medium_term" />,
+        compression: <PreferenceSection group="compression" />,
         embedding: <PreferenceSection group="embedding" />,
         advanced: <PreferenceSection group="advanced" />,
       }}
@@ -129,6 +133,9 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
         onAddGrant: (path, access) => void permissions.grant(path, access),
         onRevokeGrant: (path) => void permissions.revoke(path),
         onReload: () => void permissions.reload(),
+        // 目录选择由容器注入（2026-10-26）：`PermissionSection` 按约定不认识 fetch，
+        // 只有这一层能调 `/api/workspaces/pick`。取消返回 `null`，不改输入框。
+        onPickDirectory: async () => (await pickWorkspaceDirectory()).path ?? null,
       }}
       actions={{
         busyId: settings.busyId,

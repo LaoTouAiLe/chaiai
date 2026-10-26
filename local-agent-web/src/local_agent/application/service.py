@@ -29,6 +29,8 @@ import binascii
 import hashlib
 import json
 import logging
+import os
+import shutil
 import sqlite3
 import threading
 from collections import Counter, deque
@@ -102,6 +104,7 @@ from local_agent.application.models import (
     SkillEntryView,
     SkillRootView,
     SkillsView,
+    StorageView,
     TaskCenterView,
     TaskView,
     TurnChangesView,
@@ -583,6 +586,50 @@ class _StreamingAnswerSink:
             )
 
 
+def _directory_usage(root: Path) -> tuple[int | None, int | None]:
+    """数据根占用与所在卷剩余字节数（2026-10-26）。
+
+    两者都**不抛错**：统计失败（权限、路径刚被删）不能让整个设置页打不开——这只是
+    给用户一个"要不要换盘"的判断依据，拿不到就不显示。
+
+    遍历用 ``os.walk`` 而不是 ``Path.rglob``：后者要为每个条目建一个 ``Path`` 对象，
+    附件目录动辄几万个文件时差别很明显；这里只需要大小。
+
+    注意统计**包含**数据根下的一切（含 ``_archive-*`` 之类的手工归档）——它们确实占着盘，
+    把它排除掉会让"占用"这个数字说谎。
+    """
+    used = 0
+    try:
+        for dirpath, _dirnames, filenames in os.walk(root):
+            for name in filenames:
+                try:
+                    used += os.stat(os.path.join(dirpath, name)).st_size
+                except OSError:
+                    continue
+    except OSError:
+        return None, None
+    try:
+        free: int | None = shutil.disk_usage(root).free
+    except OSError:
+        free = None
+    return used, free
+
+
+#: 剩余空间低于这个值就提示换盘（2026-10-26）。5 GB 是**估算**：一个会话库实测 3.9 GB /
+#: 106 会话，留出一倍余量。它不是精确阈值，只是"该提醒了"的量级判断。
+_LOW_DISK_BYTES: Final[int] = 5 * 1024**3
+
+
+#: 数据根来源对应的说明（2026-10-26）。`environment` 那一档必须点明"页面改不生效"——
+#: 否则用户改完、重启、发现没变，会以为是这个功能坏了。
+_STORAGE_NOTES: dict[str, str] = {
+    "environment": "当前由环境变量 CHAIAI_HOME 决定：在页面上改不会生效，请改环境变量后重启。",
+    "settings": "位置由「设置 → 数据位置」保存的指针文件决定。",
+    "config": "当前由 config.yaml 的 data_root 决定；在页面上改会覆盖它。",
+    "default": "使用平台标准目录。",
+}
+
+
 class ApplicationService:
     """会话用例的唯一入口。"""
 
@@ -1018,6 +1065,64 @@ class ApplicationService:
     def run_cron_job_now(self, job_id: str) -> CronRunView:
         """立即触发一次，不等排期；排期本身不动。"""
         return cron_module.run_now(self, job_id)
+
+    # ---- 数据位置（2026-10-26）------------------------------------------------
+
+    def storage_location(self) -> StorageView:
+        """当前数据根、它的来源，以及"改了这一项要重启"这条事实。"""
+        from local_agent import app_paths
+
+        source = app_paths.data_root_source(self._app_config)
+        root = app_paths.data_root_of(self._app_config)
+        used, free = _directory_usage(root)
+        # 只在"默认位置 + 盘快满"时提示：已经换过盘的人不该再被劝一次（他多半是故意选的）。
+        low_disk = (
+            source == "default" and free is not None and free < _LOW_DISK_BYTES
+        )
+        return StorageView(
+            data_root=str(root),
+            default_root=str(app_paths.platform_default_root()),
+            source=source,  # type: ignore[arg-type]
+            note=_STORAGE_NOTES.get(source),
+            used_bytes=used,
+            disk_free_bytes=free,
+            low_disk=low_disk,
+        )
+
+    def save_storage_location(self, data_root: str) -> StorageView:
+        """把数据根改到 ``data_root``；**重启后生效**。
+
+        路径就在这一步校验（绝对、能创建、能写），不等到启动：启动才失败意味着服务起不来，
+        用户只能去手改文件才救得回来。
+
+        Raises:
+            ApplicationError: 路径不合法/不可写，或当前由环境变量决定（页面改不生效）。
+        """
+        from local_agent import app_paths
+
+        if app_paths.data_root_source(self._app_config) == "environment":
+            raise app_errors.model_settings_invalid(
+                detail="当前数据位置由环境变量 CHAIAI_HOME 决定：请改那个变量后重启，页面设置不会生效",
+                occurred_at=_now(),
+            )
+        try:
+            app_paths.set_data_root_pointer(data_root)
+        except ValueError as exc:
+            raise app_errors.model_settings_invalid(detail=str(exc), occurred_at=_now()) from exc
+        return self.storage_location().model_copy(update={
+            "restart_required": True,
+            "note": "已保存，重启后端后生效。新位置是空的：旧数据不会自动搬过去。",
+        })
+
+    def reset_storage_location(self) -> StorageView:
+        """恢复平台标准目录；同样要重启才生效。"""
+        from local_agent import app_paths
+
+        app_paths.reset_data_root_pointer()
+        return self.storage_location().model_copy(update={
+            "restart_required": True,
+            "note": "已恢复默认位置，重启后端后生效。",
+        })
 
     def preferences_view(self) -> PreferencesView:
         defaults = initial_preferences(self._app_config)
@@ -1817,7 +1922,7 @@ class ApplicationService:
             if snapshot is None and path is not None:
                 from local_agent.mcp.cache import CatalogCache
                 from local_agent.mcp.catalog import ExposureRow, ToolExposure
-                cache = CatalogCache(path.parent / "data" / "mcp_catalog.sqlite")
+                cache = CatalogCache(self._mcp_catalog_path())
                 for name, spec in specs.mcp_servers.items():
                     cached = cache.load(name, spec)
                     if cached is not None:
@@ -2016,7 +2121,7 @@ class ApplicationService:
                         )
                     )
             if action == "delete":
-                CatalogCache(path.parent / "data" / "mcp_catalog.sqlite").forget(name)
+                CatalogCache(self._mcp_catalog_path()).forget(name)
             manager = self._ensure_mcp_manager()
             if manager is not None:
                 manager.replace_servers(merged)
@@ -2054,12 +2159,12 @@ class ApplicationService:
     # 密钥与模型连接同一条口径（§6.8）：只进设置库或进程内存，读取接口只报"有没有"。
     # 2026-10-26：两个 API 后端各占一条密钥，页面按当前选中的后端读写对应那条——换后端不覆盖另一个。
 
-    def _search_env_name(self, provider: str) -> str:
+    def _search_env_name(self, provider: config_module.ApiSearchProvider) -> str:
         """旧环境变量路径的变量名：两个 API 后端各有自己的名字，不共用一条。"""
         web = self._app_config.web_access
         return web.deepseek_api_key_env if provider == "deepseek" else web.tavily_api_key_env
 
-    def web_search_key_view(self, provider: str = DEFAULT_PROVIDER) -> WebSearchKeyView:
+    def web_search_key_view(self, provider: config_module.ApiSearchProvider = DEFAULT_PROVIDER) -> WebSearchKeyView:
         """指定后端的凭据状态：有没有、从哪来、能不能存在设置库里。
 
         没有设置库时**不报错**：返回 ``configured=false`` 且 ``store="unavailable"``——页面要能
@@ -2087,7 +2192,7 @@ class ApplicationService:
             store=self._key_store_kind(), note=self._key_store_note(),
         )
 
-    def save_web_search_key(self, api_key: str, provider: str = DEFAULT_PROVIDER) -> WebSearchKeyView:
+    def save_web_search_key(self, api_key: str, provider: config_module.ApiSearchProvider = DEFAULT_PROVIDER) -> WebSearchKeyView:
         """写入（覆盖）指定后端的密钥，返回保存后的状态视图。
 
         Raises:
@@ -2103,13 +2208,13 @@ class ApplicationService:
         self._refresh_secrets()
         return self.web_search_key_view(provider)
 
-    def clear_web_search_key(self, provider: str = DEFAULT_PROVIDER) -> WebSearchKeyView:
+    def clear_web_search_key(self, provider: config_module.ApiSearchProvider = DEFAULT_PROVIDER) -> WebSearchKeyView:
         """删除指定后端已保存的密钥（幂等），返回删除后的状态视图。"""
         store = self._require_web_search()
         self._sqlite_access(partial(store.clear, provider=provider))
         return self.web_search_key_view(provider)
 
-    def web_search_api_key(self, provider: str = DEFAULT_PROVIDER) -> str | None:
+    def web_search_api_key(self, provider: config_module.ApiSearchProvider = DEFAULT_PROVIDER) -> str | None:
         """装配运行期工具用的密钥明文：**不进任何 DTO、日志或异常消息**。
 
         取值顺序与模型连接一致：凭据存储 → 旧环境变量。没有设置库时只看环境变量。
@@ -2420,6 +2525,19 @@ class ApplicationService:
             return frozenset()
         return self._sqlite_access(store.disabled)
 
+    def _mcp_catalog_path(self) -> Path:
+        """MCP 工具目录缓存的位置（2026-10-26）。
+
+        与 ``mcp.json`` 刻意分开：配置是**用户手写的文件**，跟 ``config.yaml`` 同目录；而这份缓存
+        是应用自己产生的状态（可删、可重建、会随 server 变化而失效），跟数据根走。
+
+        之前三处各写一次 ``path.parent / "data" / "mcp_catalog.sqlite"``，且它隐含"mcp.json 与
+        ``data/`` 同目录"这个巧合——两处任一搬家，缓存就会静默落到别处。
+        """
+        from local_agent import app_paths
+
+        return app_paths.data_root_of(self._app_config) / "mcp_catalog.sqlite"
+
     def _ensure_mcp_manager(self) -> Any:
         """按需建连接管理器：**开关打开的那一刻**才付建连与导入 SDK 的代价。
 
@@ -2452,7 +2570,7 @@ class ApplicationService:
                 servers,
                 config=self._app_config.mcp,
                 state_provider=self._mcp_states,
-                cache_path=path.parent / "data" / "mcp_catalog.sqlite",
+                cache_path=self._mcp_catalog_path(),
             )
             manager.start()
             self._mcp_manager = manager

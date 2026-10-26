@@ -230,6 +230,79 @@ class PermissionsView(_Dto):
     store_unavailable: bool = False
 
 
+# ---- 数据位置（2026-10-26）--------------------------------------------------
+
+class StorageView(_Dto):
+    """数据根（所有 SQLite、向量库、附件、日志的家）及其来源。
+
+    为什么**不能**存在设置库里：设置库自己就在数据根下。把数据根写进设置库，就等于让一个东西
+    定义它自己的位置——改到新位置后新库是空的，那条偏好丢了，启动又回到旧位置。所以它走一个
+    固定放在平台默认目录的**指针文件**，与 ``CODEX_HOME`` / ``HERMES_HOME`` 同一性质，
+    只是可以在页面上改。
+    """
+
+    data_root: str
+    #: 平台标准目录（Windows 是 ``%LOCALAPPDATA%\\chaiai``）：「恢复默认」回到这里。
+    default_root: str
+    #: 谁在决定这个值。``environment`` = 环境变量（页面改不生效，必须如实说明）。
+    source: Literal["environment", "settings", "config", "default"]
+    #: 刚保存过、还没重启：路径在启动时解析，改完必须重启才生效。
+    restart_required: bool = False
+    note: str | None = None
+    #: 数据根当前占用的字节数（2026-10-26）。算不出来时 ``None``——统计失败不该让整页打不开。
+    #:
+    #: 为什么要有它：C 盘小的用户装完就开始往满盘写，而"这个目录占了多大、那个盘还剩多少"
+    #: 此前只能在资源管理器里自己翻。设置页既然能改位置，就该同时给出改的理由。
+    used_bytes: int | None = None
+    #: 数据根所在卷的剩余字节数。
+    disk_free_bytes: int | None = None
+    #: 盘快满了**且用的还是默认位置**（2026-10-26）。
+    #:
+    #: 只在"默认位置"这一档给 `True`：用户已经主动换过盘，就不该再劝他换一次。
+    low_disk: bool = False
+
+
+# ---- 设置页字段清单（2026-10-26）-------------------------------------------
+
+class PreferenceFieldView(_Dto):
+    """一个可改字段的**机械信息**：键、输入类型、上下界、候选项、能否留空。
+
+    文案（``label`` / ``note``）与条件显示（"选了对象存储才出现端点"）**刻意不在这里**：
+    它们是产品语义，pydantic 推不出来，只在页面侧维护。这份清单的用途是让"后端加了字段、
+    页面没接"变成一次失败的测试，而不是一个靠人记住的约定。
+    """
+
+    key: str = Field(min_length=1)
+    kind: Literal["bool", "int", "float", "text", "choice"]
+    #: 仅 ``choice`` 非空：可选值按声明顺序给出。
+    options: tuple[str, ...] = ()
+    minimum: float | None = None
+    maximum: float | None = None
+    #: 边界是否**严格**（``Field(gt=0)``）。整数上"最小 1"不能写成 ``minimum=0``——
+    #: 那会让页面允许一个保存必然 422 的值。
+    minimum_exclusive: bool = False
+    maximum_exclusive: bool = False
+    #: 能否留空（``int | None``）：页面对应"留空表示不限"。
+    nullable: bool = False
+
+
+class PreferenceGroupView(_Dto):
+    """设置页的一个分区（与左栏分组一一对应）。"""
+
+    group: str = Field(min_length=1)
+    fields: tuple[PreferenceFieldView, ...] = ()
+
+
+class PreferencesSchemaView(_Dto):
+    """设置页可改字段的权威清单。
+
+    ``version`` 是**反射格式**的版本，字段增减不需要改它；只有这份清单自身的形状变了才 +1。
+    """
+
+    version: int = Field(default=1, ge=1)
+    groups: tuple[PreferenceGroupView, ...] = ()
+
+
 # ---- 联网检索密钥（T-联网设置）---------------------------------------------
 
 #: 凭据存储的对外状态：与 `SettingsView.credential_store.kind` 同一套取值（页面共用一种读法）。

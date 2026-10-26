@@ -106,32 +106,28 @@ class S3ObjectStore:
 
     # ---- 签名 -------------------------------------------------------------
 
-    def _signed_headers(self, method: str, url: str, data: bytes) -> dict[str, str]:
+    def _signed_headers(
+        self, method: str, url: str, data: bytes, *, moment: datetime | None = None
+    ) -> dict[str, str]:
+        """签名头。``moment`` 只为测试可注入——生产路径一律用当前 UTC 时间。"""
         parts = urlsplit(url)
         host = parts.netloc
         canonical_uri = quote(parts.path or "/", safe="/~")
         payload_hash = hashlib.sha256(data).hexdigest()
-        moment = datetime.now(timezone.utc)
-        amz_date = moment.strftime("%Y%m%dT%H%M%SZ")
-        date = moment.strftime("%Y%m%d")
+        now = moment if moment is not None else datetime.now(timezone.utc)
+        amz_date = now.strftime("%Y%m%dT%H%M%SZ")
+        date = now.strftime("%Y%m%d")
         signed_headers = "host;x-amz-content-sha256;x-amz-date"
         canonical_headers = (
             f"host:{host}\n"
             f"x-amz-content-sha256:{payload_hash}\n"
             f"x-amz-date:{amz_date}\n"
         )
-        canonical_request = "\n".join(
-            (method, canonical_uri, "", canonical_headers, signed_headers, payload_hash)
+        canonical_request = _canonical_request(
+            method, canonical_uri, canonical_headers, signed_headers, payload_hash
         )
         scope = f"{date}/{self._config.region or 'auto'}/s3/aws4_request"
-        string_to_sign = "\n".join(
-            (
-                "AWS4-HMAC-SHA256",
-                amz_date,
-                scope,
-                hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
-            )
-        )
+        string_to_sign = _string_to_sign(amz_date, scope, canonical_request)
         signature = hmac.new(self._signing_key(date), string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
         return {
             "x-amz-date": amz_date,
@@ -143,10 +139,32 @@ class S3ObjectStore:
         }
 
     def _signing_key(self, date: str) -> bytes:
-        key = _hmac(f"AWS4{self._secret_key}".encode("utf-8"), date)
+        key = _hmac(f"AWS4{self._secret_key}".encode(), date)
         key = _hmac(key, self._config.region or "auto")
         key = _hmac(key, "s3")
         return _hmac(key, "aws4_request")
+
+
+def _canonical_request(
+    method: str, canonical_uri: str, canonical_headers: str,
+    signed_headers: str, payload_hash: str,
+) -> str:
+    """SigV4 规范请求：``METHOD\\nURI\\nQUERY\\nHEADERS\\nSIGNED_HEADERS\\nPAYLOAD_HASH``。
+
+    单独成函数只为一件事：**能被逐字节测**。这段拼错的表现是对方回 403，而 403 不会说
+    "你第 4 段少了一个换行"——只能靠测试钉死。
+
+    ``QUERY`` 段恒为空（本模块只发 PUT / HEAD，不带查询参数）；``canonical_headers``
+    自身以 ``\\n`` 结尾，所以它后面那个分隔换行会让这里出现**连续两个** ``\\n``。
+    那是对的，别"顺手"删掉一个。
+    """
+    return f"{method}\n{canonical_uri}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+
+
+def _string_to_sign(amz_date: str, scope: str, canonical_request: str) -> str:
+    """待签名串：算法、时间、作用域，以及**规范请求的 sha256**（不是规范请求本身）。"""
+    digest = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    return f"AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{digest}"
 
 
 def _hmac(key: bytes, message: str) -> bytes:

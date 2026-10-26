@@ -1,0 +1,608 @@
+{
+  "version": 1,
+  "groups": [
+    {
+      "group": "execution",
+      "fields": [
+        {
+          "key": "max_tool_loops",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": true
+        },
+        {
+          "key": "max_retries_per_step",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "shell_timeout_seconds",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": true
+        },
+        {
+          "key": "shell_max_output_chars",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "safe_delete",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "group": "agents",
+      "fields": [
+        {
+          "key": "enabled",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "max_file_chars",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "max_total_chars",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "group": "retrieval",
+      "fields": [
+        {
+          "key": "enabled",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "max_files",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "max_results",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "timeout_seconds",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "context_lines",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "group": "memory",
+      "fields": [
+        {
+          "key": "enabled",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "confidence_threshold",
+          "kind": "float",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "importance_threshold",
+          "kind": "float",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "aging_enabled",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "forget_after_days",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "group": "medium_term",
+      "fields": [
+        {
+          "key": "enabled",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "top_k",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "min_score",
+          "kind": "float",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "decay_half_life_days",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "group": "compression",
+      "fields": [
+        {
+          "key": "enabled",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "trigger_ratio",
+          "kind": "float",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "preserve_recent_turns",
+          "kind": "int",
+          "options": [],
+          "minimum": 1.0,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "retain_ratio",
+          "kind": "float",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": 1.0,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "group": "embedding",
+      "fields": [
+        {
+          "key": "enabled",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "provider",
+          "kind": "choice",
+          "options": [
+            "onnx_local",
+            "openai_compatible"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "base_url",
+          "kind": "text",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "api_key_env",
+          "kind": "text",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "model",
+          "kind": "text",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "cache_dir",
+          "kind": "text",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "local_files_only",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "allow_plaintext_http",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "group": "web_access",
+      "fields": [
+        {
+          "key": "provider",
+          "kind": "choice",
+          "options": [
+            "auto",
+            "tavily",
+            "deepseek",
+            "bing_html",
+            "duckduckgo_html"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "fetch_provider",
+          "kind": "choice",
+          "options": [
+            "local",
+            "deepseek"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "max_results",
+          "kind": "int",
+          "options": [],
+          "minimum": 1.0,
+          "maximum": 20.0,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "max_chars",
+          "kind": "int",
+          "options": [],
+          "minimum": 500.0,
+          "maximum": 100000.0,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "prefetch_pages",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": 5.0,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "max_search_calls",
+          "kind": "int",
+          "options": [],
+          "minimum": 1.0,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": true
+        },
+        {
+          "key": "max_read_pages",
+          "kind": "int",
+          "options": [],
+          "minimum": 1.0,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": true
+        },
+        {
+          "key": "max_reads_per_page",
+          "kind": "int",
+          "options": [],
+          "minimum": 1.0,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": true
+        },
+        {
+          "key": "timeout_seconds",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": 120.0,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "domain_policy",
+          "kind": "choice",
+          "options": [
+            "allow",
+            "allowlist"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "denied_domains",
+          "kind": "text",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "allowed_domains",
+          "kind": "text",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "group": "attachments",
+      "fields": [
+        {
+          "key": "backend",
+          "kind": "choice",
+          "options": [
+            "local",
+            "oss"
+          ],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "image_context_turns",
+          "kind": "int",
+          "options": [],
+          "minimum": 1.0,
+          "maximum": 10.0,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "oss_endpoint",
+          "kind": "text",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "oss_region",
+          "kind": "text",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "oss_bucket",
+          "kind": "text",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "oss_public_base_url",
+          "kind": "text",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "oss_key_prefix",
+          "kind": "text",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "oss_path_style",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    }
+  ]
+}

@@ -23,7 +23,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final, Literal, TypeAlias, cast
+from typing import Any, Final, Literal, TypeAlias, TypeGuard, cast
 from uuid import uuid4
 
 from langchain_core.messages import (
@@ -5158,7 +5158,9 @@ def _split_image_blocks(content: _MessageContent) -> tuple[_MessageContent, list
     return texts, images
 
 
-def _is_image_block(part: object) -> bool:
+def _is_image_block(part: object) -> TypeGuard[dict[str, Any]]:
+    """`TypeGuard` 而不是 `bool`（2026-10-26）：调用方靠它把 `list[str | dict]` 收窄成
+    `list[dict]`（`_split_image_blocks` 的返回值形状），否则两个分支的类型都糊在一起。"""
     return isinstance(part, Mapping) and part.get("type") == "image_url"
 
 

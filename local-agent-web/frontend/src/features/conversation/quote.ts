@@ -40,3 +40,31 @@ export function composeQuotedMessage(quote: string | null | undefined, draft: st
   const question = draft.trim()
   return question === '' ? quoteMarkdown(quote) : `${quoteMarkdown(quote)}\n\n${question}`
 }
+
+/**
+ * 从一条用户消息里把引用块拆出来（2026-10-26）。
+ *
+ * 存储里只有纯文本（引用是消息正文的一部分），所以气泡渲染时必须重新认一遍——
+ * 否则那段 `> ……` 会原样显示成"用户自己打的问号"，分不清哪部分是被引用的旧内容。
+ *
+ * 只认**消息开头**的连续引用行：正文中间偶然出现 `>`（比如粘贴的代码或引用）不该被当成
+ * "这条消息引用了什么"。
+ */
+export function splitQuotedMessage(text: string): { quote: string | null; question: string } {
+  const lines = text.split('\n')
+  let end = 0
+  while (end < lines.length && lines[end].trimStart().startsWith('>')) end += 1
+  if (end === 0) return { quote: null, question: text }
+  const quote = lines
+    .slice(0, end)
+    // 去掉 `>` 与紧跟的一个空格；单个 `>` 的空行还原成空行，保住段落分隔。
+    .map((line) => {
+      const trimmed = line.trimStart()
+      return trimmed === '>' ? '' : trimmed.replace(/^>\s?/, '')
+    })
+    .join('\n')
+    .trim()
+  // 引用与问题之间隔着一个空行：吃掉它，否则问题前面会多出一段空白。
+  while (end < lines.length && lines[end].trim() === '') end += 1
+  return { quote: quote === '' ? null : quote, question: lines.slice(end).join('\n') }
+}

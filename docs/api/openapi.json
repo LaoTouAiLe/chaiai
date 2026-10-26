@@ -1,6 +1,31 @@
 {
   "components": {
     "schemas": {
+      "AgentsPreferences": {
+        "additionalProperties": false,
+        "description": "项目规则（``AGENTS.md``）的读取口径（2026-10-26：从\"高级只读\"搬进可改）。\n\n只搬三项**用户能判断**的：读不读、单份上限、总上限。\n\n不搬 ``filenames`` 与 ``precedence``：前者决定\"哪些文件算规则\"，改错就再也读不到自己写的\n那份；后者是\"近的目录覆盖远的\"这条语义，不是旋钮。\n\n症状锚点：规则写在 AGENTS.md 里却没生效，最常见的原因就是**被上限截断了**——这时用户\n需要一个能看到并调高的入口，而不是去翻 YAML。",
+        "properties": {
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "max_file_chars": {
+            "default": 20000,
+            "exclusiveMinimum": 0.0,
+            "title": "Max File Chars",
+            "type": "integer"
+          },
+          "max_total_chars": {
+            "default": 60000,
+            "exclusiveMinimum": 0.0,
+            "title": "Max Total Chars",
+            "type": "integer"
+          }
+        },
+        "title": "AgentsPreferences",
+        "type": "object"
+      },
       "ApprovalDecisionRequest": {
         "additionalProperties": false,
         "description": "审批决定。\n\n`edit` 必须带 `edited_arguments`（否则服务不知道该执行什么）；反过来，非 `edit` 带参数\n会被拒绝——那会让\"用户改了参数\"与\"实际执行的参数\"出现两份不一致的真相（§15.7）。",
@@ -1427,6 +1452,39 @@
           "session_state"
         ],
         "title": "CommandResultView",
+        "type": "object"
+      },
+      "CompressionPreferences": {
+        "additionalProperties": false,
+        "description": "上下文压缩（2026-10-26：从\"高级只读概览\"搬进可改）。\n\n只放**用户能凭结果判断**的四项：开不开、什么时候压、压完保留多少。\n\n其余预算项（工具步字符预算、单条工具结果阈值、摘要上限）刻意留在只读：它们改错的症状是\n\"某段输出莫名其妙被截断\"，用户既看不出原因、也不知道该调哪个，只会把界面变成一堆旋钮。\n\n上下界与 ``CompressionConfig`` 一致（偏好值经 ``model_copy(update=…)`` 回灌，那条路径不再\n二次校验，所以写在这里的约束就是最后一道）。",
+        "properties": {
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "preserve_recent_turns": {
+            "default": 8,
+            "minimum": 1.0,
+            "title": "Preserve Recent Turns",
+            "type": "integer"
+          },
+          "retain_ratio": {
+            "default": 0.16,
+            "exclusiveMinimum": 0.0,
+            "maximum": 1.0,
+            "title": "Retain Ratio",
+            "type": "number"
+          },
+          "trigger_ratio": {
+            "default": 0.8,
+            "exclusiveMinimum": 0.0,
+            "maximum": 1.0,
+            "title": "Trigger Ratio",
+            "type": "number"
+          }
+        },
+        "title": "CompressionPreferences",
         "type": "object"
       },
       "CompressionView": {
@@ -5989,13 +6047,128 @@
         "title": "PlanView",
         "type": "object"
       },
+      "PreferenceFieldView": {
+        "description": "一个可改字段的**机械信息**：键、输入类型、上下界、候选项、能否留空。\n\n文案（``label`` / ``note``）与条件显示（\"选了对象存储才出现端点\"）**刻意不在这里**：\n它们是产品语义，pydantic 推不出来，只在页面侧维护。这份清单的用途是让\"后端加了字段、\n页面没接\"变成一次失败的测试，而不是一个靠人记住的约定。",
+        "properties": {
+          "key": {
+            "minLength": 1,
+            "title": "Key",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "bool",
+              "int",
+              "float",
+              "text",
+              "choice"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "maximum": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Maximum"
+          },
+          "maximum_exclusive": {
+            "default": false,
+            "title": "Maximum Exclusive",
+            "type": "boolean"
+          },
+          "minimum": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum"
+          },
+          "minimum_exclusive": {
+            "default": false,
+            "title": "Minimum Exclusive",
+            "type": "boolean"
+          },
+          "nullable": {
+            "default": false,
+            "title": "Nullable",
+            "type": "boolean"
+          },
+          "options": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Options",
+            "type": "array"
+          }
+        },
+        "required": [
+          "key",
+          "kind"
+        ],
+        "title": "PreferenceFieldView",
+        "type": "object"
+      },
+      "PreferenceGroupView": {
+        "description": "设置页的一个分区（与左栏分组一一对应）。",
+        "properties": {
+          "fields": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PreferenceFieldView"
+            },
+            "title": "Fields",
+            "type": "array"
+          },
+          "group": {
+            "minLength": 1,
+            "title": "Group",
+            "type": "string"
+          }
+        },
+        "required": [
+          "group"
+        ],
+        "title": "PreferenceGroupView",
+        "type": "object"
+      },
       "PreferenceValues": {
         "additionalProperties": false,
         "properties": {
+          "agents": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentsPreferences"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "attachments": {
             "anyOf": [
               {
                 "$ref": "#/components/schemas/AttachmentsPreferences"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "compression": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CompressionPreferences"
               },
               {
                 "type": "null"
@@ -6070,6 +6243,27 @@
           "values"
         ],
         "title": "PreferencesRequest",
+        "type": "object"
+      },
+      "PreferencesSchemaView": {
+        "description": "设置页可改字段的权威清单。\n\n``version`` 是**反射格式**的版本，字段增减不需要改它；只有这份清单自身的形状变了才 +1。",
+        "properties": {
+          "groups": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PreferenceGroupView"
+            },
+            "title": "Groups",
+            "type": "array"
+          },
+          "version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "title": "PreferencesSchemaView",
         "type": "object"
       },
       "PreferencesView": {
@@ -7370,6 +7564,96 @@
           "title"
         ],
         "title": "StepStartedPayload",
+        "type": "object"
+      },
+      "StorageLocationRequest": {
+        "additionalProperties": false,
+        "description": "把数据根改到指定目录（2026-10-26）。\n\n这里只挡空值：绝对路径、可创建、可写这些**文件系统层面**的判断在服务里做（要真的去建目录\n并写探针），放在传输层会把 I/O 塞进校验器。非法路径返回 422，文案由服务给出。",
+        "properties": {
+          "data_root": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Data Root",
+            "type": "string"
+          }
+        },
+        "required": [
+          "data_root"
+        ],
+        "title": "StorageLocationRequest",
+        "type": "object"
+      },
+      "StorageView": {
+        "description": "数据根（所有 SQLite、向量库、附件、日志的家）及其来源。\n\n为什么**不能**存在设置库里：设置库自己就在数据根下。把数据根写进设置库，就等于让一个东西\n定义它自己的位置——改到新位置后新库是空的，那条偏好丢了，启动又回到旧位置。所以它走一个\n固定放在平台默认目录的**指针文件**，与 ``CODEX_HOME`` / ``HERMES_HOME`` 同一性质，\n只是可以在页面上改。",
+        "properties": {
+          "data_root": {
+            "title": "Data Root",
+            "type": "string"
+          },
+          "default_root": {
+            "title": "Default Root",
+            "type": "string"
+          },
+          "disk_free_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Disk Free Bytes"
+          },
+          "low_disk": {
+            "default": false,
+            "title": "Low Disk",
+            "type": "boolean"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "restart_required": {
+            "default": false,
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "source": {
+            "enum": [
+              "environment",
+              "settings",
+              "config",
+              "default"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "used_bytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used Bytes"
+          }
+        },
+        "required": [
+          "data_root",
+          "default_root",
+          "source"
+        ],
+        "title": "StorageView",
         "type": "object"
       },
       "SubmitMessageRequest": {
@@ -11722,6 +12006,25 @@
         "summary": "测试 Embedding 与已有向量集合（不保存草稿、不写入记忆）"
       }
     },
+    "/api/preferences/schema": {
+      "get": {
+        "description": "后端管得着的偏好字段、各自的输入类型与上下界。\n\n与 `GET /preferences` 的分工：那个回答\"现在是什么值\"（随保存变化），这个回答\n\"能改哪些、各是什么形状\"（只随代码变化）。混在一起会让元信息跟着每次保存抖动。\n\n纯反射、不读运行时状态，所以直接在这里调用而不经 `service`——没有可注入的东西。\n\n用途：前端测试拿它比对那份手写的字段表，**漏接一个字段就红**。此前缺这个机制，\n后端加了可改字段、页面上没有输入框，测试仍然全绿。",
+        "operationId": "get_preferences_schema_api_preferences_schema_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreferencesSchemaView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "设置页可改字段清单"
+      }
+    },
     "/api/sessions": {
       "get": {
         "description": "`workspace_id` 缺省表示列出全部会话。\n\n`q` 非空时改为搜索（§15.11.2）：匹配标题与用户提问，按最近活动倒序。\n**不传 `q` 时行为与响应和旧实现完全一致**，`limit` 也只在搜索分支生效。",
@@ -13423,6 +13726,89 @@
           }
         },
         "summary": "添加一个技能发现根"
+      }
+    },
+    "/api/storage": {
+      "delete": {
+        "description": "删掉指针文件，回到平台标准目录；同样要重启才生效。",
+        "operationId": "delete_storage_location_api_storage_delete",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "无法恢复默认位置"
+          }
+        },
+        "summary": "恢复默认数据位置"
+      },
+      "get": {
+        "description": "所有 SQLite、向量库、附件与日志的根目录，以及这个值**由谁决定**。\n\n与 `/preferences` 分开是刻意的：数据根**不能**存在设置库里（设置库自己就在它下面），\n改完必须重启；而偏好的语义是\"下一次新任务生效\"。两者混在一起会让\"什么时候生效\"说不清。",
+        "operationId": "get_storage_location_api_storage_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "数据位置"
+      },
+      "put": {
+        "description": "改到指定目录：**重启后才生效**，且新位置是空的——旧数据不会自动搬过去。\n\n路径在这里校验（绝对、能创建、能写），不等到启动：启动才失败意味着服务起不来。",
+        "operationId": "set_storage_location_api_storage_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StorageLocationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "路径不合法、不可写，或当前由环境变量决定"
+          }
+        },
+        "summary": "修改数据位置"
       }
     },
     "/api/tasks": {

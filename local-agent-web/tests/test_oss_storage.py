@@ -7,10 +7,12 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
 
 import httpx
 import pytest
 
+from local_agent import oss_storage as mod
 from local_agent.oss_storage import OssConfig, OssStorageError, S3ObjectStore
 
 
@@ -75,3 +77,66 @@ def test_probe_returns_the_status_code() -> None:
 
     assert store.probe("https://cdn.example.com/chaiai/a.jpg") == 200
     assert captured[0].method == "HEAD"
+
+
+# ---- 签名串本身（2026-10-26）------------------------------------------------
+# 此前只有"Authorization 里有 Signature=" 这种弱断言：规范请求拼错时对方回 403，
+# 而 403 不会告诉你第几段错了。下面三条把它钉到字节级。
+
+
+def test_canonical_request_keeps_the_sigv4_segment_layout() -> None:
+    request = mod._canonical_request(
+        "PUT",
+        "/images/chaiai/a.jpg",
+        "host:example.com\nx-amz-content-sha256:abc\nx-amz-date:20261026T000000Z\n",
+        "host;x-amz-content-sha256;x-amz-date",
+        "abc",
+    )
+
+    assert request == (
+        "PUT\n"
+        "/images/chaiai/a.jpg\n"
+        "\n"                                       # 空 QUERY 段
+        "host:example.com\n"
+        "x-amz-content-sha256:abc\n"
+        "x-amz-date:20261026T000000Z\n"
+        "\n"                                       # 头块自带尾部换行 + 分隔符 = 连续两个
+        "host;x-amz-content-sha256;x-amz-date\n"
+        "abc"
+    )
+
+
+def test_string_to_sign_hashes_the_canonical_request() -> None:
+    canonical = "PUT\n/images/a.jpg\n\nhost:example.com\n\nhost\nabc"
+    signed = mod._string_to_sign("20261026T000000Z", "20261026/us-east-1/s3/aws4_request", canonical)
+
+    algorithm, amz_date, scope, digest = signed.split("\n")
+    assert algorithm == "AWS4-HMAC-SHA256"
+    assert amz_date == "20261026T000000Z"
+    assert scope == "20261026/us-east-1/s3/aws4_request"
+    # 最后一段是**规范请求的哈希**，不是规范请求本身——写错这一处会导致签名恒不匹配。
+    assert digest == hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def test_signature_changes_when_any_signed_input_changes() -> None:
+    """规范请求的每一段都参与 HMAC：改 method / uri / body / 时间，签名必须都变。
+
+    防的是"某一段没进签名"——那种错误在真机上表现为"有时能传、有时 403"，
+    而且换个对象存储厂商就可能复现不了。
+    """
+    _captured, store = _store()
+    moment = datetime(2026, 10, 26, tzinfo=timezone.utc)
+
+    def signature(
+        method: str = "PUT", url: str = "https://s3.example.com/images/a.jpg", data: bytes = b"abc",
+        at: datetime = moment,
+    ) -> str:
+        headers = store._signed_headers(method, url, data, moment=at)
+        return headers["Authorization"].rsplit("Signature=", 1)[1]
+
+    # 同样的输入得到同样的签名：链路上没有随机量或"当前时间"漏进来
+    assert signature() == signature()
+    assert signature(method="HEAD") != signature()
+    assert signature(url="https://s3.example.com/images/b.jpg") != signature()
+    assert signature(data=b"abd") != signature()
+    assert signature(at=datetime(2026, 10, 26, 1, tzinfo=timezone.utc)) != signature()

@@ -11,6 +11,7 @@ import json
 import urllib.error
 
 import pytest
+from typing_extensions import Self
 
 from local_agent.tools import web_tools
 from local_agent.tools.web_tools import WebAccessError
@@ -23,7 +24,7 @@ class _Response:
     def read(self, _size: int | None = None) -> bytes:
         return self._payload
 
-    def __enter__(self) -> _Response:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *exc: object) -> bool:
@@ -38,7 +39,7 @@ class _Opener:
         self.calls = 0
         self.retry_after = retry_after
 
-    def open(self, request, timeout=None):  # noqa: ANN001, ANN201 - urllib 的鸭子类型
+    def open(self, request, timeout=None):
         self.calls += 1
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, int):

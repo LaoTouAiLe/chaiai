@@ -292,6 +292,31 @@ def test_preferences_save_conflict_validation_and_safe_overview(api: tuple[TestC
     assert client.put("/api/preferences", json={"values": values, "expected_version": 1}).status_code == 422
 
 
+def test_preferences_schema_endpoint_lists_the_editable_fields(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    """字段清单经 HTTP 暴露（2026-10-26）。
+
+    页面渲染表单只需要这份"能改什么"，不需要当前值；两者分开后，元信息不会跟着每次保存抖动。
+    前端的一致性测试比对的是同一份内容的落盘版（`docs/api/preferences-schema.json`）。
+    """
+    client, _runtime = api
+
+    payload = client.get("/api/preferences/schema").json()
+
+    groups = {group["group"]: group for group in payload["groups"]}
+    assert set(groups) == {
+        "execution", "agents", "retrieval", "memory", "medium_term", "compression",
+        "embedding", "web_access", "attachments",
+    }
+    provider = next(item for item in groups["web_access"]["fields"] if item["key"] == "provider")
+    assert provider["kind"] == "choice"
+    assert "deepseek" in provider["options"]
+    # "留空表示不限"由 `nullable` 表达，而不是给一个哨兵默认值：后者会被当成真实数值。
+    loops = next(item for item in groups["execution"]["fields"] if item["key"] == "max_tool_loops")
+    assert loops["nullable"] is True and loops["minimum_exclusive"] is True
+
+
 def test_web_search_preferences_and_credential_are_settings_backed(
     api: tuple[TestClient, ApiRuntime], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2379,6 +2404,10 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         # 改开关后下一轮生效、不用重启；档位选择器已下线，`/api/capabilities/profile` 随之删除。
         "/api/capabilities",
         "/api/preferences",
+        # 2026-10-26：设置页"能改哪些字段"的清单（只读反射，不含当前值）。
+        "/api/preferences/schema",
+        # 2026-10-26：数据位置。不能存在设置库里（设置库自己就在数据根下），所以单列一组端点。
+        "/api/storage",
         "/api/preferences/memory/test",
         "/api/data-center/memories",
         "/api/data-center/usage",

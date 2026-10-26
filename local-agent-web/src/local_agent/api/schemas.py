@@ -425,6 +425,16 @@ class PermissionsModeRequest(_Request):
     mode: ExternalPathsMode
 
 
+class StorageLocationRequest(_Request):
+    """把数据根改到指定目录（2026-10-26）。
+
+    这里只挡空值：绝对路径、可创建、可写这些**文件系统层面**的判断在服务里做（要真的去建目录
+    并写探针），放在传输层会把 I/O 塞进校验器。非法路径返回 422，文案由服务给出。
+    """
+
+    data_root: str = Field(min_length=1, max_length=1024)
+
+
 class WebSearchKeyRequest(_Request):
     """录入 / 覆盖联网检索的服务凭据（哪一条由 query 的 ``provider`` 决定：Tavily / DeepSeek）。
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
 
 import { Check, Close, Cross } from '../../components/icons'
+import { useBodyScrollLock } from '../../components/useBodyScrollLock'
 import type {
   CapabilityView,
   ConnectionStatus,
@@ -46,7 +47,7 @@ interface SettingsDialogProps {
   extraSections?: Partial<Record<SettingsSection, ReactNode>>
 }
 
-export type SettingsSection = 'models' | 'permissions' | 'skills' | 'capabilities' | 'general' | 'execution' | 'retrieval' | 'web_access' | 'mcp' | 'attachments' | 'memory' | 'medium_term' | 'embedding' | 'advanced'
+export type SettingsSection = 'models' | 'permissions' | 'skills' | 'capabilities' | 'general' | 'storage' | 'execution' | 'agents' | 'retrieval' | 'web_access' | 'mcp' | 'attachments' | 'memory' | 'medium_term' | 'compression' | 'embedding' | 'advanced'
 
 /** 原型保留连接/权限；真实宿主注入应用设置各组。 */
 /**
@@ -61,12 +62,15 @@ const SECTIONS: readonly { id: SettingsSection; label: string }[] = [
   { id: 'models', label: '模型连接' },
   { id: 'permissions', label: '权限' },
   { id: 'general', label: '通用与外观' },
+  { id: 'storage', label: '数据位置' },
   { id: 'execution', label: '任务执行' },
+  { id: 'agents', label: '项目规则' },
   { id: 'retrieval', label: '自动代码检索' },
   { id: 'web_access', label: '联网检索' },
   { id: 'attachments', label: '图片与附件' },
   { id: 'memory', label: '长期记忆' },
   { id: 'medium_term', label: '中期记忆' },
+  { id: 'compression', label: '上下文压缩' },
   { id: 'embedding', label: '向量库与 Embedding' },
   { id: 'advanced', label: '高级配置' },
 ]
@@ -78,10 +82,13 @@ const SECTIONS: readonly { id: SettingsSection; label: string }[] = [
  */
 const SECTION_GROUPS: readonly { label: string; ids: readonly SettingsSection[] }[] = [
   { label: '模型与权限', ids: ['models', 'permissions'] },
-  { label: '任务与工具', ids: ['execution', 'retrieval', 'web_access', 'attachments'] },
-  { label: '记忆', ids: ['memory', 'medium_term', 'embedding'] },
+  // 项目规则（AGENTS.md）与任务执行并列：它决定"模型在这个工作区里怎么干活"，不是记忆。
+  { label: '任务与工具', ids: ['execution', 'agents', 'retrieval', 'web_access', 'attachments'] },
+  // 压缩挂在"记忆"这一组：它管的是上下文要不要摘、摘完留多少，与三层记忆同一类事。
+  { label: '记忆与上下文', ids: ['memory', 'medium_term', 'compression', 'embedding'] },
   // 分组标题只做归类；`通用与外观` 与只读的 `高级配置` 都是"改页面本身怎么跑"，同放一组。
-  { label: '通用', ids: ['general', 'advanced'] },
+  // 「数据位置」与通用同组：两者都是"这台机器怎么跑"，改完要重启或立即生效的本地设定。
+  { label: '通用', ids: ['general', 'storage', 'advanced'] },
 ]
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -333,6 +340,10 @@ export function SettingsDialog({
   useEffect(() => {
     if (panesRef.current !== null) panesRef.current.scrollTop = 0
   }, [section, searching])
+
+  // 弹窗打开期间锁住背后的页面滚动（2026-10-26）。理由与计数语义见 hook 注释：
+  // `overscroll-behavior` 挡不住遮罩空白处的滚轮，只能锁 body。
+  useBodyScrollLock()
 
   // 目标行可能晚几帧才挂载（hidden 的祖先也不能 scrollIntoView），所以短暂轮询：
   // 找到就滚到中间并闪一下；始终找不到说明它的显示条件没满足，用文案说明而不是静默失败。

@@ -606,10 +606,12 @@ def delete_file_target(
     fingerprint = action_fingerprint("delete_file", arguments, policy=policy)
     if not decision.allowed and not policy.is_granted(fingerprint):
         resolved_for_message = policy.resolve_path(path)
-        target = _describe_target(resolved_for_message, recursive, policy)
+        # 与下面那个 `target`（解析后的路径）**不是一回事**：这里是给人看的描述文本。
+        # 同名会让类型检查（以及后来读代码的人）以为后面那个 `target` 也是 `str`。
+        target_desc = _describe_target(resolved_for_message, recursive, policy)
         detail = f"；原因：{reason}" if reason else ""
         raise SecurityError(
-            f"{decision.reason}。目标：{resolved_for_message.as_posix()}（{target}）{detail}"
+            f"{decision.reason}。目标：{resolved_for_message.as_posix()}（{target_desc}）{detail}"
         )
 
     # 变更账本（2026-10-21）：删除也要留一份原文，否则"删掉了什么"永远看不回来。

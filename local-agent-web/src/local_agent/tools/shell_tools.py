@@ -24,6 +24,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from langchain_core.tools import BaseTool, tool
@@ -202,6 +203,15 @@ def run_shell_command(
     # 拿不到调用 id（例如直接调函数）时自己生成一个，功能不受影响，只是前端没有入口。
     command_id = current_call_id() or f"cmd-{uuid4().hex[:8]}"
     detach_event = policy.commands.open(command_id)
+
+    def _record_detached(process: Any, collected: dict[str, bytes]) -> None:
+        """转入后台时登记进程句柄；**不返回** ``attach`` 的结果。
+
+        ``ProcessRegistry.run`` 对 ``on_detached`` 的契约是"回调返回 None"（它丢弃返回值）。
+        原先写成 lambda 直接返回 ``DetachedCommand``：运行时无害，但契约不一致，类型检查也会拦。
+        """
+        policy.commands.attach(command_id, process, collected)
+
     try:
         # 走**子进程登记表**（§17.4）：它有进程句柄，因此超时与取消都能按**进程树**终止，
         # 而 `subprocess.run` 只能杀直接子进程、且中途无法干预。
@@ -214,9 +224,7 @@ def run_shell_command(
             on_output=on_output,
             on_idle=on_idle,
             detach_event=detach_event,
-            on_detached=(
-                lambda process, collected: policy.commands.attach(command_id, process, collected)
-            ) if detach_event is not None else None,
+            on_detached=_record_detached if detach_event is not None else None,
         )
         for stream, decoder in decoders.items():
             # 同样兼容未提供完整增量回调的执行适配器；常规登记表已逐块送出全部字节。

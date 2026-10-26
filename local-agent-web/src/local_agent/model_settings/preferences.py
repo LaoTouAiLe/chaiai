@@ -165,6 +165,60 @@ class AttachmentsPreferences(_Preference):
         return self
 
 
+class CompressionPreferences(_Preference):
+    """上下文压缩（2026-10-26：从"高级只读概览"搬进可改）。
+
+    只放**用户能凭结果判断**的四项：开不开、什么时候压、压完保留多少。
+
+    其余预算项（工具步字符预算、单条工具结果阈值、摘要上限）刻意留在只读：它们改错的症状是
+    "某段输出莫名其妙被截断"，用户既看不出原因、也不知道该调哪个，只会把界面变成一堆旋钮。
+
+    上下界与 ``CompressionConfig`` 一致（偏好值经 ``model_copy(update=…)`` 回灌，那条路径不再
+    二次校验，所以写在这里的约束就是最后一道）。
+    """
+
+    enabled: bool = True
+    #: 已用输入额度占"窗口 − 输出预留"的比例，超过即触发压缩。
+    trigger_ratio: float = Field(default=0.8, gt=0.0, le=1.0)
+    #: 压缩后原样保留的最近轮数。
+    preserve_recent_turns: int = Field(default=8, ge=1)
+    #: 摘要目标占原内容的比例。
+    retain_ratio: float = Field(default=0.16, gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _retain_must_be_below_trigger(self) -> CompressionPreferences:
+        """保留比例 ≥ 触发比例等于"压完立刻再触发"——直接拒绝，不做静默修正。"""
+        if self.retain_ratio >= self.trigger_ratio:
+            raise ValueError("保留比例必须小于触发比例，否则压缩后立刻再次触发")
+        return self
+
+
+class AgentsPreferences(_Preference):
+    """项目规则（``AGENTS.md``）的读取口径（2026-10-26：从"高级只读"搬进可改）。
+
+    只搬三项**用户能判断**的：读不读、单份上限、总上限。
+
+    不搬 ``filenames`` 与 ``precedence``：前者决定"哪些文件算规则"，改错就再也读不到自己写的
+    那份；后者是"近的目录覆盖远的"这条语义，不是旋钮。
+
+    症状锚点：规则写在 AGENTS.md 里却没生效，最常见的原因就是**被上限截断了**——这时用户
+    需要一个能看到并调高的入口，而不是去翻 YAML。
+    """
+
+    enabled: bool = True
+    #: 单份规则文件的字符上限；超出部分不注入。
+    max_file_chars: int = Field(default=20_000, gt=0)
+    #: 所有规则文件合计的字符上限；超出部分同样不注入。
+    max_total_chars: int = Field(default=60_000, gt=0)
+
+    @model_validator(mode="after")
+    def _total_must_cover_one_file(self) -> AgentsPreferences:
+        """总上限小于单份上限等于"一份都读不全"：直接拒绝，不给静默生效一半的配置。"""
+        if self.max_total_chars < self.max_file_chars:
+            raise ValueError("规则总字符上限不能小于单份上限，否则连一份规则都读不全")
+        return self
+
+
 class RuntimePreferences(_Preference):
     execution: ExecutionPreferences
     retrieval: RetrievalPreferences
@@ -174,6 +228,10 @@ class RuntimePreferences(_Preference):
     embedding: EmbeddingPreferences | None = None
     web_access: WebAccessPreferences | None = None
     attachments: AttachmentsPreferences | None = None
+    #: 上下文压缩（2026-10-26）。``None`` = 这个字段出现之前保存的设置，按启动配置补齐。
+    compression: CompressionPreferences | None = None
+    #: 项目规则（2026-10-26），口径同上。
+    agents: AgentsPreferences | None = None
 
 
 class PreferenceValues(RuntimePreferences):
@@ -264,6 +322,12 @@ def initial_preferences(config: AppConfig) -> PreferenceValues:
             }),
         ),
         attachments=AttachmentsPreferences(),
+        compression=CompressionPreferences(**config.memory.compression.model_dump(include={
+            "enabled", "trigger_ratio", "preserve_recent_turns", "retain_ratio",
+        })),
+        agents=AgentsPreferences(**config.agents.model_dump(include={
+            "enabled", "max_file_chars", "max_total_chars",
+        })),
     )
 
 
@@ -274,6 +338,8 @@ def complete_preferences(values: PreferenceValues, config: AppConfig) -> Prefere
         "embedding": values.embedding or defaults.embedding,
         "web_access": values.web_access or defaults.web_access,
         "attachments": values.attachments or defaults.attachments,
+        "compression": values.compression or defaults.compression,
+        "agents": values.agents or defaults.agents,
     })
 
 
@@ -305,30 +371,38 @@ def apply_runtime_preferences(config: AppConfig, values: RuntimePreferences) -> 
         "memory": config.memory.model_copy(update={
             "medium_term": medium,
             "long_term": config.memory.long_term.model_copy(update=values.memory.model_dump()),
+            # 压缩（2026-10-26）：只覆盖可改的四项，其余预算项仍取启动配置。
+            "compression": config.memory.compression if values.compression is None else (
+                config.memory.compression.model_copy(update=values.compression.model_dump())
+            ),
         }),
         # 联网检索：只覆盖设置页管的那几项，``enabled`` / 两个 ``*_api_key_env`` / ``user_agent``
         # 仍取启动配置——``enabled`` 随后由能力开关回灌（``apply_capability_gates``）。
         "web_access": config.web_access if values.web_access is None else (
             config.web_access.model_copy(update=values.web_access.model_dump())
         ),
+        # 项目规则（2026-10-26）：只覆盖三项可改的，``filenames`` / ``precedence`` 仍取启动配置。
+        "agents": config.agents if values.agents is None else (
+            config.agents.model_copy(update=values.agents.model_dump())
+        ),
     })
 
 
 def advanced_preferences(config: AppConfig) -> dict[str, int | float | bool]:
-    """显式白名单，禁止向页面倾倒配置（含密钥、路径、命令规则）。"""
+    """显式白名单，禁止向页面倾倒配置（含密钥、路径、命令规则）。
+
+    2026-10-26：压缩的**开关 / 触发比例 / 保留轮数**已搬进可改的 ``CompressionPreferences``，
+    这里只留**内部预算**——它们改错的症状是"某段输出莫名被截断"，用户既看不出原因、也无从选择
+    该调哪一个，摆出来只会多几个无从判断的旋钮。
+    """
     c = config.memory.compression
     return {
-        "compression_enabled": c.enabled,
-        "compression_trigger_ratio": c.trigger_ratio,
-        "preserve_recent_turns": c.preserve_recent_turns,
         "preserve_recent_tool_steps": c.preserve_recent_tool_steps,
         "tool_step_budget_chars": c.tool_step_budget_chars,
         "tool_result_keep_chars": c.tool_result_keep_chars,
         "summary_max_chars": c.summary_max_chars,
+        # 短期记忆关掉就没有会话可读（会话、Checkpoint、幂等台账都在那个库里），所以只展示不给改。
         "short_term_enabled": config.memory.short_term.enabled,
-        "agents_enabled": config.agents.enabled,
-        "agents_max_file_chars": config.agents.max_file_chars,
-        "agents_max_total_chars": config.agents.max_total_chars,
     }
 
 
