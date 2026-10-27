@@ -321,7 +321,9 @@ export function mapTool(tool: ToolUse): ToolRowView {
           verified: tool.evidence.verified,
         },
     card:
-      outcome === null && tool.tool_name === 'run_shell'
+      outcome === null && tool.tool_name === 'memory'
+        ? memoryCard(tool.redacted_arguments ?? {})
+        : outcome === null && tool.tool_name === 'run_shell'
         ? {
           kind: 'terminal',
           command: tool.redacted_arguments?.command ?? '命令未记录',
@@ -339,6 +341,25 @@ export function mapTool(tool: ToolUse): ToolRowView {
         }
         : outcomeCard(tool, outcome),
   }
+}
+
+/**
+ * 常驻记忆（`memory`，§10.7，2026-10-27）的卡片。
+ *
+ * 服务端目前不给这个工具结构化 `outcome`，页面原来只剩「执行操作 / 该结果格式暂无可展示的
+ * 详情」——用户实拍反馈"什么都没有"。这里与 `run_shell` 在无 outcome 时同一条口径：
+ * 用**投影层已脱敏的参数**说明这次改了什么，不解析任何结果正文（结果里没有可展示内容）。
+ */
+function memoryCard(args: Record<string, string>): ToolCardView {
+  const target = args.target === 'user' ? '用户画像 USER.md' : '我的笔记 MEMORY.md'
+  const action = args.action ?? (args.operations === undefined ? '' : 'batch')
+  const summary = { add: '新增条目', patch: '修改条目', remove: '删除条目', batch: '批量更新' }[action] ?? '已更新'
+  const body = action === 'patch'
+    ? `原条目：${args.old_text ?? ''}\n现条目：${args.content ?? ''}`
+    : action === 'remove'
+      ? `删除：${args.old_text ?? ''}`
+      : action === 'add' ? args.content ?? '' : ''
+  return { kind: 'result', target, summary, body, truncated: false }
 }
 
 /** 计划条：没有计划就是 `null`，不用空计划占位（契约已经这样返回）。 */

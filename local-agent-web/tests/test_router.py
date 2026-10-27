@@ -158,17 +158,39 @@ def test_without_git_repo_stops_at_workspace_root(tmp_path: Path) -> None:
     assert "工作区根规则" in loaded.text
 
 
-def test_current_directory_outside_workspace_loads_nothing(tmp_path: Path) -> None:
+def test_current_directory_outside_workspace_falls_back_to_workspace_root(
+    tmp_path: Path,
+) -> None:
+    """当前目录在工作区外时**仍然读工作区根的规则**（2026-10-27 改口径）。
+
+    旧口径返回空：服务的进程目录与会话工作区是两个东西，换成别的工作区后规则会**静默失效**。
+    安全边界不变——工作区外的文件照样不读。
+    """
     workspace, _ = _workspace(tmp_path)
     (workspace / "AGENTS.md").write_text("工作区规则", encoding="utf-8")
     outside = tmp_path / "outside"
     outside.mkdir()
+    (outside / "AGENTS.md").write_text("工作区外规则", encoding="utf-8")
 
     loaded = agents_loader.load_agents(
         _agents_config(), workspace_root=workspace, current_cwd=outside
     )
 
-    assert loaded.is_empty
+    assert "工作区规则" in loaded.text
+    assert "工作区外规则" not in loaded.text
+    assert [path.name for path in loaded.files] == ["AGENTS.md"]
+
+
+def test_runtime_context_defaults_current_directory_to_workspace_root(
+    tmp_path: Path, app_config: AppConfig, model_factory: ModelFactory,
+) -> None:
+    """不传 ``current_cwd`` 时用**工作区根**，不是进程目录（架构 §7.1）。"""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    context = builder.build_runtime_context(
+        app_config=app_config, model_adapter=model_factory(), workspace_root=workspace
+    )
+    assert context.current_cwd == workspace
 
 
 def test_override_file_replaces_base_file(tmp_path: Path) -> None:

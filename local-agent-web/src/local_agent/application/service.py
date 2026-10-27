@@ -3938,7 +3938,7 @@ class ApplicationService:
         return builder.build_runtime_context(
             app_config=config,
             model_adapter=env.model,
-            workspace_root=Path(session.workspace_root),
+            workspace_root=Path(session.workspace_root), session_kind=session.kind,
             session_scope=f"{self._tool_namespace}:{session.session_id}",
             provider_name=env.provider_name,
             model_capabilities=env.capabilities,

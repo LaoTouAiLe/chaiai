@@ -1199,6 +1199,8 @@ def test_registry_exposes_only_read_tools_in_chat_mode(app_config: AppConfig, tm
         "write_file",
         "delete_file",
         "download_file",
+        # 2026-10-27：常驻记忆（§10.7）在注册表里一定有；两个 store 都关时才不绑给模型。
+        "memory",
         "run_shell",
         # 2026-10-23：命令会话化之后的三个工具，注册表顺序如此。
         "read_command",

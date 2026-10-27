@@ -14,7 +14,7 @@ from collections.abc import Callable, Iterable, Sequence
 from langchain_core.tools import BaseTool
 
 from local_agent.capabilities import CAPABILITY_TOOLS, EXTERNAL_TOOL_PREFIX, tool_names_for
-from local_agent.config import GitConfig, SkillsConfig, WebAccessConfig
+from local_agent.config import CuratedMemoryConfig, GitConfig, SkillsConfig, WebAccessConfig
 from local_agent.exceptions import LocalAgentError
 from local_agent.mcp.catalog import ToolEntry
 from local_agent.security.policy import SecurityPolicy
@@ -25,6 +25,7 @@ from local_agent.tools.git_tools import build_git_tools, git_availability
 from local_agent.tools.host_tools import build_host_tools
 from local_agent.tools.image_tools import build_image_tools
 from local_agent.tools.mcp_tools import build_mcp_tool_search
+from local_agent.tools.memory_tools import build_memory_tools
 from local_agent.tools.plan_tools import build_plan_tools
 from local_agent.tools.search_tools import build_search_tools
 from local_agent.tools.shell_tools import build_shell_tools
@@ -54,6 +55,10 @@ class ToolRegistry:
         self.browser_available: bool = True
         #: 环境不可用时给用户看的可照做提示（缺失 git 时的安装说明）；能力状态页用它。
         self.git_unavailable_hint: str | None = None
+        #: **已实现但不绑定**的工具名（2026-10-27）。用于"功能整体关闭时工具从 schema 消失"：
+        #: 静态能力表要求每个工具都有归属（:meth:`assert_capability_coverage`），而开关是运行期
+        #: 配置，所以这里承担"注册但不给模型看"。参照实现的做法是直接不注册，效果相同。
+        self.unavailable_tools: frozenset[str] = frozenset()
 
     @classmethod
     def build(
@@ -66,6 +71,12 @@ class ToolRegistry:
         git: GitConfig | None = None,
         git_available: bool | None = None,
         skills: SkillsConfig | None = None,
+        #: 常驻记忆配置（§10.7）：只决定 ``memory`` 工具**要不要绑给模型**——两个 store 都关时
+        #: 工具仍在注册表里（覆盖校验要求），但不出现在 schema 中。
+        curated: CuratedMemoryConfig | None = None,
+        #: 本次运行是否允许写常驻记忆（``session_kind != interactive`` 时为 False，架构 §10.7）：
+        #: 不允许时工具与"两个 store 都关"一样从 schema 移除——提示里不出现一个调了也会被拒的工具。
+        curated_writes_allowed: bool = True,
         #: 这条连接是否声明支持图像输入（``llm.supports_vision``，2026-10-16）。
         #: **默认 False = 失败闭合**：没声明就是"收不了图"，`view_image` 照旧存在但会明确拒绝。
         vision_available: bool = False,
@@ -109,6 +120,8 @@ class ToolRegistry:
             LocalAgentError: 能力归属不完整（重复归属、登记未实现、实现未登记）。
         """
         git_config = git or GitConfig()
+        curated_config = curated or CuratedMemoryConfig()
+        curated_bound = curated_config.any_enabled and curated_writes_allowed
         if git_available is None:
             probe = git_availability()
             available, hint = probe.available, probe.hint
@@ -125,6 +138,9 @@ class ToolRegistry:
         registry = cls(
             [
                 *build_file_tools(policy),
+                # 常驻记忆（架构 §10.7，2026-10-27）：总是构造（覆盖校验要求每个工具都有归属），
+                # 是否绑给模型由下面的 `unavailable_tools` 决定。
+                *build_memory_tools(curated_config, writes_allowed=curated_writes_allowed),
                 *build_plan_tools(),
                 *build_search_tools(policy),
                 *build_shell_tools(policy),
@@ -163,6 +179,8 @@ class ToolRegistry:
         registry.git_available = available
         registry.browser_available, _ = browser_availability()
         registry.git_unavailable_hint = hint
+        # 两个 store 都关 = 这个功能整体不存在：工具从 schema 消失（契约 §10.7）。
+        registry.unavailable_tools = frozenset() if curated_bound else frozenset({"memory"})
         registry.assert_capability_coverage()
         return registry
 
@@ -250,7 +268,10 @@ class ToolRegistry:
             LocalAgentError: 解析出的工具名没有实现——状态不一致，宁可失败也不静默少给工具。
             KeyError: 模式或能力名未登记（配置校验与构造校验都拦不到时才会到这里）。
         """
-        names = list(tool_names_for(mode, capabilities))
+        names = [
+            name for name in tool_names_for(mode, capabilities)
+            if name not in self.unavailable_tools
+        ]
         # 外部工具只在本轮 ``mcp`` 能力开启时绑定 ``Direct`` 档；其余留给 ``mcp_tool_search``。
         # ``capabilities is None`` 表示"默认基线"（不含 mcp），因此这里也要求显式给出能力集。
         if mode == "tool" and capabilities is not None and "mcp" in capabilities:

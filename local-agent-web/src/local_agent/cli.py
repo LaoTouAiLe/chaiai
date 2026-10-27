@@ -37,7 +37,7 @@ from local_agent.api.container import resolve_data_paths, resolve_skill_paths
 from local_agent.config import AppConfig, ConfigError
 from local_agent.exceptions import EmbeddingError, MemoryStoreError
 from local_agent.llm import embedding as embedding_module
-from local_agent.memory import forgetting, long_term, medium_term
+from local_agent.memory import curated, forgetting, long_term, medium_term
 from local_agent.scope import MemoryScope, project_id_for, visible_scope_keys
 
 EXIT_OK = 0
@@ -70,15 +70,15 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
     actions = memory.add_subparsers(dest="action", required=True)
 
     list_parser = actions.add_parser(
-        "list", help="列出当前作用域内可管理的长期事实、项目结论与中期记忆"
+        "list", help="列出当前作用域内可管理的长期事实、项目结论、中期记忆与常驻记忆"
     )
     _add_config(list_parser)
     _add_workspace(list_parser)
     list_parser.add_argument(
         "--kind",
-        choices=("all", "fact", "conclusion", "medium"),
+        choices=("all", "fact", "conclusion", "medium", "notes"),
         default="all",
-        help="只看某一类（默认 all）",
+        help="只看某一类（默认 all；notes = MEMORY.md / USER.md 两份常驻记忆文件）",
     )
     list_parser.add_argument("--limit", type=int, default=20, help="每类最多显示多少条")
 
@@ -113,6 +113,18 @@ def _parse_args(argv: Sequence[str]) -> argparse.Namespace:
         "--repeat", type=int, default=2, help="编码次数（第 2 次用于观察同进程复用耗时）"
     )
 
+    # 常驻记忆（2026-10-27，架构 §10.7）：清空是**人工动作**，模型没有对应工具——
+    # 与"删除长期记忆"同一口径（页面不放删除按钮，命令行要 --yes）。
+    reset_notes = actions.add_parser(
+        "reset-notes", help="清空常驻记忆文件（MEMORY.md / USER.md，需要 --yes 确认）"
+    )
+    _add_config(reset_notes)
+    reset_notes.add_argument(
+        "--target", choices=("all", "memory", "user"), default="all",
+        help="清空哪个（默认 all：两份都删）",
+    )
+    reset_notes.add_argument("--yes", action="store_true", help="确认执行；缺少时只打印提示")
+
     return parser.parse_args(argv)
 
 
@@ -144,6 +156,8 @@ def _cmd_list(args: argparse.Namespace) -> int:
         _print_conclusions(config, workspace=workspace, limit=args.limit)
     if args.kind in ("all", "medium"):
         _print_medium(config, workspace=workspace, limit=args.limit)
+    if args.kind in ("all", "notes"):
+        _print_notes(config, limit=args.limit)
     return EXIT_OK
 
 
@@ -406,6 +420,47 @@ def _print_conclusions(config: AppConfig, *, workspace: Path, limit: int) -> Non
         print(f"  …还有 {len(records) - limit} 条（用 --limit 调整）")
 
 
+def _print_notes(config: AppConfig, *, limit: int) -> None:
+    """列出常驻记忆两份文件（架构 §10.7）。
+
+    只读：命令行不提供"改条目"的入口——改写由模型经 `memory` 工具或用户直接编辑文件完成，
+    这里多一套编辑逻辑就会多一套格式约束（§ 分隔、上限、原子写）。
+    """
+    settings = config.memory.curated
+    store = curated.CuratedStore(settings, curated.resolve_directory(settings))
+    print(f"\n[常驻记忆] 目录：{store.directory.as_posix()}")
+    for target, label in (("memory", "MEMORY.md"), ("user", "USER.md")):
+        if not store.enabled(target):
+            print(f"  {label}：未启用")
+            continue
+        entries = store.entries(target)
+        print(f"  {label}：{store.usage(target)} 字符（{len(entries)} 条）")
+        for index, entry in enumerate(entries[:limit], start=1):
+            print(f"    {index}. {_short(entry)}")
+        if len(entries) > limit:
+            print(f"    …还有 {len(entries) - limit} 条（用 --limit 调整）")
+
+
+def _cmd_reset_notes(args: argparse.Namespace) -> int:
+    """清空常驻记忆文件（人工动作，模型没有对应工具）。"""
+    config = _load_config(args.config)
+    settings = config.memory.curated
+    store = curated.CuratedStore(settings, curated.resolve_directory(settings))
+    targets = ("memory", "user") if args.target == "all" else (args.target,)
+    if not args.yes:
+        names = "、".join("USER.md" if item == "user" else "MEMORY.md" for item in targets)
+        print(
+            "清空常驻记忆会删除用户的笔记与画像：确认无误后加 --yes 重跑，例如\n"
+            f"  python -m local_agent.cli memory reset-notes --target {args.target} --yes\n"
+            f"（将删除：{names}）"
+        )
+        return EXIT_USAGE
+    for target in targets:
+        store.reset(target)
+    print(f"已清空常驻记忆：{'、'.join(targets)}（文件已删除，目录保留）")
+    return EXIT_OK
+
+
 def _print_medium(config: AppConfig, *, workspace: Path, limit: int) -> None:
     store = _open_medium(config)
     if store is None:
@@ -459,6 +514,7 @@ _MEMORY_ACTIONS = {
     "delete": _cmd_delete,
     "forget": _cmd_forget,
     "probe": _cmd_probe,
+    "reset-notes": _cmd_reset_notes,
 }
 
 

@@ -102,6 +102,17 @@ ALWAYS_APPROVAL_TOOLS: tuple[str, ...] = ("delete_file",)
 #: 大小/覆盖判定，而是**始终需要人工审批**（§16.4）。
 GIT_WRITE_TOOLS: tuple[str, ...] = ("git_commit",)
 
+#: 常驻记忆（2026-10-27，架构 §10.7）：写在 agent 自己的存储里（数据根 `memories/`），
+#: 既不是用户文件、也没有外部副作用，因此**免审批**——这是用户明确接受的取舍
+#: （"模型可直写记忆文件"）。但它仍然是**写**：只读档一律拒绝，见 :meth:`SecurityPolicy.classify_tool`。
+MEMORY_TOOLS: tuple[str, ...] = ("memory",)
+
+#: 交互终端与浏览器（2026-10-27 从 ``classify_tool`` 里提出来，判定不变）：
+#: 它们属于"当前会话自己的进程/页面"，判定比写文件细，单独一条方法。
+INTERACTIVE_TOOLS: tuple[str, ...] = (
+    "start_shell", "read_shell", "write_shell", "stop_shell", "list_shell_sessions", "browser",
+)
+
 #: 本版本已实现、可绑定给模型的全部工具。
 KNOWN_TOOLS: tuple[str, ...] = (
     READ_ONLY_TOOLS
@@ -110,7 +121,8 @@ KNOWN_TOOLS: tuple[str, ...] = (
     + SHELL_TOOLS
     + ALWAYS_APPROVAL_TOOLS
     + GIT_WRITE_TOOLS
-    + ("start_shell", "read_shell", "write_shell", "stop_shell", "list_shell_sessions", "browser")
+    + MEMORY_TOOLS
+    + INTERACTIVE_TOOLS
 )
 
 
@@ -634,6 +646,33 @@ class SecurityPolicy:
 
     # ------------------------------------------------------------------ 工具分类
 
+    def _classify_interactive(
+        self, tool_name: str, args: dict[str, Any]
+    ) -> SafetyDecision:
+        """交互终端 / 浏览器的判定（原样从 :meth:`classify_tool` 搬出来，行为不变）。"""
+        if not self.allow_result_spill:
+            return SafetyDecision(False, False, "只读子任务不能创建或控制持久会话")
+        if tool_name in {"read_shell", "stop_shell", "list_shell_sessions"}:
+            return SafetyDecision(True, False, "读取或关闭当前会话拥有的进程")
+        if not self.external_policy.allows_workspace_write():
+            return SafetyDecision(False, False, "交互终端与浏览器需要工作区可写权限")
+        if tool_name == "start_shell":
+            return self._classify_shell(args)
+        if tool_name == "write_shell":
+            from local_agent.security.shell_guard import match_blocked_patterns
+
+            text = str(args.get("text") or "")
+            if self.security.require_approval.destructive_shell and match_blocked_patterns(
+                [], text, self.security.shell.blocked_patterns
+            ):
+                return SafetyDecision(False, True, "终端输入含破坏性命令，需要人工批准")
+        if tool_name == "browser" and args.get("path"):
+            try:
+                self.resolve_writable_path(str(args["path"]))
+            except SecurityError as exc:
+                return SafetyDecision(False, False, str(exc))
+        return SafetyDecision(True, False, "当前会话的交互操作，文件输出仍按目录授权检查")
+
     def classify_tool(
         self, tool_name: str, arguments: Mapping[str, Any] | None = None
     ) -> SafetyDecision:
@@ -652,27 +691,8 @@ class SecurityPolicy:
             )
         if tool_name in CONTROL_TOOLS:
             return SafetyDecision(allowed=True, requires_approval=False, reason="当前任务计划更新")
-        if tool_name in {"start_shell", "read_shell", "write_shell", "stop_shell", "list_shell_sessions", "browser"}:
-            if not self.allow_result_spill:
-                return SafetyDecision(False, False, "只读子任务不能创建或控制持久会话")
-            if tool_name in {"read_shell", "stop_shell", "list_shell_sessions"}:
-                return SafetyDecision(True, False, "读取或关闭当前会话拥有的进程")
-            if not self.external_policy.allows_workspace_write():
-                return SafetyDecision(False, False, "交互终端与浏览器需要工作区可写权限")
-            if tool_name == "start_shell":
-                return self._classify_shell(args)
-            if tool_name == "write_shell":
-                from local_agent.security.shell_guard import match_blocked_patterns
-
-                text = str(args.get("text") or "")
-                if self.security.require_approval.destructive_shell and match_blocked_patterns([], text, self.security.shell.blocked_patterns):
-                    return SafetyDecision(False, True, "终端输入含破坏性命令，需要人工批准")
-            if tool_name == "browser" and args.get("path"):
-                try:
-                    self.resolve_writable_path(str(args["path"]))
-                except SecurityError as exc:
-                    return SafetyDecision(False, False, str(exc))
-            return SafetyDecision(True, False, "当前会话的交互操作，文件输出仍按目录授权检查")
+        if tool_name in INTERACTIVE_TOOLS:
+            return self._classify_interactive(tool_name, args)
         if tool_name in READ_ONLY_TOOLS:
             if tool_name in {"grep", "glob"} and args.get("save_full"):
                 try:
@@ -684,6 +704,7 @@ class SecurityPolicy:
             *WRITE_TOOLS,
             *ALWAYS_APPROVAL_TOOLS,
             *GIT_WRITE_TOOLS,
+            *MEMORY_TOOLS,
         ):
             # **只读档：写类工具一律拒绝**（2026-10-15）。放在这里而不是各工具的判定里，是为了
             # 让"这个档位下不能写"只有一个出口——漏掉一个工具就是一条静默的写通道。
@@ -694,6 +715,12 @@ class SecurityPolicy:
                 reason=(
                     "当前是「只读」档，不能写文件：要改文件请先在「设置 → 权限」切到「工作区可写」"
                 ),
+            )
+        if tool_name in MEMORY_TOOLS:
+            # 常驻记忆写在 agent 自己的存储里（数据根 `memories/`）：不进工作区、不碰用户文件，
+            # 因此免审批。**放在只读档那道门之后**——它终究是"写"，只读档必须拒绝。
+            return SafetyDecision(
+                allowed=True, requires_approval=False, reason="常驻记忆（自有存储，免审批）"
             )
         if tool_name == "edit_file":
             return self._classify_edit(args)

@@ -332,6 +332,29 @@ class LongTermMemoryConfig(_StrictModel):
     allow_user_scope: bool = False
 
 
+class CuratedMemoryConfig(_StrictModel):
+    """常驻记忆：``MEMORY.md`` / ``USER.md`` 两份本地文件（架构 §10.7，2026-10-27）。
+
+    与中期/长期的区别是"**每轮必到**"而不是"按需召回"：这两块进稳定系统前缀，所以预算必须小、
+    内容必须稳定。默认打开且默认预算与参照实现一致（2200 / 1375 字符）；文件为空时不产生任何
+    Prompt 字节，因此"打开"在没有内容之前没有成本。
+    """
+
+    enabled: bool = True
+    #: 用户画像（``USER.md``）单独开关：参照实现允许只开其中一个，工具 schema 与提示段随之收窄。
+    user_profile_enabled: bool = True
+    #: 相对 ``data_root``（绝对路径照用）。默认 ``memories``。
+    path: str = "memories"
+    #: 字符上限（不是 token）。只在一次写入的最终结果上校验；加载时超限只告警、不截断。
+    memory_char_limit: int = Field(default=2200, gt=0)
+    user_char_limit: int = Field(default=1375, gt=0)
+
+    @property
+    def any_enabled(self) -> bool:
+        """两个 store 里是否至少有一个打开（都关 = 工具不注册、两块都不注入）。"""
+        return self.enabled or self.user_profile_enabled
+
+
 class CompressionConfig(_StrictModel):
     """Prompt 窗口压缩（T16 启用）。"""
 
@@ -402,11 +425,13 @@ class CompressionConfig(_StrictModel):
 
 
 class MemoryConfig(_StrictModel):
-    """三层记忆与压缩的开关集合。"""
+    """三层记忆、常驻记忆与压缩的开关集合。"""
 
     short_term: ShortTermMemoryConfig = Field(default_factory=ShortTermMemoryConfig)
     medium_term: MediumTermMemoryConfig = Field(default_factory=MediumTermMemoryConfig)
     long_term: LongTermMemoryConfig = Field(default_factory=LongTermMemoryConfig)
+    #: 常驻记忆（MEMORY.md / USER.md，架构 §10.7）。默认打开：没有内容时不产生 Prompt 字节。
+    curated: CuratedMemoryConfig = Field(default_factory=CuratedMemoryConfig)
     compression: CompressionConfig = Field(default_factory=CompressionConfig)
 
 
@@ -633,11 +658,14 @@ def is_loopback_host(host: str) -> bool:
 class ModelSettingsConfig(_StrictModel):
     """可视化模型连接设置（T29A；契约 §6.8）。
 
-    - ``path``：**独立**的设置库（非秘密设置：连接、默认与会话选择、能力检测结果）。与聊天库分开存，
+    - ``path``：**独立**的设置库（连接、默认与会话选择、能力检测结果、**模型密钥**）。与聊天库分开存，
       免得"删会话"和"停用连接"互相牵连；
-    - ``credential_store``：``auto`` 在 Windows 用系统凭据存储、其它平台临时；``memory`` 强制临时模式
-      （不想把密钥交给系统凭据存储时用，代价是重启后要重新录入）。
-      **没有任何一档会把密钥写进文件**——这一点由设置库的表结构保证（没有能放密钥的列）。
+    - ``credential_store``：``auto``（默认）把密钥存进**这个设置库**的 ``settings_meta``
+      （键 ``credentials.<ref>``，**明文、仅本机**）。2026-10-13 由项目负责人裁定，理由见
+      :mod:`local_agent.model_settings.credentials`：系统凭据存储在别人的机器上会因服务 / 组策略 /
+      会话形态失败，而失败表现是"重启后密钥没了"；``memory`` 只留进程内，重启后需要重新录入。
+      运行时设置库打不开会降级为内存模式，并在设置页明确提示。
+      密钥不进日志、导出、诊断与截图（页面只显示"已配置 / 未配置"，不回读）。
     """
 
     #: 相对 ``data_root``（2026-10-26）；绝对路径照用。

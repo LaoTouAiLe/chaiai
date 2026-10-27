@@ -203,15 +203,24 @@ def _child_context(parent: RuntimeContext, item: _PreparedChild, token: Cancella
     config.git.enabled = config.skills.enabled = False
     config.agents.enabled = config.rag.enabled = config.embedding.enabled = False
     config.memory.medium_term.enabled = config.memory.long_term.enabled = config.memory.compression.enabled = False
+    # 常驻记忆（§10.7）：子 Agent 不写、也不展示这两块。写：它的产出没有人逐条看过，
+    # 而这两份文件会进每一轮提示；展示：子任务是只读调查，多两块固定前缀只挤占证据预算。
+    config.memory.curated = config.memory.curated.model_copy(
+        update={"enabled": False, "user_profile_enabled": False}
+    )
     # 只读档本身允许外部读取；委派另以内部 workspace_only 约束指定 scope，不继承父授权。
     policy = SecurityPolicy.from_config(config, workspace_root=item.root,
         external_policy=ExternalPathPolicy(mode="read-only", workspace_only=True),
         cancellation=token, allow_result_spill=False)
-    registry = ToolRegistry.build(policy, web_access=config.web_access, git=config.git, skills=config.skills)
+    registry = ToolRegistry.build(
+        policy, web_access=config.web_access, git=config.git, skills=config.skills,
+        curated=config.memory.curated,
+    )
     return replace(parent, app_config=config, workspace_root=item.root, current_cwd=item.root,
                    agent_capabilities=(readonly_child_capabilities(parent.agent_capabilities) if item.autonomous else
                        tuple(cap for cap in parent.agent_capabilities if cap in {"files_read", "code_search"})),
-                   agents_context=None, user_id=None, request_id=item.child_id,
+                   agents_context=None, curated_snapshot={}, curated_available=False,
+                   user_id=None, request_id=item.child_id,
                    security_policy=policy, tool_registry=registry, usage_recorder=None,
                    cancellation=token, readonly_research=None, code_change=None, delegated_research=None,
                    child_index=None, delegation_audit=None)

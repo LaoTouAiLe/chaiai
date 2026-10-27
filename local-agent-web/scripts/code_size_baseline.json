@@ -40,7 +40,7 @@
       "nesting": 7
     },
     "function:security/policy.py::SecurityPolicy.classify_tool": {
-      "complexity": 28
+      "complexity": 21
     },
     "function:security/shell_guard.py::prepare_shell": {
       "complexity": 23

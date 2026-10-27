@@ -165,6 +165,22 @@ class AttachmentsPreferences(_Preference):
         return self
 
 
+class CuratedMemoryPreferences(_Preference):
+    """常驻记忆（``MEMORY.md`` / ``USER.md``，2026-10-27；架构 §10.7）。
+
+    与参照实现的设置页一一对应：两个开关 + 两个预算。三条说明写在这里，因为页面 note 只是转述：
+
+    - 预算是**字符**不是 token，默认 2200 / 1375；
+    - 改小**不会删除**已有内容（加载时只告警、不截断），只影响后续能否再添加；
+    - 两块内容每轮进系统提示，是固定成本——这与中期/长期的"按需召回"不是一回事。
+    """
+
+    enabled: bool = True
+    user_profile_enabled: bool = True
+    memory_char_limit: int = Field(default=2200, gt=0)
+    user_char_limit: int = Field(default=1375, gt=0)
+
+
 class CompressionPreferences(_Preference):
     """上下文压缩（2026-10-26：从"高级只读概览"搬进可改）。
 
@@ -223,6 +239,8 @@ class RuntimePreferences(_Preference):
     execution: ExecutionPreferences
     retrieval: RetrievalPreferences
     memory: LongTermPreferences
+    #: 常驻记忆（2026-10-27）：``None`` = 这个字段出现之前保存的设置，按启动配置补齐。
+    curated: CuratedMemoryPreferences | None = None
     # Missing fields in old settings/checkpoints keep the startup configuration.
     medium_term: MediumTermPreferences | None = None
     embedding: EmbeddingPreferences | None = None
@@ -328,6 +346,9 @@ def initial_preferences(config: AppConfig) -> PreferenceValues:
         agents=AgentsPreferences(**config.agents.model_dump(include={
             "enabled", "max_file_chars", "max_total_chars",
         })),
+        curated=CuratedMemoryPreferences(**config.memory.curated.model_dump(include={
+            "enabled", "user_profile_enabled", "memory_char_limit", "user_char_limit",
+        })),
     )
 
 
@@ -340,6 +361,7 @@ def complete_preferences(values: PreferenceValues, config: AppConfig) -> Prefere
         "attachments": values.attachments or defaults.attachments,
         "compression": values.compression or defaults.compression,
         "agents": values.agents or defaults.agents,
+        "curated": values.curated or defaults.curated,
     })
 
 
@@ -374,6 +396,10 @@ def apply_runtime_preferences(config: AppConfig, values: RuntimePreferences) -> 
             # 压缩（2026-10-26）：只覆盖可改的四项，其余预算项仍取启动配置。
             "compression": config.memory.compression if values.compression is None else (
                 config.memory.compression.model_copy(update=values.compression.model_dump())
+            ),
+            # 常驻记忆（2026-10-27）：两个开关 + 两个预算；``path`` 仍取启动配置（数据位置不在这里改）。
+            "curated": config.memory.curated if values.curated is None else (
+                config.memory.curated.model_copy(update=values.curated.model_dump())
             ),
         }),
         # 联网检索：只覆盖设置页管的那几项，``enabled`` / 两个 ``*_api_key_env`` / ``user_agent``

@@ -113,6 +113,16 @@ memory:
     # 一次误分类就会让项目事实被别的项目召回——所以跨项目共享必须显式打开。
     allow_user_scope: false
 
+  # 常驻记忆（架构 §10.7，2026-10-27）：MEMORY.md / USER.md 两份本地文件，内容**每轮都进系统提示**，
+  # 所以有字符上限。与中期/长期的区别是"必到"而不是"按需召回"。
+  # 没有内容时不产生任何 Prompt 字节，因此默认打开没有成本。
+  curated:
+    enabled: true                  # 我的笔记（MEMORY.md）
+    user_profile_enabled: true     # 用户画像（USER.md）
+    path: "memories"               # 相对 data_root
+    memory_char_limit: 2200        # 字符（不是 token）
+    user_char_limit: 1375
+
   compression:
     enabled: true                  # 默认启用 Prompt 窗口压缩；Checkpoint 原始 messages 不删
     trigger_ratio: 0.8

@@ -45,7 +45,10 @@ from local_agent.tools.tool_registry import ToolRegistry
 #: 当前核心工具序列；显式列出，避免由被测实现生成期望。
 CORE_TOOL_ORDER = (
     "task_control", "update_plan", "list_dir", "read_file", "grep", "glob", "search_files",
-    "edit_file", "write_file", "delete_file", "download_file", "run_shell",
+    "edit_file", "write_file", "delete_file", "download_file",
+    # 2026-10-27：常驻记忆（§10.7）挂在 files_write 能力下，排在写文件工具之后（`CAPABILITY_TOOLS` 的顺序）。
+    "memory",
+    "run_shell",
     # 2026-10-21：转后台之后的两条查询/结束工具（同属 shell 能力，紧跟在 run_shell 之后）。
     "read_command", "stop_command",
     # 2026-10-22：跑一段 Python（同一 shell 能力门）。

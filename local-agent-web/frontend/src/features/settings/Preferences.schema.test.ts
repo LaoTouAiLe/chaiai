@@ -3,7 +3,7 @@ import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { FIELDS } from './PreferenceSection'
+import { FIELDS, PREFERENCE_SECTIONS } from './PreferenceSection'
 
 /**
  * 设置页的字段表与后端偏好模型的一致性检查（2026-10-26）。
@@ -48,8 +48,16 @@ describe('设置页字段表与后端偏好模型一致（2026-10-26）', () => 
     // 下面三条都是「集合里没有多余/缺少项」——清单被清空或导出失败时它们会全部通过。
     // 这条是那道防线本身的防线。
     expect(schema.version).toBeGreaterThanOrEqual(1)
-    expect(schema.groups).toHaveLength(9)
+    // 2026-10-27：9 → 10（新增「常驻记忆」curated）。这个数字刻意写死——它防的是"清单被清空"。
+    expect(schema.groups).toHaveLength(10)
     expect(schema.groups.reduce((total, group) => total + group.fields.length, 0)).toBeGreaterThan(40)
+  })
+
+  it('renders every preference group that has fields (no orphan group)', () => {
+    // 2026-10-27 的实证：`curated`（常驻记忆）后端有字段、`FIELDS` 有文案，但渲染清单是另一处手写的
+    // `extraSections`，漏改之后左栏整块不出现，而类型检查（`Partial<Record<…>>`）不会报错。
+    const rendered = PREFERENCE_SECTIONS.filter(group => group !== 'advanced')
+    expect([...rendered].sort()).toEqual(Object.keys(FIELDS).sort())
   })
 
   it('covers every backend field with a form row', () => {

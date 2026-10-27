@@ -235,7 +235,7 @@ _OPERATION_NAMES: Final[dict[str, str]] = {
     "start_shell": "启动交互进程", "read_shell": "读取进程输出", "write_shell": "发送终端输入",
     "stop_shell": "停止交互进程", "list_shell_sessions": "查看后台进程", "browser": "操作浏览器",
     "download_file": "下载文件", "inspect_system": "查询本机状态",
-    "grep": "搜索内容", "glob": "查找文件", "update_plan": "更新计划",
+    "grep": "搜索内容", "glob": "查找文件", "update_plan": "更新计划", "memory": "更新记忆",
 }
 
 

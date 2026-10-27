@@ -459,6 +459,15 @@ class AgentState(TypedDict, total=False):
     #: 会话来源（架构 §10.6、§17.1）：只决定记忆候选的**来源级别**，不进系统提示（不改变稳定前缀）。
     #: 由应用服务在每次提交时按会话索引写入；旧 Checkpoint 缺这个字段时按 ``interactive`` 处理。
     session_kind: SessionKind
+    #: **会话首轮冻结**的 AGENTS 规则文本（架构 §7.2、§15.7、§10.7，2026-10-27）。
+    #: ``None`` = 本会话还没读过盘；一旦写入就不再改（压缩也不重读），开新会话才重新读。
+    agents_snapshot: str | None
+    #: **会话首轮冻结**的常驻记忆块（``{"memory": 渲染块, "user": 渲染块}``，架构 §10.7）。
+    #: 会话中途的写入只落盘、不改它；压缩之后下一轮会重新读一次（见下一条字段）。
+    curated_snapshot: dict[str, str] | None
+    #: 冻结时的 ``compression_count``。下一轮发现它比当前值小，说明期间发生过压缩 →
+    #: 重新读一次常驻记忆（只读这一份，不重读 AGENTS）。
+    curated_snapshot_compression: int
     normalized_request: str
     mode: AgentMode
     route_reason: str
@@ -596,7 +605,16 @@ class RuntimeContext:
     #: **同一份事实**，否则会出现 2026-10-09 那类"清单里有、`skill_load` 说没有"的错位。
     disabled_skills: frozenset[str] = frozenset()
     #: 合并后的 AGENTS 规则文本，由 load_agents 节点写入（架构 §4.1、§7.2）。
+    #: 2026-10-27 起它是**会话冻结值**的搬运载体：内容来自 State 的 ``agents_snapshot``，
+    #: 节点不再每轮读盘（§15.7 的例外条款）。
     agents_context: str | None = None
+    #: 常驻记忆块的冻结副本（架构 §10.7）：load_agents 节点从 State 取出后放进上下文，只读。
+    #: 空字典表示"本会话没有常驻记忆内容"，与"关闭"不同——关闭时 ``curated_available`` 为 False。
+    curated_snapshot: Mapping[str, str] = field(default_factory=dict)
+    #: 本轮是否绑定并描述了 ``memory`` 工具（两个 store 都关，或会话来源不是 interactive 时为 False）。
+    curated_available: bool = False
+    #: 会话来源（架构 §10.6）：``interactive`` 之外不写常驻记忆（§10.7 的来源约束）。
+    session_kind: str = "interactive"
     #: 启动时探测到的模型能力（架构 §11.7）；工具模式据此失败闭合。
     model_capabilities: ModelCapabilities | None = None
     tool_registry: ToolRegistry | None = None

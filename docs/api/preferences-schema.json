@@ -247,6 +247,51 @@
       ]
     },
     {
+      "group": "curated",
+      "fields": [
+        {
+          "key": "enabled",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "user_profile_enabled",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "memory_char_limit",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "user_char_limit",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": null,
+          "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    },
+    {
       "group": "compression",
       "fields": [
         {

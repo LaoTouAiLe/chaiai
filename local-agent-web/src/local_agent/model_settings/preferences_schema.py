@@ -47,6 +47,8 @@ GROUP_ORDER: tuple[str, ...] = (
     "retrieval",
     "memory",
     "medium_term",
+    # 常驻记忆（2026-10-27）：排在中期之后、压缩之前——按"必到 → 按需 → 压缩"的阅读顺序。
+    "curated",
     "compression",
     "embedding",
     "web_access",

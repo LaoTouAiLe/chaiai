@@ -145,6 +145,10 @@ def resolve_data_paths(config: AppConfig) -> AppConfig:
             "long_term": memory.long_term.model_copy(
                 update={"path": str(resolve_under(root, memory.long_term.path))}
             ),
+            # 常驻记忆（§10.7）：与三层库同一基准——它也是应用自己产生的状态，不跟着代码目录走。
+            "curated": memory.curated.model_copy(
+                update={"path": str(resolve_under(root, memory.curated.path))}
+            ),
         }
     )
     settings = config.model_settings.model_copy(

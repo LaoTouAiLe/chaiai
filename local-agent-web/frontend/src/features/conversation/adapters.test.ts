@@ -291,6 +291,42 @@ describe('mapTool', () => {
     expect(row.card).toMatchObject({ kind: 'terminal', truncated: true })
   })
 
+  it('gives a memory write a card built from its sanitised arguments', () => {
+    // 2026-10-27 实拍：常驻记忆那一行只显示"执行操作 / 该结果格式暂无可展示的详情"。
+    // 服务端还没有这个工具的结构化 outcome，所以与 run_shell 无 outcome 时同一条口径：
+    // 用已脱敏的参数说明这次改了什么，不解析结果正文。
+    const row = mapTool(
+      toolMessage('ok', {
+        tool_name: 'memory',
+        redacted_arguments: { target: 'user', action: 'add', content: '用户偏好简洁回答' },
+      }).tool,
+    )
+
+    expect(row.card).toMatchObject({
+      kind: 'result',
+      target: '用户画像 USER.md',
+      summary: '新增条目',
+      body: '用户偏好简洁回答',
+    })
+  })
+
+  it('shows both sides for a memory patch and the removed text for a removal', () => {
+    const patched = mapTool(toolMessage('ok', {
+      tool_name: 'memory',
+      redacted_arguments: { target: 'memory', action: 'patch', old_text: 'pytest', content: 'unittest' },
+    }).tool)
+    expect(patched.card).toMatchObject({
+      kind: 'result', target: '我的笔记 MEMORY.md', summary: '修改条目',
+      body: '原条目：pytest\n现条目：unittest',
+    })
+
+    const removed = mapTool(toolMessage('ok', {
+      tool_name: 'memory',
+      redacted_arguments: { target: 'memory', action: 'remove', old_text: '本项目用 pytest' },
+    }).tool)
+    expect(removed.card).toMatchObject({ summary: '删除条目', body: '删除：本项目用 pytest' })
+  })
+
   it('gives a web result its own card instead of the generic placeholder', () => {
     // 2026-10-26：网页工具此前不在服务端的识别表里，卡片只剩"该结果格式暂无可展示的详情"。
     // 现在服务端给出搜索词、条数与有界正文，页面只照搬，不在这里重新解析 URL 列表。

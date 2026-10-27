@@ -434,8 +434,15 @@ def app_config(monkeypatch: pytest.MonkeyPatch) -> AppConfig:
                 update={
                     "long_term": base.memory.long_term.model_copy(update={"enabled": False}),
                     "compression": base.memory.compression.model_copy(update={"enabled": False}),
+                    # 常驻记忆（§10.7）在单测里默认关：开着会给提示加段落、给工具集加 `memory`，
+                    # 于是每个断言"工具序列 / 系统前缀字节"的既有用例都要跟着改，而它们与这件事无关。
+                    # 需要它的用例自己打开（`tests/test_curated_memory.py`）。
+                    "curated": base.memory.curated.model_copy(
+                        update={"enabled": False, "user_profile_enabled": False}
+                    ),
                 }
             ),
+
             # 安全删除（2026-10-20）在单测里**默认关**：开着时删除会移进回收站，
             # 而默认回收站根是真实数据目录——测试不该往用户目录里丢东西。
             # 这条能力由 `test_trash.py` / `test_file_system_sandbox.py` 显式开启来覆盖。

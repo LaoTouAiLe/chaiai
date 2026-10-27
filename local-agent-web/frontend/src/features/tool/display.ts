@@ -30,8 +30,13 @@ const LABELS: Record<string, string> = {
   search_files: '搜索文件',
   todo_write: '更新任务清单',
   update_plan: '更新计划',
+  // 网页工具（2026-10-27 补）：此前也不在这张表里，工具行同样退化成"执行操作"。
+  web_search: '联网检索',
+  web_fetch: '读取网页',
   // §18.7：自主委派。不写这一条，工具行会退化成通用兜底文案"执行操作"。
   delegate_research: '委派只读调查',
+  // 常驻记忆（2026-10-27，§10.7）：同样会退化成"执行操作"（用户实拍反馈的就是这一条）。
+  memory: '更新记忆',
 }
 
 export function toolLabel(name: string): string {

@@ -17,7 +17,7 @@
    保留头尾并插入截断标记。
 
 安全边界：位于 ``workspace.root`` 之外的文件一律不读取；``current_cwd`` 不在工作区内时
-不加载任何文件。
+**回落到工作区根**继续扫描（2026-10-27 改：旧口径直接返回空，导致"换工作区后规则静默失效"）。
 """
 
 from __future__ import annotations
@@ -108,7 +108,15 @@ def _directories_to_scan(
     """计算需要扫描的目录，顺序即合并顺序。"""
     chain = _ancestor_chain(current_cwd, workspace_root)
     if not chain:
-        return []
+        # 2026-10-27：当前目录在工作区之外时**回落到工作区根**，不再返回空。
+        #
+        # 为什么改：服务的进程目录与会话绑定的工作区是两件事（工作区可在网页里选择并随会话保存），
+        # 旧口径在这时会让规则文件**静默失效**——用户写的 AGENTS.md 一条都不生效，提示里只写
+        # "未加载到任何 AGENTS 文件"，看起来像"本来就没有规则"。实测：同一份 AGENTS.md，
+        # cwd 在工作区内能加载、换成服务启动目录就一个字都读不到。
+        #
+        # 边界不变：仍然只读工作区根之内的文件，绝不向父目录越界。
+        return [_normalized(workspace_root)]
 
     git_root = _find_git_root(chain)
     directories = chain if git_root is None else chain[chain.index(git_root) :]

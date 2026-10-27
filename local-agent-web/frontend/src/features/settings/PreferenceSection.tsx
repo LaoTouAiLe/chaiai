@@ -8,7 +8,7 @@ import { StorageLocationField } from './StorageLocationField'
 import { WebSearchKeyField } from './WebSearchKeyField'
 import styles from './PreferenceSection.module.css'
 
-export type PreferenceGroup = 'general' | 'storage' | 'execution' | 'agents' | 'retrieval' | 'web_access' | 'attachments' | 'memory' | 'medium_term' | 'compression' | 'embedding' | 'advanced'
+export type PreferenceGroup = 'general' | 'storage' | 'execution' | 'agents' | 'retrieval' | 'web_access' | 'attachments' | 'memory' | 'medium_term' | 'curated' | 'compression' | 'embedding' | 'advanced'
 // `type: 'path'`（2026-10-26）表示"这是一个本机目录"：输入框旁边带「选择…」，走原生目录选择器。
 // 让人手输绝对路径是不合理的——拼错一个字符只会得到"目录不存在"，而用户并不知道自己打错了哪里。
 export type Field = { key: string; label: string; note: string; min?: number; max?: number; step?: number | 'any'; type?: 'text' | 'path'; providers?: readonly string[]; required?: boolean; unlimited?: boolean; optional?: boolean; options?: readonly (readonly [string, string])[]; when?: readonly (readonly [string, string])[] }
@@ -83,6 +83,14 @@ export const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'min_score', label: '最低语义相似度', note: '0–1；阈值取决于向量模型，换模型后需要重新标定。', min: 0, max: 1, step: 'any' },
     { key: 'decay_half_life_days', label: '时间衰减半衰期（天）', note: '每经过此天数，记忆的时间评分降为一半；不会删除记录。', min: 1 },
   ],
+  // 常驻记忆（2026-10-27）：MEMORY.md / USER.md。两块内容**每轮都进系统提示**，与中期/长期的
+  // "按需召回"不是一回事——所以文案必须把"固定成本"说清，别让用户以为越大越好。
+  curated: [
+    { key: 'enabled', label: '启用常驻记忆', note: 'MEMORY.md：环境事实、跨项目约定、工具怪癖。关闭后不再注入，模型也不能写；已有内容保留。' },
+    { key: 'user_profile_enabled', label: '启用用户画像', note: 'USER.md：你的称呼、偏好与沟通风格。关闭不影响 MEMORY.md。' },
+    { key: 'memory_char_limit', label: '记忆预算（字符）', note: '每轮都占用的固定长度；按字符不按 token。改小不会删除已有内容，只影响之后能否再添加。', min: 1 },
+    { key: 'user_char_limit', label: '画像预算（字符）', note: '同上，只管 USER.md。', min: 1 },
+  ],
   compression: [
     // 2026-10-26：这四项原来只在"高级配置"里只读展示。搬出来的理由是它们**能凭结果判断**——
     // 用户看到"答到一半被摘要了"就能想到调触发比例；而工具预算、摘要上限那些改错的症状是
@@ -103,7 +111,21 @@ export const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'allow_plaintext_http', label: '允许非本机端点明文 HTTP', note: '只在你确认可信网络中的明文传输风险时勾选；HTTPS 与本机回环 HTTP 无需勾选。', providers: ['openai_compatible'] },
   ],
 }
-export const TITLES: Record<PreferenceGroup, string> = { general: '通用与外观', storage: '数据位置', execution: '任务执行', agents: '项目规则', retrieval: '任务前自动代码检索', web_access: '联网检索', attachments: '图片与附件', memory: '长期记忆', medium_term: '中期记忆', compression: '上下文压缩', embedding: '向量库与 Embedding', advanced: '高级配置概览' }
+export const TITLES: Record<PreferenceGroup, string> = { general: '通用与外观', storage: '数据位置', execution: '任务执行', agents: '项目规则', retrieval: '任务前自动代码检索', web_access: '联网检索', attachments: '图片与附件', memory: '长期记忆', medium_term: '中期记忆', curated: '常驻记忆', compression: '上下文压缩', embedding: '向量库与 Embedding', advanced: '高级配置概览' }
+
+/**
+ * 设置页**逐分区渲染**的顺序（`advanced` 是只读概览，但同样由本组件渲染）。
+ *
+ * 2026-10-27：这份清单原先是 `ModelSettingsDialog` 里手写的一张 `extraSections` 对象，
+ * 新增「常驻记忆」（curated）时**漏改**——后端有字段、`FIELDS` 有文案、类型检查也通过
+ * （`extraSections` 是 `Partial`），结果左栏根本不出这一项。改成由本常量派生渲染，
+ * 并加一条"与本表 `FIELDS` 的键完全一致"的用例（`Preferences.schema.test.ts`），
+ * 让这类"加了但没接上"直接变红。
+ */
+export const PREFERENCE_SECTIONS = [
+  'general', 'storage', 'execution', 'agents', 'retrieval', 'web_access', 'attachments',
+  'memory', 'medium_term', 'curated', 'compression', 'embedding', 'advanced',
+] as const satisfies readonly PreferenceGroup[]
 export const ADVANCED: Record<string, string> = {
   // 压缩与 AGENTS 的可改项已搬进各自分区（2026-10-26），这里只剩**内部预算**和"关掉就没有会话"
   // 的短期记忆开关——它们要么改错只会得到莫名截断，要么根本不该由页面关闭。
@@ -265,7 +287,7 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
         : `${group === 'general' ? '保存后立即生效；恢复初始值使用应用默认外观。' : group === 'embedding' ? '普通模型参数保存后从下一次新任务生效；更换本地缓存目录可能需要重启后端，准备状态会说明。正在执行或等待审批的任务保留原值。初值来自加载的 config.yaml。' : '保存后从下一次新任务生效；正在执行或等待审批的任务保留原值。初值来自加载的 config.yaml。'} 设置写入本地设置库。`}</p>
     </header>
     {(group === 'embedding' || group === 'medium_term') && resources?.restart_required ? <p role="alert" className={styles.error}>新缓存目录需重启后端生效。配置已保留，请重启后测试，再开始使用中期记忆的新任务。</p> : null}
-    {group === 'retrieval' || group === 'web_access' || group === 'memory' || group === 'medium_term' || group === 'embedding' ? <p className={styles.note}>修改这些参数会改变模型收到的内容，可能影响回答质量与缓存命中率。</p> : null}
+    {group === 'retrieval' || group === 'web_access' || group === 'memory' || group === 'medium_term' || group === 'curated' || group === 'embedding' ? <p className={styles.note}>修改这些参数会改变模型收到的内容，可能影响回答质量与缓存命中率。</p> : null}
     {group === 'embedding' && resources ? <>
       <dl className={styles.overview} aria-label="向量库信息">
         <div><dt>向量库</dt><dd>{resources.backend}</dd></div>

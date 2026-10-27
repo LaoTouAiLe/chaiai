@@ -464,6 +464,8 @@ def build_runtime_context(
     tool_registry: ToolRegistry | None = None,
     model_capabilities: ModelCapabilities | None = None,
     user_id: str | None = None,
+    #: 会话来源（架构 §10.6）：``interactive`` 之外不绑定 ``memory`` 工具（§10.7 的来源约束）。
+    session_kind: str = "interactive",
     config_profile: str = "default",
     request_id: str | None = None,
     provider_name: str | None = None,
@@ -567,6 +569,11 @@ def build_runtime_context(
                 mcp_direct.append(name)
         mcp_search_provider = _mcp_search_provider(mcp.manager, mcp_registry_holder)
 
+    # 常驻记忆（§10.7）：两个 store 都关、或会话来源不是交互式 → 不绑定 `memory` 工具，
+    # 提示里也不描述它（"提示不能承诺本档做不到的事"，§6.9）。
+    curated_config = app_config.memory.curated
+    curated_writes_allowed = str(session_kind) == "interactive"
+    curated_available = curated_config.any_enabled and curated_writes_allowed
     registry = tool_registry or ToolRegistry.build(
         policy,
         web_access=app_config.web_access,
@@ -579,6 +586,8 @@ def build_runtime_context(
         # 2026-10-09 的真实运行验收撞到的正是这个：**清单里列出了技能，`skill_load` 却说没有**。
         skills=app_config.skills,
         disabled_skills=disabled_skills,
+        curated=curated_config,
+        curated_writes_allowed=curated_writes_allowed,
         vision_available=vision_available,
         # 注入的注册表（测试/脚本）自带它自己的委派入口或明确的失败，这里不覆盖。
         delegate=_delegate,
@@ -593,10 +602,15 @@ def build_runtime_context(
     )
     context = RuntimeContext(
         workspace_root=workspace_root,
-        current_cwd=Path.cwd() if current_cwd is None else current_cwd,
+        # 默认取**工作区根**而不是进程目录（2026-10-27）：工作区随会话绑定，进程目录只是启动位置；
+        # 用进程目录会让"别的会话里的 AGENTS.md"整份失效（§7.1）。
+        current_cwd=workspace_root if current_cwd is None else current_cwd,
         model_adapter=model_adapter,
         app_config=app_config,
         user_id=user_id,
+        # 常驻记忆的两项运行期事实：本轮能否用它（决定提示与工具绑定）、会话来源（决定能否写）。
+        curated_available=curated_available,
+        session_kind=str(session_kind),
         config_profile=config_profile,
         agent_switches=switches,
         # 有效能力 = 开关表（∩ Git 的**环境**条件）：关掉的能力对模型完全不可见（§16.3、§16.4）。

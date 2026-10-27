@@ -56,7 +56,11 @@ CAPABILITY_TOOLS: Mapping[str, tuple[str, ...]] = {
     "files_read": ("list_dir", "read_file"),
     # 2026-10-22：`search_files` 是"按内容搜/按名字找"的合并入口（同一能力、同一只读门）。
     "code_search": ("grep", "glob", "search_files"),
-    "files_write": ("edit_file", "write_file", "delete_file", "download_file"),
+    # 2026-10-27：`memory` 是常驻记忆（MEMORY.md / USER.md，架构 §10.7）的写入口。挂在
+    # `files_write` 下而不是另开能力：它本质就是"写两份文件"，另开一个能力会在「能力」面板与
+    # 「设置 → 记忆」之间造出两个开关。是否真的绑定由 `ToolRegistry.unavailable_tools` 决定
+    # （设置里两项都关时从 schema 移除，与参照实现"工具消失"同效）。
+    "files_write": ("edit_file", "write_file", "delete_file", "download_file", "memory"),
     # 2026-10-21：`read_command` / `stop_command` 属于 shell 能力——它们只操作**本会话**里
     # 由 `run_shell` 转后台的命令，不是一条新的执行通道，因此不单开能力、也不放宽任何门。
     "shell": ("run_shell", "read_command", "stop_command", "execute_code"),

@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Literal
@@ -64,6 +65,7 @@ from local_agent.llm.usage_recording import (
     record_model_call,
     tools_fingerprint,
 )
+from local_agent.memory.curated import CuratedStore, resolve_directory
 from local_agent.memory.short_term import (
     PromptWindow,
     project_tool_messages,
@@ -287,6 +289,8 @@ from .tool_runner import (  # noqa: F401 - 保留 nodes 的既有导入入口
     unconfirmed_calls,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 
 def prepare_context_node(
     state: AgentState, runtime: Runtime[RuntimeContext]
@@ -391,19 +395,59 @@ def prepare_context_node(
 
 
 def load_agents_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
-    """加载并合并 AGENTS 规则，写入 RuntimeContext（架构 §4.1、§7.1）。
+    """会话级冻结的项目规则与常驻记忆（架构 §7.2、§10.7、§15.7）。
 
-    规则文本不放进 State：它属于单次运行的临时上下文，写入 Checkpoint 没有意义，
-    也会让每轮都重复保存同一份规则。空结果写为 ``None``。
+    2026-10-27 起这个节点不再"每轮读一遍 AGENTS"：**首次**读盘后把结果写进 State
+    （``agents_snapshot``），之后各轮直接复用。理由是稳定系统前缀与缓存——规则文件在会话中途
+    被编辑时，旧行为会让整个前缀当场失效；新行为与参照实现一致：**开新会话才生效**，压缩也不重读。
+
+    常驻记忆（``MEMORY.md`` / ``USER.md``）在同一处冻结，但刷新时机不同：首轮读一次，
+    之后只要 ``compression_count`` 变过（发生过压缩）就再读一次。这条差异是刻意的——规则文件
+    是"项目约定"，压缩不该让它变；记忆是"agent 自己的笔记"，压缩边界是它追上磁盘的唯一时机。
+
+    State 里只存冻结结果，不存"是否读过"的布尔：``agents_snapshot`` 为 ``None`` 即未读，
+    空字符串表示"读过但没有任何规则"（两者必须能区分，否则每次都会重读一遍空目录）。
     """
     context = runtime.context
-    loaded = load_agents(
-        context.app_config.agents,
-        workspace_root=context.workspace_root,
-        current_cwd=context.current_cwd,
-    )
-    context.agents_context = loaded.text or None
-    return {}
+    update: AgentState = {}
+
+    snapshot = state.get("agents_snapshot")
+    if snapshot is None:
+        loaded = load_agents(
+            context.app_config.agents,
+            workspace_root=context.workspace_root,
+            current_cwd=context.current_cwd,
+        )
+        snapshot = loaded.text or ""
+        update["agents_snapshot"] = snapshot
+    context.agents_context = snapshot or None
+
+    curated_config = context.app_config.memory.curated
+    context.session_kind = str(state.get("session_kind") or "interactive")
+    # 两个 store 都关，或会话来源不是交互式 → 不绑定 `memory` 工具、提示里也不提它（§10.7）。
+    context.curated_available = curated_config.any_enabled and context.session_kind == "interactive"
+    if not curated_config.any_enabled:
+        context.curated_snapshot = {}
+        return update
+
+    blocks = dict(state.get("curated_snapshot") or {})
+    compression_count = int(state.get("compression_count") or 0)
+    frozen_at = int(state.get("curated_snapshot_compression") or 0)
+    if state.get("curated_snapshot") is None or compression_count > frozen_at:
+        store = CuratedStore(curated_config, resolve_directory(curated_config))
+        store.load()
+        blocks = {
+            target: block
+            for target in ("memory", "user")
+            if (block := store.snapshot(target))
+        }
+        update["curated_snapshot"] = blocks
+        update["curated_snapshot_compression"] = compression_count
+        for warning in store.warnings:
+            # 超限只告警、不截断（§10.7）：日志留痕，页面上由写入时的错误说明。
+            _LOGGER.warning("常驻记忆：%s", warning)
+    context.curated_snapshot = blocks
+    return update
 
 
 def retrieve_code_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
