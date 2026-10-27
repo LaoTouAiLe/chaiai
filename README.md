@@ -9,14 +9,17 @@
 ![Node](https://img.shields.io/badge/node-22.20%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
-> **This is a learning project.** I am learning agent development by building one: the tool loop, approval cards,
-> the Windows write-side sandbox, three-tier memory, retrieval and permission boundaries — all written from scratch,
-> on the principle that implementing it is the only way to really understand it. That is why the **docs and tests are
-> denser than the feature set**. v0.1.1 is early; contracts still move, and it is **not recommended as a production
-> dependency**.
+> **An agent you can take apart.**
+> The tool loop, approval cards, the Windows write-side sandbox, three-tier memory, semantic and literal retrieval,
+> persistent terminals, a controlled browser, MCP and skills, cron jobs — most of the skeleton an agent needs is
+> already running here; the rest is being finished.
 >
-> **Feedback is genuinely welcome — especially disagreement.** If an abstraction is wrong, redundant, or a security
-> boundary is missing, open an issue or a PR. No need to be polite about it.
+> v0.1.1 is still evolving: APIs will move and boundaries are being sharpened. **Not recommended as a production
+> dependency** — but it is **readable, inspectable and changeable**: every trade-off is written down in
+> `ARCHITECTURE.md` and `docs/`, instead of hiding behind "internal implementation".
+>
+> Suggestions welcome; disagreement more so. If something is wrong, redundant, or missing from the security boundary,
+> open an issue.
 
 **Stack**: Python 3.13 · FastAPI + SSE · LangGraph (tool loop and checkpoints) · SQLite / Chroma ·
 React 19 + Vite 8 + TypeScript · PyInstaller onedir + Inno Setup + WebView2 ·

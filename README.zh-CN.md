@@ -9,12 +9,14 @@
 ![Node](https://img.shields.io/badge/node-22.20%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
-> **这是一个学习项目。** 我在学 agent 开发，边学边写：工具循环、审批卡、Windows 写沙箱、三层记忆、
-> 检索、权限边界，都按"自己实现一遍才算真懂"的标准做。所以它的**文档与测试密度明显高于功能完备度**——
-> v0.1.1 还是早期版本，契约与接口仍会变，**不建议作为生产依赖**。
+> **一个能拆开看的 Agent。**
+> 工具循环、审批卡、Windows 写侧沙箱、三层记忆、语义与字面检索、持久终端、受控浏览器、MCP 与技能、
+> 定时任务——agent 该有的骨架，这里大部分已经跑通，剩下的在收尾。
 >
-> **非常欢迎你的意见，尤其是反对意见。** 架构哪里想错了、哪些抽象是多余的、安全边界漏了什么，
-> 直接开 issue 或 PR 都行，不需要客气。
+> v0.1.1 仍在逐步完善：接口会变，边界还在磨，**不建议作为生产依赖**；但它是**可读、可查、可改**的，
+> 每一处取舍都写在 `ARCHITECTURE.md` 与 `docs/` 里，而不是藏在"内部实现"四个字后面。
+>
+> 欢迎建议，更欢迎反对意见——哪里想错了、哪些抽象多余、哪条边界漏了，直接开 issue，不必客气。
 
 **技术栈**：Python 3.13 · FastAPI + SSE · LangGraph（工具循环与检查点）· SQLite / Chroma ·
 React 19 + Vite 8 + TypeScript · PyInstaller onedir + Inno Setup + WebView2 ·
