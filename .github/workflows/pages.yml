@@ -1,0 +1,59 @@
+# 文档站发布：把 website/ 发到 GitHub Pages（2026-10-27）。
+#
+# 为什么在构建产物里改名，而不是直接把 source 里的 site.html 改成 index.html：
+# Pages 只把 `index.html` 当目录默认页，而站内每页有 3 处指向 `../site.html` 的链接
+# （顶栏品牌、返回官网、侧栏页脚，共 16 页）。改源文件要同步改 48 处，漏一页就是一个 404；
+# 在这里改名 + 替换链接，源文件保持 `site.html`，本地双击预览的用法完全不变。
+#
+# 一次性设置（需要人工做一次）：仓库 Settings → Pages → Build and deployment →
+# Source 选 **GitHub Actions**。之后每次 push 到 website/ 会自动重新发布。
+
+name: Pages
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "website/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Pages 部署不能并发（同一时间只能有一个 deployment 在跑）。
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: website / deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 整理为 Pages 形态
+        working-directory: website
+        run: |
+          cp site.html index.html
+          # 只改 `../site.html` 这种相对引用；site.html 自身与 docs/ 之间的相对路径不变。
+          grep -rl '\.\./site\.html' docs | xargs -r sed -i 's#\.\./site\.html#../index.html#g'
+          # 维护者文档不进站点（见 website/README.md「部署」一节）。
+          rm -f README.md docs/README.md
+          echo "待发布文件数：$(find . -type f | wc -l)"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

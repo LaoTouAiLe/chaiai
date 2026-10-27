@@ -57,11 +57,21 @@ SHA256SUMS.txt                  上面两个的校验值
   现在靠 `.iss` 里的 `[Messages]` 覆盖了欢迎、目录、任务、准备、安装、完成、卸载与按钮。
   拿到完整 `.isl` 后放进 `packaging/languages/`，在 `[Languages]` 里加一行即可整体替换，
   同时可以删掉那段 `[Messages]`。
-- **没有代码签名**：安装包会触发 SmartScreen「未知发布者」。签名证书是付费项，未购买前在
-  发布说明里写清"点更多信息 → 仍要运行"。
+- **没有代码签名**：安装包会触发 SmartScreen「未知发布者」。**不必自己买证书**——SignPath.io 与
+  Certum 都对开源项目提供免费代码签名（需审核，1–2 周），Azure Trusted Signing 约 $9.99/月。
+  证书到位之前，Release 说明与 README 必须写清「点更多信息 → 仍要运行」，否则第一波用户会当成流氓软件。
 - **只检查更新，不自动安装**（2026-10-27）：`设置 → 关于` 会查 GitHub 最新 Release 并提醒，
   有新版就打开 Release 页由用户自己下载、覆盖安装。**不下载、不静默升级**——本项目没有自升级器，
   替用户替换正在运行的 exe 是另一整套东西。`SHA256SUMS.txt` 仍是"下载到的那份是不是我们发的"
   的校验依据。
+- **构建机的 locale 必须能输出 UTF-8**（2026-10-27 实测并已修）：GitHub 的 Windows runner 是 en-US，
+  Python 的 stdout 默认 cp1252，而构建脚本每条进度都是中文——第一次跑 release workflow 就崩在
+  `[2/5] 打包：PyInstaller onedir → …` 的 `print` 上（`UnicodeEncodeError: 'charmap'`）。
+  现在脚本自己 `reconfigure(encoding="utf-8")`、两个 workflow 也都设了 `PYTHONIOENCODING=utf-8`。
+  换构建机或新写 CI 时不要去掉这两处；本地中文 Windows 是 cp936，看不出这个问题。
+- **CI 与本机的依赖布局不同**：本机是 conda 系 Python，`[3/5]` 的 DLL 补齐会从
+  `<base_prefix>/Library/bin` 取 `libcrypto-3-x64.dll` 等；标准 CPython（CI）里这些位置不存在。
+  目前 CI 能通过，是因为 PyInstaller 在标准布局下会自己收进 `_internal`。换 runner 镜像后若报
+  "缺 XXX.dll"，先看是分析漏收还是环境真的没有。
 - 安装版与开发版**共用同一个数据目录**：在开发机上装一个旧版本安装包，`--diagnose` 会报
   "数据库需要迁移"。给朋友的干净机器不会有这个问题，但自己测的时候要留意。
