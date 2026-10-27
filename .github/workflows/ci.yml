@@ -31,6 +31,9 @@ jobs:
     name: backend / pytest
     runs-on: windows-latest
     timeout-minutes: 40
+    env:
+      # runner 是 en-US locale：Python 默认 cp1252，pytest 打印中文断言信息会 UnicodeEncodeError。
+      PYTHONIOENCODING: utf-8
     defaults:
       run:
         working-directory: local-agent-web

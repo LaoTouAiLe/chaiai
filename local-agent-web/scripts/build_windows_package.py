@@ -525,7 +525,29 @@ def _display(path: Path) -> str:
         return str(path)
 
 
+def _force_utf8_console() -> None:
+    """把 stdout / stderr 强制成 UTF-8（2026-10-27）。
+
+    为什么需要：GitHub Actions 的 Windows runner 是 en-US locale，Python 的 stdout 编码是
+    **cp1252**，而本脚本每条进度都是中文——第一次跑 release workflow 就崩在
+    ``print("[2/5] 打包：PyInstaller onedir → …")`` 上，抛 ``UnicodeEncodeError: 'charmap'``。
+    本地中文 Windows 是 cp936，看得见中文，所以这个问题永远只在别人的构建机上暴露。
+
+    ``errors="replace"`` 是兜底：宁可少一个字形，也不要因为一句进度提示让整次构建失败
+    （这条脚本的职责是"产出可靠的包"，不是"保证终端能显示中文"）。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:  # 被重定向成非 TextIOWrapper 时无从设置
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            continue
+
+
 def main(argv: list[str] | None = None) -> int:
+    _force_utf8_console()
     parser = argparse.ArgumentParser(description="构建 chaiai Windows 目录式试用包（T40）")
     parser.add_argument(
         "--frontend",

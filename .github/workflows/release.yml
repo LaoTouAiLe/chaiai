@@ -41,6 +41,9 @@ jobs:
         working-directory: local-agent-web
     env:
       CHAIAI_OUT_DIR: build/packaging/out-release
+      # Windows runner 是 en-US locale，Python 默认按 cp1252 编码 stdout；
+      # 构建脚本与 pytest 都会打印中文，不设这一条会直接 UnicodeEncodeError（2026-10-27 实测）。
+      PYTHONIOENCODING: utf-8
 
     steps:
       - uses: actions/checkout@v4
