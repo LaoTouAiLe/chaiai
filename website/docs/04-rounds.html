@@ -6,13 +6,13 @@
 <title>聊天、Agent 与一轮任务 · 操作手册 · chaiai</title>
 <meta name="description" content="chaiai 一轮任务：模式切换、发送与停止、审批卡、结果不确定时的收尾。" />
 <meta name="color-scheme" content="light" />
-<link rel="stylesheet" href="../assets/docs.css" />
+<link rel="stylesheet" href="assets/docs.css" />
 </head>
 <body>
 
 <header class="topbar">
   <div class="topbar__inner">
-    <a class="brand" href="../../site.html" aria-label="chaiai 官网">
+    <a class="brand" href="../site.html" aria-label="chaiai 官网">
       <svg class="brand__mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
         <defs>
           <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
@@ -31,10 +31,9 @@
       <span class="brand__label">文档</span>
     </a>
     <nav class="topnav" aria-label="站点导航">
-      <a href="../index.html">文档首页</a>
-      <a href="index.html" aria-current="page">操作手册</a>
-      <a href="../internals/index.html">技术实现</a>
-      <a class="topnav__out" href="../../site.html">返回官网</a>
+      <a href="index.html">文档首页</a>
+      <a href="internals/index.html">技术实现</a>
+      <a class="topnav__out" href="../site.html">返回官网</a>
     </nav>
   </div>
 </header>
@@ -43,11 +42,10 @@
   <nav class="sidebar" aria-label="文档目录">
     <div class="sidebar__group">
       <p class="sidebar__title">文档</p>
-      <a href="../index.html">概览</a>
+      <a href="index.html">概览</a>
     </div>
     <div class="sidebar__group">
       <p class="sidebar__title">操作手册</p>
-      <a href="index.html">手册首页</a>
       <a href="01-install.html">01 安装与第一次启动</a>
       <a href="02-model.html">02 连接一个模型</a>
       <a href="03-permissions.html">03 权限三档与目录授权</a>
@@ -59,9 +57,17 @@
     </div>
     <div class="sidebar__group">
       <p class="sidebar__title">技术实现说明</p>
-      <a href="../internals/index.html">概览</a>
+      <a href="internals/index.html">概览</a>
+      <a href="internals/01-architecture.html">01 架构总览</a>
+      <a href="internals/02-lifecycle.html">02 一轮请求的生命周期</a>
+      <a href="internals/03-tools.html">03 工具层与安全判据</a>
+      <a href="internals/04-sandbox.html">04 写侧沙箱与权限判定</a>
+      <a href="internals/05-memory.html">05 记忆与上下文压缩</a>
+      <a href="internals/06-browser-terminal.html">06 浏览器与持久进程</a>
+      <a href="internals/07-frontend-data.html">07 前端数据流与轮次展示</a>
+      <a href="internals/08-testing.html">08 测试与验收方式</a>
     </div>
-    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+    <div class="sidebar__foot"><a href="../site.html">← 返回官网</a></div>
   </nav>
 
   <main class="doc">
@@ -98,7 +104,7 @@
       </p>
 
       <figure>
-        <img src="../assets/img/ui-approval-20261019.png" alt="高风险删除的审批卡：等待审批、影响说明与二次确认" width="566" height="300" loading="lazy" />
+        <img src="assets/img/ui-approval-20261019.png" alt="高风险删除的审批卡：等待审批、影响说明与二次确认" width="566" height="300" loading="lazy" />
         <figcaption>高风险删除的审批卡：写清目标、影响与不可撤销，第一次确认只进入二次确认，不会直接删。</figcaption>
       </figure>
 

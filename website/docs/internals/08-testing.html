@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>测试与验收方式 · 技术实现说明 · chaiai</title>
+<meta name="description" content="chaiai 测试与验收：替身模型与真实模型三层分工、必须为 0 的四条指标、离线门禁、skip 不等于 pass，以及只能由真机或真实端点证明的结论。" />
+<meta name="color-scheme" content="light" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="../../site.html" aria-label="chaiai 官网">
+      <svg class="brand__mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <defs>
+          <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#F8B65C"/><stop offset="1" stop-color="#E77737"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="18" fill="url(#chaiaiWarm)"/>
+        <path d="m16 27-1-13c-.4-3 1.2-4 3.3-2.2l8.7 7.4a16 16 0 0 1 10 0l8.7-7.4c2.1-1.8 3.7-.8 3.3 2.2l-1 13c3 3.2 4 7.2 4 11 0 8.4-8.2 14-20 14-2.4 0-4.7-.2-7-.7L15 55l2.3-10.2C13.9 42.4 12 39.4 12 36c0-3.5 1.4-6.7 4-9Z" fill="#FFF7E9"/>
+        <path d="m19.3 16.8.8 8.4 5.1-3.5Zm25.4 0-.8 8.4-5.1-3.5Z" fill="#BF6A37"/>
+        <path d="M24 32.5v2M40 32.5v2" fill="none" stroke="#633E2B" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M29.2 38.1c-.7-.8-.2-2.1.9-2.1h3.8c1.1 0 1.6 1.3.9 2.1L33 40a1.4 1.4 0 0 1-2 0Z" fill="#633E2B"/>
+        <path d="M26.5 42.2c1.5 1.7 3.3 1.7 5.5-.3 2.2 2 4 2 5.5.3" fill="none" stroke="#633E2B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>chaiai</span>
+      <span class="brand__divider" aria-hidden="true"></span>
+      <span class="brand__label">文档</span>
+    </a>
+    <nav class="topnav" aria-label="站点导航">
+      <a href="../index.html">文档首页</a>
+      <a href="index.html" aria-current="page">技术实现</a>
+      <a class="topnav__out" href="../../site.html">返回官网</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout layout--plain">
+  <nav class="sidebar" aria-label="文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="../01-install.html">01 安装与第一次启动</a>
+      <a href="../02-model.html">02 连接一个模型</a>
+      <a href="../03-permissions.html">03 权限三档与目录授权</a>
+      <a href="../04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="../05-map.html">05 会话地图与分支追问</a>
+      <a href="../06-data.html">06 数据中台</a>
+      <a href="../07-settings.html">07 设置项与生效时机</a>
+      <a href="../08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="index.html">概览</a>
+      <a href="01-architecture.html">01 架构总览</a>
+      <a href="02-lifecycle.html">02 一轮请求的生命周期</a>
+      <a href="03-tools.html">03 工具层与安全判据</a>
+      <a href="04-sandbox.html">04 写侧沙箱与权限判定</a>
+      <a href="05-memory.html">05 记忆与上下文压缩</a>
+      <a href="06-browser-terminal.html">06 浏览器与持久进程</a>
+      <a href="07-frontend-data.html">07 前端数据流与轮次展示</a>
+      <a href="08-testing.html" aria-current="page">08 测试与验收方式</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+
+  <main class="doc">
+    <p class="kicker">INTERNALS · 第 8 章</p>
+    <h1>测试与验收方式</h1>
+    <p class="lead">
+      替身模型管"行为对不对"，真实模型管"能不能用"，人工验收管"装到机器上还活着吗"。三层不互相替代，也不能互相背书。
+    </p>
+
+    <div class="prose">
+      <h2>1 三层，问的是三个不同的问题</h2>
+      <table>
+        <thead><tr><th>层</th><th>用什么模型</th><th>默认跑吗</th><th>断言什么</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>自动化层</td>
+            <td>脚本化替身（<code>tests/conftest.py</code>）</td>
+            <td>跑，属于常规回归</td>
+            <td>终点类型 + 几条<strong>必须为 0</strong> 的硬不变量（<code>tests/test_agent_eval.py:14-22</code>）</td>
+          </tr>
+          <tr>
+            <td>冒烟层</td>
+            <td>真实模型</td>
+            <td>不跑，<code>DS_SMOKE=1</code> 才跑</td>
+            <td>只记录兼容性与质量，<strong>不做逐字断言</strong>（<code>tests/test_agent_smoke.py:1-8</code>）</td>
+          </tr>
+          <tr>
+            <td>精度层</td>
+            <td>真实模型</td>
+            <td>不跑，<code>DS_PRECISION=1</code> 才跑</td>
+            <td>硬阈值，但取<strong>总体下限</strong>（<code>tests/test_agent_eval_precision.py:1-30</code>、<code>:104-110</code>）</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        规模参考（会随代码变化）：后端 <code>tests/</code> 下 146 个 <code>.py</code> 文件（含 <code>conftest.py</code>），
+        前端 <code>src/</code> 下 62 个 <code>*.test.ts(x)</code>，由 <code>npm run test</code>（vitest）执行；
+        前端构建 <code>npm run build</code> 先跑 <code>tsc --noEmit</code>，类型错误进不了产物。
+      </p>
+
+      <h2>2 替身为什么能当基准</h2>
+      <p>
+        假模型按提示内容区分两类调用：路由分类返回分类 JSON，其余按配置返回工具调用或文本回答——
+        两条链路都能断言，且不联网、不依赖真实模型输出（<code>tests/conftest.py:1-5</code>）。
+        三点让它称得上"基准"而不是"凑数的桩"：
+      </p>
+      <ul>
+        <li><strong>流式与非流式同一套脚本</strong>：增量块拼起来必须等于整段回答，所以两条路径的最终消息完全一致（<code>tests/conftest.py:345-350</code>）。</li>
+        <li><strong>每个用例一个独立数据根</strong>：不隔离的话，跑测试会直接读写用户真实的会话库与设置库，用例之间还会互相串（<code>tests/conftest.py:32-49</code>）。</li>
+        <li><strong>它明确承认测不到什么</strong>：替身能测终点与安全不变量，测不出"模型有没有真的引用行号"——那正是精度层存在的理由（<code>tests/test_agent_eval_precision.py:1-11</code>）。</li>
+      </ul>
+
+      <h2>3 自动化层盯的四条"必须为 0"</h2>
+      <p>指标里有两类：可以波动的比例，和一条都不许有的红线（<code>tests/test_agent_eval.py:16-22</code>）：</p>
+      <ul>
+        <li><strong>错误宣称 = 0</strong>：任务标 <code>completed</code> 但产物或执行证据不符。</li>
+        <li><strong>重复副作用 = 0</strong>：同一次任务里同一副作用工具执行超过一次。</li>
+        <li><strong>密钥 / 越界泄漏 = 0</strong>：轨迹或出站提示里出现工作区外内容与密钥。</li>
+        <li><strong>轨迹含隐藏思维链 = 0</strong>：决策轨迹、工具事件、错误事件、最终证据里不得出现 <code>reasoning_content</code>。</li>
+      </ul>
+      <p>
+        比例类指标是<strong>完成率</strong>与<strong>追问率</strong>：追问不一定是错，要看原因分布（<code>tests/test_agent_eval.py:16-17</code>）。
+        结果写成固定报表 <code>eval/latest.json</code> / <code>eval/latest.md</code>，两次运行可直接对比（<code>:1-5</code>）。
+      </p>
+
+      <h2>4 真实模型这一层怎么控成本</h2>
+      <p>
+        默认不跑，理由直接写在 <code>skipif</code> 的 reason 里，而不是写在某个人的记忆里：
+        "要联网、有费用、输出不稳定：显式设置 <code>DS_SMOKE=1</code> 才运行"
+        （<code>tests/test_agent_smoke.py:530-533</code>）。精度层同理，开关是 <code>DS_PRECISION</code>
+        （<code>tests/test_agent_eval_precision.py:725-728</code>）。
+      </p>
+      <ul>
+        <li><strong>冒烟层只记录、不打分</strong>：文件头自己写明"默认跳过、只记录不比对"（<code>tests/test_agent_smoke.py:1</code>）。</li>
+        <li><strong>精度层不按单条硬断言</strong>：真实模型同一用例两次运行可能一次收尾、一次追问，单条 flaky 会让门槛随机变红，
+          而随机变红的门槛等于没有门槛；所以改成总体下限，系统性退化仍然会红（<code>tests/test_agent_eval_precision.py:105-110</code>）。</li>
+        <li><strong>离线报表用字段自证没花钱</strong>：<code>paid_model_calls == 0</code>、<code>semantic_quality_reviewed is False</code>、
+          <code>real_model_advantage_proven is False</code>（<code>tests/test_workflow_eval.py:59-63</code>、
+          <code>tests/test_workflow_comparison.py:18-24</code>）。这三个字段的意义是：<strong>离线跑出来的结论不能写成真实模型的结论</strong>，
+          否则下一个人会把"替身证明"当成"真机证明"。</li>
+      </ul>
+
+      <h2>5 只跑 pytest 不够：还有五道离线门</h2>
+      <ul>
+        <li><strong>兼容基线</strong>：默认只读检查，<code>--write</code> 只在审查契约后显式使用（<code>scripts/check_release_contracts.py:1-2</code>、<code>:20-34</code>）。</li>
+        <li><strong>OpenAPI 与偏好 schema 的导出</strong>：生成物必须与代码一致，用各自的 <code>--check</code> 守。</li>
+        <li><strong>规模与复杂度棘轮</strong>：文件行数、函数行数、圈复杂度、嵌套深度四个门槛，基线只存超标项，
+          新超标和存量恶化都失败（<code>scripts/check_size.py</code>、<code>tests/test_code_size.py:80-84</code>）。</li>
+        <li><strong>交付证据离线复核</strong>：校验冻结的证据文件，<strong>从不调用模型</strong>（<code>scripts/verify_delivery_evidence.py:1</code>）。</li>
+        <li><strong>固定工程评测</strong>：输出到新目录、拒绝覆盖旧结果，源文件指纹与契约清单随报告保存（<code>scripts/run_release_evaluation.py:1</code>、<code>:20-32</code>）。</li>
+      </ul>
+      <p>
+        另外有几条评测脚本本身就是"不花钱"的：离线基线明确"不创建真实模型客户端"
+        （<code>scripts/run_workflow_baseline.py:1</code>），固定工程评测"不触发付费模型"
+        （<code>scripts/run_release_evaluation.py:1</code>）。
+      </p>
+
+      <h2>6 跳过不是通过</h2>
+      <p>
+        测试里条件跳过很常见，但这里要求它<strong>如实标注</strong>，不假装跑过。最直白的一条写在进程树用例上：
+        "非 Windows 上跳过并如实标注——不假装跑过"（<code>tests/test_process_guard.py:281-285</code>）。
+        跳过的四类原因，读报告时要分开看：
+      </p>
+      <ul>
+        <li><strong>平台语义</strong>：POSIX 权限位、Windows ACL 与受限令牌、junction、大小写规则（<code>tests/test_tools.py:370</code>、<code>tests/test_permission_model_review.py:17</code>、<code>tests/test_external_read_policy.py:127</code>）。</li>
+        <li><strong>可选依赖</strong>：中期记忆需要 <code>uv sync --extra memory</code>，没装就跳过而不是失败（<code>tests/test_memory.py:86-92</code>）。</li>
+        <li><strong>环境能力</strong>：跨盘验证要求临时目录在另一块盘、符号链接需要创建权限、缺少 <code>git</code> / <code>node</code> / <code>python</code> 时直接说明（<code>tests/test_external_read_policy.py:147-153</code>、<code>tests/test_protected_scan.py:102-104</code>）。</li>
+        <li><strong>真实模型开关</strong>：见上一节。</li>
+      </ul>
+      <p>
+        所以看一份报告时，"passed 多少"不足以判断验收状态；必须同时看用 <code>-rs</code> 打出来的跳过原因——
+        跳过的用例意味着<strong>这条结论在你这台机器上还没有证据</strong>。
+      </p>
+
+      <h2>7 哪些结论只能由真机或真实端点证明</h2>
+      <ul>
+        <li><strong>行号级引用准不准</strong>：替身回放测不出真实模型会不会真的引用 <code>文件:行号</code>（<code>tests/test_agent_eval_precision.py:7-11</code>）。</li>
+        <li><strong>协议级兼容性</strong>：工具调用格式、流式分块、结构化输出的降级链，只有真实端点能暴露；
+          冒烟层的定位就是"发现协议级/兼容性问题"，不是打分（<code>tests/test_agent_eval_precision.py:9-10</code>）。</li>
+        <li><strong>平台安全能力</strong>：受限令牌、目录 ACL、junction 重定向、进程树终止，只在对应平台上成立，别的平台是 skip（<code>tests/test_permission_model_review.py:17</code>、<code>tests/test_process_guard.py:281-285</code>）。</li>
+        <li><strong>成本与缓存</strong>：离线只能算估算值，真实命中率与回落次数要看供应商回报（见<a href="05-memory.html">第 5 章</a>的验收观测量）。</li>
+        <li><strong>安装器与桌面窗口</strong>：仓库的测试与脚本里没有引用安装器脚本（<code>chaiai.iss</code> / <code>ISCC</code>）的用例，
+          这两件事只能按"编译 → 隔离环境安装 → 启动 → 核对实际读写位置"人工验收，不能拿 pytest 全绿顶上。</li>
+      </ul>
+
+      <h2>8 提交前最小闭环</h2>
+      <pre><code class="language-bash"># 后端（在 local-agent-web/ 下）
+.venv/Scripts/python -m pytest -q            # 含规模棘轮的常规回归
+.venv/Scripts/python -m ruff check .
+.venv/Scripts/python -m mypy src
+
+# 前端（在 local-agent-web/frontend/ 下）
+npm run typecheck
+npm run test
+npm run build                                # 产物要给服务端托管，不重建就是旧页面
+
+# 契约与证据（在 local-agent-web/ 下）
+.venv/Scripts/python scripts/check_release_contracts.py --check
+.venv/Scripts/python scripts/export_openapi.py --check
+.venv/Scripts/python scripts/export_preferences_schema.py --check</code></pre>
+      <p>
+        真实模型的两层<strong>不在这条闭环里</strong>：它们要联网、要花钱，得显式开开关，且结果只写"记录"不写"通过"。
+      </p>
+
+      <div class="note">
+        <strong>未验证的部分：</strong>本章只读源码与脚本，<strong>没有运行任何测试</strong>——所以文中没有给出通过数，
+        也不代表当前工作树是绿的。要验证本章的说法，跑一次 <code>pytest -rs</code> 看跳过原因是否与第 6 节列的四类对得上，
+        再跑一次 <code>npm run test</code> 看前端 62 个测试文件是否都能被收集到。
+      </div>
+    </div>
+
+    <nav class="pager" aria-label="翻页">
+      <a href="07-frontend-data.html">
+        <span class="pager__hint">上一篇</span>
+        <span class="pager__title">← 07 前端数据流与轮次展示</span>
+      </a>
+      <span></span>
+    </nav>
+
+    <p class="pagefoot">最后更新 2026-10-27 · 适用版本 v1.0</p>
+  </main>
+</div>
+
+</body>
+</html>

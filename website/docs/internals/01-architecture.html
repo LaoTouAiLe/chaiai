@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>架构总览：两层界面与一支执行链 · 技术实现说明 · chaiai</title>
+<meta name="description" content="chaiai 架构总览：React 页面只发请求、FastAPI 单一入口、ApplicationService 管台账与投影、LangGraph 按轮推进，状态落在本机 SQLite。" />
+<meta name="color-scheme" content="light" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="../../site.html" aria-label="chaiai 官网">
+      <svg class="brand__mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <defs>
+          <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#F8B65C"/><stop offset="1" stop-color="#E77737"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="18" fill="url(#chaiaiWarm)"/>
+        <path d="m16 27-1-13c-.4-3 1.2-4 3.3-2.2l8.7 7.4a16 16 0 0 1 10 0l8.7-7.4c2.1-1.8 3.7-.8 3.3 2.2l-1 13c3 3.2 4 7.2 4 11 0 8.4-8.2 14-20 14-2.4 0-4.7-.2-7-.7L15 55l2.3-10.2C13.9 42.4 12 39.4 12 36c0-3.5 1.4-6.7 4-9Z" fill="#FFF7E9"/>
+        <path d="m19.3 16.8.8 8.4 5.1-3.5Zm25.4 0-.8 8.4-5.1-3.5Z" fill="#BF6A37"/>
+        <path d="M24 32.5v2M40 32.5v2" fill="none" stroke="#633E2B" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M29.2 38.1c-.7-.8-.2-2.1.9-2.1h3.8c1.1 0 1.6 1.3.9 2.1L33 40a1.4 1.4 0 0 1-2 0Z" fill="#633E2B"/>
+        <path d="M26.5 42.2c1.5 1.7 3.3 1.7 5.5-.3 2.2 2 4 2 5.5.3" fill="none" stroke="#633E2B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>chaiai</span>
+      <span class="brand__divider" aria-hidden="true"></span>
+      <span class="brand__label">文档</span>
+    </a>
+    <nav class="topnav" aria-label="站点导航">
+      <a href="../index.html">文档首页</a>
+      <a href="index.html" aria-current="page">技术实现</a>
+      <a class="topnav__out" href="../../site.html">返回官网</a>
+    </nav>
+  </div>
+</header>
+
+<div class="layout layout--plain">
+  <nav class="sidebar" aria-label="文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="../01-install.html">01 安装与第一次启动</a>
+      <a href="../02-model.html">02 连接一个模型</a>
+      <a href="../03-permissions.html">03 权限三档与目录授权</a>
+      <a href="../04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="../05-map.html">05 会话地图与分支追问</a>
+      <a href="../06-data.html">06 数据中台</a>
+      <a href="../07-settings.html">07 设置项与生效时机</a>
+      <a href="../08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="index.html">概览</a>
+      <a href="01-architecture.html" aria-current="page">01 架构总览</a>
+      <a href="02-lifecycle.html">02 一轮请求的生命周期</a>
+      <a href="03-tools.html">03 工具层与安全判据</a>
+      <a href="04-sandbox.html">04 写侧沙箱与权限判定</a>
+      <a href="05-memory.html">05 记忆与上下文压缩</a>
+      <a href="06-browser-terminal.html">06 浏览器与持久进程</a>
+      <a href="07-frontend-data.html">07 前端数据流与轮次展示</a>
+      <a href="08-testing.html">08 测试与验收方式</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+
+  <main class="doc">
+    <p class="kicker">INTERNALS · 第 1 章</p>
+    <h1>架构总览：两层界面与一支执行链</h1>
+    <p class="lead">
+      页面只发请求，判定留在服务端，状态落在同一个 SQLite。这三件事定下了后面每一章的形状。
+    </p>
+
+    <div class="prose">
+      <h2>1 一次追问走过哪几层</h2>
+      <p>
+        整条链只有一支：浏览器发请求，服务端跑图，工具落盘。中间没有第二个服务，也没有第二个进程。
+      </p>
+      <pre><code class="language-text">浏览器（React 页面）
+  │  相对路径 /api：JSON 请求 + SSE 事件流
+  ▼
+FastAPI 入口          api/app.py:61          create_app 是唯一装配点
+  │  本机边界：Host / Origin / 正文上限
+  ▼
+ApplicationService    application/service.py:633
+  │  幂等台账 → 预检 → 执行锁 → 跑图 → 投影
+  ▼
+LangGraph 图          graph/builder.py:119
+  │  prepare_context → … → 安全门 → 审批 → 工具
+  ▼
+工具与安全策略        security/policy.py:3
+  ▼
+本机磁盘 + SQLite（Checkpoint、会话索引、幂等台账）</code></pre>
+
+      <h2>2 界面为什么不碰文件</h2>
+      <p>
+        界面是浏览器里的 React 页面，它的全部能力就是发 HTTP 请求和读 SSE 事件。这不是自觉，是结构决定的。
+      </p>
+      <ul>
+        <li>
+          <strong>同源托管。</strong>前端构建产物由本服务自己发：<code>api/static.py:3</code> 写明"生产环境只需要启动 Python"，
+          兜底路由在业务路由之后注册（<code>api/app.py:132-137</code>），所以页面和接口同源，不存在跨端拼地址的余地。
+        </li>
+        <li>
+          <strong>只走相对路径。</strong>传输层客户端只认 <code>/api</code>，从不拼绝对地址，
+          因此请求不会跑到用户没配过的机器上（<code>frontend/src/api/client.ts:6-8</code>）。
+        </li>
+        <li>
+          <strong>判定不在这一侧。</strong>危险动作在代码层拦，不依赖 Prompt（<code>security/policy.py:3-4</code>）；
+          没放行或没有审批能力的动作一律失败闭合。把判定交给页面，等于把闸门交给请求方。
+        </li>
+        <li>
+          <strong>类型是生成物。</strong>前端类型由服务端 OpenAPI 生成，生成文件不得手改（<code>api/app.py:40-42</code>、
+          <code>frontend/src/api/client.ts:1</code>）。接口改了而页面没跟上，是编译期错误，不是运行时惊喜。
+        </li>
+      </ul>
+      <table>
+        <thead><tr><th>界面负责</th><th>服务端负责</th></tr></thead>
+        <tbody>
+          <tr><td>把输入变成一次请求，带上幂等键</td><td>判定这次请求是谁、能不能跑、跑没跑过</td></tr>
+          <tr><td>把 DTO 渲染成话题、轨迹、审批卡</td><td>把 State 投影成 DTO，只回引用与结论</td></tr>
+          <tr><td>展示"断线了""正在重连"</td><td>决定这一轮的终态，写下台账</td></tr>
+          <tr><td>从不重发用户消息，重试由人发起</td><td>同 id 同参数的重试直接回放，不再跑图</td></tr>
+        </tbody>
+      </table>
+
+      <h2>3 四层职责</h2>
+      <p>按依赖方向从外到内，每层只做一件事；跨层的调用方向单一，不回头。</p>
+      <table>
+        <thead><tr><th>层</th><th>目录</th><th>只负责</th><th>明确不做</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>接口层</td>
+            <td><code>api/</code></td>
+            <td>路由、本机边界、SSE 帧、静态托管</td>
+            <td>不判业务，不读写 State</td>
+          </tr>
+          <tr>
+            <td>应用层</td>
+            <td><code>application/</code></td>
+            <td>幂等台账、执行锁、跑图、把 State 投影成 DTO</td>
+            <td>不决定某个工具能不能放行</td>
+          </tr>
+          <tr>
+            <td>图与工具层</td>
+            <td><code>graph/</code>、<code>tools/</code></td>
+            <td>按节点推进一轮、执行工具、写审计字段</td>
+            <td>不知道 HTTP，也不知道页面</td>
+          </tr>
+          <tr>
+            <td>支撑层</td>
+            <td><code>security/</code>、<code>persistence/</code>、<code>context/</code>、<code>memory/</code>、<code>llm/</code>、<code>mcp/</code>、<code>rag/</code></td>
+            <td>判定、存储、提示组装、模型适配、外部工具目录、按需检索</td>
+            <td>不自己发起轮次</td>
+          </tr>
+        </tbody>
+      </table>
+      <p>
+        <code>persistence/</code> 只有一句话的定位："Checkpoint 与会话索引"（<code>persistence/__init__.py:1</code>）；
+        <code>context/prompt_context.py:1-11</code> 则把提示拆成"稳定前缀"与"动态快照"两块，前者在同一会话内字节不变。
+        这两处约束会直接影响第 5 章的压缩策略。
+      </p>
+
+      <h2>4 图里有什么</h2>
+      <p>
+        图在 <code>graph/builder.py:119</code> 构建，注册了 <strong>18 个节点</strong>（<code>graph/builder.py:135-152</code>）与
+        <strong>3 个固定子图</strong>（<code>graph/builder.py:153-155</code>），最后 <code>compile</code> 并放开递归上限（<code>graph/builder.py:157</code>）。
+        边的形状写在 <code>graph/edges.py:85-182</code>，文件头有一份可直接读的路径图。
+        节点按什么顺序串起来、在哪个节点上分叉，留给<a href="02-lifecycle.html">第 2 章</a>。
+      </p>
+
+      <h2>5 单进程、单 worker 是硬约束</h2>
+      <p>
+        入口把 <code>workers=1</code> 写死（<code>api/__main__.py:160-167</code>），并说明这不是懒得配：
+        进程内广播、每会话互斥与幂等台账，都以"只有一个进程在写"为前提（<code>api/__main__.py:17-18</code>）。
+        想开多进程，先要换掉这三样的实现，而不是改一个启动参数。
+      </p>
+      <p>
+        服务只为本机设计：监听非回环地址时只打印一条警告，没有鉴权（<code>api/__main__.py:100-106</code>）；
+        FastAPI 自带的交互文档也刻意不挂（<code>api/app.py:93-95</code>），避免多开一个无鉴权的调试面。
+      </p>
+
+      <h2>6 状态放在哪</h2>
+      <p>
+        Checkpoint、会话索引、幂等台账、任务索引共用<strong>同一个 SQLite 库、同一条连接、同一把锁</strong>
+        （<code>api/container.py:242-290</code>）。图在 <code>api/container.py:250</code> 拿到这个 checkpointer；
+        库打不开就没有会话可服务（<code>api/container.py:224</code>）。
+      </p>
+      <p>
+        库文件位置由数据根推算，优先级是"环境变量 → 指针文件 → 配置里的 <code>data_root</code> → 平台默认"
+        （<code>app_paths.py:214-215</code>，环境变量名与指针文件名见 <code>app_paths.py:83</code>、<code>app_paths.py:87</code>）。
+        服务启动时总会把实际数据根打出来（<code>api/__main__.py:124-126</code>），因为它是备份、迁移与排障的唯一锚点。
+      </p>
+      <p>
+        投影层是<strong>单向</strong>的：输入 State、输出 DTO，不写回、不调用模型、不读数据库
+        （<code>application/projection.py:1-5</code>）。这条纪律让"页面显示的状态"永远可以追到某个 Checkpoint，
+        而不是某一处顺手改的缓存。
+      </p>
+
+      <h2>7 这套划分的代价</h2>
+      <ul>
+        <li>
+          <strong>改前端必须重新构建。</strong>服务端只按目录内容返回文件（<code>api/static.py:154-164</code>），
+          它不关心产物是否与源码同步；不重建，页面就还是旧产物。产物缺失时只提供接口并给一句可执行的提示
+          （<code>api/static.py:88-93</code>）。
+        </li>
+        <li>
+          <strong>加一个能力要同时改两端。</strong>服务端加路由与 DTO，前端重新生成类型，少一边就编译不过。
+        </li>
+        <li>
+          <strong>没有鉴权。</strong>本机边界只挡跨源与 DNS rebinding（<code>api/security.py:1-17</code>），
+          挡不住同机上的其他进程。这是"只在本机用"的设计，不是可以对外开放的服务。
+        </li>
+      </ul>
+
+      <div class="note">
+        <strong>取证方式：</strong>本章全部结论来自 2026-10-27 的源码静态阅读，引用的行号对应当时的工作树；
+        没有启动服务做运行时实测，凡属运行时的表现一律算未验证。行号会随代码变动失效，改这几处时请顺手核对本页。
+      </div>
+    </div>
+
+    <nav class="pager" aria-label="翻页">
+      <a href="index.html">
+        <span class="pager__hint">上一篇</span>
+        <span class="pager__title">← 技术实现说明 · 概览</span>
+      </a>
+      <a class="pager__next" href="02-lifecycle.html">
+        <span class="pager__hint">下一篇</span>
+        <span class="pager__title">02 一轮请求的生命周期 →</span>
+      </a>
+    </nav>
+
+    <p class="pagefoot">最后更新 2026-10-27 · 适用版本 v1.0</p>
+  </main>
+</div>
+
+</body>
+</html>

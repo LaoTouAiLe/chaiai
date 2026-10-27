@@ -18,25 +18,35 @@ website/
   site.html                官网首页
   docs/
     README.md              本规范（维护者看，发布时可排除）
-    index.html             文档概览：两个入口
-    manual/                操作手册（面向使用者）
-      index.html           手册首页：8 章目录 + 一张总览图
-      01-install.html      安装与第一次启动
-      02-model.html        连接一个模型
-      03-permissions.html  权限三档与目录授权
-      04-rounds.html       聊天、Agent 与一轮任务
-      05-map.html          会话地图与分支追问
-      06-data.html         数据中台
-      07-settings.html     设置项与生效时机
-      08-faq.html          常见问题与自检
-    internals/             技术实现说明（面向开发者）
-      index.html           概览 + 8 章目录（正文待编写）
+    index.html             文档首页＝操作手册首页：8 章目录 + 总览图 + 术语 + 技术实现入口
+    01-install.html        安装与第一次启动
+    02-model.html          连接一个模型
+    03-permissions.html    权限三档与目录授权
+    04-rounds.html         聊天、Agent 与一轮任务
+    05-map.html            会话地图与分支追问
+    06-data.html           数据中台
+    07-settings.html       设置项与生效时机
+    08-faq.html            常见问题与自检
+    internals/                技术实现说明（面向开发者）
+      index.html              概览 + 8 章目录
+      01-architecture.html    架构总览：两层界面与一支执行链
+      02-lifecycle.html       一轮请求的生命周期
+      03-tools.html           工具层与安全判据
+      04-sandbox.html         写侧沙箱与权限判定
+      05-memory.html          记忆与上下文压缩
+      06-browser-terminal.html 浏览器与持久进程
+      07-frontend-data.html    前端数据流与轮次展示
+      08-testing.html         测试与验收方式
     assets/
       docs.css             唯一样式表
       img/                 截图与示意图
 ```
 
 命名：`<两位序号>-<kebab-case>.html`。序号只在目录页与文件里用，标题里也保留，便于交叉引用。
+
+**为什么手册不单独占一层目录**（2026-10-27 改）：原来走「官网 → 文档首页（两张入口卡）→ 操作手册首页」三跳才能看到章节，
+而首页除了导航没有别的内容。现在文档首页本身就是手册首页，左栏一次列出全部 18 页，点一次就到正文。
+`internals/` 仍作为子目录，用来表达"面向开发者"这一层区分。
 
 ## 3. 两种页面骨架
 
@@ -62,30 +72,31 @@ website/
 
 ## 4. 左栏树：新增一章时要同步的地方
 
-左栏是**每个页面各写一份**（无 JS），结构固定：
+左栏是**每个页面各写一份**（无 JS），结构固定。全站只有一棵树，`docs/` 根下的页面写本章节名，
+`docs/internals/` 下的页面把前缀改成 `../`：
 
 ```html
 <nav class="sidebar" aria-label="文档目录">
   <div class="sidebar__group">
     <p class="sidebar__title">文档</p>
-    <a href="../index.html">概览</a>
+    <a href="index.html">概览</a>
   </div>
   <div class="sidebar__group">
     <p class="sidebar__title">操作手册</p>
-    <a href="index.html">手册首页</a>
     <a href="01-install.html" aria-current="page">01 安装与第一次启动</a>
-    …其余章节…
+    …其余 7 章…
   </div>
   <div class="sidebar__group">
     <p class="sidebar__title">技术实现说明</p>
-    <a href="../internals/index.html">概览</a>
+    <a href="internals/index.html">概览</a>
+    …其余 8 章…
   </div>
-  <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  <div class="sidebar__foot"><a href="../site.html">← 返回官网</a></div>
 </nav>
 ```
 
-新增一章需要改：① 新建章节页；② `manual/index.html` 的章节列表与下一条 pager；③ 相邻两章的 pager；
-④ **所有文档页的侧栏**（当前 11 个页面）；⑤ 章节页顶栏 `aria-current`。漏掉 ④ 会让侧栏在别的页面里少一条。
+新增一章需要改：① 新建章节页；② `docs/index.html` 的章节列表与下一条 pager；③ 相邻两章的 pager；
+④ **所有页面（当前 18 个）的侧栏**——首页也有完整侧栏，不再有"简化侧栏"的例外；⑤ 当前页的 `aria-current`。漏掉 ④ 会让侧栏在别的页面里少一条。
 
 ## 5. 图与图注
 
@@ -132,7 +143,7 @@ website/
 | 投影 | 服务端把运行状态整理成页面可读的只读视图 |
 | 未验证 | 没有实测证据，只有代码或推断支撑 |
 
-术语表放在 `manual/index.html` 的「附：术语」，两套材料共用；新增术语先加表，再在正文里沿用。
+术语表放在 `docs/index.html` 的「附：术语」，两套材料共用；新增术语先加表，再在正文里沿用。
 
 ## 7. 以后迁 Markdown 的约定
 
@@ -148,7 +159,8 @@ website/
 - [ ] 直接双击 `site.html` 与各文档页（`file://`）样式正常，控制台无报错；
 - [ ] 1440 / 1024 / 390 三个宽度下正文可读，表格与代码块不撑破页面；
 - [ ] 所有链接可点：不出现 404、不出现以 `/` 开头的路径；
-- [ ] 新章节已同步所有页面的侧栏，`aria-current` 每页只有一处；
+- [ ] 新章节已同步所有页面的侧栏；
+- [ ] `aria-current` 只标在**指向当前页**的链接上：首页有两条指向自己（顶栏 + 左栏），章节页通常只有左栏一条，不为了凑数而多加；
 - [ ] 上一篇 / 下一篇指向正确；
 - [ ] 图片都是 fixture 截图或自绘，带 `alt`、宽高与图注，图注写明"示意数据"；
 - [ ] 没有内联 `style`（样式只改 `assets/docs.css`）；
