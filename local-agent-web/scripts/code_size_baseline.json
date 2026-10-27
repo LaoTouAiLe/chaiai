@@ -1,0 +1,81 @@
+{
+  "exceptions": {
+    "file:application/projection.py": {
+      "file_lines": 2084
+    },
+    "file:application/service.py": {
+      "file_lines": 4891
+    },
+    "function:api/browsers.py::build_browser_router": {
+      "complexity": 24
+    },
+    "function:api/routes.py::build_router": {
+      "complexity": 110,
+      "function_lines": 921
+    },
+    "function:api/terminals.py::build_terminal_router": {
+      "complexity": 26
+    },
+    "function:application/artifacts.py::_scan": {
+      "complexity": 23
+    },
+    "function:application/projection.py::_tool_outcome": {
+      "complexity": 40
+    },
+    "function:application/service.py::ApplicationService._change_mcp_spec": {
+      "nesting": 7
+    },
+    "function:application/service.py::ApplicationService._turn_events": {
+      "complexity": 29
+    },
+    "function:context/citations.py::complete_citation_paths": {
+      "complexity": 22
+    },
+    "function:graph/reflection.py::reflection_node": {
+      "complexity": 36
+    },
+    "function:graph/tool_runner.py::tool_execution_node": {
+      "complexity": 37,
+      "function_lines": 452,
+      "nesting": 7
+    },
+    "function:security/policy.py::SecurityPolicy.classify_tool": {
+      "complexity": 28
+    },
+    "function:security/shell_guard.py::prepare_shell": {
+      "complexity": 23
+    },
+    "function:tools/browser_tools.py::build_browser_tools": {
+      "complexity": 31
+    },
+    "function:tools/browser_tools.py::build_browser_tools.<locals>.browser": {
+      "complexity": 30,
+      "nesting": 7
+    },
+    "function:tools/file_tools.py::read_file_content": {
+      "complexity": 23
+    },
+    "function:tools/search_tools.py::grep_content": {
+      "complexity": 25
+    },
+    "function:tools/shell_tools.py::run_shell_command": {
+      "complexity": 26
+    },
+    "function:tools/web_tools.py::search": {
+      "complexity": 22
+    },
+    "function:ui/decision_streaming.py::stream_decision": {
+      "complexity": 31
+    },
+    "function:ui/streaming.py::stream_answer": {
+      "complexity": 22
+    }
+  },
+  "limits": {
+    "complexity": 20,
+    "file_lines": 2000,
+    "function_lines": 300,
+    "nesting": 6
+  },
+  "version": 1
+}
