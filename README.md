@@ -10,13 +10,14 @@
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
 > **An agent you can take apart.**
-> The tool loop, approval cards, the Windows write-side sandbox, three-tier memory, semantic and literal retrieval,
-> persistent terminals, a controlled browser, MCP and skills, cron jobs — most of the skeleton an agent needs is
-> already running here; the rest is being finished.
+> I am learning agent development by writing one: the tool loop, approval cards, the Windows write-side sandbox,
+> three-tier memory, semantic and literal retrieval, persistent terminals, a controlled browser, MCP and skills,
+> cron jobs — most of the skeleton an agent needs is already running here, and the rest is being finished.
+> Everything follows one rule: implement it yourself, or you do not really understand it.
 >
 > v0.1.1 is still evolving: APIs will move and boundaries are being sharpened. **Not recommended as a production
-> dependency** — but it is **readable, inspectable and changeable**: every trade-off is written down in
-> `ARCHITECTURE.md` and `docs/`, instead of hiding behind "internal implementation".
+> dependency** — but it is **readable, inspectable and changeable**: the trade-offs are written down in
+> `ARCHITECTURE.md` and `docs/`, not hidden behind "internal implementation".
 >
 > Suggestions welcome; disagreement more so. If something is wrong, redundant, or missing from the security boundary,
 > open an issue.
