@@ -306,7 +306,8 @@ def test_preferences_schema_endpoint_lists_the_editable_fields(
 
     groups = {group["group"]: group for group in payload["groups"]}
     assert set(groups) == {
-        "execution", "agents", "retrieval", "memory", "medium_term", "compression",
+        # curated（常驻记忆，2026-10-27）与 medium_term 同组：两者都是"往 Prompt 里放什么"的选择。
+        "execution", "agents", "retrieval", "memory", "medium_term", "curated", "compression",
         "embedding", "web_access", "attachments",
     }
     provider = next(item for item in groups["web_access"]["fields"] if item["key"] == "provider")
@@ -2339,6 +2340,11 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
 
     assert set(schema["paths"]) == {
         "/api/health",
+        # 2026-10-27：设置页「关于」——版本与安装形态（只读）、检查更新、卸载交接。
+        # 不提供"自动安装"：本项目没有自升级器，检查只提醒并给出发布页。
+        "/api/app/info",
+        "/api/app/update/check",
+        "/api/app/uninstall",
         "/api/workspaces",
         "/api/workspaces/pick",
         "/api/workspaces/select",

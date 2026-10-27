@@ -8,8 +8,10 @@
 ; 三条约定（改之前先读）：
 ; 1. **按用户安装**（`PrivilegesRequired=lowest`）：装进 `%LOCALAPPDATA%\Programs\chaiai`，
 ;    不需要管理员权限。程序本身也不写 HKCU 以外的地方。
-; 2. **用户数据不归安装包管**：配置、SQLite、记忆都在 `%LOCALAPPDATA%\chaiai`（见 app_paths.py），
-;    与安装目录无关。因此卸载**不删**那个目录——删数据必须是用户自己的动作。
+; 2. **用户数据默认不归安装包管**：配置、SQLite、记忆都在 `%LOCALAPPDATA%\chaiai`（见 app_paths.py），
+;    与安装目录无关。卸载**不删**那个目录。程序内「设置 → 关于 → 卸载」可以显式勾选
+;    「同时删除数据目录」——那条路径不经过本脚本（由程序交接的批处理在卸载完成后执行，
+;    且先过 app_maintenance.removal_block_reason 的护栏）。删数据始终是用户自己的动作。
 ; 3. **升级＝再装一次**：AppId 固定，新版本直接覆盖安装；`CloseApplications=yes` 会在卸载/覆盖
 ;    前提示关闭正在运行的 chaiai.exe（Windows 不允许覆盖运行中的 exe）。
 ;
@@ -96,6 +98,8 @@ Filename: "{app}\{#AppExeName}"; Description: "立即启动 {#AppName}"; Flags: 
 [UninstallDelete]
 ; 只删安装目录里的运行时残留（启动日志可能落在 exe 同级）。
 ; **不要**在这里加 {localappdata}\chaiai：那是用户数据目录，卸载不删。
+; 「同时删除数据目录」是程序内卸载的显式勾选，由 `app_maintenance.schedule_uninstall` 交出的
+; 批处理在卸载器**之后**执行——把删除写到这里会让"不勾选也删"，与本文件第 2 条冲突。
 Type: files; Name: "{app}\启动错误.log"
 
 [Code]

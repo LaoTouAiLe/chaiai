@@ -23,6 +23,8 @@ import json
 from collections.abc import Iterable
 from typing import Final
 
+from fastapi import HTTPException
+from starlette.requests import Request
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 #: 需要校验 `Origin` 的方法：能改服务端状态的那些。
@@ -75,6 +77,22 @@ def is_allowed_origin(origin: str, host_header: str, allowed_origins: Iterable[s
     if origin.lower() in {item.strip().lower() for item in allowed_origins}:
         return True
     return _authority(origin) == _authority(host_header)
+
+
+def require_browser_origin(request: Request, *, allowed_origins: Iterable[str]) -> None:
+    """只接受**带同源浏览器元数据**的请求，否则抛传输层 403。
+
+    少数接口需要额外加严：它们会弹系统窗口、卸载本机程序或替换安装——那类能力只有本机页面
+    该调。跨源网页已被中间件挡住，这一条挡的是**本机脚本**（curl）：它想弹原生对话框、想卸载
+    程序，自己也能做，没有理由借这条路。
+
+    拒绝走传输层语义（`{"detail": ...}`）而不是业务信封：这不是业务结论，而是"这个请求不配进
+    业务逻辑"，与中间件对 `Host` / `Origin` 的判定属于同一层。
+    """
+    origin = request.headers.get("origin")
+    host = request.headers.get("host", "")
+    if origin is None or not is_allowed_origin(origin, host, allowed_origins):
+        raise HTTPException(status_code=403, detail="本接口只接受来自本机页面的同源请求。")
 
 
 class LocalBoundaryMiddleware:

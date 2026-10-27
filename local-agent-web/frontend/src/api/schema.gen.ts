@@ -4,6 +4,83 @@
  */
 
 export interface paths {
+    "/api/app/info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 版本与安装形态
+         * @description 「关于」页的全部本机事实：版本、装在哪、数据在哪、能不能卸、能否连数据一起删。
+         *
+         *     数据根复用「数据位置」那套解析（`service.storage_location()`），不在这里另算一份——
+         *     两处各算一次的话，页面显示的位置和真的删掉的位置会慢慢变成两个。
+         */
+        get: operations["app_info_api_app_info_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/app/uninstall": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 卸载本机程序（交接给安装程序）
+         * @description 把卸载交给 Inno 卸载器，**本进程随后退出**。
+         *
+         *     为什么不能自己删：`unins000.exe` 与 `chaiai.exe` 同级，Windows 不允许删除正在运行的
+         *     文件。所以这里只写一个延迟批处理（等本进程退出 → 调卸载器 → 按勾选删数据）并返回 202，
+         *     真正的退出由脚本里的 `taskkill` 完成。
+         *
+         *     `remove_data` 是**用户在弹窗里勾过**的结果，默认 false（`packaging/README.md` 的老约定：
+         *     用户数据不归安装包管）。数据目录不能安全删除时**拒绝整个请求**而不是偷偷降级——
+         *     用户勾了"删数据"却删不掉，比直接报错更糟。
+         */
+        post: operations["uninstall_api_app_uninstall_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/app/update/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 检查更新（GitHub Release）
+         * @description 查一次 GitHub 最新 Release 并与当前版本比较。
+         *
+         *     **只检查、不下载、不安装**（2026-10-27 拍板）：本项目没有自升级器，替用户覆盖安装
+         *     要能替换正在运行的 exe，那是另一整套东西。有新版就把发布页交给系统浏览器。
+         *
+         *     失败**不抛错**：`status="unavailable"` + `note` 就是完整答复。设置页是只读提醒，
+         *     不该因为 GitHub 连不上而变成一个错误页。
+         */
+        post: operations["check_update_api_app_update_check_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/attachments/oss/credential": {
         parameters: {
             query?: never;
@@ -1499,6 +1576,41 @@ export interface components {
             max_total_chars: number;
         };
         /**
+         * AppInfoView
+         * @description 「关于」页要显示的**本机事实**。
+         *
+         *     路径是绝对路径（与 `PickDirectoryView` 同一口径）：这一页就是给用户核对"装在哪儿、
+         *     数据在哪儿"用的，隐藏路径等于把最有用的信息删掉。注意它与 `/health` 的约束不同——
+         *     那里要公共可用性摘要，这里只给本机设置页看。
+         */
+        AppInfoView: {
+            build?: components["schemas"]["BuildInfoView"] | null;
+            /** Can Remove Data */
+            can_remove_data: boolean;
+            /** Data Root */
+            data_root: string;
+            /**
+             * Data Root Source
+             * @enum {string}
+             */
+            data_root_source: "environment" | "settings" | "config" | "default";
+            /** Install Dir */
+            install_dir?: string | null;
+            /**
+             * Install Kind
+             * @enum {string}
+             */
+            install_kind: "installed" | "portable" | "source";
+            /** Remove Data Note */
+            remove_data_note?: string | null;
+            /** Uninstall Available */
+            uninstall_available: boolean;
+            /** Uninstall Note */
+            uninstall_note?: string | null;
+            /** Version */
+            version: string;
+        };
+        /**
          * ApprovalDecisionRequest
          * @description 审批决定。
          *
@@ -2095,6 +2207,20 @@ export interface components {
             url: string;
         };
         /**
+         * BuildInfoView
+         * @description `BUILD_INFO.txt` 的摘要：打包机写入，让"这个包对应哪份代码"可以复核。
+         */
+        BuildInfoView: {
+            /** Built At */
+            built_at: string;
+            /** Dirty */
+            dirty: string;
+            /** Python */
+            python: string;
+            /** Revision */
+            revision: string;
+        };
+        /**
          * CancelTaskRequest
          * @description 取消当前会话在跑的任务（架构 §15.2、§17.4）。**幂等**：没有可取消的任务时是空操作。
          *
@@ -2518,6 +2644,38 @@ export interface components {
             runs: components["schemas"]["CronRunView"][];
             /** Total */
             total: number;
+        };
+        /**
+         * CuratedMemoryPreferences
+         * @description 常驻记忆（``MEMORY.md`` / ``USER.md``，2026-10-27；架构 §10.7）。
+         *
+         *     与参照实现的设置页一一对应：两个开关 + 两个预算。三条说明写在这里，因为页面 note 只是转述：
+         *
+         *     - 预算是**字符**不是 token，默认 2200 / 1375；
+         *     - 改小**不会删除**已有内容（加载时只告警、不截断），只影响后续能否再添加；
+         *     - 两块内容每轮进系统提示，是固定成本——这与中期/长期的"按需召回"不是一回事。
+         */
+        CuratedMemoryPreferences: {
+            /**
+             * Enabled
+             * @default true
+             */
+            enabled: boolean;
+            /**
+             * Memory Char Limit
+             * @default 2200
+             */
+            memory_char_limit: number;
+            /**
+             * User Char Limit
+             * @default 1375
+             */
+            user_char_limit: number;
+            /**
+             * User Profile Enabled
+             * @default true
+             */
+            user_profile_enabled: boolean;
         };
         /** DelegatedResearchRequest */
         DelegatedResearchRequest: {
@@ -4327,6 +4485,7 @@ export interface components {
             agents?: components["schemas"]["AgentsPreferences"] | null;
             attachments?: components["schemas"]["AttachmentsPreferences"] | null;
             compression?: components["schemas"]["CompressionPreferences"] | null;
+            curated?: components["schemas"]["CuratedMemoryPreferences"] | null;
             embedding?: components["schemas"]["EmbeddingPreferences"] | null;
             execution: components["schemas"]["ExecutionPreferences"];
             general?: components["schemas"]["GeneralPreferences"];
@@ -5621,6 +5780,34 @@ export interface components {
             user_message_id: string;
         };
         /**
+         * UninstallRequest
+         * @description 卸载请求。
+         *
+         *     `remove_data=False` 是默认，也是**老约定**（`packaging/README.md` 的"用户数据不归安装包管"）：
+         *     传 `true` 是用户在弹窗里显式勾选过"同时删除数据"，不是服务端替他决定。
+         */
+        UninstallRequest: {
+            /**
+             * Remove Data
+             * @default false
+             */
+            remove_data: boolean;
+        };
+        /**
+         * UninstallView
+         * @description 卸载已交出去（202 + `scheduled=true`）：进程随后会被脚本结束，前端不该再发请求。
+         */
+        UninstallView: {
+            /** Data Dir */
+            data_dir: string;
+            /** Message */
+            message: string;
+            /** Remove Data */
+            remove_data: boolean;
+            /** Scheduled */
+            scheduled: boolean;
+        };
+        /**
          * UnrecordedChangeView
          * @description 命令/代码改过、但**没有进账本**的文件（2026-10-22）。
          *
@@ -5637,6 +5824,27 @@ export interface components {
             reason: string;
             /** Status */
             status: string;
+        };
+        /**
+         * UpdateCheckView
+         * @description 一次检查更新的结果。**查不到不算错误**：`unavailable` + `note` 就是完整答复。
+         */
+        UpdateCheckView: {
+            /** Current Version */
+            current_version: string;
+            /** Latest Version */
+            latest_version?: string | null;
+            /** Note */
+            note?: string | null;
+            /** Published At */
+            published_at?: string | null;
+            /** Release Url */
+            release_url?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "update_available" | "up_to_date" | "unavailable";
         };
         /** UsageBucketView */
         UsageBucketView: {
@@ -6000,6 +6208,102 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    app_info_api_app_info_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AppInfoView"];
+                };
+            };
+        };
+    };
+    uninstall_api_app_uninstall_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UninstallRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UninstallView"];
+                };
+            };
+            /** @description 不是本机页面的同源请求（本接口只服务于页面） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 当前形态没有可卸载的安装（绿色包 / 源码运行） */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_update_api_app_update_check_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdateCheckView"];
+                };
+            };
+            /** @description 不是本机页面的同源请求（本接口只服务于页面） */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_oss_credential_api_attachments_oss_credential_get: {
         parameters: {
             query?: never;

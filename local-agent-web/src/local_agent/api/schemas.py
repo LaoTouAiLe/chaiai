@@ -325,6 +325,73 @@ class HealthView(BaseModel):
     static_frontend: bool
 
 
+# ---- 应用身份与维护（2026-10-27，设置页「关于」）--------------------------
+
+
+class BuildInfoView(BaseModel):
+    """`BUILD_INFO.txt` 的摘要：打包机写入，让"这个包对应哪份代码"可以复核。"""
+
+    built_at: str
+    revision: str
+    dirty: str
+    python: str
+
+
+class AppInfoView(BaseModel):
+    """「关于」页要显示的**本机事实**。
+
+    路径是绝对路径（与 `PickDirectoryView` 同一口径）：这一页就是给用户核对"装在哪儿、
+    数据在哪儿"用的，隐藏路径等于把最有用的信息删掉。注意它与 `/health` 的约束不同——
+    那里要公共可用性摘要，这里只给本机设置页看。
+    """
+
+    version: str
+    #: `installed` 安装版 / `portable` 绿色包 / `source` 源码。
+    install_kind: Literal["installed", "portable", "source"]
+    #: 源码形态为 `null`（没有"安装目录"这回事）。
+    install_dir: str | None = None
+    data_root: str
+    data_root_source: Literal["environment", "settings", "config", "default"]
+    build: BuildInfoView | None = None
+    #: 卸载入口可不可点；不可点时 `uninstall_note` 必须说明下一步怎么做。
+    uninstall_available: bool
+    uninstall_note: str | None = None
+    #: 「同时删除数据」勾选框能不能勾；不能时 `remove_data_note` 说明原因。
+    can_remove_data: bool
+    remove_data_note: str | None = None
+
+
+class UpdateCheckView(BaseModel):
+    """一次检查更新的结果。**查不到不算错误**：`unavailable` + `note` 就是完整答复。"""
+
+    status: Literal["update_available", "up_to_date", "unavailable"]
+    current_version: str
+    latest_version: str | None = None
+    #: GitHub Release 页面（不是 API 地址）：前端直接交给系统浏览器打开。
+    release_url: str | None = None
+    published_at: str | None = None
+    note: str | None = None
+
+
+class UninstallRequest(_Request):
+    """卸载请求。
+
+    `remove_data=False` 是默认，也是**老约定**（`packaging/README.md` 的"用户数据不归安装包管"）：
+    传 `true` 是用户在弹窗里显式勾选过"同时删除数据"，不是服务端替他决定。
+    """
+
+    remove_data: bool = False
+
+
+class UninstallView(BaseModel):
+    """卸载已交出去（202 + `scheduled=true`）：进程随后会被脚本结束，前端不该再发请求。"""
+
+    scheduled: bool
+    remove_data: bool
+    data_dir: str
+    message: str
+
+
 class PickDirectoryView(BaseModel):
     """本机目录选择器的结果：`path` 是选中的**绝对路径**，用户取消时为 `null`。
 

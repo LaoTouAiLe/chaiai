@@ -26,6 +26,99 @@
         "title": "AgentsPreferences",
         "type": "object"
       },
+      "AppInfoView": {
+        "description": "「关于」页要显示的**本机事实**。\n\n路径是绝对路径（与 `PickDirectoryView` 同一口径）：这一页就是给用户核对\"装在哪儿、\n数据在哪儿\"用的，隐藏路径等于把最有用的信息删掉。注意它与 `/health` 的约束不同——\n那里要公共可用性摘要，这里只给本机设置页看。",
+        "properties": {
+          "build": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BuildInfoView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "can_remove_data": {
+            "title": "Can Remove Data",
+            "type": "boolean"
+          },
+          "data_root": {
+            "title": "Data Root",
+            "type": "string"
+          },
+          "data_root_source": {
+            "enum": [
+              "environment",
+              "settings",
+              "config",
+              "default"
+            ],
+            "title": "Data Root Source",
+            "type": "string"
+          },
+          "install_dir": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Install Dir"
+          },
+          "install_kind": {
+            "enum": [
+              "installed",
+              "portable",
+              "source"
+            ],
+            "title": "Install Kind",
+            "type": "string"
+          },
+          "remove_data_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remove Data Note"
+          },
+          "uninstall_available": {
+            "title": "Uninstall Available",
+            "type": "boolean"
+          },
+          "uninstall_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uninstall Note"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "version",
+          "install_kind",
+          "data_root",
+          "data_root_source",
+          "uninstall_available",
+          "can_remove_data"
+        ],
+        "title": "AppInfoView",
+        "type": "object"
+      },
       "ApprovalDecisionRequest": {
         "additionalProperties": false,
         "description": "审批决定。\n\n`edit` 必须带 `edited_arguments`（否则服务不知道该执行什么）；反过来，非 `edit` 带参数\n会被拒绝——那会让\"用户改了参数\"与\"实际执行的参数\"出现两份不一致的真相（§15.7）。",
@@ -1119,6 +1212,35 @@
         "title": "BrowserView",
         "type": "object"
       },
+      "BuildInfoView": {
+        "description": "`BUILD_INFO.txt` 的摘要：打包机写入，让\"这个包对应哪份代码\"可以复核。",
+        "properties": {
+          "built_at": {
+            "title": "Built At",
+            "type": "string"
+          },
+          "dirty": {
+            "title": "Dirty",
+            "type": "string"
+          },
+          "python": {
+            "title": "Python",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "built_at",
+          "revision",
+          "dirty",
+          "python"
+        ],
+        "title": "BuildInfoView",
+        "type": "object"
+      },
       "CancelTaskRequest": {
         "additionalProperties": false,
         "description": "取消当前会话在跑的任务（架构 §15.2、§17.4）。**幂等**：没有可取消的任务时是空操作。\n\n刻意**不带** `client_request_id`：取消不进幂等台账（重复调用本来就是空操作），\n要求一个用不上的幂等键只会让调用方以为\"取消也会被去重\"。",
@@ -2147,6 +2269,36 @@
           "limit"
         ],
         "title": "CronRunsPageView",
+        "type": "object"
+      },
+      "CuratedMemoryPreferences": {
+        "additionalProperties": false,
+        "description": "常驻记忆（``MEMORY.md`` / ``USER.md``，2026-10-27；架构 §10.7）。\n\n与参照实现的设置页一一对应：两个开关 + 两个预算。三条说明写在这里，因为页面 note 只是转述：\n\n- 预算是**字符**不是 token，默认 2200 / 1375；\n- 改小**不会删除**已有内容（加载时只告警、不截断），只影响后续能否再添加；\n- 两块内容每轮进系统提示，是固定成本——这与中期/长期的\"按需召回\"不是一回事。",
+        "properties": {
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "memory_char_limit": {
+            "default": 2200,
+            "exclusiveMinimum": 0.0,
+            "title": "Memory Char Limit",
+            "type": "integer"
+          },
+          "user_char_limit": {
+            "default": 1375,
+            "exclusiveMinimum": 0.0,
+            "title": "User Char Limit",
+            "type": "integer"
+          },
+          "user_profile_enabled": {
+            "default": true,
+            "title": "User Profile Enabled",
+            "type": "boolean"
+          }
+        },
+        "title": "CuratedMemoryPreferences",
         "type": "object"
       },
       "DelegatedResearchRequest": {
@@ -6175,6 +6327,16 @@
               }
             ]
           },
+          "curated": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CuratedMemoryPreferences"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "embedding": {
             "anyOf": [
               {
@@ -9331,6 +9493,48 @@
         "title": "TurnUsageView",
         "type": "object"
       },
+      "UninstallRequest": {
+        "additionalProperties": false,
+        "description": "卸载请求。\n\n`remove_data=False` 是默认，也是**老约定**（`packaging/README.md` 的\"用户数据不归安装包管\"）：\n传 `true` 是用户在弹窗里显式勾选过\"同时删除数据\"，不是服务端替他决定。",
+        "properties": {
+          "remove_data": {
+            "default": false,
+            "title": "Remove Data",
+            "type": "boolean"
+          }
+        },
+        "title": "UninstallRequest",
+        "type": "object"
+      },
+      "UninstallView": {
+        "description": "卸载已交出去（202 + `scheduled=true`）：进程随后会被脚本结束，前端不该再发请求。",
+        "properties": {
+          "data_dir": {
+            "title": "Data Dir",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "remove_data": {
+            "title": "Remove Data",
+            "type": "boolean"
+          },
+          "scheduled": {
+            "title": "Scheduled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "scheduled",
+          "remove_data",
+          "data_dir",
+          "message"
+        ],
+        "title": "UninstallView",
+        "type": "object"
+      },
       "UnrecordedChangeView": {
         "description": "命令/代码改过、但**没有进账本**的文件（2026-10-22）。\n\n为什么单列而不并进账本：这些写入没有\"改前原文\"，塞进账本会让面板假装自己有基线。\n用户需要知道的是\"还有这些文件被动过\"，而不是让面板谎报完整性。",
         "properties": {
@@ -9353,6 +9557,74 @@
           "status"
         ],
         "title": "UnrecordedChangeView",
+        "type": "object"
+      },
+      "UpdateCheckView": {
+        "description": "一次检查更新的结果。**查不到不算错误**：`unavailable` + `note` 就是完整答复。",
+        "properties": {
+          "current_version": {
+            "title": "Current Version",
+            "type": "string"
+          },
+          "latest_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Version"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "published_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published At"
+          },
+          "release_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Url"
+          },
+          "status": {
+            "enum": [
+              "update_available",
+              "up_to_date",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "current_version"
+        ],
+        "title": "UpdateCheckView",
         "type": "object"
       },
       "UsageBucketView": {
@@ -10146,6 +10418,99 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/app/info": {
+      "get": {
+        "description": "「关于」页的全部本机事实：版本、装在哪、数据在哪、能不能卸、能否连数据一起删。\n\n数据根复用「数据位置」那套解析（`service.storage_location()`），不在这里另算一份——\n两处各算一次的话，页面显示的位置和真的删掉的位置会慢慢变成两个。",
+        "operationId": "app_info_api_app_info_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AppInfoView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "版本与安装形态"
+      }
+    },
+    "/api/app/uninstall": {
+      "post": {
+        "description": "把卸载交给 Inno 卸载器，**本进程随后退出**。\n\n为什么不能自己删：`unins000.exe` 与 `chaiai.exe` 同级，Windows 不允许删除正在运行的\n文件。所以这里只写一个延迟批处理（等本进程退出 → 调卸载器 → 按勾选删数据）并返回 202，\n真正的退出由脚本里的 `taskkill` 完成。\n\n`remove_data` 是**用户在弹窗里勾过**的结果，默认 false（`packaging/README.md` 的老约定：\n用户数据不归安装包管）。数据目录不能安全删除时**拒绝整个请求**而不是偷偷降级——\n用户勾了\"删数据\"却删不掉，比直接报错更糟。",
+        "operationId": "uninstall_api_app_uninstall_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UninstallRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UninstallView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "不是本机页面的同源请求（本接口只服务于页面）"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "当前形态没有可卸载的安装（绿色包 / 源码运行）"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "卸载本机程序（交接给安装程序）"
+      }
+    },
+    "/api/app/update/check": {
+      "post": {
+        "description": "查一次 GitHub 最新 Release 并与当前版本比较。\n\n**只检查、不下载、不安装**（2026-10-27 拍板）：本项目没有自升级器，替用户覆盖安装\n要能替换正在运行的 exe，那是另一整套东西。有新版就把发布页交给系统浏览器。\n\n失败**不抛错**：`status=\"unavailable\"` + `note` 就是完整答复。设置页是只读提醒，\n不该因为 GitHub 连不上而变成一个错误页。",
+        "operationId": "check_update_api_app_update_check_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdateCheckView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "不是本机页面的同源请求（本接口只服务于页面）"
+          }
+        },
+        "summary": "检查更新（GitHub Release）"
+      }
+    },
     "/api/attachments/oss/credential": {
       "delete": {
         "operationId": "delete_oss_credential_api_attachments_oss_credential_delete",

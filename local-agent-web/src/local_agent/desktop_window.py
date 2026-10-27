@@ -75,19 +75,27 @@ def run(
             log_level="info",
         )
     )
+    # 冻结形态在**这里**就把控制台藏起来（2026-10-27）：那个黑框是 PyInstaller 的 console 子系统
+    # 在 `CreateProcess` 那一刻创建的，代码只能事后 `ShowWindow(SW_HIDE)`——藏得越晚，它活得越久。
+    # 原先藏在"服务就绪之后"，于是黑框覆盖了整个启动过程（解包 + 建库 + 绑端口），首次启动能有
+    # 好几秒。挪到这里（服务对象已构造、线程还没起）后，用户只看到解释器启动的一瞬间；
+    # 构造期的配置错误仍发生在隐藏之前，原因照旧看得见。
+    #
+    # 代价是之后的失败原因默认不可见，所以**每一个**失败出口都必须把控制台还回去
+    # （`_wait_until_ready` 失败、窗口创建失败）。源码形态 `_hide_console` 返回 None，行为不变。
+    console = _hide_console()
     thread = threading.Thread(target=server.run, name="chaiai-http", daemon=True)
     thread.start()
 
     if not _wait_until_ready(probe_host, port):
+        # 先还控制台再打印：否则"服务没起来"这句话被写进一个看不见的窗口。
+        _show_console(console)
         print(f"服务在 {READY_TIMEOUT_SECONDS:.0f} 秒内没有就绪，窗口不打开。", file=sys.stderr)
         server.should_exit = True
         thread.join(timeout=SHUTDOWN_TIMEOUT_SECONDS)
         return 1
 
     print(f"正在打开窗口：{page_url}", flush=True)
-    # 冻结形态把黑色控制台藏起来：双击 exe 的人期望看到的是"一个程序"，不是一个命令行窗口。
-    # 源码形态**不藏**——那个控制台就是开发者自己的终端。
-    console = _hide_console()
     try:
         webview.create_window(
             title,

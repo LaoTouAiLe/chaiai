@@ -857,6 +857,41 @@ export function resetStorageLocation(): Promise<StorageLocationDto> {
   return request<StorageLocationDto>('/api/storage', { method: 'DELETE' })
 }
 
+// ---- 应用身份与维护（2026-10-27，「关于」页）--------------------------------
+
+export type AppInfoDto = components['schemas']['AppInfoView']
+export type UpdateCheckDto = components['schemas']['UpdateCheckView']
+export type UninstallResultDto = components['schemas']['UninstallView']
+
+/** 「关于」页的本机事实：版本、安装形态（安装版/绿色包/源码）、数据目录、卸载可用性。 */
+export function getAppInfo(): Promise<AppInfoDto> {
+  return request<AppInfoDto>('/api/app/info')
+}
+
+/**
+ * 检查更新（GitHub Release，**只查不装**）。
+ *
+ * 失败不抛错：`status: 'unavailable'` + `note` 就是完整答复。调用方按 status 分支，
+ * 不要把它当异常路径——GitHub 连不上不该让设置页变成错误页。
+ */
+export function checkForUpdate(): Promise<UpdateCheckDto> {
+  return request<UpdateCheckDto>('/api/app/update/check', { method: 'POST' })
+}
+
+/**
+ * 卸载：交接给安装程序，本进程随后退出（202）。
+ *
+ * `removeData` 必须是用户在弹窗里**显式勾选**的结果，默认不删（`packaging/README.md`
+ * 的老约定：用户数据不归安装包管）。数据目录不能安全删除时服务端返回 422，
+ * 不会偷偷降级成"不删"——那种静默改写比报错更糟。
+ */
+export function uninstallApp(removeData: boolean): Promise<UninstallResultDto> {
+  return request<UninstallResultDto>('/api/app/uninstall', {
+    method: 'POST',
+    body: JSON.stringify({ remove_data: removeData }),
+  })
+}
+
 /** 对象存储密钥状态（2026-10-20）：只报"有没有"，不回读密钥。 */
 export function getOssCredential(): Promise<components['schemas']['OssCredentialView']> {
   return request<components['schemas']['OssCredentialView']>('/api/attachments/oss/credential')

@@ -304,3 +304,33 @@ def bundled_static_dir() -> Path | None:
         return None
     candidate = base.joinpath(*STATIC_DIR_PARTS)
     return candidate if candidate.is_dir() else None
+
+
+#: Inno Setup 卸载器的默认文件名。`packaging/chaiai.iss` **没有**改 `UninstallFilesDir`，
+#: 所以它固定与 `chaiai.exe` 同级；改那一项会让这里的判断失效。
+UNINSTALLER_NAME: Final[str] = "unins000.exe"
+
+
+def install_dir() -> Path | None:
+    """程序**安装目录**（`chaiai.exe` 所在处）；源码形态返回 ``None``。
+
+    为什么用 ``sys.executable`` 的父目录而不是 ``resource_dir()``：后者是 onedir 的
+    ``_internal/``，只读资源在那儿，但卸载器与 ``skills/`` 在**上一层**。
+    """
+    if not is_frozen():
+        return None
+    return Path(sys.executable).parent
+
+
+def uninstaller_path() -> Path | None:
+    """安装版的卸载器；**绿色包与源码形态返回 ``None``**。
+
+    三种形态的"卸载"不是一回事（`packaging/README.md`）：
+    安装版有 Inno 卸载器；绿色包是"删掉解压目录"，删之前自己不能在里面跑；
+    源码形态根本没有可卸的东西。调用方据此决定按钮是否可点，不要自己拼路径。
+    """
+    base = install_dir()
+    if base is None:
+        return None
+    candidate = base / UNINSTALLER_NAME
+    return candidate if candidate.is_file() else None

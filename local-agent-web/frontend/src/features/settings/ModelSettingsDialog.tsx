@@ -8,11 +8,12 @@ import { useCallback, useMemo, useState } from 'react'
 import { pickWorkspaceDirectory } from '../../api/client'
 import type { ModelConnectionDto, ModelConnectionInput } from '../../api/client'
 import { toSettingsView } from '../../api/viewModels'
+import { AboutSection } from './AboutSection'
 import { ConnectionForm } from './ConnectionForm'
 import { SettingsDialog } from './SettingsDialog'
 import { useModelSettings } from './useModelSettings'
 import { usePermissions } from './usePermissions'
-import { PreferenceSection } from './PreferenceSection'
+import { PREFERENCE_SECTIONS, PreferenceSection } from './PreferenceSection'
 import styles from './SettingsDialog.module.css'
 
 export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
@@ -110,21 +111,12 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
       settings={view}
       form={form}
       extraSections={{
-        // 技能 / 能力 / MCP 三块 2026-10-22 已移出设置，改由侧栏「能力中心」整页提供
-        // （`features/capabilities/CapabilitiesCenter.tsx`）。这里不再注入，避免同一件事两个入口。
-        general: <PreferenceSection group="general" />,
-        storage: <PreferenceSection group="storage" />,
-        execution: <PreferenceSection group="execution" />,
-        agents: <PreferenceSection group="agents" />,
-        retrieval: <PreferenceSection group="retrieval" />,
-        web_access: <PreferenceSection group="web_access" />,
-        // 图片与附件（2026-10-20）：目前只有"图片上下文轮数"；存储后端等 OSS 接入后再加。
-        attachments: <PreferenceSection group="attachments" />,
-        memory: <PreferenceSection group="memory" />,
-        medium_term: <PreferenceSection group="medium_term" />,
-        compression: <PreferenceSection group="compression" />,
-        embedding: <PreferenceSection group="embedding" />,
-        advanced: <PreferenceSection group="advanced" />,
+        ...Object.fromEntries(
+          PREFERENCE_SECTIONS.map(group => [group, <PreferenceSection group={group} />]),
+        ),
+        // 关于（2026-10-27）：不是偏好分区——它读的是宿主形态（版本、装在哪、能不能卸），
+        // 后端也刻意没让它进设置库。所以单独注入，不塞进 `FIELDS`。
+        about: <AboutSection />,
       }}
       permissionBusy={permissions.busy}
       permissionError={permissions.error?.message ?? null}

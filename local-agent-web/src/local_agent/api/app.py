@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse, Response
 
 from local_agent.api.browsers import build_browser_router
 from local_agent.api.container import ApiRuntime
+from local_agent.api.maintenance import build_maintenance_router
 from local_agent.api.routes import build_router, status_for_code
 from local_agent.api.schema_extras import merge_event_schemas
 from local_agent.api.security import LocalBoundaryMiddleware
@@ -130,6 +131,9 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
 
     app.add_exception_handler(RequestValidationError, validation_error)
     app.include_router(build_router(runtime))
+    # 应用身份与维护（2026-10-27）：与业务路由分开装配——它读宿主形态（版本、装在哪、能不能卸），
+    # 也没有对应的应用服务用例。
+    app.include_router(build_maintenance_router(runtime))
     app.include_router(build_events_router(runtime))
     app.include_router(build_terminal_router(runtime))
     app.include_router(build_browser_router(browsers))

@@ -47,7 +47,7 @@ interface SettingsDialogProps {
   extraSections?: Partial<Record<SettingsSection, ReactNode>>
 }
 
-export type SettingsSection = 'models' | 'permissions' | 'skills' | 'capabilities' | 'general' | 'storage' | 'execution' | 'agents' | 'retrieval' | 'web_access' | 'mcp' | 'attachments' | 'memory' | 'medium_term' | 'compression' | 'embedding' | 'advanced'
+export type SettingsSection = 'models' | 'permissions' | 'skills' | 'capabilities' | 'general' | 'storage' | 'about' | 'execution' | 'agents' | 'retrieval' | 'web_access' | 'mcp' | 'attachments' | 'memory' | 'medium_term' | 'curated' | 'compression' | 'embedding' | 'advanced'
 
 /** 原型保留连接/权限；真实宿主注入应用设置各组。 */
 /**
@@ -63,6 +63,9 @@ const SECTIONS: readonly { id: SettingsSection; label: string }[] = [
   { id: 'permissions', label: '权限' },
   { id: 'general', label: '通用与外观' },
   { id: 'storage', label: '数据位置' },
+  // 关于（2026-10-27）：版本与更新、卸载。与"数据位置"同组——都是"这台机器怎么跑"，
+  // 而且它读的也是宿主形态（装在哪、能不能卸），不是发给模型的偏好。
+  { id: 'about', label: '关于' },
   { id: 'execution', label: '任务执行' },
   { id: 'agents', label: '项目规则' },
   { id: 'retrieval', label: '自动代码检索' },
@@ -70,6 +73,7 @@ const SECTIONS: readonly { id: SettingsSection; label: string }[] = [
   { id: 'attachments', label: '图片与附件' },
   { id: 'memory', label: '长期记忆' },
   { id: 'medium_term', label: '中期记忆' },
+  { id: 'curated', label: '常驻记忆' },
   { id: 'compression', label: '上下文压缩' },
   { id: 'embedding', label: '向量库与 Embedding' },
   { id: 'advanced', label: '高级配置' },
@@ -85,10 +89,11 @@ const SECTION_GROUPS: readonly { label: string; ids: readonly SettingsSection[] 
   // 项目规则（AGENTS.md）与任务执行并列：它决定"模型在这个工作区里怎么干活"，不是记忆。
   { label: '任务与工具', ids: ['execution', 'agents', 'retrieval', 'web_access', 'attachments'] },
   // 压缩挂在"记忆"这一组：它管的是上下文要不要摘、摘完留多少，与三层记忆同一类事。
-  { label: '记忆与上下文', ids: ['memory', 'medium_term', 'compression', 'embedding'] },
+  // 常驻记忆（2026-10-27）：放在中期之后、"上下文压缩"之前——按"必到 → 按需 → 压缩"的阅读顺序。
+  { label: '记忆与上下文', ids: ['memory', 'medium_term', 'curated', 'compression', 'embedding'] },
   // 分组标题只做归类；`通用与外观` 与只读的 `高级配置` 都是"改页面本身怎么跑"，同放一组。
   // 「数据位置」与通用同组：两者都是"这台机器怎么跑"，改完要重启或立即生效的本地设定。
-  { label: '通用', ids: ['general', 'storage', 'advanced'] },
+  { label: '通用', ids: ['general', 'storage', 'about', 'advanced'] },
 ]
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {

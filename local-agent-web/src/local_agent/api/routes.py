@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final, Literal, cast
@@ -60,7 +59,7 @@ from local_agent.api.schemas import (
     SubmitMessageRequest,
     WebSearchKeyRequest,
 )
-from local_agent.api.security import is_allowed_origin
+from local_agent.api.security import require_browser_origin
 from local_agent.application import errors as app_errors
 from local_agent.application.cron_models import (
     CronJobCreateRequest,
@@ -138,6 +137,8 @@ _STATUS_BY_CODE: Final[dict[str, int]] = {
     app_errors.SETTINGS_STORE_UNAVAILABLE: 503,
     # 宿主能力故障（弹不出目录选择器）：服务还在，依赖不可用，稍后可重试。
     app_errors.DIRECTORY_PICKER_UNAVAILABLE: 503,
+    # 请求本身成立，但当前形态（绿色包 / 源码）没有可卸载的安装：是状态不允许，不是服务故障。
+    app_errors.UNINSTALL_UNAVAILABLE: 409,
 }
 
 #: 默认状态码：不在表里就是**未预期**，不假装知道它该怎么重试。
@@ -201,20 +202,7 @@ def _validated_path(raw: str) -> Path:
         raise app_errors.workspace_unusable(occurred_at=datetime.now(timezone.utc)) from exc
 
 
-def _require_browser_origin(request: Request, *, allowed_origins: Iterable[str]) -> None:
-    """只接受**带同源浏览器元数据**的请求，否则抛传输层 403。
 
-    本服务只有这一个接口需要额外加严：它会往用户桌面上弹一个窗口，是唯一能**干扰桌面**的能力。
-    跨源网页已被中间件挡住，这一条挡的是**本机脚本**（curl）——它想要原生对话框的话自己就能弹，
-    没有理由借这条路。
-
-    拒绝走传输层语义（`{"detail": ...}`）而不是业务信封：这不是业务结论，而是"这个请求不配进
-    业务逻辑"，与中间件对 `Host` / `Origin` 的判定属于同一层。
-    """
-    origin = request.headers.get("origin")
-    host = request.headers.get("host", "")
-    if origin is None or not is_allowed_origin(origin, host, allowed_origins):
-        raise HTTPException(status_code=403, detail="本接口只接受来自本机页面的同源请求。")
 
 
 def _selection_ref(payload: SelectionExpectation) -> SelectionRef:
@@ -543,7 +531,7 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         为什么是独立一步、而不是"选完直接登记"：取消是正常操作，不该改变任何状态。选完之后由
         前端调既有的 `POST /workspaces/select { path }`——校验、幂等与错误码全部复用那条路。
         """
-        _require_browser_origin(request, allowed_origins=runtime.web.dev_origins)
+        require_browser_origin(request, allowed_origins=runtime.web.dev_origins)
         try:
             path = directory_picker.pick_directory()
         except directory_picker.DirectoryPickerError as exc:

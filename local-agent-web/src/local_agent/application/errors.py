@@ -70,6 +70,10 @@ SETTINGS_STORE_UNAVAILABLE: Final[str] = "SETTINGS_STORE_UNAVAILABLE"
 # 文案必须把"没弹出来"与"你选错了目录"分开——后者是 `WORKSPACE_NOT_FOUND`。
 DIRECTORY_PICKER_UNAVAILABLE: Final[str] = "DIRECTORY_PICKER_UNAVAILABLE"
 
+# 宿主能力：当前形态没有可卸载的安装（绿色包 / 源码运行）。这是**请求不成立**，
+# 不是故障：页面早就从 `GET /api/app/info` 知道按钮该不该亮，这里挡的是直接打接口。
+UNINSTALL_UNAVAILABLE: Final[str] = "UNINSTALL_UNAVAILABLE"
+
 # 安全：与既有 SecurityError / WorkspaceBoundaryError 对应（v0.1–v0.3 语义不变）。
 SECURITY_POLICY_DENIED: Final[str] = "SECURITY_POLICY_DENIED"
 WORKSPACE_BOUNDARY_VIOLATION: Final[str] = "WORKSPACE_BOUNDARY_VIOLATION"
@@ -142,6 +146,7 @@ _ERROR_CATEGORY_OF: Final[dict[str, ErrorCategory]] = {
     SESSION_NOT_FOUND: "system",
     WORKSPACE_NOT_FOUND: "configuration",
     DIRECTORY_PICKER_UNAVAILABLE: "system",
+    UNINSTALL_UNAVAILABLE: "system",
 }
 
 #: 同一次提交在条件满足后能否原样重试（§15.5）。
@@ -184,6 +189,7 @@ _RETRY_CONDITION: Final[dict[str, str]] = {
     SESSION_NOT_FOUND: "刷新会话列表后重新选择；已删除的会话不会恢复。",
     WORKSPACE_NOT_FOUND: "刷新工作区列表后重新选择；新工作区可按路径添加。",
     DIRECTORY_PICKER_UNAVAILABLE: "确认本机桌面会话可用（远程桌面断开时弹不出窗口）后重新点击。",
+    UNINSTALL_UNAVAILABLE: "不需要重试：安装版可直接卸载，绿色版关闭程序后删除程序文件夹即可。",
 }
 
 ERROR_CODES: Final[tuple[str, ...]] = tuple(_ERROR_CATEGORY_OF)
@@ -339,6 +345,24 @@ def directory_picker_unavailable(*, occurred_at: datetime) -> ApplicationError:
             message="没能弹出系统的文件夹选择窗口：这次没有选中任何目录，工作区没有被改变。",
             hint="重新点一次「添加工作区」即可；若反复打不开，先确认本机桌面会话可用。",
             diagnostic_id=diagnostic_id_for(DIRECTORY_PICKER_UNAVAILABLE, "pick"),
+            occurred_at=occurred_at,
+        )
+    )
+
+
+def uninstall_unavailable(*, note: str, occurred_at: datetime) -> ApplicationError:
+    """当前形态没有可卸载的安装（绿色包 / 源码运行）。
+
+    文案由调用方取 :func:`local_agent.app_maintenance.uninstall_note`——那里是唯一真源，
+    这一段只管把它包成公开信封。**不放进可重试集合**：换个时机点也还是同一个形态。
+    """
+    return ApplicationError(
+        ErrorView.for_code(
+            UNINSTALL_UNAVAILABLE,
+            title="没有可卸载的安装",
+            message=note,
+            hint="安装版在开始菜单里有「卸载 chaiai」；绿色版关闭程序后删除程序文件夹即可。",
+            diagnostic_id=diagnostic_id_for(UNINSTALL_UNAVAILABLE, "uninstall"),
             occurred_at=occurred_at,
         )
     )
