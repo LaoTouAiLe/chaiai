@@ -9,8 +9,16 @@
 ![Node](https://img.shields.io/badge/node-22.20%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
-> **状态：v0.1.1 早期版本。** 契约与接口仍在变动，不建议作为生产依赖。
-> 现在开源是为了先听意见——结构、契约、安全边界上的问题，欢迎直接开 issue。
+> **这是一个学习项目。** 我在学 agent 开发，边学边写：工具循环、审批卡、Windows 写沙箱、三层记忆、
+> 检索、权限边界，都按"自己实现一遍才算真懂"的标准做。所以它的**文档与测试密度明显高于功能完备度**——
+> v0.1.1 还是早期版本，契约与接口仍会变，**不建议作为生产依赖**。
+>
+> **非常欢迎你的意见，尤其是反对意见。** 架构哪里想错了、哪些抽象是多余的、安全边界漏了什么，
+> 直接开 issue 或 PR 都行，不需要客气。
+
+**技术栈**：Python 3.13 · FastAPI + SSE · LangGraph（工具循环与检查点）· SQLite / Chroma ·
+React 19 + Vite 8 + TypeScript · PyInstaller onedir + Inno Setup + WebView2 ·
+**3068 个后端测试、634 个前端测试**
 
 ![对话与工具执行](docs/assets/screenshots/conversation.png)
 

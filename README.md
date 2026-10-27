@@ -9,8 +9,18 @@
 ![Node](https://img.shields.io/badge/node-22.20%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
-> **Status: v0.1.1, early.** Contracts and APIs still move; not recommended as a production dependency.
-> It is open-sourced to gather feedback first — structure, contracts and security boundaries: issues are welcome.
+> **This is a learning project.** I am learning agent development by building one: the tool loop, approval cards,
+> the Windows write-side sandbox, three-tier memory, retrieval and permission boundaries — all written from scratch,
+> on the principle that implementing it is the only way to really understand it. That is why the **docs and tests are
+> denser than the feature set**. v0.1.1 is early; contracts still move, and it is **not recommended as a production
+> dependency**.
+>
+> **Feedback is genuinely welcome — especially disagreement.** If an abstraction is wrong, redundant, or a security
+> boundary is missing, open an issue or a PR. No need to be polite about it.
+
+**Stack**: Python 3.13 · FastAPI + SSE · LangGraph (tool loop and checkpoints) · SQLite / Chroma ·
+React 19 + Vite 8 + TypeScript · PyInstaller onedir + Inno Setup + WebView2 ·
+**3068 backend tests, 634 frontend tests**
 
 ![Chat with tool execution](docs/assets/screenshots/conversation.png)
 
