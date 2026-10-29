@@ -2,7 +2,8 @@
   display: flex;
   align-items: stretch;
   height: 100%;
-  background: var(--law-bg-base);
+  background: var(--c-rail);
+  gap: 0;
 }
 
 .main {
@@ -11,6 +12,13 @@
   flex-direction: column;
   flex: 1 1 auto;
   min-width: 0;
+  margin: 8px 8px 8px 0;
+  border: 1px solid var(--c-line);
+  border-radius: 16px;
+  background: var(--c-canvas);
+  overflow: hidden;
+  border-left: 1px solid var(--c-line);
+  box-shadow: var(--sh-frame);
 }
 
 
@@ -78,7 +86,7 @@
   padding: 0 var(--sp-3);
   border-radius: var(--r-control);
   background: var(--c-accent);
-  color: #fff;
+  color: var(--c-text-inverse);
   font-size: var(--fs-meta);
   cursor: pointer;
 }
@@ -93,3 +101,23 @@
 .recoveryButton:not(:disabled):hover {
   filter: brightness(0.94);
 }
+
+/* A new conversation is one centered starting point. Existing turns keep the bottom dock. */
+.main:has(> [data-empty-conversation='true']):has(> [data-composer-mode='input']) { overflow-y: auto; }
+.main:has(> [data-empty-conversation='true']):has(> [data-composer-mode='input']) > [data-empty-conversation='true'] {
+  flex: 0 0 auto;
+  margin-top: auto;
+}
+.main:has(> [data-empty-conversation='true']):has(> [data-composer-mode='input']) > [data-composer='true'] {
+  margin-bottom: auto;
+}
+
+@media (max-width: 720px) {
+  .main { margin: 6px 6px 6px 0; border-radius: 12px; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .main > [data-empty-conversation='true'] { animation: arrive 260ms ease-out both; }
+}
+@keyframes arrive { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+:global(:root[data-motion='reduced']) .main > [data-empty-conversation='true'] { animation: none; }

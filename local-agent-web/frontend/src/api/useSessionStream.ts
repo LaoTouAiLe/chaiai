@@ -130,6 +130,8 @@ export function useSessionStream(sessionId: string | null): SessionStreamState {
           return
         case 'approval_required':
         case 'approval_resolved':
+        case 'question_required':
+        case 'question_resolved':
           // T30 只展示安全等待态，不作审批决定；但必须读到新快照，否则页面会一直显示“正在生成”。
           reconcileFromServer()
           return

@@ -23,12 +23,14 @@
 /* Hover popover (matrix 22). No gap from the trigger, so hover is continuous;
    `focus-within` gives the keyboard the same content. */
 .popover {
+  /* Read-only help must never intercept adjacent model/input controls on narrow rows. */
+  pointer-events: none;
   position: absolute;
   right: 0;
   bottom: 100%;
   z-index: 2;
   visibility: hidden;
-  width: 340px;
+  width: min(340px, calc(100vw - 24px));
   padding: var(--law-space-md) var(--law-space-lg);
   border: 1px solid var(--law-border-l2);
   border-radius: var(--law-radius-lg);
@@ -41,15 +43,15 @@
   visibility: visible;
 }
 
-/* Pinned panel (matrix 23): same detail, no overlap to reason about. */
+/* Pinned detail scrolls inside the anchored popover. */
 .panel {
   display: flex;
   flex-direction: column;
   gap: var(--law-space-sm);
-  padding: var(--law-space-md) var(--law-space-xl);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-lg);
-  background: var(--law-bg-layer-2);
+  padding: 16px 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: var(--law-surface-menu);
 }
 
 .panelHead {

@@ -39,6 +39,7 @@ import {
   newRequestId,
   pickWorkspaceDirectory,
   resolveApproval,
+  resolveQuestion,
   selectSessionModel,
   setCapabilities,
   setMcpServer,
@@ -510,6 +511,9 @@ const pendingMessages = new WeakMap<QueryClient, Map<string, PendingMessage>>()
 
 export function useSubmitMessage(sessionId: string | null, context: SubmissionContext = {}, networkMode: 'online' | 'always' = 'online') {
   const queryClient = useQueryClient()
+  const acceptedJob = useQuery<string | null>({
+    queryKey: ['accepted-submission-job', sessionId], queryFn: () => null, enabled: false,
+  })
 
   const mutation = useMutation({
     networkMode,
@@ -546,13 +550,17 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
       return result
     },
     onSuccess: (result, request) => {
+      if (result.status === 'running' && result.job_id) {
+        queryClient.setQueryData(['accepted-submission-job', request.sessionId], result.job_id)
+      }
       // 提交返回的是**命令结果**（不是快照）：权威状态仍以快照为准，所以拉一次。
-      void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
+      const refreshed = queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
       void queryClient.invalidateQueries({ queryKey: ['sessions'] })
       // 侧栏那行的「执行中 / 等待审批」来自任务索引，不刷它会落后于实际状态。
       void queryClient.invalidateQueries({ queryKey: ['tasks'] })
       void queryClient.invalidateQueries({ queryKey: ['conversation-map', request.sessionId] })
-      return result
+      // 自动队列需先看到本次提交后的状态，才能判定是否可以发送下一条。
+      return refreshed.then(() => result)
     },
     onError: (_error, request) => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
@@ -560,6 +568,7 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
   })
   const belongsHere = mutation.variables?.sessionId === sessionId
   return {
+    acceptedJobId: acceptedJob.data ?? null,
     // 带的附件是**引用**（`AttachmentView.attachment_id`），不是文件本身；字节已经在上传接口落盘了。
     mutate: (
       // `context` 可**按次覆盖**：行内编辑（2026-10-21）要临时换 `parent_turn_id`，
@@ -636,6 +645,61 @@ export function useResolveApproval(sessionId: string | null) {
     resolve: (approvalId: string, decision: 'approve' | 'reject', confirmRecursive = false) => {
       if (sessionId === null) throw new Error('还没有打开会话')
       mutation.mutate({ sessionId, approvalId, decision, confirmRecursive })
+    },
+    isPending: belongsHere && mutation.isPending,
+    error: belongsHere ? mutation.error : null,
+    reset: mutation.reset,
+  }
+}
+
+/**
+ * 提交一次提问答复（2026-10-28，§6.14）。
+ *
+ * 与 `useResolveApproval` 同一套纪律：**同一次答复的重试复用同一个 `client_request_id`**
+ * （键按 `提问 id + 动作 + 答复正文` 记），成功与失败都重取快照——服务端才是权威。
+ */
+export function useResolveQuestion(sessionId: string | null) {
+  const queryClient = useQueryClient()
+  const pending = useRef(new Map<string, string>())
+
+  const mutation = useMutation({
+    mutationFn: async (request: {
+      sessionId: string
+      questionId: string
+      answers: readonly { index: number; answer: string }[]
+    }) => {
+      // 整组一次提交（2026-10-28）：键包含全部逐题内容，同一次提交的重试才共用幂等键。
+      const body = JSON.stringify(request.answers)
+      const scope = `${request.questionId}:${body}`
+      const requestId = pending.current.get(scope) ?? newRequestId()
+      pending.current.set(scope, requestId)
+      const hasAnswer = request.answers.some((item) => item.answer.trim() !== '')
+      const result = await resolveQuestion(request.sessionId, request.questionId, {
+        action: hasAnswer ? 'answer' : 'skip',
+        answers: hasAnswer ? request.answers : [],
+        client_request_id: requestId,
+      })
+      // 成功之后才换新的：失败（失效、忙碌、网络中断）都保留，重试仍指向同一次答复。
+      pending.current.delete(scope)
+      return result
+    },
+    onSuccess: (_result, request) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      void queryClient.invalidateQueries({ queryKey: ['sessions'] })
+    },
+    onError: (_error, request) => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(request.sessionId) })
+      void queryClient.invalidateQueries({ queryKey: ['tasks'] })
+    },
+  })
+
+  const belongsHere = mutation.variables?.sessionId === sessionId
+  return {
+    /** 一次提交整组：`answers` 是逐题结果，空数组表示整组跳过。 */
+    resolve: (questionId: string, answers: readonly { index: number; answer: string }[]) => {
+      if (sessionId === null) throw new Error('还没有打开会话')
+      mutation.mutate({ sessionId, questionId, answers })
     },
     isPending: belongsHere && mutation.isPending,
     error: belongsHere ? mutation.error : null,

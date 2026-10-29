@@ -1,9 +1,10 @@
 import { useState } from 'react'
 
 import type { SessionSummaryView } from '../fixtures/types'
-import { ChevronLeft, ChevronRight } from './icons'
 import styles from './Sidebar.module.css'
 import { SidebarItemMenu } from './SidebarItemMenu'
+import { NavigationRail } from './NavigationRail'
+import { WorkbenchIcon } from './WorkbenchIcon'
 
 export interface SidebarManagement {
   renameSession: (id: string, title: string) => Promise<void>
@@ -49,6 +50,7 @@ export interface SidebarActions {
   onAddWorkspace: () => void
   onSelectSession: (sessionId: string) => void
   onNewSession: () => void
+  onOpenConversation?: () => void
   onOpenSettings: () => void
   onOpenDataCenter?: () => void
   /**
@@ -80,12 +82,11 @@ export interface SidebarActions {
 }
 
 interface SidebarProps {
+  /** 当前打开的功能页；仅表达导航状态，不保存或改变页面状态。 */
+  activePage?: 'tasks' | 'data' | 'artifacts' | 'capabilities' | 'cron' | null
   workspaces: ReadonlyArray<{ id: string; title: string; sessions: readonly SidebarSession[]; managed?: boolean }>
   management?: SidebarManagement
-  /**
-   * Narrow rail (matrix 24): brand, new session, expand and settings, with no
-   * session tree. Nothing is secretly selected — the tree is not rendered at all.
-   */
+  /** 只收起会话目录，独立功能导航始终保留。 */
   collapsed?: boolean
   actions?: SidebarActions
   /**
@@ -108,15 +109,18 @@ const STATUS_TEXT: Record<SessionSummaryView['status'], string> = {
   idle: '空闲',
   running: '运行中',
   'awaiting-approval': '等待审批',
+  // 2026-10-28：提问挂起是"等你回答一句"，与"等你批准一个动作"分开说。
+  'awaiting-input': '等待回答',
   completed: '已完成',
 }
 
-/** Status dot colour is the only place a run state shows up in the shell. */
+/** 颜色只作辅助，运行状态同时有可访问的文字表达。 */
 function statusClass(status: SessionSummaryView['status']): string {
   switch (status) {
     case 'running':
       return styles.dotRunning ?? ''
     case 'awaiting-approval':
+    case 'awaiting-input':
       return styles.dotWaiting ?? ''
     case 'completed':
       return styles.dotDone ?? ''
@@ -126,195 +130,88 @@ function statusClass(status: SessionSummaryView['status']): string {
 }
 
 /**
- * Resident session shell: brand row, search, and one workspace tree.
- *
- * Static prototype data only — selection and search become real in T30.
+ * 功能导航、可收起的会话目录与工作区管理，共用真实数据和静态场景。
  */
-export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, management }: SidebarProps) {
+export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, management, activePage = null }: SidebarProps) {
   const [search, setSearch] = useState('')
+  const [filter, setFilter] = useState<'all' | 'running' | 'attention'>('all')
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<ReadonlySet<string>>(new Set())
   const [restoring, setRestoring] = useState<string | null>(null)
   const [restoreError, setRestoreError] = useState<string | null>(null)
   const query = search.trim().toLocaleLowerCase()
-  const visibleWorkspaces = query === '' ? workspaces : workspaces
-    .map((workspace) => ({
-      ...workspace,
-      sessions: workspace.title.toLocaleLowerCase().includes(query)
-        ? workspace.sessions
-        : workspace.sessions.filter((session) => session.title.toLocaleLowerCase().includes(query)),
-    }))
-    .filter((workspace) => workspace.sessions.length > 0)
-  return (
-    <aside
-      className={collapsed ? `${styles.sidebar} ${styles.sidebarCollapsed}` : styles.sidebar}
-      aria-label="会话与工作区"
-      data-collapsed={collapsed ? 'true' : 'false'}
-    >
-      <div className={styles.brand}>
-        <img className={styles.brandMark} src="/chaiai.svg" width={28} height={28}
-          alt={collapsed ? 'chaiai' : ''} title="chaiai" />
-        {collapsed ? null : <span className={styles.brandName}>chaiai</span>}
-        {collapsed ? null : (
-          <button
-            type="button"
-            className={styles.brandToggle}
-            aria-label="收起侧边栏"
-            aria-expanded={true}
-            onClick={() => actions?.onToggleCollapse()}
-          >
-            <ChevronLeft />
-          </button>
-        )}
+  const visibleWorkspaces = workspaces.map((workspace) => ({
+    ...workspace,
+    sessions: workspace.sessions.filter((session) => {
+      const matchesQuery = query === '' || workspace.title.toLocaleLowerCase().includes(query) || session.title.toLocaleLowerCase().includes(query)
+      const matchesFilter = filter === 'all' || (filter === 'running' ? session.status === 'running' : session.status === 'awaiting-approval' || session.status === 'awaiting-input')
+      return matchesQuery && matchesFilter
+    }),
+  })).filter((workspace) => (query === '' && filter === 'all') || workspace.sessions.length > 0)
+  const filtered = query !== '' || filter !== 'all'
+  const sessionCount = workspaces.reduce((count, workspace) => count + workspace.sessions.length, 0)
+  const pages = [
+    { id: 'tasks' as const, label: '任务中心', onOpen: actions?.onOpenTasks },
+    { id: 'artifacts' as const, label: '产物', onOpen: actions?.onOpenArtifacts },
+    { id: 'capabilities' as const, label: '能力中心', onOpen: actions?.onOpenCapabilities },
+    { id: 'cron' as const, label: '定时任务', onOpen: actions?.onOpenCron },
+    { id: 'data' as const, label: '数据中台', onOpen: actions?.onOpenDataCenter },
+  ].filter((page) => actions === undefined || page.onOpen !== undefined)
+
+  return <aside className={collapsed ? `${styles.sidebar} ${styles.sidebarCollapsed}` : styles.sidebar} aria-label="会话与工作区" data-collapsed={collapsed ? 'true' : 'false'}>
+    <NavigationRail activePage={activePage} collapsed={collapsed} pendingTasks={actions?.pendingTasks ?? 0}
+      onNewSession={actions?.onNewSession} onOpenConversation={actions?.onOpenConversation}
+      onOpenSettings={actions?.onOpenSettings} onToggleCollapse={actions?.onToggleCollapse} pages={pages} />
+    {collapsed ? null : <div className={styles.navigator}>
+      <header className={styles.header}>
+        <div><p className={styles.eyebrow}>CHAIAI WORKSPACE</p><h2 className={styles.heading}>会话<span className={styles.count}>{sessionCount}</span></h2></div>
+        <span className={styles.localBadge}><span />本地</span>
+      </header>
+      <label className={styles.search}>
+        <span className="visually-hidden">搜索会话</span><WorkbenchIcon name="search" size={15} />
+        <input placeholder="搜索会话或工作区" type="search" value={search} onChange={(event) => setSearch(event.target.value)} />
+      </label>
+      <div className={styles.filters} role="group" aria-label="筛选会话">
+        <button type="button" aria-label="全部会话" aria-pressed={filter === 'all'} onClick={() => setFilter('all')}>全部</button>
+        <button type="button" aria-label="进行中的会话" aria-pressed={filter === 'running'} onClick={() => setFilter('running')}>进行中</button>
+        <button type="button" aria-label="等待处理的会话" aria-pressed={filter === 'attention'} onClick={() => setFilter('attention')}>待处理</button>
       </div>
-
-      {/* 功能入口在顶部，对齐 hermes 的侧栏 nav 行（2026-10-22）：
-          以前这五个堆在左下角，等于把最常用的跳转放在离视线最远的地方。 */}
-      <nav className={styles.nav} aria-label="功能入口">
-        <button type="button" className={styles.navRow} onClick={() => actions?.onNewSession()}
-          aria-label="新建会话" title={collapsed ? '新建会话' : undefined}>
-          <span className={styles.navIcon} aria-hidden="true">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 5v14M5 12h14" /></svg>
-          </span>
-          <span className={styles.navLabel}>新建会话</span>
-        </button>
-        {actions?.onOpenTasks ? (
-          <button type="button" className={styles.navRow} onClick={actions.onOpenTasks}
-            aria-label={(actions.pendingTasks ?? 0) > 0 ? `任务中心（${actions.pendingTasks} 个等你处理）` : '任务中心'}
-            title={collapsed ? '任务中心' : undefined}>
-            <span className={styles.navIcon} aria-hidden="true">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M4 7h16M4 12h16M4 17h9" /><circle cx="18" cy="17" r="2" /></svg>
-            </span>
-            <span className={styles.navLabel}>任务中心</span>
-            {(actions.pendingTasks ?? 0) > 0 ? <span className={styles.navBadge} aria-hidden="true">{actions.pendingTasks}</span> : null}
-          </button>
-        ) : null}
-        {actions?.onOpenDataCenter ? (
-          <button type="button" className={styles.navRow} onClick={actions.onOpenDataCenter}
-            aria-label="数据中台" title={collapsed ? '数据中台' : undefined}>
-            <span className={styles.navIcon} aria-hidden="true">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M4 5h11l4 4v10H4z" /><path d="M8 11h7M8 15h5" /></svg>
-            </span>
-            <span className={styles.navLabel}>数据中台</span>
-          </button>
-        ) : null}
-        {actions?.onOpenArtifacts ? (
-          <button type="button" className={styles.navRow} onClick={actions.onOpenArtifacts}
-            aria-label="产物" title={collapsed ? '产物' : undefined}>
-            <span className={styles.navIcon} aria-hidden="true">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 3 3 8l9 5 9-5-9-5Z" /><path d="m3 13 9 5 9-5" /></svg>
-            </span>
-            <span className={styles.navLabel}>产物</span>
-          </button>
-        ) : null}
-        {actions?.onOpenCapabilities ? (
-          <button type="button" className={styles.navRow} onClick={actions.onOpenCapabilities}
-            aria-label="能力中心" title={collapsed ? '能力中心' : undefined}>
-            <span className={styles.navIcon} aria-hidden="true">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M13 2 4 14h6l-1 8 9-12h-6l1-8Z" /></svg>
-            </span>
-            <span className={styles.navLabel}>能力中心</span>
-          </button>
-        ) : null}
-        {actions?.onOpenCron ? (
-          <button type="button" className={styles.navRow} onClick={actions.onOpenCron}
-            aria-label="定时任务" title={collapsed ? '定时任务' : undefined}>
-            <span className={styles.navIcon} aria-hidden="true">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3.5 2" /></svg>
-            </span>
-            <span className={styles.navLabel}>定时任务</span>
-          </button>
-        ) : null}
-        {/* 设置不在这里：2026-10-22 起按 hermes 放到标题栏右上角齿轮。 */}
-      </nav>
-
-      {collapsed ? (
-        <>
-          <button
-            type="button"
-            className={styles.railButton}
-            aria-label="展开侧边栏"
-            aria-expanded={false}
-            onClick={() => actions?.onToggleCollapse()}
-          >
-            <ChevronRight />
-          </button>
-        </>
-      ) : (
-        <>
-          <label className={styles.search}>
-            <span className="visually-hidden">搜索会话</span>
-            <input placeholder="搜索会话…" type="search" value={search} onChange={(event) => setSearch(event.target.value)} />
-          </label>
-
-          <div className={styles.treeHeader}>
-            <span className={styles.treeLabel}>工作区</span>
-            <button
-              type="button"
-              className={styles.addWorkspace}
-              aria-label="添加工作区"
-              title="添加工作区"
-              disabled={addWorkspace?.pending === true}
-              onClick={() => actions?.onAddWorkspace()}
-            >
-              <span aria-hidden="true">＋</span>
-            </button>
-          </div>
-          {addWorkspace?.error == null ? null : (
-            <p className={styles.treeError} role="status">{addWorkspace.error}</p>
-          )}
-          <div className={styles.sessionScroll}>
-          <nav aria-label="会话">
-            {visibleWorkspaces.map((workspace) => (
-              <div key={workspace.id} className={styles.workspace}>
-                <div className={styles.managedRow}>
-                {workspace.managed === false ? <span className={styles.workspaceTitle}>{workspace.title}</span> : <button
-                  type="button"
-                  className={styles.workspaceTitle}
-                  onClick={() => actions?.onSelectWorkspace(workspace.id)}
-                >
-                  {workspace.title}
-                </button>}
-                {management === undefined || workspace.managed === false ? null : <SidebarItemMenu
-                  title={workspace.title} kind="工作区"
-                  onRename={(title) => management.renameWorkspace(workspace.id, title)}
-                  onRemove={() => management.removeWorkspace(workspace.id)} />}
+      <div className={styles.treeHeader}>
+        <span className={styles.treeLabel}>工作区</span>
+        <button type="button" className={styles.addWorkspace} aria-label="添加工作区" title="添加工作区" disabled={addWorkspace?.pending === true} onClick={() => actions?.onAddWorkspace()}><WorkbenchIcon name="plus" size={15} /></button>
+      </div>
+      {addWorkspace?.error == null ? null : <p className={styles.treeError} role="status">{addWorkspace.error}</p>}
+      <div className={styles.sessionScroll}>
+        <nav aria-label="会话">
+          {visibleWorkspaces.map((workspace) => <div key={workspace.id} className={styles.workspace}>
+            <div className={styles.managedRow}>
+              <WorkbenchIcon name="folder" size={15} />
+              {workspace.managed === false ? <span className={styles.workspaceTitle}>{workspace.title}</span> : <button type="button" className={styles.workspaceTitle} onClick={() => actions?.onSelectWorkspace(workspace.id)}>{workspace.title}</button>}
+              {management === undefined || workspace.managed === false ? null : <SidebarItemMenu title={workspace.title} kind="工作区" onRename={(title) => management.renameWorkspace(workspace.id, title)} onRemove={() => management.removeWorkspace(workspace.id)} />}
+            </div>
+            <ul className={styles.sessions}>
+              {workspace.sessions.filter((session, index) => filtered || expandedWorkspaces.has(workspace.id) || index < 5 || session.selected).map((session) => <li key={session.id} aria-current={session.selected ? 'true' : undefined}>
+                <div className={styles.sessionRow} data-selected={session.selected ? 'true' : undefined}>
+                  <button type="button" className={session.selected ? `${styles.session} ${styles.sessionSelected}` : styles.session} onClick={() => actions?.onSelectSession(session.id)}>
+                    <span className={`${styles.dot} ${statusClass(session.status)}`} aria-hidden="true" />
+                    <span className="visually-hidden">{STATUS_TEXT[session.status]}</span>
+                    <span className={styles.sessionTitle}>{session.title}</span>
+                    <span className={styles.sessionMeta}>
+                      {session.stateLabel === undefined ? <span aria-hidden="true">{session.status === 'running' ? '正在执行' : session.status === 'awaiting-approval' ? '等你确认' : session.status === 'awaiting-input' ? '等你回答' : session.status === 'completed' ? '任务已结束' : '本地会话'}</span> : <span className={styles.sessionState}>{session.stateLabel}</span>}
+                      <span className={styles.sessionTime}>{session.timeLabel}</span>
+                    </span>
+                  </button>
+                  {management === undefined ? null : <SidebarItemMenu title={session.title} kind="会话" blocked={session.status === 'running' || session.status === 'awaiting-approval' || session.status === 'awaiting-input'} onRename={(title) => management.renameSession(session.id, title)} onRemove={() => management.archiveSession(session.id)} />}
                 </div>
-                <ul>
-                  {workspace.sessions.filter((session, index) => query !== '' || expandedWorkspaces.has(workspace.id) || index < 5 || session.selected).map((session) => (
-                    <li key={session.id} aria-current={session.selected ? 'true' : undefined}>
-                      <div className={styles.managedRow}>
-                      <button
-                        type="button"
-                        className={session.selected ? `${styles.session} ${styles.sessionSelected}` : styles.session}
-                        onClick={() => actions?.onSelectSession(session.id)}
-                      >
-                        <span className={`${styles.dot} ${statusClass(session.status)}`} aria-hidden="true" />
-                        <span className="visually-hidden">{STATUS_TEXT[session.status]}</span>
-                        <span className={styles.sessionTitle}>{session.title}</span>
-                        {session.stateLabel === undefined ? null : (
-                          <span className={styles.sessionState}>{session.stateLabel}</span>
-                        )}
-                        <span className={styles.sessionTime}>{session.timeLabel}</span>
-                      </button>
-                      {management === undefined ? null : <SidebarItemMenu title={session.title} kind="会话"
-                        blocked={session.status === 'running' || session.status === 'awaiting-approval'}
-                        onRename={(title) => management.renameSession(session.id, title)}
-                        onRemove={() => management.archiveSession(session.id)} />}
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-                {query !== '' || !workspace.sessions.some((session, index) => index >= 5 && !session.selected) ? null : <button type="button" className={styles.showMore}
-                  aria-label={`${workspace.title}${expandedWorkspaces.has(workspace.id) ? '收起会话' : '展示更多会话'}`}
-                  aria-expanded={expandedWorkspaces.has(workspace.id)}
-                  onClick={() => setExpandedWorkspaces((previous) => {
-                    const next = new Set(previous); if (!next.delete(workspace.id)) next.add(workspace.id); return next
-                  })}>{expandedWorkspaces.has(workspace.id) ? '收起' : `展示更多（${workspace.sessions.filter((session, index) => index >= 5 && !session.selected).length}）`}</button>}
-              </div>
-            ))}
-            {query !== '' && visibleWorkspaces.length === 0 ? <p className={styles.noResults}>没有匹配的会话</p> : null}
-          </nav>
-          {management === undefined ? null : <section className={styles.archivedSection} aria-label="已归档会话">
+              </li>)}
+            </ul>
+            {filtered || !workspace.sessions.some((session, index) => index >= 5 && !session.selected) ? null : <button type="button" className={styles.showMore} aria-label={`${workspace.title}${expandedWorkspaces.has(workspace.id) ? '收起会话' : '展示更多会话'}`} aria-expanded={expandedWorkspaces.has(workspace.id)} onClick={() => setExpandedWorkspaces((previous) => {
+              const next = new Set(previous); if (!next.delete(workspace.id)) next.add(workspace.id); return next
+            })}>{expandedWorkspaces.has(workspace.id) ? '收起' : `展示更多（${workspace.sessions.filter((session, index) => index >= 5 && !session.selected).length}）`}</button>}
+          </div>)}
+          {filtered && visibleWorkspaces.length === 0 ? <p className={styles.noResults}>{query !== '' ? '没有匹配的会话' : '当前没有这类会话'}</p> : null}
+          {!filtered && sessionCount === 0 ? <div className={styles.emptyList}><WorkbenchIcon name="chat" size={25} /><strong>工作从一次对话开始</strong><p>点击左侧 ＋ 新建会话，或添加一个工作区。</p></div> : null}
+        </nav>
+        {management === undefined ? null : <section className={styles.archivedSection} aria-label="已归档会话">
             <button type="button" className={styles.footerButton} aria-expanded={management.archivedOpen}
               onClick={management.onToggleArchived}>已归档会话</button>
             {!management.archivedOpen ? null : <>
@@ -335,10 +232,8 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
               </div>)}
             </>}
           </section>}
-          </div>
-        </>
-      )}
-
-    </aside>
-  )
+      </div>
+      <footer className={styles.navigatorFooter}><span className={styles.localDot} />会话与文件保存在本机</footer>
+    </div>}
+  </aside>
 }

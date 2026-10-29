@@ -9,7 +9,7 @@
 .scroll {
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: var(--law-space-3xl) 0 var(--law-space-xl);
+  padding: 32px 0 24px;
 }
 
 .turn {
@@ -17,7 +17,7 @@
   flex-direction: column;
   /* 轮内间距（2026-10-22 重排）：与轮间形成 12 / 32 的对比。
      之前轮内 20、轮间 24，两者几乎相同，眼睛分不出"这一轮从哪开始"。 */
-  gap: var(--law-space-lg);
+  gap: 20px;
 }
 
 .column {
@@ -25,11 +25,11 @@
   flex-direction: column;
   /* 轮间距（24，2026-10-22 V3 由 32 收紧）> 轮内间距（12）：先按"问答"分组，再按段落分组。
      1440 屏上 32 会让两轮之间空出一整屏的呼吸感，正文反而显得零散。 */
-  gap: var(--sp-6);
+  gap: 36px;
   width: 100%;
   max-width: var(--law-conversation-max-width);
   margin: 0 auto;
-  padding: 0 var(--sp-5);
+  padding: 0 var(--workspace-gutter);
 }
 
 .userRow {
@@ -40,9 +40,9 @@
 }
 
 .userBubble {
-  max-width: 76%;
-  padding: var(--sp-3) var(--sp-4);
-  border-radius: var(--r-panel);
+  max-width: 82%;
+  padding: 12px 18px;
+  border-radius: 16px 16px 4px 16px;
   background: var(--c-bubble);
   font-size: var(--fs-chat);
   line-height: var(--lh-chat);
@@ -228,33 +228,33 @@
 .identity {
   display: flex;
   align-items: center;
-  gap: var(--law-space-md);
+  gap: var(--sp-2);
   /* 身份行属于**它下面那段**内容，不属于上一段：把与下一条的间距从 20 收到 8。
      不这么做时，它会悬在上一轮与下一段正中间，看起来像一条独立的分隔说明。 */
-  margin-bottom: calc(-1 * var(--law-space-lg));
+  margin-bottom: var(--sp-1);
 }
 
 .identityMark {
   flex: none;
-  width: 18px;
-  height: 18px;
+  width: var(--sp-5);
+  height: var(--sp-5);
 }
 
 .identityName {
   color: var(--law-text-primary);
-  font-size: var(--law-text-sm);
+  font-size: var(--fs-body);
   line-height: var(--law-leading-sm);
-  font-weight: var(--law-weight-medium);
+  font-weight: 600;
 }
 
 .assistantText {
   /* 正文与工具行错开一档：同左边界时，长回答和工具列表会连成一堵墙。 */
-  padding-left: var(--law-space-lg);
+  padding-left: 0;
   /* 不再用 `ch` 限宽（2026-10-22）：`ch` 是数字 0 的宽度，中文正文下 72ch 只有约 600px，
      列宽放到 960 之后正文仍缩在左边，看起来像被"腰斩"。阅读宽度交给列宽本身控制。 */
   max-width: 100%;
-  font-size: var(--law-text-base);
-  line-height: var(--law-leading-lg);
+  font-size: var(--fs-chat);
+  line-height: var(--lh-chat);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -358,14 +358,22 @@
 .toolGroup {
   display: flex;
   flex-direction: column;
+  border-left: none;
+  padding-left: 0;
+  margin-left: 0;
+  padding: 0;
+  border: 1px solid var(--c-line);
+  background: var(--c-panel);
+  border-radius: 10px;
+  overflow: hidden;
 }
 
 .toolGroupHead {
   display: flex;
   align-items: center;
-  gap: var(--law-space-sm);
+  gap: 8px;
   width: 100%;
-  padding: 2px 0;
+  padding: 12px 14px;
   border: none;
   background: transparent;
   color: var(--law-text-secondary);
@@ -407,219 +415,9 @@
   margin: var(--law-space-xs) 0 0 6px;
   padding-left: var(--law-space-md);
   border-left: 1px solid var(--law-border-l1);
+  padding: 4px 12px 12px;
+  border-top: 1px solid var(--c-line);
 }
-
-/* 空态（2026-10-22 重设计）：一张左对齐的「工作台简报」。
-   不再沿用参考产品的「居中大标题 + 圆角卡片 + 右侧卡通插图」构图：标题下压一根
-   短强调条，能力说明是细线分隔的编号清单，插图退成右上角的线稿水印；底纹、水印
-   都只是装饰，窄屏整块收起。 */
-.empty {
-  position: relative;
-  isolation: isolate;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  min-height: clamp(340px, 54vh, 540px);
-  padding: var(--law-space-4xl) 0;
-  text-align: left;
-}
-
-/* 图纸底纹：44px 一格的极淡网格，向左下淡出，避免压住正文。 */
-.emptyGrid {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  background-image:
-    linear-gradient(to right, var(--law-border-l1) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--law-border-l1) 1px, transparent 1px);
-  background-size: 44px 44px;
-  -webkit-mask-image: radial-gradient(120% 100% at 28% 38%, #000 0%, transparent 76%);
-  mask-image: radial-gradient(120% 100% at 28% 38%, #000 0%, transparent 76%);
-  opacity: 0.7;
-  pointer-events: none;
-}
-
-.emptyBoard {
-  display: flex;
-  flex-direction: column;
-  gap: var(--law-space-2xl);
-  width: 100%;
-  max-width: 620px;
-}
-
-/* 顶部状态行：等宽字体 + 一枚状态点，右侧拉一条细线收尾。 */
-.emptyMeta {
-  display: flex;
-  align-items: center;
-  gap: var(--law-space-md);
-  margin: 0;
-  color: var(--law-text-caption);
-  font-family: var(--law-font-mono);
-  font-size: var(--law-text-xxs);
-  letter-spacing: 0.1em;
-}
-
-.emptyMetaDot {
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--law-accent-500);
-  box-shadow: 0 0 0 3px var(--law-accent-100);
-}
-
-.emptyMetaRule {
-  flex: 0 0 56px;
-  height: 1px;
-  background: var(--law-border-l2);
-}
-
-/* 标题：纯色、左对齐，靠下沿一根 44px 的强调条做节奏；不再用渐变字。 */
-.emptyTitle {
-  margin: 0;
-  padding-bottom: var(--law-space-lg);
-  color: var(--law-text-primary);
-  font-size: clamp(calc(26px * var(--law-font-scale)), 3vw, calc(34px * var(--law-font-scale)));
-  line-height: 1.2;
-  font-weight: var(--law-weight-semibold);
-  letter-spacing: -0.015em;
-  text-wrap: balance;
-  background: linear-gradient(var(--law-accent-500), var(--law-accent-500)) left bottom / 44px 2px no-repeat;
-}
-
-.emptyText {
-  margin: 0;
-  color: var(--law-text-secondary);
-  font-size: calc(15px * var(--law-font-scale));
-  line-height: calc(25px * var(--law-font-scale));
-}
-
-/* 能力清单：小标题旁拉一条渐隐细线，下面是编号 + 细线分隔的三行。 */
-.emptyBrief {
-  display: flex;
-  flex-direction: column;
-  gap: var(--law-space-lg);
-}
-
-.emptyBriefHead {
-  display: flex;
-  align-items: center;
-  gap: var(--law-space-md);
-  color: var(--law-text-tertiary);
-}
-
-.emptyBriefMark {
-  display: inline-flex;
-  color: var(--law-state-warn-secondary);
-}
-
-.emptyBriefTitle {
-  margin: 0;
-  color: var(--law-text-tertiary);
-  font-size: var(--law-text-xs);
-  font-weight: var(--law-weight-semibold);
-  letter-spacing: 0.06em;
-}
-
-.emptyBriefRule {
-  flex: 1 1 auto;
-  height: 1px;
-  background: linear-gradient(90deg, var(--law-border-l2), transparent);
-}
-
-.emptyList {
-  display: flex;
-  flex-direction: column;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  border-top: 1px solid var(--law-border-l2);
-}
-
-.emptyItem {
-  display: grid;
-  grid-template-columns: 44px minmax(0, 1fr);
-  align-items: baseline;
-  gap: var(--law-space-md);
-  padding: var(--law-space-lg) 0;
-  border-bottom: 1px solid var(--law-border-l1);
-}
-
-.emptyIndex {
-  color: var(--law-accent-500);
-  font-family: var(--law-font-mono);
-  font-size: var(--law-text-xxs);
-  letter-spacing: 0.12em;
-  font-variant-numeric: tabular-nums;
-}
-
-.emptyItemText {
-  color: var(--law-text-secondary);
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
-}
-
-/* 底部提示：一枚短横线起头，不再居中。 */
-.emptyHint {
-  display: flex;
-  align-items: flex-start;
-  gap: var(--law-space-md);
-  margin: 0;
-  color: var(--law-text-caption);
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-xs);
-}
-
-.emptyHint::before {
-  content: '';
-  flex: 0 0 auto;
-  width: 18px;
-  height: 1px;
-  margin-top: calc(var(--law-leading-xs) / 2 - 1px);
-  background: currentColor;
-  opacity: 0.55;
-}
-
-/* 线稿水印：只占右上角的留白，不盖正文。 */
-.emptyArt {
-  position: absolute;
-  top: -6px;
-  right: 4px;
-  width: 196px;
-  height: 163px;
-  opacity: 0.5;
-  pointer-events: none;
-}
-
-.emptyArtTrace {
-  animation: emptyTraceDrift 9s linear infinite;
-}
-
-@keyframes emptyTraceDrift {
-  to { stroke-dashoffset: -36; }
-}
-
-/* 窄屏：底纹与线稿收起，编号列收窄。 */
-@media (max-width: 720px) {
-  .empty {
-    min-height: 0;
-    padding: var(--law-space-2xl) 0;
-  }
-
-  .emptyTitle {
-    font-size: calc(24px * var(--law-font-scale));
-  }
-
-  .emptyItem {
-    grid-template-columns: 32px minmax(0, 1fr);
-  }
-
-  .emptyGrid,
-  .emptyArt {
-    display: none;
-  }
-}
-
 /* Loading state. The skeleton has no animation: baselines stay deterministic. */
 .loading {
   display: flex;
@@ -656,9 +454,9 @@
 }
 
 .stats {
-  margin-top: var(--law-space-sm);
-  padding-top: var(--law-space-md);
-  border-top: 1px solid var(--law-border-l1);
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: none;
   color: var(--law-text-caption);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
@@ -816,3 +614,23 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+@media (max-width: 720px) {
+  .column { padding-inline: var(--workspace-gutter); }
+  .emptyList { grid-template-columns: 1fr; gap: var(--sp-2); }
+  .emptyItem { flex-direction: row; gap: var(--sp-3); padding: var(--sp-3); }
+  .emptyArt { display: block; }
+  .emptyHint { display: none; }
+}
+
+.wrap[data-empty-conversation='true'] .scroll { padding: 0; flex: 0 0 auto; overflow: visible; width: 100%; }
+@media (max-width: 720px) {
+  .emptyList { gap: var(--sp-2); }
+  .emptyItem { padding: 0; }
+}
+
+.response { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.responseHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 2px; }
+.responseBody { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.operationCount { flex: 0 0 auto; padding: 3px 7px; border-radius: 5px; background: var(--c-panel); color: var(--c-text-3); font-size: 10px; line-height: 16px; }
+@media (max-width: 720px) { .column { padding-inline: var(--workspace-gutter); } .operationCount { font-size: 9px; } }

@@ -6,6 +6,7 @@ import { useCronJobs, useCronRuns } from '../../api/queries'
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { EmptyState } from '../../components/ui/EmptyState'
+import { EditorDialog } from '../../components/ui/EditorDialog'
 import { describeCron } from './cronDescribe'
 import styles from './CronPanel.module.css'
 
@@ -46,6 +47,7 @@ export function CronPanel({ onOpenSession }: { onOpenSession?: (sessionId: strin
   const [expanded, setExpanded] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [form, setForm] = useState({ name: '', prompt: '', schedule: PRESETS[0].schedule })
+  const dismissCreation = () => { setCreating(false); setError(null) }
 
   const refresh = () => queryClient.invalidateQueries({ queryKey: ['cron'] })
   const fail = (cause: unknown) =>
@@ -110,8 +112,8 @@ export function CronPanel({ onOpenSession }: { onOpenSession?: (sessionId: strin
             按 cron 排期自动跑一轮。会话在后台创建，不抢当前会话；遇到需要审批的动作会被直接拒绝并记为失败。
           </p>
         </div>
-        <Button variant="primary" size="sm" onClick={() => setCreating((open) => !open)}>
-          {creating ? '取消' : '新建任务'}
+        <Button variant="primary" size="sm" onClick={() => { setError(null); setCreating(true) }}>
+          新建任务
         </Button>
       </header>
 
@@ -121,9 +123,10 @@ export function CronPanel({ onOpenSession }: { onOpenSession?: (sessionId: strin
         </p>
       ) : null}
 
-      {error !== null ? <p role="alert" className={styles.notice}>{error}</p> : null}
+      {error !== null && !creating ? <p role="alert" className={styles.notice}>{error}</p> : null}
 
       {creating ? (
+        <EditorDialog title="新建定时任务" description="设置执行内容和时间，在后台自动创建会话。" onClose={dismissCreation} dismissible={!create.isPending}>
         <form
           className={styles.form}
           onSubmit={(event) => {
@@ -187,13 +190,16 @@ export function CronPanel({ onOpenSession }: { onOpenSession?: (sessionId: strin
                 : `${description.reason}；仍可创建，最终由服务端校验`}
             </span>
           </label>
+          {error !== null ? <p role="alert" className={styles.notice}>{error}</p> : null}
           <div className={styles.formActions}>
+            <Button type="button" variant="ghost" disabled={create.isPending} onClick={dismissCreation}>取消</Button>
             <Button type="submit" variant="primary" disabled={create.isPending || !form.name.trim() || !form.prompt.trim()}>
               {create.isPending ? '创建中…' : '创建'}
             </Button>
             <span className={styles.hint}>投递结果只落本地运行记录，不推送外部渠道。</span>
           </div>
         </form>
+        </EditorDialog>
       ) : null}
 
       {list.length === 0 && !jobs.isPending ? (

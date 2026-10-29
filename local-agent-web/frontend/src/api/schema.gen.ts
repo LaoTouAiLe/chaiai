@@ -1049,6 +1049,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/questions/{question_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 提交提问答复
+         * @description 回答或跳过一个挂起的提问：空答复按跳过处理（失败闭合）。
+         */
+        post: operations["resolve_question_api_sessions__session_id__questions__question_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/recovery": {
         parameters: {
             query?: never;
@@ -2373,7 +2393,7 @@ export interface components {
              * Operation
              * @enum {string}
              */
-            operation: "submit_message" | "resolve_approval" | "cancel_task";
+            operation: "submit_message" | "resolve_approval" | "resolve_question" | "cancel_task";
             /**
              * Replayed
              * @default false
@@ -2389,14 +2409,14 @@ export interface components {
              * Session State
              * @enum {string}
              */
-            session_state: "idle" | "running" | "awaiting_approval" | "blocked" | "completed" | "failed";
+            session_state: "idle" | "running" | "awaiting_approval" | "awaiting_input" | "blocked" | "completed" | "failed";
             /** Snapshot Id */
             snapshot_id: string;
             /**
              * Status
              * @enum {string}
              */
-            status: "completed" | "awaiting_approval" | "failed" | "running" | "cancelled";
+            status: "completed" | "awaiting_approval" | "awaiting_input" | "failed" | "running" | "cancelled";
         };
         /**
          * CompressionPreferences
@@ -2840,7 +2860,7 @@ export interface components {
             /** Title */
             title: string;
         };
-        EventEnvelope: components["schemas"]["SessionSnapshotEvent"] | components["schemas"]["MessageStartedEvent"] | components["schemas"]["MessageDeltaEvent"] | components["schemas"]["MessageCompletedEvent"] | components["schemas"]["PlanUpdatedEvent"] | components["schemas"]["StepStartedEvent"] | components["schemas"]["StepCompletedEvent"] | components["schemas"]["ToolStartedEvent"] | components["schemas"]["ToolOutputEvent"] | components["schemas"]["ToolCompletedEvent"] | components["schemas"]["ApprovalRequiredEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["MemoryRecalledEvent"] | components["schemas"]["MemoryWrittenEvent"] | components["schemas"]["ModelCallStartedEvent"] | components["schemas"]["ModelUsageReportedEvent"] | components["schemas"]["ModelCallCompletedEvent"] | components["schemas"]["TaskCompletedEvent"] | components["schemas"]["TaskFailedEvent"] | components["schemas"]["JobQueuedEvent"] | components["schemas"]["JobProgressEvent"] | components["schemas"]["JobWaitingEvent"] | components["schemas"]["JobCompletedEvent"] | components["schemas"]["TaskCancelledEvent"];
+        EventEnvelope: components["schemas"]["SessionSnapshotEvent"] | components["schemas"]["MessageStartedEvent"] | components["schemas"]["MessageDeltaEvent"] | components["schemas"]["MessageCompletedEvent"] | components["schemas"]["PlanUpdatedEvent"] | components["schemas"]["StepStartedEvent"] | components["schemas"]["StepCompletedEvent"] | components["schemas"]["ToolStartedEvent"] | components["schemas"]["ToolOutputEvent"] | components["schemas"]["ToolCompletedEvent"] | components["schemas"]["ApprovalRequiredEvent"] | components["schemas"]["ApprovalResolvedEvent"] | components["schemas"]["QuestionRequiredEvent"] | components["schemas"]["QuestionResolvedEvent"] | components["schemas"]["MemoryRecalledEvent"] | components["schemas"]["MemoryWrittenEvent"] | components["schemas"]["ModelCallStartedEvent"] | components["schemas"]["ModelUsageReportedEvent"] | components["schemas"]["ModelCallCompletedEvent"] | components["schemas"]["TaskCompletedEvent"] | components["schemas"]["TaskFailedEvent"] | components["schemas"]["JobQueuedEvent"] | components["schemas"]["JobProgressEvent"] | components["schemas"]["JobWaitingEvent"] | components["schemas"]["JobCompletedEvent"] | components["schemas"]["TaskCancelledEvent"];
         /** ExecutionPreferences */
         ExecutionPreferences: {
             /** Max Retries Per Step */
@@ -3262,7 +3282,7 @@ export interface components {
         };
         /**
          * JobWaitingEvent
-         * @description 任务进入 `waiting_user`：等用户在页面上做决定（例如审批）。
+         * @description 任务进入 `waiting_user`：等你处理——审批一个动作，或回答 Agent 的一个提问（2026-10-28）。
          */
         JobWaitingEvent: {
             /** Event Id */
@@ -4533,6 +4553,185 @@ export interface components {
             writable: boolean;
         };
         /**
+         * QuestionAnswerItem
+         * @description 题组里某一题的答复（2026-10-28）：`index` 对齐 `QuestionView.items`，空 `answer` = 该题跳过。
+         */
+        QuestionAnswerItem: {
+            /**
+             * Answer
+             * @default
+             */
+            answer: string;
+            /** Index */
+            index: number;
+        };
+        /**
+         * QuestionAnswerRequest
+         * @description 提问答复（2026-10-28，架构 §15.3）。
+         *
+         *     **一次提交整组**：`answers` 是逐题结果，用户翻页答完点一次"提交"。`answer` 保留给单题写法
+         *     （只问了一题时）。空答复、越界 `index` 与未知 `action` 一律按"跳过"处理（失败闭合），与
+         *     图内节点的判定同一口径——两处各判一次会造出两个真相。
+         */
+        QuestionAnswerRequest: {
+            /**
+             * Action
+             * @default answer
+             * @enum {string}
+             */
+            action: "answer" | "skip";
+            /** Answer */
+            answer?: string | null;
+            /** Answers */
+            answers?: components["schemas"]["QuestionAnswerItem"][] | null;
+            /** Client Request Id */
+            client_request_id: string;
+        };
+        /**
+         * QuestionItemView
+         * @description 题组里的一题（含用户对它的答复）。`answer` 为空且 `skipped` 为真 = 这题被跳过。
+         */
+        QuestionItemView: {
+            /**
+             * Allow Free Text
+             * @default true
+             */
+            allow_free_text: boolean;
+            /** Answer */
+            answer?: string | null;
+            /** Index */
+            index: number;
+            /** Options */
+            options?: string[];
+            /** Question */
+            question: string;
+            /**
+             * Skipped
+             * @default false
+             */
+            skipped: boolean;
+        };
+        /** QuestionRequiredEvent */
+        QuestionRequiredEvent: {
+            /** Event Id */
+            event_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            event_type: "question_required";
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            payload: components["schemas"]["QuestionRequiredPayload"];
+            /** Run Id */
+            run_id: string;
+            /**
+             * Schema Version
+             * @default 1
+             */
+            schema_version: number;
+            /** Session Id */
+            session_id: string;
+            /** Stream Sequence */
+            stream_sequence: number;
+            /** Task Id */
+            task_id: string;
+        };
+        /**
+         * QuestionRequiredPayload
+         * @description 提问出现（2026-10-28）：与 `approval_required` 同构。
+         */
+        QuestionRequiredPayload: {
+            question: components["schemas"]["QuestionView"];
+        };
+        /** QuestionResolvedEvent */
+        QuestionResolvedEvent: {
+            /** Event Id */
+            event_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            event_type: "question_resolved";
+            /**
+             * Occurred At
+             * Format: date-time
+             */
+            occurred_at: string;
+            payload: components["schemas"]["QuestionResolvedPayload"];
+            /** Run Id */
+            run_id: string;
+            /**
+             * Schema Version
+             * @default 1
+             */
+            schema_version: number;
+            /** Session Id */
+            session_id: string;
+            /** Stream Sequence */
+            stream_sequence: number;
+            /** Task Id */
+            task_id: string;
+        };
+        /**
+         * QuestionResolvedPayload
+         * @description 提问有了结局：`answered` 或 `skipped`。
+         */
+        QuestionResolvedPayload: {
+            /** Question Id */
+            question_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "pending" | "answered" | "skipped" | "expired";
+        };
+        /**
+         * QuestionView
+         * @description 提问的**派生视图状态**（2026-10-28，架构 §6.14）。
+         *
+         *     底层只有 `pending_question`（当前请求）与 `question_history`（答复记录），没有状态机字段：
+         *     `pending` / `answered` / `skipped` / `expired` 全部在这里推导。
+         *
+         *     映射规则：挂着活的 interrupt 且有待决请求 → `pending`；有对应答复记录 → `answered`
+         *     （至少一题给了答复）或 `skipped`（整组跳过 / 无人值守跳过）；有待决请求但 interrupt 已不在了
+         *     （运行在执行中断里结束） → `expired`，页面不给按钮。
+         *
+         *     **一次挂起对应一次提交**：`items` 是整组题，用户翻页答完一起提交；页面用 `items` 的长度做
+         *     "1/3"式的进度，服务端不记录"答到第几题"。
+         */
+        QuestionView: {
+            /** Answer */
+            answer?: string | null;
+            /** Answered At */
+            answered_at?: string | null;
+            /**
+             * Asked At
+             * Format: date-time
+             */
+            asked_at: string;
+            /** Items */
+            items?: components["schemas"]["QuestionItemView"][];
+            /** Note */
+            note?: string | null;
+            /** Question */
+            question: string;
+            /** Question Id */
+            question_id: string;
+            /** Run Id */
+            run_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "pending" | "answered" | "skipped" | "expired";
+            /** Tool Call Id */
+            tool_call_id: string;
+        };
+        /**
          * ReadonlyResearchRequest
          * @description 只接受工作区内的相对 glob 与字面关键词，不接受控制流。
          */
@@ -4797,6 +4996,7 @@ export interface components {
             model_calls?: components["schemas"]["ModelCallRecordView"][];
             model_selection?: components["schemas"]["ModelSelectionView"] | null;
             plan?: components["schemas"]["PlanView"] | null;
+            question?: components["schemas"]["QuestionView"] | null;
             /**
              * Schema Version
              * @default 1
@@ -4808,7 +5008,7 @@ export interface components {
              * Session State
              * @enum {string}
              */
-            session_state: "idle" | "running" | "awaiting_approval" | "blocked" | "completed" | "failed";
+            session_state: "idle" | "running" | "awaiting_approval" | "awaiting_input" | "blocked" | "completed" | "failed";
             /** Snapshot Id */
             snapshot_id: string;
             /** Title */
@@ -8565,6 +8765,60 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionSummaryView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resolve_question_api_sessions__session_id__questions__question_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+                question_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["QuestionAnswerRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CommandResultView"];
+                };
+            };
+            /** @description 会话不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
             /** @description Validation Error */

@@ -184,16 +184,17 @@
 .list {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-md);
+  gap: 0;
   margin: var(--law-space-lg) 0 0;
   padding: 0;
   list-style: none;
 }
 
 .row {
-  padding: var(--law-space-lg);
-  border: 1px solid var(--law-border-l1);
-  border-radius: var(--law-radius-md);
+  padding: var(--sp-5) 0;
+  border: none;
+  border-radius: 0;
+  border-bottom: 1px solid var(--c-line);
 }
 
 .rowHead {
@@ -204,28 +205,31 @@
 }
 
 .label {
-  font-size: var(--law-text-md);
+  font-size: var(--fs-ui);
   color: var(--law-text-primary);
+  font-weight: 550;
 }
 
 .chip {
   flex: none;
-  padding: 0 var(--law-space-sm);
+  padding: var(--sp-1) var(--sp-2);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
   color: var(--law-text-secondary);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-pill);
+  border: none;
+  border-radius: var(--r-control);
 }
 
 .ok {
   color: var(--law-state-success);
   border-color: var(--law-state-success-subtle);
+  background: var(--c-success-soft);
 }
 
 .off {
   color: var(--law-state-warn-label);
   border-color: var(--law-state-warn-subtle);
+  background: var(--c-warn-soft);
 }
 
 .detail {

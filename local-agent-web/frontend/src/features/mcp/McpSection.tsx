@@ -5,6 +5,7 @@ import {
   asApiError, useAddMcpServer, useDeleteMcpServer, useEditMcpServer,
   useMcp, useReloadMcp, useSetCapabilities, useSetMcpServer,
 } from '../../api/queries'
+import { EditorDialog } from '../../components/ui/EditorDialog'
 import styles from './McpSection.module.css'
 
 const STATUS_LABEL: Record<string, string> = {
@@ -75,6 +76,7 @@ function ServerCard({ server, unavailable, onEdit }: {
     setServer.reset()
     setListsOpen(open => !open)
   }
+  const closeLists = () => { setListsOpen(false); setServer.reset() }
   const parseNames = (text: string) => [...new Set(text.split(/[,，\r\n]+/).map(x => x.trim()).filter(Boolean))]
   return (
     <li className={styles.card}>
@@ -104,9 +106,9 @@ function ServerCard({ server, unavailable, onEdit }: {
         <button type="button" className={styles.ghost} disabled={busy} onClick={() => setDeleting(false)}>取消删除</button>
         <button type="button" className={styles.ghost} disabled={busy} onClick={() => remove.mutate(server.name)}>确认删除</button>
       </div> : null}
-      {failure ? <p className={styles.error} role="alert">{asApiError(failure).message}</p> : null}
+      {failure && !listsOpen ? <p className={styles.error} role="alert">{asApiError(failure).message}</p> : null}
       {server.failure_message ? <p className={styles.error}>{server.failure_message}</p> : null}
-      {listsOpen ? <div className={styles.form}>
+      {listsOpen ? <EditorDialog title={`工具名单 · ${server.name}`} onClose={closeLists} dismissible={!busy}><div className={styles.form}>
         <label className={styles.toggle}><input type="checkbox" checked={limited} aria-label={`${server.name} 使用白名单`}
           onChange={event => setLimited(event.target.checked)} />只允许白名单中的工具</label>
         {limited ? <label className={styles.field}>白名单（原始工具名，每行一个；空名单禁用全部工具）
@@ -118,7 +120,8 @@ function ServerCard({ server, unavailable, onEdit }: {
         <button type="button" className={styles.primary} disabled={busy} onClick={() => setServer.mutate({
           name: server.name, changes: { enabled_tools: limited ? parseNames(allowed) : null, disabled_tools: parseNames(denied) },
         }, { onSuccess: () => setListsOpen(false) })}>保存工具名单</button>
-      </div> : null}
+        {failure ? <p className={styles.error} role="alert">{asApiError(failure).message}</p> : null}
+      </div></EditorDialog> : null}
       {tools.length > 0 ? <ul className={styles.tools}>{tools.map(tool => {
         const disabled = disabledTools.includes(tool.tool)
         const permitted = !disabled && (server.enabled_tools == null || server.enabled_tools.includes(tool.tool))
@@ -186,7 +189,7 @@ export function McpSection() {
           <p className={styles.note}>MCP 仅供主 Agent 使用，子 Agent 暂不支持。</p>
         </div>
         <div className={styles.headerActions}>
-          <button type="button" className={styles.ghost} disabled={busy || unavailable} onClick={formOpen ? closeForm : openAdd}>{formOpen ? '取消编辑' : '添加 Server'}</button>
+          <button type="button" className={styles.ghost} disabled={busy || unavailable} onClick={openAdd}>添加 Server</button>
           <button type="button" className={styles.ghost} disabled={reload.isPending || busy} onClick={() => reload.mutate()}>重读配置</button>
         </div>
       </div>
@@ -199,7 +202,8 @@ export function McpSection() {
       <p className={styles.scale}>已配置 {summary?.configured ?? 0} · 已启用 {summary?.enabled ?? 0} · 已连接 {summary?.connected ?? 0} · 失败 {summary?.failed ?? 0} · 工具 {summary?.tools ?? 0} · 直接可见 {summary?.direct ?? 0} · 其余 {summary?.deferred ?? 0} 按需检索</p>
       {view.config_error ? <p className={styles.error} role="alert">{view.config_error}</p> : null}
       {failure ? <p className={styles.error} role="alert">{asApiError(failure).message}</p> : null}
-      {formOpen ? <form className={styles.form} onSubmit={event => { event.preventDefault(); submit() }}>
+      {formOpen ? <EditorDialog title={editing ? '编辑 MCP Server' : '添加 MCP Server'} onClose={closeForm} dismissible={!busy}>
+      <form className={styles.form} onSubmit={event => { event.preventDefault(); submit() }}>
         <label className={styles.field}>名称<input aria-label="名称" value={draftName} disabled={Boolean(editing) || busy} onChange={event => setDraftName(event.target.value)} placeholder="只允许字母、数字、下划线、连字符" /></label>
         <label className={styles.field}>命令<input aria-label="命令" value={draftCommand} disabled={busy} onChange={event => setDraftCommand(event.target.value)} placeholder="npx" /></label>
         <label className={styles.field}>参数（JSON 数组，含空格的参数保留在同一项）<textarea aria-label="参数" value={draftArgs} disabled={busy} onChange={event => setDraftArgs(event.target.value)} rows={2} placeholder='["-y", "mcp-demo"]' /></label>
@@ -209,8 +213,8 @@ export function McpSection() {
         </fieldset> : null}
         <p className={styles.note}>环境变量凭据以明文写进 <code>{view.config_path ?? 'mcp.json'}</code>，页面不回显值。{editing ? '修改连接方式后 Server 会关闭，请核对命令后重新启用。' : '新增 Server 默认关闭。'}</p>
         {formFailure ? <p className={styles.error} role="alert">{formFailure}</p> : null}
-        <div className={styles.formActions}><button type="submit" className={styles.primary} disabled={busy || unavailable || !draftName.trim() || !draftCommand.trim()}>保存</button></div>
-      </form> : null}
+        <div className={styles.formActions}><button type="button" className={styles.ghost} disabled={busy} onClick={closeForm}>取消</button><button type="submit" className={styles.primary} disabled={busy || unavailable || !draftName.trim() || !draftCommand.trim()}>保存</button></div>
+      </form></EditorDialog> : null}
       {(view.servers ?? []).length === 0 ? <p className={styles.empty}>还没有配置任何 MCP Server。用上面的「添加 Server」，或把 <code>mcpServers</code> 写进 <code>{view.config_path ?? 'mcp.json'}</code> 后点「重读配置」。</p>
         : <ul className={styles.list}>{(view.servers ?? []).map(server => <ServerCard key={server.name} server={server} unavailable={unavailable} onEdit={openEdit} />)}</ul>}
     </section>

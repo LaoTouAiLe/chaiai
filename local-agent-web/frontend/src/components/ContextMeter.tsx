@@ -1,10 +1,12 @@
-import type { CSSProperties } from 'react'
+import type { CSSProperties, RefObject } from 'react'
 import type { ContextMeterView } from '../fixtures/types'
 import { Close } from './icons'
+import { AnchoredPopover } from './ui/AnchoredPopover'
 import styles from './ContextMeter.module.css'
 
 interface ContextMeterProps {
   meter: ContextMeterView
+  triggerRef?: RefObject<HTMLButtonElement | null>
   /** The detail is open as a panel elsewhere, so the hover popover is suppressed. */
   open?: boolean
   /**
@@ -48,6 +50,20 @@ function formatExact(value: number): string {
  * guessed, and cache baselines only compare within one connection version — so a
  * user cannot read the ring as an estimate of something else.
  */
+/**
+ * 口径那一行。
+ *
+ * 新会话的特殊形态（2026-10-28）：`usedTokens === 0` 且窗口已知时，前端已经能显示
+ * `0 / 128k`、`0%`，再配一句"尚未组装"就自相矛盾了——那更像是"计量器还没开始工作"。
+ * 这里如实说明"是新会话、窗口来自连接配置"，与"跑过但没记上用量"（真正的未知）区分开。
+ */
+function scopeText(meter: ContextMeterView): string {
+  if (meter.scope === 'unknown' && meter.usedTokens === 0 && meter.windowTokens !== null) {
+    return '新会话 · 还没有发出过请求，窗口来自连接配置'
+  }
+  return `${SCOPE_LABEL[meter.scope]} · ${SCOPE_MEANING[meter.scope]}`
+}
+
 function MeterDetail({ meter }: { meter: ContextMeterView }) {
   const known = meter.usedTokens !== null && meter.windowTokens !== null && meter.windowTokens > 0
   // 百分比**如实**反映用量：分子超过分母（发送前估算超出窗口）时显示 >100%，
@@ -74,9 +90,7 @@ function MeterDetail({ meter }: { meter: ContextMeterView }) {
         </div>
         <div className={styles.fact}>
           <dt>口径</dt>
-          <dd>
-            {SCOPE_LABEL[meter.scope]} · {SCOPE_MEANING[meter.scope]}
-          </dd>
+          <dd>{scopeText(meter)}</dd>
         </div>
       </dl>
       <p className={styles.basis}>
@@ -99,7 +113,7 @@ function MeterDetail({ meter }: { meter: ContextMeterView }) {
  * available as a pinned panel through `MeterPanel`, so the numbers are reachable
  * without a pointer (matrix 22/23).
  */
-export function ContextMeter({ meter, open = false, onToggle }: ContextMeterProps) {
+export function ContextMeter({ meter, open = false, onToggle, triggerRef }: ContextMeterProps) {
   const known = meter.usedTokens !== null && meter.windowTokens !== null && meter.windowTokens > 0
   // 分子超过分母时圆环填充封顶整圈（视觉上不可能超过一圈），但**数字**如实（>100%），
   // 两者口径分开：过去数字也被钳成 100%，于是"读数是 2,000,000 / 1,000,000 却写 100%"自相矛盾。
@@ -122,6 +136,7 @@ export function ContextMeter({ meter, open = false, onToggle }: ContextMeterProp
   return (
     <div className={styles.meter} title={detail}>
       <button
+        ref={triggerRef}
         type="button"
         className={styles.trigger}
         // 惰性按钮不谎称展开态：没有 handler 时连这个属性都不渲染（基线不受影响）。
@@ -152,9 +167,10 @@ export function ContextMeter({ meter, open = false, onToggle }: ContextMeterProp
   )
 }
 
-/** The same detail as a block panel: the ring's click target, pinned open. */
-export function MeterPanel({ meter, onClose }: { meter: ContextMeterView; onClose?: () => void }) {
+/** Pinned detail floats above the meter without displacing the input. */
+export function MeterPanel({ meter, onClose, anchorRef }: { meter: ContextMeterView; onClose?: () => void; anchorRef?: RefObject<HTMLElement | null> }) {
   return (
+    <AnchoredPopover label="上下文详情" anchorRef={anchorRef} onClose={onClose}>
     <section className={styles.panel} aria-label="上下文详情">
       <header className={styles.panelHead}>
         <h2 className={styles.panelTitle}>上下文详情</h2>
@@ -169,5 +185,6 @@ export function MeterPanel({ meter, onClose }: { meter: ContextMeterView; onClos
       </header>
       <MeterDetail meter={meter} />
     </section>
+    </AnchoredPopover>
   )
 }

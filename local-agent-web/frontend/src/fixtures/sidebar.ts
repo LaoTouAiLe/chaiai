@@ -53,6 +53,8 @@ export const sidebarWorkspaces: readonly SidebarWorkspaceFixture[] = [
         selected: false,
       },
       { id: 's-approval', title: '清理构建产物', status: 'awaiting-approval', timeLabel: '4 分钟', selected: false },
+      // 2026-10-28：问答案例（与 `questionScenario` 同一个会话；状态点单列一档"等待回答"）。
+      { id: 's-question', title: '发布到测试环境', status: 'awaiting-input', timeLabel: '刚刚', selected: false },
       { id: 's-running', title: '检查可选依赖口径', status: 'running', timeLabel: '5 分钟', selected: false },
     ],
   },

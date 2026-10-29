@@ -1,0 +1,235 @@
+/**
+ * 提问卡（2026-10-28，§6.14）。
+ *
+ * 与审批卡同一套视觉语言（白底浮起 + 左侧 3px 语义色条），但语气更轻：
+ * 它不是"危险动作待批准"，而是"Agent 想问你一句"。所以色条用强调色而不是警示色。
+ */
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-4) var(--sp-3) var(--sp-5);
+  border: 0;
+  border-left: 3px solid var(--c-accent);
+  border-radius: var(--r-overlay);
+  background: var(--c-raised);
+  box-shadow: var(--sh-overlay);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--law-space-md);
+  min-width: 0;
+}
+
+.state {
+  flex: 0 0 auto;
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  font-weight: 500;
+  color: var(--c-text-1);
+}
+
+.question {
+  color: var(--c-text-1);
+  font-size: var(--fs-title);
+  line-height: var(--lh-title);
+  overflow-wrap: anywhere;
+}
+
+.field {
+  display: block;
+}
+
+.input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 60px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-control);
+  background: var(--c-raised);
+  color: var(--c-text-1);
+  font-family: inherit;
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 1px;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--law-space-lg);
+  padding-top: var(--law-space-xs);
+}
+
+.hint {
+  flex: 1 1 100%;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: var(--lh-meta);
+}
+
+.skip,
+.submit {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  height: 34px;
+  padding: 0 var(--sp-4);
+  border-radius: var(--r-control);
+  font-family: inherit;
+  font-size: var(--fs-body);
+  font-weight: 500;
+  transition: background var(--dur-hover-out) var(--ease-out);
+}
+
+.skip {
+  border: 1px solid var(--c-line);
+  background: var(--c-raised);
+  color: var(--c-text-1);
+}
+
+.skip:hover {
+  background: var(--c-hover);
+  transition: none;
+}
+
+.submit {
+  border: 0;
+  background: var(--c-accent);
+  color: var(--c-text-inverse);
+}
+
+.submit:hover {
+  background: color-mix(in srgb, var(--c-accent) 88%, #000);
+  transition: none;
+}
+
+.submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 终态：只占一行，结果留着但不长期霸占输入区上方（与审批卡的收起态同一取舍）。 */
+.settled {
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3) var(--sp-2) var(--sp-4);
+  border-left-color: var(--c-line);
+}
+
+.settled .question {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+}
+
+.outcome {
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-sm);
+  line-height: var(--law-leading-sm);
+  overflow-wrap: anywhere;
+}
+
+/* ---- 题组（2026-10-28）----------------------------------------------------- */
+
+/* 右上角的 1/3：进度是**本地翻页**的产物，不是服务端状态。 */
+.counter {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-family: var(--law-font-mono);
+  font-size: var(--fs-meta);
+  line-height: 18px;
+  color: var(--c-text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.option {
+  max-width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-control);
+  background: var(--c-raised);
+  color: var(--c-text-1);
+  font-family: inherit;
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.option:hover {
+  background: var(--c-hover);
+}
+
+.option[aria-pressed='true'] {
+  border-color: var(--c-accent);
+  background: color-mix(in srgb, var(--c-accent) 12%, var(--c-raised));
+  color: var(--c-text-1);
+}
+
+.step {
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-control);
+  background: var(--c-raised);
+  color: var(--c-text-2);
+  font-family: inherit;
+  font-size: var(--fs-body);
+}
+
+.step:hover:not(:disabled) {
+  background: var(--c-hover);
+}
+
+.step:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 进度点：只表达"第几题、填没填"，不承担导航（导航是上面两个按钮）。 */
+.dots {
+  display: flex;
+  gap: var(--sp-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.dot,
+.dotActive {
+  width: 18px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--c-line);
+}
+
+.dot[data-filled='true'] {
+  background: color-mix(in srgb, var(--c-accent) 45%, var(--c-line));
+}
+
+.dotActive {
+  background: var(--c-accent);
+}

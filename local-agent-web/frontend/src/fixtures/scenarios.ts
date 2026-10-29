@@ -6,6 +6,7 @@ import type {
   ErrorNoticeView,
   MemoryRowView,
   ModelConnectionView,
+  QuestionView,
   ReadLineView,
   ToolRowView,
   TurnStatsView,
@@ -832,6 +833,120 @@ export const approvalExpiredScenario: ConversationScenario = {
   takeover: { kind: 'approval', approval: expiredApproval },
   settings: null,
   modelMenu: null,
+}
+
+const pendingQuestion: QuestionView = {
+  questionId: 'q-9001',
+  question: '这次发布到哪个环境？',
+  // 题组形态（2026-10-28）：页面做成可翻页的题组，用户答完一次性提交。
+  items: [
+    {
+      index: 0,
+      question: '这次发布到哪个环境？两个环境的数据库不同，我不替你猜。',
+      options: ['测试环境', '生产环境'],
+      allowFreeText: true,
+      answer: null,
+      skipped: false,
+    },
+    {
+      index: 1,
+      question: '用哪个分支发布？',
+      options: [],
+      allowFreeText: true,
+      answer: null,
+      skipped: false,
+    },
+    {
+      index: 2,
+      question: '发布前要不要先备份？',
+      options: ['要', '不要'],
+      allowFreeText: false,
+      answer: null,
+      skipped: false,
+    },
+  ],
+  state: 'pending',
+  answer: null,
+  note: null,
+}
+
+/** 提问接管：Agent 在执行中问一句，回答或跳过后继续同一轮（2026-10-28，§6.14）。 */
+export const questionScenario: ConversationScenario = {
+  id: 'question',
+  sessionId: 's-question',
+  purpose: '提问接管：Agent 问一句，页面给答复与跳过两个出口',
+  session: {
+    title: '发布到测试环境',
+    workspace: 'local-agent-web',
+    status: 'awaiting-input',
+    modelLabel: '模型 A · 上下文 128k',
+  },
+  messages: [
+    { kind: 'user', id: 'u1', text: '把这个版本发布上线。', at: '16:20' },
+    { kind: 'assistant', id: 'a1', text: '我需要先确认目标环境，再继续执行发布步骤。', at: '16:20' },
+  ],
+  plan: {
+    goal: '发布当前版本',
+    steps: [
+      { id: 's1', title: '确认目标环境', status: 'running' },
+      { id: 's2', title: '执行发布', status: 'pending' },
+    ],
+  },
+  stats: {
+    turns: 1,
+    steps: 1,
+    cacheHitRatio: 0.55,
+    inputTokens: 2_400,
+    outputTokens: 128,
+    elapsedLabel: '8 秒',
+    estimated: false,
+    calls: [],
+  },
+  context: { usedTokens: 42_000, windowTokens: 128_000, scope: 'previous' },
+  takeover: { kind: 'question', question: pendingQuestion },
+  settings: null,
+  modelMenu: null,
+}
+
+const answeredQuestion: QuestionView = {
+  ...pendingQuestion,
+  state: 'answered',
+  answer: null,
+  items: [
+    { ...pendingQuestion.items[0]!, answer: '测试环境' },
+    { ...pendingQuestion.items[1]!, answer: null, skipped: true },
+    { ...pendingQuestion.items[2]!, answer: '要' },
+  ],
+}
+
+/** 同一件事的下一步：答完这一轮继续跑，结果只留一行（输入区随之恢复）。 */
+export const questionAnsweredScenario: ConversationScenario = {
+  ...questionScenario,
+  id: 'question-answered',
+  purpose: '提问已回答：结果留一行，输入区恢复可用',
+  session: { ...questionScenario.session, status: 'running' },
+  takeover: { kind: 'question', question: answeredQuestion },
+}
+
+/**
+ * 待发队列（2026-10-28）：本轮在跑，用户已经把三条排在后面。
+ *
+ * 第三题故意很长：队列行最多两行，这条用来证明超长文本被截断而不是把输入区顶开。
+ */
+export const queueScenario: ConversationScenario = {
+  ...shellScenario,
+  id: 'queue',
+  purpose: '消息队列：本轮进行中仍可入队，可调序、可单条取消',
+  session: { ...shellScenario.session, status: 'running' },
+  queued: [
+    { id: 'q1', text: '顺手把 README 的安装步骤也补上' },
+    { id: 'q2', text: '再跑一遍 pnpm run check，确认没有残留的类型错误' },
+    {
+      id: 'q3',
+      text: '最后把这次的改动整理成一段可以贴进 PR 描述的说明，包含动机、做法与验证方式'
+        + '（长一点也没关系，这里就是用来验证两行截断的那一条）',
+    },
+  ],
 }
 
 /**
@@ -1746,6 +1861,9 @@ export const scenarios: readonly ConversationScenario[] = [
   longTextScenario,
   approvalScenario,
   approvalExpiredScenario,
+  questionScenario,
+  questionAnsweredScenario,
+  queueScenario,
   settingsModelsScenario,
   settingsEmptyScenario,
   modelMenuScenario,

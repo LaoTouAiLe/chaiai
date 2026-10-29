@@ -49,8 +49,8 @@
 }
 
 .block {
-  border: 1px solid var(--law-border-l1);
-  border-radius: var(--law-radius-md);
+  border: 1px solid var(--c-line);
+  border-radius: var(--r-panel);
   overflow: hidden;
 }
 
@@ -59,8 +59,8 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--law-space-sm);
-  padding: var(--law-space-xs) var(--law-space-sm);
-  background: var(--law-surface-code);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--c-sunken);
   border-bottom: 1px solid var(--law-border-l1);
 }
 
@@ -74,12 +74,12 @@
 
 .pre {
   margin: 0;
-  padding: var(--law-space-md);
+  padding: var(--sp-4);
   overflow-x: auto;
-  background: var(--law-surface-sunken);
+  background: var(--c-sunken);
   font-family: var(--law-font-mono);
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
+  font-size: var(--fs-body);
+  line-height: var(--lh-chat);
 }
 
 .copy {

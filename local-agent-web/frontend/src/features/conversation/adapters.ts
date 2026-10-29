@@ -19,6 +19,7 @@ import type {
   MessageView,
   ModelCallView,
   PlanView,
+  QuestionView,
   TraceEventView,
   RetrievalSourceView,
   RetrievalView,
@@ -36,6 +37,7 @@ type ToolUse = components['schemas']['ToolUseView']
 type ToolOutcome = components['schemas']['ToolOutcomeView']
 type TransportSource = components['schemas']['RetrievalSourceView']
 type TransportApproval = components['schemas']['ApprovalView']
+type TransportQuestion = components['schemas']['QuestionView']
 type TransportDiff = components['schemas']['FileDiffView']
 type TransportCall = components['schemas']['ModelCallRecordView']
 type SessionState = Snapshot['session_state']
@@ -54,6 +56,8 @@ const SESSION_STATE: Record<SessionState, SessionSummaryView['status']> = {
   idle: 'idle',
   running: 'running',
   awaiting_approval: 'awaiting-approval',
+  // 2026-10-28：提问挂起与审批挂起是两种"等你"，侧栏文案因此也分开（架构 §17.6）。
+  awaiting_input: 'awaiting-input',
   blocked: 'idle',
   completed: 'completed',
   failed: 'idle',
@@ -281,6 +285,30 @@ export function mapApproval(approval: TransportApproval): ApprovalView {
     state: approval.state,
     note: approval.note ?? null,
     parameters: Object.entries(approval.redacted_arguments ?? {}).map(([name, value]) => ({ name, value })),
+  }
+}
+
+/**
+ * 提问 DTO → 提问卡视图模型（2026-10-28，§6.14）。
+ *
+ * 同样是**如实搬运**：问题正文与答复都由服务端脱敏后给出，这里不截断、不解释；
+ * `note` 是服务端写好的终态说明（"你跳过了…"），页面不自己拼。
+ */
+export function mapQuestion(question: TransportQuestion): QuestionView {
+  return {
+    questionId: question.question_id,
+    question: question.question,
+    items: (question.items ?? []).map((item) => ({
+      index: item.index,
+      question: item.question,
+      options: item.options ?? [],
+      allowFreeText: item.allow_free_text,
+      answer: item.answer ?? null,
+      skipped: item.skipped,
+    })),
+    state: question.state,
+    answer: question.answer ?? null,
+    note: question.note ?? null,
   }
 }
 

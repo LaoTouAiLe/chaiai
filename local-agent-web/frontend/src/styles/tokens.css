@@ -1,5 +1,7 @@
 ﻿/**
  * Design tokens for the local Agent web UI.
+ * 2026-10-28: separated workbench surfaces and violet interaction accents supersede
+ * historical V0/V3 measurements in the migration comments below.
  *
  * 规范：[docs/plans/UI_PAGE_IMPLEMENTATION.md](../../../../docs/plans/UI_PAGE_IMPLEMENTATION.md) §2。
  *
@@ -21,31 +23,31 @@
 
   /* ===== 1. 新体系：surface ============================================ */
   /* 三层中性底靠明度区分，不用边框制造层次。 */
-  --c-canvas: #ffffff;
-  --c-panel: #f7f8fa;
+  --c-canvas: #fdfdfe;
+  --c-panel: #f7f6f9;
   --c-raised: #ffffff;
-  --c-sunken: #f1f3f6;
+  --c-sunken: #f1f0f5;
   /* hover / active 比 sunken 再深一档：在 panel(#f7f8fa) 上必须可见。
      2026-10-22 截图复核后从 #eef0f4 / #e4e7ec 调深——原值在侧栏选中行上几乎看不出来。 */
-  --c-hover: #eaedf2;
-  --c-active: #dfe3ea;
+  --c-hover: #eae8f0;
+  --c-active: #e6e2f0;
   /* 用户气泡：比 #edf3fe 略淡，但必须在白底上仍能分辨出发言方。 */
-  --c-bubble: #eef4ff;
+  --c-bubble: #eeedf3;
 
   /* 边界：一条默认 hairline + 一条强调 hairline */
-  --c-line: #e3e6eb;
-  --c-line-strong: #d2d7de;
+  --c-line: #e6e3ec;
+  --c-line-strong: #d6d1e0;
 
   /* 文字：四级。承载信息的只有前三档，off 只用于禁用与纯装饰。 */
-  --c-text-1: #14171c; /* 17.0:1 on #fff */
-  --c-text-2: #4a5058; /*  8.1:1 */
-  --c-text-3: #6b7280; /*  4.8:1 */
-  --c-text-off: #9ca3af; /*  2.8:1，禁止承载信息 */
+  --c-text-1: #27242e; /* 17.0:1 on #fff */
+  --c-text-2: #585362; /*  8.1:1 */
+  --c-text-3: #736c7e; /* metadata remains readable on the sidebar surface */
+  --c-text-off: #a3a3ae; /*  2.8:1，禁止承载信息 */
   --c-text-inverse: #ffffff;
 
   /* 强调与语义（文字色均已按白底核算 ≥4.5:1） */
-  --c-accent: #2563eb;
-  --c-accent-soft: #eff4ff;
+  --c-accent: #7154a5;
+  --c-accent-soft: #eee8f7;
   --c-success: #12805c;
   --c-success-soft: #e9f7f1;
   --c-warn: #b45309;
@@ -57,10 +59,10 @@
   --c-scrim: #0b0d1280;
 
   /* ===== 1. 新体系：圆角 ============================================== */
-  /* 同一屏不超过 3 种。大圆角 + 边框是"软塌"观感的主要来源，故上限 10px。 */
-  --r-control: 6px;
-  --r-panel: 6px;
-  --r-overlay: 10px;
+  /* 控件、内容面板与浮层分层；画布边缘与输入区使用各自的布局圆角。 */
+  --r-control: 8px;
+  --r-panel: 12px;
+  --r-overlay: 16px;
   --r-pill: 999px;
 
   /* ===== 1. 新体系：阴影 ============================================== */
@@ -68,9 +70,7 @@
   --sh-menu: 0 0 0 1px #00000012, 0 4px 12px #10182814;
 
   /* ===== 1. 新体系：字体与字号 ======================================== */
-  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI',
-    'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', 'Helvetica Neue', Arial,
-    sans-serif;
+  --font-ui: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
   --font-mono-code: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas,
     'Microsoft YaHei Mono', 'Liberation Mono', Menlo, monospace;
 
@@ -82,14 +82,14 @@
   --lh-body: 20px;
   --fs-ui: 14px;
   --lh-ui: 20px;
-  --fs-chat: 14px;
-  --lh-chat: 21px;
-  --fs-title: 15px;
-  --lh-title: 22px;
-  --fs-heading: 18px;
-  --lh-heading: 26px;
-  --fs-display: 26px;
-  --lh-display: 34px;
+  --fs-chat: calc(15px * var(--law-font-scale));
+  --lh-chat: calc(26px * var(--law-font-scale));
+  --fs-title: 16px;
+  --lh-title: 24px;
+  --fs-heading: 22px;
+  --lh-heading: 30px;
+  --fs-display: 32px;
+  --lh-display: 44px;
 
   /* ===== 1. 新体系：间距 ============================================== */
   /* 4px 基准。旧 `--law-space-*` 不映射到这一套，见文件头第 3 类。 */
@@ -202,12 +202,12 @@
   --law-blue-grey-950: #151517;
   --law-blue-grey-1000: #0f1115;
 
-  --law-accent-50: #edf3fe;
-  --law-accent-100: #e4edfd;
-  --law-accent-200: #d3e2ff;
-  --law-accent-400: #679efe;
-  --law-accent-500: #4176e6;
-  --law-accent-700: #2f4c8f;
+  --law-accent-50: var(--c-accent-soft);
+  --law-accent-100: var(--c-accent-soft);
+  --law-accent-200: var(--c-line-strong);
+  --law-accent-400: #80808d;
+  --law-accent-500: var(--c-accent);
+  --law-accent-700: var(--c-accent);
   --law-red-50: #fef2f2;
   --law-red-100: #fee2e2;
   --law-red-400: #f25a5a;
@@ -223,8 +223,8 @@
   --law-surface-tip: var(--law-blue-grey-60);
 
   /* 按钮：形态在 V2/V3 由 Button 原语接管，本批不改色 */
-  --law-button-primary-fill: var(--law-blue-grey-1000);
-  --law-button-primary-hover: var(--law-blue-grey-750);
+  --law-button-primary-fill: var(--c-accent);
+  --law-button-primary-hover: color-mix(in srgb, var(--c-accent) 90%, #000);
   --law-button-primary-disabled: var(--law-blue-grey-100);
   --law-button-ghost-fill: var(--law-blue-grey-00);
   --law-button-ghost-hover: var(--law-blue-grey-75);
@@ -245,10 +245,8 @@
   --law-diff-num-text: #1f2328;
 
   /* 字体：`--law-font-mono` 供旧组件使用，值同步到新等宽栈 */
-  --law-font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
-    'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
-  --law-font-mono: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas, 'Liberation Mono', Menlo, Courier,
-    'PingFang SC', 'Microsoft YaHei';
+  --law-font-sans: var(--font-ui);
+  --law-font-mono: var(--font-mono-code);
 
   /* 字号与行高：V3 与对话流重构同批迁移 */
   --law-text-xxs: calc(11px * var(--law-font-scale));
@@ -282,20 +280,40 @@
   --law-space-4xl: 32px;
 
   /* 布局：顶栏 63 → 56（2026-10-22 拍板，§12 决策 1） */
-  --law-sidebar-width: 268px;
-  --law-sidebar-width-collapsed: 56px;
-  --law-header-height: 56px;
+  --law-sidebar-width: 332px;
+  --law-sidebar-width-collapsed: 64px;
+  --law-header-height: 78px;
   /* 会话行高 34 → 28（2026-10-22）：对齐 hermes 侧栏行（26–28），一屏多看 3–4 条。 */
   --law-session-row-height: 32px;
   /* 对话列宽（2026-10-22）：760 → 960。760 在 1440 屏上两边各留 340px 空白，太窄；
      1080 又显得散（正文与工具行拉得太开）。960 是两者折中，正文仍由 72ch 限制阅读宽度。 */
-  --law-conversation-max-width: 960px;
+  --law-conversation-max-width: 880px;
 
   /* 动效：旧名保持原值；新代码用 `--dur-*` / `--ease-*` */
   --law-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --law-duration-fast: 0.1s;
   --law-duration-base: 0.2s;
   --law-duration-slow: 0.3s;
+  --r-shell: 18px;
+  --r-composer: 16px;
+  --sh-composer: 0 4px 20px -6px #3d2a5d12, 0 1px 3px #3d2a5d08;
+  --page-gutter: clamp(20px, 4vw, 48px);
+  --size-control: 36px;
+  --size-control-sm: 30px;
+  --size-icon: 32px;
+  --size-composer-input: 68px;
+  --welcome-width: 680px;
+  --welcome-height: clamp(300px, 52vh, 500px);
+  --size-brand: 26px;
+  --size-welcome-mark: 36px;
+  --sh-welcome-mark: 0 8px 24px -12px #ab5a2e38;
+  --size-settings-width: 1100px;
+  --size-settings-height: 790px;
+  --size-settings-nav: 212px;
+  --c-rail: #eeedf2;
+  --size-nav-rail: 64px;
+  --sh-frame: 0 1px 3px #2e25400a;
+  --workspace-gutter: clamp(16px, 2.3vw, 32px);
 }
 
 :root[data-font-size='small'] { --law-font-scale: .9; }
@@ -310,27 +328,27 @@
 :root[data-theme='dark'] {
   color-scheme: dark;
 
-  --c-canvas: #111318;
+  --c-canvas: #1d1b22;
   /* 2026-10-22 深色截图复核：panel 与 canvas 明度差过小（#16181d vs #111318），三栏糊成一片，
      panel 提亮到 #1a1d23、hairline 提到 #2e333c，让分区在深色下也能看出来。 */
-  --c-panel: #1a1d23;
-  --c-raised: #20242b;
-  --c-sunken: #0d0f13;
-  --c-hover: #262b34;
-  --c-active: #2f3540;
-  --c-bubble: #1e2a42;
+  --c-panel: #222029;
+  --c-raised: #282530;
+  --c-sunken: #2c2835;
+  --c-hover: #34303e;
+  --c-active: #3d324e;
+  --c-bubble: #302b3a;
 
-  --c-line: #2e333c;
-  --c-line-strong: #3b414c;
+  --c-line: #37313f;
+  --c-line-strong: #4c4358;
 
-  --c-text-1: #e9ecf1;
-  --c-text-2: #a8b0bc;
-  --c-text-3: #7c8695;
-  --c-text-off: #5a6270;
-  --c-text-inverse: #111318;
+  --c-text-1: #f1edf6;
+  --c-text-2: #c6bdcf;
+  --c-text-3: #a69bb3;
+  --c-text-off: #737384;
+  --c-text-inverse: #21172d;
 
-  --c-accent: #6e9bff;
-  --c-accent-soft: #1a2438;
+  --c-accent: #c2a5ef;
+  --c-accent-soft: #362b45;
   --c-success: #3dd68c;
   --c-success-soft: #12271e;
   --c-warn: #f0a742;
@@ -354,9 +372,9 @@
   --law-blue-grey-700: #c1c6d0;
   --law-blue-grey-750: #d7dbe3;
   --law-blue-grey-1000: #f2f4f8;
-  --law-accent-50: #202f4b;
-  --law-accent-100: #263a5b;
-  --law-accent-700: #a7c4ff;
+  --law-accent-50: var(--c-accent-soft);
+  --law-accent-100: var(--c-accent-soft);
+  --law-accent-700: var(--c-accent);
   --law-red-50: #3d2228;
   --law-red-100: #482730;
   --law-red-600: #ff8b92;
@@ -372,6 +390,9 @@
   --law-diff-del-text: #ff9fa6;
   --law-diff-gutter: #8b949e;
   --law-diff-num-text: #d1d5db;
+  --sh-composer: 0 8px 32px -16px #00000050, 0 2px 6px #00000018;
+  --c-rail: #18161d;
+  --sh-frame: 0 1px 3px #00000018;
 }
 :root[data-motion='reduced'] *,
 :root[data-motion='reduced'] *::before,

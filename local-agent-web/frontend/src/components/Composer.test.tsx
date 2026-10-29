@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -147,7 +147,7 @@ describe('Composer 追问引用（2026-10-26）', () => {
         takeover={shellScenario.takeover}
         modelMenu={shellScenario.modelMenu}
         state={shellScenario.composer}
-        actions={{ draft: '', onDraftChange: () => {}, onSend: () => true, canSend: false, quote, onClearQuote }}
+        actions={{ draft: '', onDraftChange: () => {}, onSend: () => 'sent', canSend: false, quote, onClearQuote }}
       />,
     )
   }
@@ -174,7 +174,7 @@ describe('Composer 追问引用（2026-10-26）', () => {
 describe('Composer 图片（2026-10-16）', () => {
   /** 真接线（带 `actions`）的渲染：只测与图片有关的那条路。 */
   function renderWired(
-    onSend: (ids: readonly string[]) => boolean,
+    onSend: (ids: readonly string[]) => 'sent' | 'queued' | 'rejected',
     onAttachFile: (file: File) => Promise<{ id: string; previewUrl: string }>,
   ) {
     return render(
@@ -200,7 +200,7 @@ describe('Composer 图片（2026-10-16）', () => {
     }))
     const { container } = renderWired((ids) => {
       sent.push(ids)
-      return true
+      return 'sent'
     }, attach)
 
     const box = screen.getByRole('textbox', { name: '给智能体发消息' })
@@ -222,7 +222,7 @@ describe('Composer 图片（2026-10-16）', () => {
   it('keeps the plain-text paste untouched when the clipboard has no image', () => {
     // 只在**真有图**时拦默认行为：否则连正常粘贴文字都会被吃掉。
     const attach = vi.fn(async () => ({ id: 'x', previewUrl: 'blob:x' }))
-    renderWired(() => true, attach)
+    renderWired(() => 'sent', attach)
 
     const box = screen.getByRole('textbox', { name: '给智能体发消息' })
     fireEvent.paste(box, { clipboardData: { files: [] } })
@@ -233,7 +233,7 @@ describe('Composer 图片（2026-10-16）', () => {
     // 实测缺陷：一轮进行中 / 提交在飞时回车，`onSend` 静默拒绝，但图片已被清空——
     // 用户看到"问题没发出去、文字还在、图片没了"。队列只有在对方**接受**后才清。
     const attach = vi.fn(async () => ({ id: 'kept', previewUrl: 'blob:kept' }))
-    const onSend = vi.fn(() => false)
+    const onSend = vi.fn(() => 'rejected' as const)
     const { container } = renderWired(onSend, attach)
 
     const box = screen.getByRole('textbox', { name: '给智能体发消息' })
@@ -244,5 +244,118 @@ describe('Composer 图片（2026-10-16）', () => {
     fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
     expect(onSend).toHaveBeenCalledTimes(1)
     expect(container.querySelector('img[src="blob:kept"]')).not.toBeNull()
+  })
+})
+
+describe('Composer 待发队列（2026-10-28）', () => {
+  const QUEUED = [
+    { id: 'q1', text: '先问 A' },
+    { id: 'q2', text: '再问 B' },
+  ]
+
+  function renderQueue(overrides: {
+    queued?: readonly { id: string; text: string }[]
+    queuePaused?: boolean
+    canQueue?: boolean
+    onMoveQueued?: (id: string, direction: 'up' | 'down') => void
+    onRemoveQueued?: (id: string) => void
+    onEditQueued?: (id: string, text: string) => boolean
+    onQueueEditingChange?: (editing: boolean) => void
+    onResumeQueue?: () => void
+    queueNotice?: string | null
+  } = {}) {
+    return render(
+      <Composer
+        session={shellScenario.session}
+        plan={shellScenario.plan}
+        meter={shellScenario.context}
+        takeover={shellScenario.takeover}
+        modelMenu={shellScenario.modelMenu}
+        state={shellScenario.composer}
+        queued={QUEUED}
+        {...overrides}
+      />,
+    )
+  }
+
+  it('lists the queued messages in send order, with their position', () => {
+    renderQueue()
+
+    const list = screen.getByRole('region', { name: '待发送的消息' })
+    expect(list).toHaveTextContent('待发送 2 条 · 本轮结束后自动发送')
+    const items = within(list).getAllByRole('listitem')
+    expect(items).toHaveLength(2)
+    expect(items[0]).toHaveTextContent('先问 A')
+    expect(items[1]).toHaveTextContent('再问 B')
+  })
+  it('编辑使用独立窗口，取消不写入，保存只更新目标消息', async () => {
+    const user = userEvent.setup()
+    const onEditQueued = vi.fn(() => true)
+    const onQueueEditingChange = vi.fn()
+    renderQueue({ onEditQueued, onQueueEditingChange })
+    await user.click(screen.getByRole('button', { name: '编辑第 2 条' }))
+    expect(onQueueEditingChange).toHaveBeenLastCalledWith(true)
+    await user.clear(screen.getByRole('textbox', { name: '待发消息内容' }))
+    expect(screen.getByRole('button', { name: '保存修改' })).toBeDisabled()
+    await user.type(screen.getByRole('textbox', { name: '待发消息内容' }), '修改后的 B')
+    await user.click(screen.getByRole('button', { name: '取消' }))
+    expect(onEditQueued).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: '编辑第 2 条' }))
+    expect(screen.getByRole('textbox', { name: '待发消息内容' })).toHaveValue('再问 B')
+    await user.clear(screen.getByRole('textbox', { name: '待发消息内容' }))
+    await user.type(screen.getByRole('textbox', { name: '待发消息内容' }), '修改后的 B')
+    await user.click(screen.getByRole('button', { name: '保存修改' }))
+    expect(onEditQueued).toHaveBeenCalledWith('q2', '修改后的 B')
+    expect(onQueueEditingChange).toHaveBeenLastCalledWith(false)
+  })
+
+  it('moves and removes one entry at a time, and disables the boundary arrows', () => {
+    const onMoveQueued = vi.fn()
+    const onRemoveQueued = vi.fn()
+    renderQueue({ onMoveQueued, onRemoveQueued })
+
+    fireEvent.click(screen.getByRole('button', { name: '下移第 1 条' }))
+    expect(onMoveQueued).toHaveBeenCalledWith('q1', 'down')
+    fireEvent.click(screen.getByRole('button', { name: '删除第 2 条' }))
+    expect(onRemoveQueued).toHaveBeenCalledWith('q2')
+
+    expect(screen.getByRole('button', { name: '上移第 1 条' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: '下移第 2 条' })).toBeDisabled()
+  })
+
+  it('shows a paused queue with a way back', () => {
+    const onResumeQueue = vi.fn()
+    renderQueue({ queuePaused: true, onResumeQueue })
+
+    expect(screen.getByText('待发送 2 条 · 已暂停')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '继续发送' }))
+    expect(onResumeQueue).toHaveBeenCalledTimes(1)
+  })
+
+  it('says why a message did not make it into the queue', () => {
+    // 静默拒绝会让人以为"已经排上了"：被拒时必须有一行可见的说明。
+    renderQueue({ queueNotice: '待发队列已满（20 条），这条没有加进去。' })
+
+    expect(screen.getByRole('status')).toHaveTextContent('待发队列已满')
+  })
+
+  it('accepts Enter as a queue action while the turn is running', () => {
+    // 2026-10-28：本轮忙时回车不再"什么都不发生"，而是把这条放进队列（输入框随后由宿主清空）。
+    const onSend = vi.fn(() => 'queued' as const)
+    render(
+      <Composer
+        session={{ ...shellScenario.session, status: 'running' }}
+        plan={shellScenario.plan}
+        meter={shellScenario.context}
+        takeover={shellScenario.takeover}
+        modelMenu={shellScenario.modelMenu}
+        state={shellScenario.composer}
+        canQueue
+        actions={{ draft: '排队这条', onDraftChange: () => {}, onSend, canSend: false }}
+      />,
+    )
+
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '给智能体发消息' }), { key: 'Enter' })
+    expect(onSend).toHaveBeenCalledTimes(1)
   })
 })

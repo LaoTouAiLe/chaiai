@@ -41,7 +41,7 @@ describe('useSessionStream approval boundary', () => {
     ]))
     unmount()
   })
-  it.each(['approval_required', 'approval_resolved'] as const)(
+  it.each(['approval_required', 'approval_resolved', 'question_required', 'question_resolved'] as const)(
     'refreshes the authoritative snapshot on %s',
     async (eventType) => {
       mock.read.mockImplementation(async (_sessionId, handlers: { onEvent: (event: unknown) => void }) => {

@@ -9,7 +9,7 @@
 .page button { cursor: pointer; }
 .page button:disabled { cursor: default; opacity: .45; }
 .page button:focus-visible, .page input:focus-visible, .page select:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 2px; }
-.header { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--sp-4); padding: var(--sp-6) clamp(20px, 4vw, 64px) var(--sp-4); background: var(--c-canvas); }
+.header { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--sp-4); padding: var(--sp-8) var(--page-gutter) var(--sp-5); background: var(--c-canvas); }
 .header h1 { font-size: var(--fs-heading); line-height: var(--lh-heading); font-weight: 600; margin: var(--sp-1) 0 0; }
 .header p { margin: var(--sp-1) 0 0; font-size: var(--fs-meta); line-height: var(--lh-meta); color: var(--c-text-3); }
 .eyebrow { color: var(--c-accent); font-size: var(--fs-meta); line-height: var(--lh-meta); }
@@ -17,16 +17,16 @@
 .actions button, .filters button, .pagination button { height: 32px; padding: 0 var(--sp-3); border: 1px solid var(--c-line); border-radius: var(--r-control); background: var(--c-raised); color: var(--c-text-1); font-size: var(--fs-body); }
 .actions button:hover, .filters button:hover, .pagination button:hover { background: var(--c-hover); }
 /* 页签改成分段控件形态（§7.6）：容器下沉、选中上浮，不再用下划线 */
-.tabs { display: flex; gap: 2px; margin: 0 clamp(20px, 4vw, 64px); padding: 2px; border-radius: var(--r-control); background: var(--c-sunken); overflow-x: auto; flex-shrink: 0; width: fit-content; max-width: calc(100% - 2 * clamp(20px, 4vw, 64px)); }
+.tabs { display: flex; gap: 2px; margin: 0 var(--page-gutter); padding: 2px; border-radius: var(--r-control); background: var(--c-sunken); overflow-x: auto; flex-shrink: 0; width: fit-content; max-width: calc(100% - 2 * var(--page-gutter)); }
 .tabs button { height: 28px; padding: 0 var(--sp-3); border-radius: var(--r-control); font-size: var(--fs-body); white-space: nowrap; color: var(--c-text-2); }
 .tabs button:hover { color: var(--c-text-1); background: var(--c-hover); }
 .tabs button[aria-current] { background: var(--c-raised); color: var(--c-text-1); font-weight: 500; box-shadow: var(--sh-menu); }
-.filters { display: flex; flex-wrap: wrap; align-items: end; gap: var(--sp-3); padding: var(--sp-3) clamp(20px, 4vw, 64px); background: var(--c-canvas); border-bottom: 1px solid var(--c-line); }
+.filters { display: flex; flex-wrap: wrap; align-items: end; gap: var(--sp-3); padding: var(--sp-4) var(--page-gutter); background: var(--c-canvas); border-bottom: none; }
 .filters label { display: flex; flex-direction: column; gap: var(--sp-1); font-size: var(--fs-meta); color: var(--c-text-3); }
 .filters input, .filters select { height: 32px; padding: 0 var(--sp-3); font-size: var(--fs-body); min-width: 110px; max-width: 200px; border: 1px solid transparent; border-radius: var(--r-control); background: var(--c-raised); color: var(--c-text-1); }
 .filters input:focus-visible, .filters select:focus-visible { border-color: var(--c-accent); outline: none; }
 .filters form { display: flex; align-items: end; gap: var(--sp-2); }
-.body { overflow: auto; flex: 1; min-height: 0; padding: var(--sp-4) clamp(20px, 4vw, 64px) var(--sp-8); }
+.body { overflow: auto; flex: 1; min-height: 0; padding: var(--sp-6) var(--page-gutter) var(--sp-8); }
 .notice { padding: var(--sp-3) var(--sp-4); margin-bottom: var(--sp-4); border: 0; border-radius: var(--r-panel); background: var(--c-warn-soft); color: var(--c-warn); font-size: var(--fs-body); }
 .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--sp-3); }
 /* 卡片：去掉描边，用白底浮在灰页上（与设置页去框同一口径） */

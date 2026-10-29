@@ -48,6 +48,15 @@ function firstRow(): HTMLElement {
 }
 
 describe('任务中心面板', () => {
+  it('作为工作区页面展示，并通过返回会话离开', async () => {
+    const onClose = vi.fn()
+    render(<TasksPanel view={view([])} onOpenSession={vi.fn()} onClose={onClose} />)
+    expect(screen.getByRole('heading', { level: 1, name: '任务中心' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(document.body.style.overflow).not.toBe('hidden')
+    await userEvent.click(screen.getByRole('button', { name: '返回会话' }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
   // 只冻结 `Date`：时长断言要确定，"输入事件"仍走真实计时器（fake 掉 setInterval 会让 userEvent 卡住）。
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ['Date'] })
@@ -113,7 +122,7 @@ describe('任务中心面板', () => {
       />,
     )
 
-    await user.click(screen.getByRole('button', { name: '打开会话做决定' }))
+    await user.click(screen.getByRole('button', { name: '打开会话处理' }))
 
     expect(onOpenSession).toHaveBeenCalledWith('session-1')
   })

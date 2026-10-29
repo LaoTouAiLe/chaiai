@@ -1,10 +1,13 @@
+import type { RefObject } from 'react'
 import { Check, Close } from '../../components/icons'
+import { AnchoredPopover } from '../../components/ui/AnchoredPopover'
 import type { ConnectionStatus, ModelMenuView } from '../../fixtures/types'
 import styles from './ModelMenu.module.css'
 
 interface ModelMenuProps {
   menu: ModelMenuView
   onClose?: () => void
+  anchorRef?: RefObject<HTMLElement | null>
   actions?: {
     busy: boolean
     onSelect: (connectionId: string) => void
@@ -28,18 +31,12 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
  * it was pinned to, and the menu says so instead of implying an immediate change
  * (ARCHITECTURE §15.9).
  *
- * Rendered as a block above the composer rather than a floating layer, so the
- * prototype has no overlap or occlusion to reason about.
+ * Anchored to the model trigger; the list scrolls without resizing the conversation.
  */
-export function ModelMenu({ menu, actions, onClose }: ModelMenuProps) {
+export function ModelMenu({ menu, actions, onClose, anchorRef }: ModelMenuProps) {
   return (
-    <section className={styles.menu} aria-label="模型选择" onKeyDown={(event) => {
-      if (event.key === 'Escape' && onClose !== undefined) {
-        event.preventDefault()
-        event.stopPropagation()
-        onClose()
-      }
-    }}>
+    <AnchoredPopover label="模型选择" anchorRef={anchorRef} onClose={onClose}>
+    <section className={styles.menu}>
       <div className={styles.head}>
         <span className={styles.headTitle}>会话模型</span>
         <span className={styles.headHint}>切换只影响下一次提交</span>
@@ -83,5 +80,6 @@ export function ModelMenu({ menu, actions, onClose }: ModelMenuProps) {
         管理模型连接…
       </button>
     </section>
+    </AnchoredPopover>
   )
 }

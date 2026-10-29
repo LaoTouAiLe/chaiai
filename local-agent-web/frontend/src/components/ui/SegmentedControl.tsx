@@ -17,6 +17,7 @@ export function SegmentedControl<T extends string>({
   onChange,
   ariaLabel,
   size = 'default',
+  variant = 'filled',
 }: {
   options: readonly SegmentedOption<T>[]
   value: T
@@ -24,10 +25,11 @@ export function SegmentedControl<T extends string>({
   onChange?: (value: T) => void
   ariaLabel: string
   size?: 'sm' | 'default'
+  variant?: 'filled' | 'plain'
 }) {
   const sizeClass = size === 'sm' ? styles.segmentSm : undefined
   return (
-    <div className={styles.segmented} role="tablist" aria-label={ariaLabel}>
+    <div className={[styles.segmented, variant === 'plain' ? styles.segmentedPlain : null].filter(Boolean).join(' ')} role="tablist" aria-label={ariaLabel}>
       {options.map((option) => {
         const active = option.value === value
         return (

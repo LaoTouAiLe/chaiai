@@ -59,7 +59,8 @@ describe('标签闭集', () => {
   it('"在等什么"逐个对上契约那张表（不读会话内部状态）', () => {
     expect(TASK_WAITING_LABEL.queued).toBe('在等空闲执行位')
     expect(TASK_WAITING_LABEL.running).toBe('没有在等外部输入')
-    expect(TASK_WAITING_LABEL.waiting_user).toBe('在等你的决定（审批）')
+    // 2026-10-28：`waiting_user` 涵盖审批与提问两种，文案不再只说"审批"。
+    expect(TASK_WAITING_LABEL.waiting_user).toBe('在等你的决定（审批或回答提问）')
     expect(TASK_WAITING_LABEL.needs_review).toBe('已结束，等你核对')
     expect(TASK_WAITING_LABEL.completed).toBe('已结束')
   })

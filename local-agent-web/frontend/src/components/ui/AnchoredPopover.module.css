@@ -1,0 +1,15 @@
+.popover {
+  position: fixed;
+  z-index: 60;
+  visibility: hidden;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--law-border-l2);
+  border-radius: 14px;
+  background: var(--law-surface-menu);
+  box-shadow: var(--sh-overlay);
+  color: var(--law-text-primary);
+  overscroll-behavior: contain;
+}
+.popover > * { min-height: 0; max-height: inherit; }

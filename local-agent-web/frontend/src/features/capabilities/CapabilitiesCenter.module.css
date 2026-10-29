@@ -17,7 +17,7 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: var(--sp-4);
-  padding: var(--sp-6) clamp(20px, 4vw, 64px) var(--sp-4);
+  padding: var(--sp-8) var(--page-gutter) var(--sp-5);
 }
 
 .heading {
@@ -36,7 +36,8 @@
   color: var(--c-text-1);
   font-size: var(--fs-heading);
   line-height: var(--lh-heading);
-  font-weight: 600;
+  font-weight: 550;
+  letter-spacing: -.035em;
 }
 
 .subtitle {
@@ -48,7 +49,7 @@
 }
 
 .tabBar {
-  padding: 0 clamp(20px, 4vw, 64px) var(--sp-3);
+  padding: 0 var(--page-gutter) var(--sp-3);
   border-bottom: 1px solid var(--c-line);
 }
 
@@ -56,5 +57,5 @@
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--sp-4) clamp(20px, 4vw, 64px) var(--sp-8);
+  padding: var(--sp-6) var(--page-gutter) var(--sp-8);
 }

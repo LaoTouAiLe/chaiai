@@ -1,4 +1,5 @@
-import { useRef, useState, type ClipboardEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent } from 'react'
+import { EditorDialog } from './ui/EditorDialog'
 import type {
   ComposerStateView,
   ComposerTakeoverView,
@@ -9,11 +10,14 @@ import type {
 } from '../fixtures/types'
 import { ApprovalCard } from '../features/approval/ApprovalCard'
 import type { ApprovalActions } from '../features/approval/ApprovalCard'
+import { QuestionCard } from '../features/question/QuestionCard'
+import type { QuestionActions } from '../features/question/QuestionCard'
 import { PlanStrip } from '../features/plan/PlanStrip'
 import { ModelMenu } from '../features/settings/ModelMenu'
 import { useGeneralPreferences } from '../features/settings/preferencesContext'
 import { ContextMeter, MeterPanel } from './ContextMeter'
 import { quotePreview } from '../features/conversation/quote'
+import type { QueuedMessage } from '../stores/outbox'
 import { ImagePlus } from './icons'
 import styles from './Composer.module.css'
 
@@ -39,11 +43,13 @@ export interface ComposerActions {
    * 发送。带上的附件是**引用**（`2026/10/16/<会话>/<哈希>.png`），不是文件本身——
    * 字节在上传时就落盘了（见 `onAttachFile`）。
    *
-   * 返回 **是否真的接受了这次提交**：调用方在一轮进行中、提交在飞、待审批或需核对时
-   * 会静默拒绝（不发请求、不报错）。**必须先问它、再清待发图片**——否则图片会凭空消失，
-   * 而草稿还在输入框里（2026-10-20 实测）。
+   * 返回这次提交的去向（2026-10-28 起是三态）：
+   * - `sent` 已发出去；
+   * - `queued` **被接受了，但进了待发队列**（本轮还在跑）——同样要清待发图片与草稿；
+   * - `rejected` 没接受（空输入、带图不允许入队、队列已满、需先处理中断）。
+   * **必须先问它、再清待发图片**——否则图片会凭空消失（2026-10-20 实测）。
    */
-  onSend: (attachmentIds: readonly string[]) => boolean
+  onSend: (attachmentIds: readonly string[]) => 'sent' | 'queued' | 'rejected'
   /**
    * 把一张图交给服务端（2026-10-16）：成功给回引用与一个**本地预览地址**，失败**抛错**。
    *
@@ -106,6 +112,31 @@ interface ComposerProps {
    * keeps its handler-free buttons.
    */
   approvalActions?: ApprovalActions
+  /**
+   * Question wiring (2026-10-28); omitted in prototype mode so the static card
+   * keeps its handler-free buttons.
+   */
+  questionActions?: QuestionActions
+  /**
+   * 待发队列（2026-10-28）：本轮忙时草稿仍可**入队**（`canQueue` 决定回车/发送键是否被接受），
+   * 队列区渲染在输入框上方，可上移/下移/删除；`queuePaused` 时给一个"继续发送"。
+   *
+   * 刻意**不放进 `actions`**：它不是对会话的动作，而是"我还有几条没发"的界面状态。
+   */
+  canQueue?: boolean
+  queued?: readonly QueuedMessage[]
+  queuePaused?: boolean
+  onRemoveQueued?: (id: string) => void
+  onMoveQueued?: (id: string, direction: 'up' | 'down') => void
+  onEditQueued?: (id: string, text: string) => boolean
+  onQueueEditingChange?: (editing: boolean) => void
+  queueScope?: string | null
+  onResumeQueue?: () => void
+  /**
+   * 队列相关问题的一句话（2026-10-28）：入队被拒（队列已满 / 带图）或自动发送失败。
+   * 没有它时**不渲染任何占位**——正常排队时不该多一行字。
+   */
+  queueNotice?: string | null
 }
 
 /** One copy of the running-state explanation, derived from `session.status`. */
@@ -122,17 +153,34 @@ const SEND_BLOCKED_TEXT = '任务进行中：可以先继续写草稿，但要�
  * card stays above it as a visible outcome, because a card that asks the user to
  * re-issue a request must not be the reason they cannot type one.
  */
-export function Composer({ mode = 'agent', session, plan, meter, takeover, modelMenu, state, stopped = false, actions, modelMenuActions, approvalActions }: ComposerProps) {
+export function Composer({ mode = 'agent', session, plan, meter, takeover, modelMenu, state, stopped = false, actions, modelMenuActions, approvalActions, questionActions, canQueue = false, queued = [], queuePaused = false, onRemoveQueued, onMoveQueued, onEditQueued, onQueueEditingChange, queueScope, onResumeQueue, queueNotice = null }: ComposerProps) {
   // `animations` 不再需要：用它的是那条压缩提示，而它 2026-10-16 搬进了对话流。
   const { send_shortcut: sendShortcut } = useGeneralPreferences()
   const modelTrigger = useRef<HTMLButtonElement>(null)
+  const meterTrigger = useRef<HTMLButtonElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
   // 待发图片（2026-10-16）：它是**这条草稿**的一部分，属于本地瞬态——刷新即丢（字节已在服务端）。
   const [pending, setPending] = useState<readonly PendingAttachment[]>([])
   const [attachError, setAttachError] = useState<string | null>(null)
   const [attachBusy, setAttachBusy] = useState(false)
   // 待发引用（2026-10-26）：状态在宿主（它负责拼进正文），这里只用来显示与取消。
   const quote = actions?.quote ?? ''
+  const [queueEditor, setQueueEditor] = useState<{ id: string; text: string } | null>(null)
+  const [editError, setEditError] = useState<string | null>(null)
+  const editingChange = useRef(onQueueEditingChange)
+  useLayoutEffect(() => { editingChange.current = onQueueEditingChange }, [onQueueEditingChange])
+  useEffect(() => {
+    setQueueEditor(null)
+    setEditError(null)
+    editingChange.current?.(false)
+    return () => editingChange.current?.(false)
+  }, [queueScope])
+  const closeQueueEditor = () => {
+    setQueueEditor(null)
+    setEditError(null)
+    editingChange.current?.(false)
+  }
 
   /** 粘贴与选图走**同一条路**：两者都只是"拿到若干 File"，处理方式必须一样。 */
   async function attachFiles(files: readonly File[]) {
@@ -161,13 +209,13 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
     void attachFiles(files)
   }
 
-  /** 发送：把待发图片的**引用**一起交出去；**只有调用方接受后才清空队列**。 */
+  /** 发送：把待发图片的**引用**一起交出去；**只有调用方接受（sent / queued）后才清空**。 */
   function send() {
     if (actions === undefined) return
     const ids = pending.map((item) => item.id)
-    // 先问后清：`onSend` 命中"一轮进行中 / 提交在飞 / 待审批 / 需核对"时会返回 false
-    // 且什么都不做。若这里先清队列，用户看到的就是"问题没发出去、文字还在、图片没了"。
-    if (!actions.onSend(ids)) return
+    // 先问后清：`rejected` 命中"空输入 / 带图不允许入队 / 队列已满 / 需先处理中断"时
+    // 什么都不做。若这里先清，用户看到的就是"问题没发出去、文字还在、图片没了"。
+    if (actions.onSend(ids) === 'rejected') return
     setPending([])
     setAttachError(null)
   }
@@ -178,34 +226,133 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
   const stopVisible = actions?.onStop !== undefined && actions.canStop === true
   const approval = takeover.kind === 'approval' ? takeover.approval : null
   const awaitingDecision = approval !== null && approval.state === 'pending'
+  // 提问（2026-10-28）：与审批互斥——后端保证同一时刻最多只有一个非 `none`（架构 §4.2）。
+  const question = takeover.kind === 'question' ? takeover.question : null
+  const awaitingAnswer = question !== null && question.state === 'pending'
   const disabledReason = state?.disabledReason ?? null
   const phase = state?.phase ?? null
   const meterOpen = state?.meterOpen ?? false
+  useLayoutEffect(() => {
+    const resize = () => {
+      const input = inputRef.current
+      if (input === null) return
+      input.style.height = 'auto'
+      input.style.height = `${Math.min(input.scrollHeight, 200)}px`
+    }
+    resize()
+    window.addEventListener('resize', resize)
+    return () => window.removeEventListener('resize', resize)
+  }, [actions?.draft, awaitingDecision, awaitingAnswer])
   // A running turn blocks *sending*, not writing: the draft stays editable, the
   // input is never replaced by a stop button, and the reason is derived from the
   // run state itself rather than repeated per fixture (plan §T30, ARCHITECTURE §15.2).
   const sendBlockedReason = session.status === 'running' ? SEND_BLOCKED_TEXT : null
 
   return (
-    <div className={styles.dock}>
+    <div className={styles.dock} data-composer="true" data-composer-mode={awaitingDecision ? 'approval' : awaitingAnswer ? 'question' : 'input'}>
       <div className={styles.stack}>
         {plan === null ? null : <PlanStrip plan={plan} />}
+
+        {/* 队列相关的一句话（2026-10-28）：入队被拒或自动发送失败时才出现。 */}
+        {queueNotice === null || queueNotice === undefined ? null : (
+          <p className={styles.queueNotice} role="status">{queueNotice}</p>
+        )}
+
+        {/* 待发队列（2026-10-28）：本轮还没结束时排队；顺序可调、可单条取消。 */}
+        {queued.length === 0 ? null : (
+          <section className={styles.queue} aria-label="待发送的消息">
+            <div className={styles.queueHead}>
+              <span className={styles.queueTitle}>
+                待发送 {queued.length} 条 · {queuePaused ? '已暂停' : '本轮结束后自动发送'}
+              </span>
+              {queuePaused && onResumeQueue !== undefined ? (
+                <button type="button" className={styles.queueResume} onClick={onResumeQueue}>
+                  继续发送
+                </button>
+              ) : null}
+            </div>
+            <ol className={styles.queueList}>
+              {queued.map((item, index) => (
+                <li key={item.id} className={styles.queueItem}>
+                  <span className={styles.queueIndex}>{index + 1}</span>
+                  <span className={styles.queueText}>{item.text}</span>
+                  <span className={styles.queueActions}>
+                    <button type="button" className={styles.queueButton} aria-label={`编辑第 ${index + 1} 条`}
+                      disabled={onEditQueued === undefined} onClick={() => {
+                        setQueueEditor({ id: item.id, text: item.text })
+                        setEditError(null)
+                        editingChange.current?.(true)
+                      }}>
+                      <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3 3 3M3 10l7-7a2.1 2.1 0 0 1 3 3l-7 7-4 1z" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.queueButton}
+                      aria-label={`上移第 ${index + 1} 条`}
+                      disabled={index === 0 || onMoveQueued === undefined}
+                      onClick={() => onMoveQueued?.(item.id, 'up')}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.queueButton}
+                      aria-label={`下移第 ${index + 1} 条`}
+                      disabled={index === queued.length - 1 || onMoveQueued === undefined}
+                      onClick={() => onMoveQueued?.(item.id, 'down')}
+                    >
+                      ↓
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.queueButton}
+                      aria-label={`删除第 ${index + 1} 条`}
+                      disabled={onRemoveQueued === undefined}
+                      onClick={() => onRemoveQueued?.(item.id)}
+                    >
+                      ×
+                    </button>
+                  </span>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
+        {queueEditor !== null && queued.some(item => item.id === queueEditor.id) ? (
+          <EditorDialog title="编辑待发消息" description="保存后保留原来的排队位置；编辑期间暂缓自动发送。" onClose={closeQueueEditor}>
+            <form className={styles.queueEditor} onSubmit={event => {
+              event.preventDefault()
+              if (!queueEditor.text.trim()) return
+              if (onEditQueued?.(queueEditor.id, queueEditor.text)) closeQueueEditor()
+              else setEditError('这条消息已不在队列中，请关闭窗口并检查会话。')
+            }}>
+              <label>消息内容<textarea aria-label="待发消息内容" value={queueEditor.text} rows={7} maxLength={100000}
+                onChange={event => setQueueEditor({ ...queueEditor, text: event.target.value })} /></label>
+              {editError ? <p role="alert">{editError}</p> : null}
+              <div><button type="button" onClick={closeQueueEditor}>取消</button>
+                <button type="submit" disabled={!queueEditor.text.trim()}>保存修改</button></div>
+            </form>
+          </EditorDialog>
+        ) : null}
 
         {approval !== null && !awaitingDecision ? (
           <ApprovalCard key={approval.approvalId} approval={approval} actions={approvalActions} />
         ) : null}
 
-        {modelMenu === null || awaitingDecision ? null : <ModelMenu menu={modelMenu} actions={modelMenuActions}
-          onClose={actions?.onCloseModelMenu === undefined ? undefined : () => {
-            actions.onCloseModelMenu?.()
-            modelTrigger.current?.focus()
-          }} />}
-
-        {meterOpen && !awaitingDecision ? (
-          <MeterPanel meter={meter} onClose={actions?.onToggleMeter} />
+        {question !== null && !awaitingAnswer ? (
+          <QuestionCard key={question.questionId} question={question} actions={questionActions} />
         ) : null}
 
-        {awaitingDecision ? (
+        {modelMenu === null || awaitingDecision || awaitingAnswer ? null : <ModelMenu menu={modelMenu} actions={modelMenuActions}
+          anchorRef={modelTrigger} onClose={actions?.onCloseModelMenu} />}
+
+        {meterOpen && !awaitingDecision && !awaitingAnswer ? (
+          <MeterPanel meter={meter} anchorRef={meterTrigger} onClose={actions?.onToggleMeter} />
+        ) : null}
+
+        {awaitingAnswer ? (
+          <QuestionCard key={question.questionId} question={question} actions={questionActions} />
+        ) : awaitingDecision ? (
           <ApprovalCard key={approval.approvalId} approval={approval} actions={approvalActions} />
         ) : (
           <>
@@ -260,6 +407,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                 {/* A disabled input states why it is disabled, and points at that
                     sentence for assistive tech rather than relying on the greying. */}
                 <textarea
+                  ref={inputRef}
                   className={styles.input}
                   placeholder="给智能体发消息"
                   rows={1}
@@ -283,7 +431,8 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                         // Enter sends, Shift+Enter keeps the newline (chat convention).
                         const sendKey = sendShortcut === 'ctrl_enter' ? event.ctrlKey || event.metaKey : !event.ctrlKey && !event.metaKey
                         // 有待发图片时也允许发出（2026-10-16）：只贴一张图、不写字是合法提交。
-                        if (event.key === 'Enter' && sendKey && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229 && (actions.canSend || pending.length > 0)) {
+                        // `canQueue`（2026-10-28）：本轮忙时回车也算"被接受"——进待发队列。
+                        if (event.key === 'Enter' && sendKey && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229 && (actions.canSend || canQueue || pending.length > 0)) {
                           event.preventDefault()
                           send()
                         }
@@ -343,6 +492,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                   type="button"
                   className={styles.chip}
                   ref={modelTrigger}
+                  aria-haspopup="dialog"
                   onClick={actions?.onToggleModelMenu}
                   aria-expanded={actions?.onToggleModelMenu === undefined ? undefined : modelMenu !== null}
                   aria-label={actions?.onToggleModelMenu === undefined ? undefined : '选择会话模型'}
@@ -397,7 +547,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                       event.target.value = ''
                     }}
                   />
-                  <ContextMeter meter={meter} open={meterOpen} onToggle={actions?.onToggleMeter} />
+                  <ContextMeter meter={meter} triggerRef={meterTrigger} open={meterOpen} onToggle={actions?.onToggleMeter} />
                   {/* v0.4 exposes no `cancel_task()`, so the primary action is never a
                       stop button: sending is simply unavailable until the turn ends
                       (ARCHITECTURE §15.2, plan §T30). */}
@@ -425,7 +575,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                       // Prototype mode keeps it permanently disabled (the fixture snapshot);
                       // real mode enables it once there is something to send.
                       // 有待发图片时也可以点（2026-10-16）：`canSend` 只管"草稿非空"。
-                      disabled={actions === undefined || (!actions.canSend && pending.length === 0)}
+                      disabled={actions === undefined || (!actions.canSend && !canQueue && pending.length === 0)}
                       onClick={actions === undefined ? undefined : () => send()}
                       aria-label="发送消息"
                       aria-describedby={sendBlockedReason === null ? undefined : 'composer-send-blocked'}
@@ -445,6 +595,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                 </div>
               </div>
             </div>
+            <div className={styles.helper} aria-hidden="true"><span>{sendShortcut === 'ctrl_enter' ? 'Ctrl / ⌘ + Enter 发送' : 'Enter 发送'}</span><span>Shift + Enter 换行</span></div>
           </>
         )}
       </div>

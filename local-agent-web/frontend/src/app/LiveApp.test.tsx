@@ -1,7 +1,8 @@
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { useOutbox } from '../stores/outbox'
 import { useUiStore } from '../stores/ui'
 import { ApiError } from '../api/client'
 import { LiveApp } from './LiveApp'
@@ -13,6 +14,11 @@ const mock = vi.hoisted(() => ({
   approval: null as null | Record<string, unknown>,
   messages: [] as Record<string, unknown>[],
   mutate: vi.fn(),
+  mutateAsync: vi.fn(),
+  acceptedJobId: null as string | null,
+  taskRows: [] as { task_id: string; session_id: string; state: string }[],
+  snapshotBranch: undefined as string | undefined,
+  getSnapshot: vi.fn(),
   modelMutate: vi.fn(),
   modeMutate: vi.fn(),
   recoveryMutate: vi.fn(),
@@ -48,6 +54,10 @@ const mock = vi.hoisted(() => ({
     sequence: number
     channel?: 'text' | 'reasoning'
   },
+}))
+vi.mock('../api/client', async importOriginal => ({
+  ...await importOriginal<typeof import('../api/client')>(),
+  getSessionSnapshot: mock.getSnapshot,
 }))
 
 /** 快照里的挂起审批（传输形状；页面经 `mapApproval` 映射成卡片视图模型）。 */
@@ -116,7 +126,7 @@ vi.mock('../api/queries', () => ({
   useSessionChangeDiff: () => ({ data: undefined, isLoading: false, isError: false }),
   useHealth: () => ({ data: { model_configured: true } }),
   // 任务中心的数据源：这个夹具里没有任务，角标因此不显示（T62；§17.6）。
-  useTasks: () => ({ data: { tasks: [], counts: {}, pending_count: 0 } }),
+  useTasks: () => ({ data: { tasks: mock.taskRows, counts: {}, pending_count: 0 } }),
   useArchivedSessions: () => ({ data: [], isLoading: false, isError: false }),
   useWorkspaces: () => ({ data: [{ workspace_id: 'w1', display_name: '工作区' }] }),
   useSessions: () => ({
@@ -136,6 +146,7 @@ vi.mock('../api/queries', () => ({
       session_state: mock.sessionState,
       interrupted_request_id: mock.interrupted,
       snapshot_id: 'snapshot-1',
+      branch_id: mock.snapshotBranch,
       schema_version: 1,
       created_at: '2026-09-27T00:00:00Z',
       workspace: { workspace_id: 'w1', display_name: '工作区' },
@@ -180,13 +191,20 @@ vi.mock('../api/queries', () => ({
   useArtifactsDetail: () => ({ data: undefined, isLoading: false, isError: false }),
   useSelectWorkspace: () => ({ mutate: mock.workspaceMutate }),
   usePickWorkspaceDirectory: () => ({ mutate: mock.pickMutate, isPending: false, error: null }),
-  useSubmitMessage: () => ({ mutate: mock.mutate, isPending: false, isError: false, reset: mock.submitReset }),
+  useSubmitMessage: (sessionId: string) => ({ acceptedJobId: mock.acceptedJobId, mutateAsync: (request: unknown) => mock.mutateAsync(sessionId, request), mutate: mock.mutate, isPending: false, isError: false, reset: mock.submitReset }),
   useSelectSessionModel: () => ({ mutate: mock.modelMutate, isPending: false }),
   useResolveApproval: () => ({
     resolve: mock.resolve,
     isPending: mock.resolvePending,
     error: mock.resolveError,
     reset: mock.approvalReset,
+  }),
+  // 提问答复（2026-10-28）：与审批同一套接口形状，测试默认不触发。
+  useResolveQuestion: () => ({
+    resolve: vi.fn(),
+    isPending: false,
+    error: null,
+    reset: vi.fn(),
   }),
 }))
 
@@ -199,6 +217,10 @@ vi.mock('../stores/stream', () => ({
 }))
 
 beforeEach(() => {
+  mock.acceptedJobId = null
+  mock.taskRows = []
+  mock.snapshotBranch = undefined
+  mock.getSnapshot.mockReset().mockImplementation(async () => ({ snapshot_id: 'fresh-snapshot', branch_id: mock.snapshotBranch }))
   mock.sessionState = 'awaiting_approval'
   // 默认没有挂起审批：审批相关的用例各自设置，其余用例保持输入区可见。
   mock.approval = null
@@ -206,6 +228,7 @@ beforeEach(() => {
   mock.resolvePending = false
   mock.resolveError = null
   mock.mutate.mockReset()
+  mock.mutateAsync.mockReset().mockImplementation(() => new Promise(() => {}))
   mock.modelMutate.mockReset()
   mock.modeMutate.mockReset()
   mock.recoveryMutate.mockReset()
@@ -427,11 +450,19 @@ describe('LiveApp pending approval', () => {
     expect(screen.queryByRole('button', { name: '允许一次' })).not.toBeInTheDocument()
   })
 
-  it('explains a stale decision instead of silently retrying', () => {
+  it('explains a stale decision instead of silently retrying（文案取自后端）', () => {
     mock.approval = { ...pendingApproval }
-    mock.resolveError = new ApiError({ status: 409, code: 'APPROVAL_EXPIRED', message: '已失效' })
+    // 2026-10-28：页面不再按错误码自己写文案，直接展示后端给的 message + hint。
+    mock.resolveError = new ApiError({
+      status: 409,
+      code: 'APPROVAL_EXPIRED',
+      message: '这个审批请求已经不在等待决策，因此没有执行任何操作。',
+      hint: '重新发起请求并重新确认。',
+    })
     renderApp()
-    expect(screen.getByRole('alert')).toHaveTextContent('这次审批已失效，未执行任何操作')
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent('这个审批请求已经不在等待决策')
+    expect(alert).toHaveTextContent('重新发起请求并重新确认')
   })
 
   it('reveals the structured diff only after the tool row is expanded', () => {
@@ -653,5 +684,153 @@ describe('LiveApp 未流式', () => {
     mock.answerStreaming = undefined
     renderApp()
     expect(screen.queryByText('未流式')).not.toBeInTheDocument()
+  })
+})
+
+describe('LiveApp 待发队列（2026-10-28）', () => {
+  it('版本冲突后可以重试，但不能悄悄把消息发到另一个分支', async () => {
+    mock.sessionState = 'idle'
+    mock.snapshotBranch = 'original'
+    mock.mutateAsync.mockImplementationOnce(() => {
+      mock.snapshotBranch = 'changed'
+      return Promise.reject(new ApiError({ status: 409, code: 'CONVERSATION_CONFLICT', message: '状态已更新' }))
+    })
+    useOutbox.getState().enqueue('s1', '属于原分支的消息')
+    render(<QueryClientProvider client={new QueryClient()}><LiveApp /></QueryClientProvider>)
+    await waitFor(() => expect(useOutbox.getState().paused.s1).toBe(true), { timeout: 3000 })
+    expect(mock.mutateAsync).toHaveBeenCalledOnce()
+    expect(screen.getByText(/会话分支已切换/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '继续发送' }))
+    await waitFor(() => expect(mock.mutateAsync).toHaveBeenCalledTimes(2))
+    expect(mock.mutateAsync.mock.calls[1]?.[1].context.expected_branch_id).toBe('changed')
+  })
+  it('后台已接受时不使用旧空闲快照，直到本次任务确认结束才发送队首', async () => {
+    mock.sessionState = 'idle'
+    mock.acceptedJobId = 'job-accepted'
+    useOutbox.getState().enqueue('s1', '必须等本轮结束')
+    render(<QueryClientProvider client={new QueryClient()}><LiveApp /></QueryClientProvider>)
+    expect(mock.mutateAsync).not.toHaveBeenCalled()
+    act(() => {
+      mock.taskRows = [{ task_id: 'job-accepted', session_id: 's1', state: 'running' }]
+      useUiStore.setState({ drafts: { s1: '触发刷新' } })
+    })
+    expect(mock.mutateAsync).not.toHaveBeenCalled()
+    act(() => {
+      mock.taskRows = [{ task_id: 'job-accepted', session_id: 's1', state: 'completed' }]
+      useUiStore.setState({ drafts: { s1: '' } })
+    })
+    await waitFor(() => expect(mock.mutateAsync).toHaveBeenCalledOnce())
+  })
+  const renderApp = () => render(
+    <QueryClientProvider client={new QueryClient()}><LiveApp /></QueryClientProvider>,
+  )
+
+  beforeEach(() => {
+    useOutbox.getState().reset()
+  })
+
+  it('切会话并再次提交后，原会话的失败仍恢复队首，且不阻塞另一会话', async () => {
+    mock.sessionState = 'idle'
+    let rejectFirst!: (error: Error) => void
+    mock.mutateAsync.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject }))
+    useOutbox.getState().enqueue('s1', 'A 的队首')
+    renderApp()
+    await waitFor(() => expect(mock.mutateAsync).toHaveBeenCalledTimes(1))
+    act(() => {
+      useUiStore.getState().openSession('s2')
+      useOutbox.getState().enqueue('s2', 'B 的队首')
+    })
+    await waitFor(() => expect(mock.mutateAsync).toHaveBeenCalledTimes(2))
+    expect(mock.mutateAsync.mock.calls[1]?.[0]).toBe('s2')
+    act(() => rejectFirst(new Error('A 断网')))
+    await waitFor(() => expect(useOutbox.getState().paused.s1).toBe(true))
+    expect(useOutbox.getState().bySession.s1?.[0]?.text).toBe('A 的队首')
+    expect(screen.queryByText(/A 断网/)).not.toBeInTheDocument()
+    act(() => useOutbox.getState().enqueue('s2', 'B 的下一条'))
+    expect(mock.mutateAsync).toHaveBeenCalledTimes(2)
+    act(() => {
+      useUiStore.getState().openSession('s1')
+      useOutbox.getState().resume('s1')
+    })
+    await waitFor(() => expect(mock.mutateAsync).toHaveBeenCalledTimes(3))
+    expect(mock.mutateAsync.mock.calls[2]?.[0]).toBe('s1')
+  })
+
+  it('发送队首那条，并在本轮结束后自动发出去', async () => {
+    mock.sessionState = 'idle'
+    useOutbox.getState().enqueue('s1', '下一条')
+    useOutbox.getState().enqueue('s1', '再下一条')
+
+    renderApp()
+
+    await waitFor(() => expect(mock.mutateAsync).toHaveBeenCalledTimes(1))
+    expect(mock.mutateAsync.mock.calls[0]?.[1]).toEqual({ text: '下一条', attachments: [],
+      context: { expected_snapshot_id: 'fresh-snapshot', expected_branch_id: undefined } })
+    // 只有发出去的那条离开队列，后面的还在等下一轮。
+    expect(useOutbox.getState().bySession.s1?.map((item) => item.text)).toEqual(['再下一条'])
+  })
+
+  it('本轮进行中不动队列，等它结束', async () => {
+    mock.sessionState = 'running'
+    useOutbox.getState().enqueue('s1', '等一会儿')
+
+    renderApp()
+
+    await waitFor(() => expect(screen.getByRole('textbox', { name: '给智能体发消息' })).toBeInTheDocument())
+    expect(mock.mutateAsync).not.toHaveBeenCalled()
+    expect(useOutbox.getState().bySession.s1).toHaveLength(1)
+  })
+
+  it('队列满时明确说"没有加进去"，不静默丢输入', async () => {
+    mock.sessionState = 'running'
+    for (let index = 0; index < 20; index += 1) {
+      useOutbox.getState().enqueue('s1', `第 ${index} 条`)
+    }
+    useUiStore.setState({ drafts: { s1: '再加一条' } })
+
+    renderApp()
+    fireEvent.keyDown(screen.getByRole('textbox', { name: '给智能体发消息' }), { key: 'Enter' })
+
+    expect(await screen.findByText(/待发队列已满/)).toBeInTheDocument()
+    expect(useOutbox.getState().bySession.s1).toHaveLength(20)
+  })
+
+  it('自动发送失败时说明原因（只给中文，不嵌服务端原文），并把消息放回队首', async () => {
+    mock.sessionState = 'idle'
+    mock.mutateAsync.mockImplementation(() => {
+      // 后端给的是面向用户的一句话（§15.5）；页面原样展示，不再自己写码表。
+      return Promise.reject(new ApiError({
+        status: 409,
+        code: 'MODEL_AUTH_FAILED',
+        message: '测试：模型鉴权失败，同一会话同一时刻只允许一轮运行',
+        hint: '等待当前一轮结束。',
+      }))
+    })
+    useOutbox.getState().enqueue('s1', '下一条')
+
+    renderApp()
+
+    const notice = await screen.findByText(/队列里的下一条没有发出去/)
+    expect(notice).toHaveTextContent('同一会话同一时刻只允许一轮运行')
+    // 队列提示只取 message：可执行提示由"已暂停，处理后再点继续发送"承担，不重复后端 hint。
+    expect(notice).not.toHaveTextContent('等待当前一轮结束')
+    expect(notice).not.toHaveTextContent('sk-')
+    expect(useOutbox.getState().paused.s1).toBe(true)
+    // 消息没有丢：还在队首。
+    expect(useOutbox.getState().bySession.s1?.map((item) => item.text)).toEqual(['下一条'])
+  })
+
+  it('用户按过停止之后保持暂停，直到点"继续发送"', async () => {
+    mock.sessionState = 'idle'
+    useOutbox.getState().enqueue('s1', '暂停中')
+    useOutbox.getState().pause('s1')
+
+    renderApp()
+
+    await waitFor(() => expect(screen.getByRole('button', { name: '继续发送' })).toBeInTheDocument())
+    expect(mock.mutateAsync).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: '继续发送' }))
+    await waitFor(() => expect(mock.mutateAsync).toHaveBeenCalledTimes(1))
   })
 })

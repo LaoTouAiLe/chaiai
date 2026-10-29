@@ -1,29 +1,15 @@
 /* 「任务中心」面板样式。只用 `--law-*` 设计令牌，深浅色随主题自动切换（与能力面板同一套写法）。 */
 
-.overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: var(--law-space-xl);
-  background: var(--law-bg-mask);
-}
-
-.dialog {
-  width: min(680px, 100%);
-  max-height: 80vh;
+.page {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
   overflow: auto;
-  /* 滚到边界就停住，不把滚轮沿 DOM 链传给背后的会话区（2026-10-26）。 */
   overscroll-behavior: contain;
-  padding: var(--sp-6);
+  padding: 36px clamp(20px, 4vw, 64px);
   background: var(--c-canvas);
-  /* 去描边、统一浮层高度（2026-10-22 V6，与设置弹窗同口径） */
-  border: 0;
-  border-radius: var(--r-overlay);
-  box-shadow: var(--sh-overlay);
 }
+.eyebrow { display: block; margin-bottom: 8px; color: var(--law-text-tertiary); font-size: 12px; }
 
 .head {
   display: flex;
@@ -34,10 +20,11 @@
 
 .title {
   margin: 0;
-  font-size: var(--law-text-lg);
-  line-height: var(--law-leading-lg);
+  font-size: 28px;
+  line-height: var(--lh-heading);
   font-weight: var(--law-weight-semibold);
   color: var(--law-text-primary);
+  letter-spacing: -.035em;
 }
 
 .note {
@@ -48,13 +35,16 @@
 }
 
 .close {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   flex: none;
-  padding: var(--law-space-xs) var(--law-space-md);
+  padding: 8px 12px;
   font-size: var(--law-text-sm);
   color: var(--law-text-secondary);
-  background: var(--law-button-ghost-fill);
+  background: var(--c-panel);
   border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-sm);
+  border-radius: 8px;
   cursor: pointer;
 }
 
@@ -80,13 +70,14 @@
   display: inline-flex;
   align-items: center;
   gap: var(--law-space-xs);
-  padding: var(--law-space-xs) var(--law-space-md);
+  padding: var(--sp-2) var(--sp-3);
   font-size: var(--law-text-sm);
   color: var(--law-text-secondary);
-  background: var(--law-button-ghost-fill);
+  background: var(--c-sunken);
   border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-pill);
+  border-radius: var(--r-control);
   cursor: pointer;
+  border-color: transparent;
 }
 
 .filter:hover {
@@ -208,4 +199,12 @@
 
 .open:hover {
   background: var(--law-button-ghost-hover);
+}
+
+@media (max-width: 640px) {
+  .page { padding: 24px 16px; }
+  .head { flex-wrap: wrap; }
+  .title { font-size: 24px; }
+  .rowHead { align-items: flex-start; }
+  .open { margin-right: 6px; }
 }

@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import { Composer } from '../components/Composer'
 import { Sidebar } from '../components/Sidebar'
 import { TopBar } from '../components/TopBar'
+import { useCompactNavigation } from '../components/useCompactNavigation'
 import { CapabilitiesPanel } from '../features/capabilities/CapabilitiesPanel'
 import { TasksPanel } from '../features/tasks/TasksPanel'
 import { Conversation } from '../features/conversation/Conversation'
@@ -50,6 +51,7 @@ function readLiveFlag(): boolean {
  * 一条"未接 Graph"的横幅已经没有对象可提醒，留着只会在基线里制造噪声。
  */
 function PrototypeHost({ scenarioId }: { scenarioId: string | null }) {
+  const compactNavigation = useCompactNavigation()
   const scenario = findScenario(scenarioId)
   const [liveOpen, setLiveOpen] = useState(true)
   // 「能力与档位」面板的展开态：默认展开，关闭按钮真的能关（基线里要照到它，但不假装它关不掉）。
@@ -76,8 +78,9 @@ function PrototypeHost({ scenarioId }: { scenarioId: string | null }) {
 
   return (
     <div className={styles.app} data-scenario={scenario.id}>
-      <Sidebar workspaces={workspaces} collapsed={scenario.sidebarCollapsed ?? false} />
+      <Sidebar workspaces={workspaces} collapsed={scenario.sidebarCollapsed ?? compactNavigation} activePage={scenario.tasks != null ? 'tasks' : null} />
       <main className={styles.main}>
+        {scenario.tasks != null ? <TasksPanel view={scenario.tasks} onOpenSession={() => undefined} /> : <>
         <TopBar
           title={scenario.session.title}
           workspace={scenario.session.workspace}
@@ -92,7 +95,10 @@ function PrototypeHost({ scenarioId }: { scenarioId: string | null }) {
           takeover={scenario.takeover}
           modelMenu={scenario.modelMenu}
           state={scenario.composer}
+          // 待发队列（2026-10-28）：只有挂了 fixture 的场景才渲染，其余场景 DOM 不变。
+          queued={scenario.queued ?? []}
         />
+        </>}
         {live && liveOpen ? (
           <ModelSettingsDialog onClose={() => setLiveOpen(false)} />
         ) : scenario.settings === null ? null : (
@@ -108,10 +114,6 @@ function PrototypeHost({ scenarioId }: { scenarioId: string | null }) {
             actions={{ onToggle: () => undefined }}
             onClose={() => setCapabilitiesOpen(false)}
           />}
-        {/* 同上（T62 的 `tasks`）：只有挂了视图模型的场景才渲染，"打开会话"在原型里是惰性的。 */}
-        {scenario.tasks == null
-          ? null
-          : <TasksPanel view={scenario.tasks} onOpenSession={() => undefined} />}
       </main>
     </div>
   )

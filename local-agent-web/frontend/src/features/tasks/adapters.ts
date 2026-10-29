@@ -24,7 +24,10 @@ export const TASK_STATE_LABEL: Record<TaskState, string> = {
 export const TASK_WAITING_LABEL: Record<TaskState, string> = {
   queued: '在等空闲执行位',
   running: '没有在等外部输入',
-  waiting_user: '在等你的决定（审批）',
+  // 2026-10-28：`waiting_user` 现在有两种原因——等你批准一个动作，或等你回答一句提问。
+  // 索引里没有"哪一种"这个字段（§17.6：在等什么是状态的函数，服务端不猜），所以这里
+  // 只能如实说两种都可能，具体是哪种到了会话里就看得见。
+  waiting_user: '在等你的决定（审批或回答提问）',
   completed: '已结束',
   failed: '已结束',
   cancelled: '已结束',
@@ -136,7 +139,8 @@ export function taskFilterCounts(view: TasksView): Record<TaskFilter, number> {
 }
 
 /**
- * 入口角标用哪个数：**服务端给的** `pendingCount`（= 在等审批 + 需要人工核对）。
+ * 入口角标用哪个数：**服务端给的** `pendingCount`（= 在等你处理 + 需要人工核对；
+ * 前者包含审批与提问两种挂起，见 `waiting_user` 的文案注释）。
  *
  * 页面不自己从 `counts` 加总——两个口径分叉时，角标显示的数字会比面板里的行对不上，
  * 而那种不一致没人能解释清楚。

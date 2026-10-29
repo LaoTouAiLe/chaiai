@@ -5,6 +5,7 @@ import { Sidebar, type SidebarActions } from './Sidebar'
 function renderSidebar(
   overrides: Partial<SidebarActions> = {},
   addWorkspace?: { pending: boolean; error: string | null },
+  collapsed = false,
 ) {
   const actions: SidebarActions = {
     onSelectWorkspace: vi.fn(),
@@ -15,10 +16,23 @@ function renderSidebar(
     onToggleCollapse: vi.fn(),
     ...overrides,
   }
-  return render(<Sidebar workspaces={[]} actions={actions} addWorkspace={addWorkspace} />)
+  return render(<Sidebar workspaces={[]} actions={actions} addWorkspace={addWorkspace} collapsed={collapsed} />)
 }
 
 describe('Sidebar 添加工作区', () => {
+  it('侧栏底部设置入口复用已有动作，收起后仍可打开', () => {
+    const onOpenSettings = vi.fn()
+    const actions: SidebarActions = {
+      onSelectWorkspace: vi.fn(), onAddWorkspace: vi.fn(), onSelectSession: vi.fn(),
+      onNewSession: vi.fn(), onOpenSettings, onToggleCollapse: vi.fn(),
+    }
+    const view = render(<Sidebar workspaces={[]} actions={actions} />)
+    fireEvent.click(screen.getByRole('button', { name: /^设置$/ }))
+    view.rerender(<Sidebar workspaces={[]} collapsed actions={actions} />)
+    fireEvent.click(screen.getByRole('button', { name: /^设置$/ }))
+    expect(onOpenSettings).toHaveBeenCalledTimes(2)
+  })
+
   it('入口只有一条，点了就拉起宿主的目录选择器', () => {
     // 系统对话框自带"新建文件夹"，所以不该再有"按名称创建"的第二条路径。
     const onAddWorkspace = vi.fn()
@@ -84,6 +98,37 @@ it('搜索会话会筛选侧栏，并能清空恢复', () => {
   expect(screen.getByText('没有匹配的会话')).toBeInTheDocument()
   fireEvent.change(search, { target: { value: '' } })
   expect(screen.getByText('修复测试')).toBeInTheDocument()
+})
+
+it('状态筛选与搜索共同生效，切回全部保留原始会话', () => {
+  render(<Sidebar workspaces={[{ id: 'w', title: '项目', sessions: [
+    { id: 'running', title: '运行测试', status: 'running', timeLabel: '', selected: false },
+    { id: 'approval', title: '审批改动', status: 'awaiting-approval', timeLabel: '', selected: false },
+    { id: 'input', title: '回答问题', status: 'awaiting-input', timeLabel: '', selected: false },
+    { id: 'done', title: '已结束的任务', status: 'completed', timeLabel: '', selected: false },
+  ] }]} />)
+  fireEvent.click(screen.getByRole('button', { name: '进行中的会话' }))
+  expect(screen.getByText('运行测试')).toBeInTheDocument()
+  expect(screen.queryByText('审批改动')).not.toBeInTheDocument()
+  fireEvent.change(screen.getByRole('searchbox', { name: '搜索会话' }), { target: { value: '审批' } })
+  expect(screen.getByText('没有匹配的会话')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: '等待处理的会话' }))
+  expect(screen.getByText('审批改动')).toBeInTheDocument()
+  fireEvent.change(screen.getByRole('searchbox', { name: '搜索会话' }), { target: { value: '' } })
+  expect(screen.getByText('回答问题')).toBeInTheDocument()
+  expect(screen.getByText('等待回答')).toHaveClass('visually-hidden')
+  fireEvent.click(screen.getByRole('button', { name: '全部会话' }))
+  expect(screen.getByText('已结束的任务')).toBeInTheDocument()
+})
+
+it('独立功能导航在目录收起后仍保留返回会话与任务入口', () => {
+  const onOpenConversation = vi.fn()
+  const onOpenTasks = vi.fn()
+  renderSidebar({ onOpenConversation, onOpenTasks }, undefined, true)
+  fireEvent.click(screen.getByRole('button', { name: '会话工作台' }))
+  fireEvent.click(screen.getByRole('button', { name: '任务中心' }))
+  expect(onOpenConversation).toHaveBeenCalledOnce()
+  expect(onOpenTasks).toHaveBeenCalledOnce()
 })
 
 it('每个工作区独立展示更多，保留选中项且搜索全部会话', () => {

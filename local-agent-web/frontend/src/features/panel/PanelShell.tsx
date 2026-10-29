@@ -1,7 +1,7 @@
 ﻿import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 
 import { useArtifactsDetail, useSearchWorkspaceFiles, useSessionChanges, useSideChatCreation, useWorkspaceFiles } from '../../api/queries'
-import { ApiError, closeBrowser, newRequestId } from '../../api/client'
+import { ApiError, closeBrowser, newRequestId, requestTerminal, stopTerminal } from '../../api/client'
 import { sameFilePath } from '../conversation/fileLinks'
 import type { TraceView as TraceViewModel } from '../../fixtures/types'
 import { Button } from '../../components/ui/Button'
@@ -28,6 +28,12 @@ function panelScrollBehavior(): ScrollBehavior {
 
 type Tab = 'files' | 'changes' | 'steps' | 'sidechat' | 'terminal' | 'browser'
 
+/** `C:\Windows\System32\cmd.exe` → `cmd`：标签上显示的名字（2026-10-28）。 */
+function shellLabel(shell: string): string {
+  const name = shell.split(/[\\/]/).pop() ?? shell
+  return name.replace(/\.exe$/i, '').toLowerCase()
+}
+
 /**
  * 右栏首屏菜单（2026-10-23 按参考图重做）。
  *
@@ -41,7 +47,8 @@ const MENU: { id: Tab; label: string; hint: string; icon: string }[] = [
   // 侧边对话是**右栏里的一块面板**：主对话不动、不切走。
   // 之前做成"新建会话然后切过去"，用户的原话是「完全就不对」。
   { id: 'sidechat', label: '侧边对话', hint: '基于当前上下文开启独立对话，不打断当前任务', icon: 'M4 5h16v11H9l-5 4z' },
-  { id: 'terminal', label: '终端', hint: '运行命令及脚本', icon: 'M4 6h16v12H4zM8 10l2 2-2 2' },
+  // 终端：点一次开一个标签、一个终端（2026-10-28，不再逐次审批）。
+  { id: 'terminal', label: '终端', hint: '打开一个命令行，可多开标签', icon: 'M4 6h16v12H4zM8 10l2 2-2 2' },
   { id: 'browser', label: '浏览器', hint: '浏览外网与预览本地项目', icon: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18' },
 ]
 
@@ -148,6 +155,8 @@ export function PanelShell({
   const [activeId, setActiveId] = useState<string | null>(restored?.activeId ?? null)
   const [slideDirection, setSlideDirection] = useState<'left' | 'right'>('right')
   const [cleanupError, setCleanupError] = useState<string | null>(null)
+  // 终端启动失败按标签记（2026-10-28）：标签立刻出现，请求在后台跑，失败原因挂回它自己。
+  const [terminalIssues, setTerminalIssues] = useState<Record<string, string>>({})
   const selectTab = (id: string | null) => {
     if (id === activeId) return
     const previous = tabs.findIndex((item) => item.id === activeId)
@@ -177,11 +186,41 @@ export function PanelShell({
     const id = `${kind}-${String(counter.current)}`
     setTabs((previous) => [...previous, { id, kind, param: param ?? null, browserKey: kind === 'browser' ? newRequestId() : undefined }])
     selectTab(id)
+    // 终端：打开标签即启动一个（2026-10-28）。不再出审批卡，也不再由面板内部管理多个终端。
+    if (kind === 'terminal') void startTerminal(id)
     return id
   }
 
   const patchTab = (id: string, param: string | null) => {
     setTabs((previous) => previous.map((item) => (item.id === id ? { ...item, param } : item)))
+  }
+
+  /**
+   * 一个标签一个终端：请求成功就把 `terminal_id` 绑到标签上，失败原因留在这个标签里。
+   * 标签先渲染（"正在启动…"）再回填，避免点一下要等一次网络才出现东西。
+   */
+  async function startTerminal(tabId: string): Promise<void> {
+    if (!workspaceId) {
+      setTerminalIssues((previous) => ({ ...previous, [tabId]: '先选择一个工作区。' }))
+      return
+    }
+    try {
+      const view = await requestTerminal(workspaceId)
+      const terminalId = view.terminal_id
+      if (terminalId == null) {
+        setTerminalIssues((previous) => ({ ...previous, [tabId]: view.detail ?? '终端没有启动。' }))
+        return
+      }
+      // 标签直接改成 shell 名（`cmd`）：多开时比"终端 2/3"更好认，也和自己开的终端一致。
+      setTabs((previous) => previous.map((item) => item.id === tabId
+        ? { ...item, param: terminalId, title: shellLabel(view.shell) }
+        : item))
+    } catch (cause) {
+      setTerminalIssues((previous) => ({
+        ...previous,
+        [tabId]: cause instanceof Error ? cause.message : '终端启动失败。',
+      }))
+    }
   }
 
   const panelRef = useRef<HTMLElement>(null)
@@ -195,6 +234,9 @@ export function PanelShell({
   const tabLabel = (item: PanelTab) => item.kind === 'files' && item.param !== null
     ? item.param.split(/[\\/]/).pop() ?? '文件'
     : item.kind === 'browser' && item.title ? item.title
+    // 终端标签用 shell 名（cmd / powershell），与用户自己开的终端同名（2026-10-28）；
+    // 拿不到名字时退回自增编号，避免出现空标签。
+    : item.kind === 'terminal' ? (item.title ?? `终端 ${/-(\d+)$/.exec(item.id)?.[1] ?? ''}`.trim())
     : MENU.find((entry) => entry.id === item.kind)?.label ?? item.kind
 
   const closeTab = (id: string) => {
@@ -203,6 +245,16 @@ export function PanelShell({
     if (closing?.kind === 'browser' && closing.browserKey) {
       void closeBrowser(closing.browserKey).catch(() => setCleanupError('浏览器关闭请求未成功，将在断开连接并空闲 30 分钟后结束。'))
     }
+    // 终端没有「结束」按钮了：关闭标签就是结束它，否则进程只能等 30 分钟空闲回收。
+    if (closing?.kind === 'terminal' && closing.param !== null) {
+      void stopTerminal(closing.param).catch(() => setCleanupError('终端结束请求未成功，它会在 30 分钟无输入后自动结束。'))
+    }
+    setTerminalIssues((previous) => {
+      if (!(id in previous)) return previous
+      const remaining = { ...previous }
+      delete remaining[id]
+      return remaining
+    })
     const index = tabs.findIndex((item) => item.id === id)
     const next = tabs.filter((item) => item.id !== id)
     const nextId = activeId === id ? (next[Math.min(index, next.length - 1)]?.id ?? null) : activeId
@@ -492,9 +544,13 @@ export function PanelShell({
               />
             ) : null}
             {active.kind === 'terminal' ? (
-              <Suspense fallback={<p>正在加载终端…</p>}>
-                <TerminalPane key={`${workspaceId ?? ''}-${active.id}`} workspaceId={workspaceId} />
-              </Suspense>
+              active.param === null ? (
+                <p className={styles.hint}>{terminalIssues[active.id] ?? '正在启动终端…'}</p>
+              ) : (
+                <Suspense fallback={<p>正在加载终端…</p>}>
+                  <TerminalPane key={`${workspaceId ?? ''}-${active.id}`} terminalId={active.param} />
+                </Suspense>
+              )
             ) : null}
           </div>
         )}

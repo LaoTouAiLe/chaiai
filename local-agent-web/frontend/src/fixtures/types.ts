@@ -477,7 +477,7 @@ export interface SessionSummaryView {
   title: string
   /** Null while no workspace is selected: the shell then shows no breadcrumb. */
   workspace: string | null
-  status: 'idle' | 'running' | 'awaiting-approval' | 'completed'
+  status: 'idle' | 'running' | 'awaiting-approval' | 'awaiting-input' | 'completed'
   modelLabel: string
   /**
    * Whether this session's next answer arrives as increments (`true`) or in one
@@ -527,7 +527,40 @@ export interface ApprovalView {
   parameters?: readonly { name: string; value: string }[]
 }
 
-export type ComposerTakeoverView = { kind: 'none' } | { kind: 'approval'; approval: ApprovalView }
+/**
+ * 一个"等用户回答"的提问（2026-10-28，ARCHITECTURE §6.14）。
+ *
+ * `state` 决定卡片形态：只有 `pending` 给输入框与按钮；其余只报结果（与审批同一口径：
+ * 一次性的东西一旦有结局就不再提供第二次机会）。
+ */
+export interface QuestionItemView {
+  index: number
+  question: string
+  /** 最多 3 个候选；空 = 只能自由输入。 */
+  options: readonly string[]
+  allowFreeText: boolean
+  /** 用户对这一题的答复（已脱敏）；未答或跳过时为 `null`。 */
+  answer: string | null
+  skipped: boolean
+}
+
+export interface QuestionView {
+  questionId: string
+  /** 第一题的正文（单题兼容；多题时以 `items` 为准）。 */
+  question: string
+  /** 整组题（1–5 题）：页面据此做"1/3"式翻页。 */
+  items: readonly QuestionItemView[]
+  state: 'pending' | 'answered' | 'skipped' | 'expired'
+  /** 单题兼容的答复；多题时为 `null`，逐题看 `items[].answer`。 */
+  answer: string | null
+  /** 终态说明（"你跳过了…" / "该提问已失效…"）；待决时为 `null`。 */
+  note: string | null
+}
+
+export type ComposerTakeoverView =
+  | { kind: 'none' }
+  | { kind: 'approval'; approval: ApprovalView }
+  | { kind: 'question'; question: QuestionView }
 
 /**
  * Capability detection result for one connection.
@@ -937,4 +970,17 @@ export interface ConversationScenario {
   sidebarCollapsed?: boolean
   /** Which top-bar tab this scenario opens on. Omitted means `conversation`. */
   tab?: 'conversation' | 'trace'
+  /**
+   * 待发队列（2026-10-28）：本轮还在跑时用户排在后面的那几条。
+   *
+   * 与 `capabilities` / `tasks` 同一条理由：产品里这是页面自己的界面状态（`stores/outbox.ts`），
+   * 默认场景不带它，既有截图逐字节不变；要视觉基线就在这个场景上挂一份 fixture。
+   */
+  queued?: readonly QueuedMessageFixture[]
+}
+
+/** 队列一条的展示形状（与 `stores/outbox.ts` 的 `QueuedMessage` 结构兼容）。 */
+export interface QueuedMessageFixture {
+  id: string
+  text: string
 }

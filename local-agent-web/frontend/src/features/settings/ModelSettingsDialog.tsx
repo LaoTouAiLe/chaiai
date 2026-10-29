@@ -6,10 +6,11 @@
 import { useCallback, useMemo, useState } from 'react'
 
 import { pickWorkspaceDirectory } from '../../api/client'
-import type { ModelConnectionDto, ModelConnectionInput } from '../../api/client'
+import type { ApiError, ModelConnectionDto, ModelConnectionInput } from '../../api/client'
 import { toSettingsView } from '../../api/viewModels'
 import { AboutSection } from './AboutSection'
 import { ConnectionForm } from './ConnectionForm'
+import { EditorDialog } from '../../components/ui/EditorDialog'
 import { SettingsDialog } from './SettingsDialog'
 import { useModelSettings } from './useModelSettings'
 import { usePermissions } from './usePermissions'
@@ -27,6 +28,9 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
   const [partialSaveId, setPartialSaveId] = useState<string | null>(null)
   /** 刚保存过的连接：卡片提示"从下一轮请求开始生效"（正在运行的一轮已固定自己的版本）。 */
   const [pendingId, setPendingId] = useState<string | null>(null)
+  const [dismissedIssue, setDismissedIssue] = useState<ApiError | null>(null)
+  const issue = settings.conflict ?? settings.error
+  const visibleIssue = issue === dismissedIssue ? null : issue
 
   const editing = useMemo(
     () => settings.connections.find((item) => item.connection_id === editingId) ?? null,
@@ -59,6 +63,11 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
     setFormOpen(false)
     setEditingId(null)
   }, [])
+  const dismissForm = () => {
+    // An abandoned editor's failure stays with that operation, not above the source list.
+    setDismissedIssue(issue)
+    closeForm()
+  }
 
   const submit = useCallback(
     async (input: ModelConnectionInput, apiKey: string | null) => {
@@ -86,20 +95,11 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
     [closeForm, editingId, settings],
   )
 
-  const form = formOpen ? (
-    <ConnectionForm
-      initial={editing}
-      // 新增时没有 id，忙态在 `creating` 上：两者合起来才是"表单正在提交"。
-      busy={settings.busyId !== null || settings.creating}
-      error={settings.conflict ?? settings.error}
-      onSubmit={(input, apiKey) => void submit(input, apiKey)}
-      onCancel={closeForm}
-    />
-  ) : partialSaveId !== null || settings.conflict !== null || settings.error !== null ? (
+  const form = !formOpen && (partialSaveId !== null || visibleIssue !== null) ? (
     // 只重试选择，不再重做已经成功的创建；其他冲突同样要求先刷新。
     <p className={styles.formError} role="alert">
       {partialSaveId === null ? null : '连接已保存，但尚未设为默认。请刷新后在该连接卡片点击「设为默认」。'}
-      {settings.conflict?.message ?? settings.error?.message}
+      {visibleIssue?.message}
       <button type="button" className={styles.ghost} onClick={() => void settings.reload()}>
         刷新连接列表
       </button>
@@ -107,6 +107,7 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
   ) : null
 
   return (
+    <>
     <SettingsDialog
       settings={view}
       form={form}
@@ -133,11 +134,13 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
         busyId: settings.busyId,
         creating: settings.creating,
         onAdd: () => {
+          setDismissedIssue(issue)
           setEditingId(null)
           setFormOpen(true)
         },
         // 编辑入口：打开表单并**带上这条连接的当前值**（密钥不在其中——契约不给，也就无从回显）。
         onEdit: (id) => {
+          setDismissedIssue(issue)
           setEditingId(id)
           setFormOpen(true)
         },
@@ -158,5 +161,20 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
         onClose,
       }}
     />
+    {formOpen ? <EditorDialog title={editingId === null ? '添加模型连接' : '编辑模型连接'}
+      description="配置连接与模型参数，保存后从下一轮请求开始生效。"
+      dismissible={settings.busyId === null && !settings.creating} onClose={dismissForm}>
+
+    <ConnectionForm
+      initial={editing}
+      // 新增时没有 id，忙态在 `creating` 上：两者合起来才是"表单正在提交"。
+      busy={settings.busyId !== null || settings.creating}
+      error={visibleIssue}
+      onSubmit={(input, apiKey) => void submit(input, apiKey)}
+      onCancel={dismissForm}
+    />
+
+    </EditorDialog> : null}
+    </>
   )
 }

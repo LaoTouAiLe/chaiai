@@ -6,10 +6,11 @@
   z-index: 40;
   display: grid;
   place-items: center;
-  background: var(--law-bg-mask);
+  background: var(--c-scrim);
   /* 2026-10-26：滚到边界后不要沿 DOM 链把滚轮传给背后的页面。
      完整修复还需要组件里锁 body（overlay 本身不可滚动时这条不生效），两处配合见组件注释。 */
   overscroll-behavior: contain;
+  padding: 16px;
 }
 
 /* 2026-10-19：从 800×800 单列改为 960×760 的双栏（左导航 + 右内容）。
@@ -17,23 +18,25 @@
 .dialog {
   display: flex;
   flex-direction: column;
-  width: min(960px, calc(100vw - 48px));
-  height: min(760px, calc(100vh - 48px));
+  width: min(1100px, calc(100vw - 32px));
+  height: min(800px, calc(100dvh - 32px));
   /* 2026-10-22 V4：24px 圆角收到 10px，阴影统一到 --sh-overlay（§2.5 / §2.6） */
-  border-radius: var(--r-overlay);
+  border-radius: 18px;
   background: var(--c-canvas);
   box-shadow: var(--sh-overlay);
   overflow: hidden;
+  border: 1px solid var(--c-line);
 }
 
 .header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--law-space-md) var(--law-space-xl);
-  padding: var(--law-space-2xl) var(--law-space-3xl) var(--law-space-xl);
+  padding: 24px 28px;
   border-bottom: 1px solid var(--law-border-l1);
+  background: var(--c-raised);
 }
 
 .headerText {
@@ -53,12 +56,12 @@
 
 .searchInput {
   width: 100%;
-  height: 30px;
+  height: var(--size-control);
   min-width: 0;
   padding: 0 var(--law-space-lg);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-md);
-  background: var(--law-bg-layer-1);
+  border: 1px solid var(--c-line);
+  border-radius: 9px;
+  background: var(--c-panel);
   color: var(--law-text-primary);
   font: inherit;
   font-size: var(--law-text-sm);
@@ -69,14 +72,15 @@
 }
 
 .title {
-  font-size: var(--law-text-xl);
-  line-height: var(--law-leading-xl);
-  font-weight: var(--law-weight-semibold);
+  font-size: 22px;
+  line-height: var(--lh-heading);
+  font-weight: 600;
+  letter-spacing: -.035em;
 }
 
 .subtitle {
-  margin-top: var(--law-space-xxs);
-  color: var(--law-text-caption);
+  margin-top: var(--sp-1);
+  color: var(--c-text-3);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
 }
@@ -204,20 +208,20 @@
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: 208px minmax(0, 1fr);
+  grid-template-columns: var(--size-settings-nav) minmax(0, 1fr);
 }
 
 .nav {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-xl);
+  gap: 22px;
   min-height: 0;
   overflow-y: auto;
   /* 滚到顶/底就停住，别把滚轮传给背后的会话区（2026-10-26）。 */
   overscroll-behavior: contain;
-  padding: var(--law-space-2xl) var(--law-space-lg);
-  border-right: 1px solid var(--law-border-l1);
-  background: var(--law-bg-layer-1);
+  padding: 24px 12px;
+  border-right: 1px solid var(--c-line);
+  background: var(--c-panel);
 }
 
 .navGroup {
@@ -229,10 +233,12 @@
 .navLabel {
   margin: 0 0 var(--law-space-xxs);
   padding: 0 var(--law-space-md);
-  color: var(--law-text-caption);
-  font-size: var(--law-text-xxs);
+  color: var(--c-text-3);
+  font-size: var(--fs-caption);
   line-height: var(--law-leading-xs);
   letter-spacing: 0.04em;
+  font-weight: 550;
+  margin-bottom: var(--sp-2);
 }
 
 /* 右栏的定位基准：刻度条与"滑到最底"箭头浮在它上面，不随内容滚动。 */
@@ -251,7 +257,7 @@
   /* 同上：设置页滚到底不该带动背后的页面（2026-10-26）。 */
   overscroll-behavior: contain;
   /* 右留"滑到最底"箭头的位置，避免圆钮压住输入框右边缘。 */
-  padding: var(--law-space-2xl) 48px 0 var(--law-space-3xl);
+  padding: 28px 36px 0 28px;
 }
 
 .sectionHead {
@@ -262,9 +268,9 @@
 }
 
 .sectionTitle {
-  font-size: var(--law-text-md);
-  line-height: var(--law-leading-md);
-  font-weight: var(--law-weight-medium);
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 550;
 }
 
 .sectionNote {
@@ -305,10 +311,11 @@
 
 .empty {
   margin-top: var(--law-space-xl);
-  padding: var(--law-space-4xl) var(--law-space-3xl);
-  border: 1px dashed var(--law-border-l3);
+  padding: var(--sp-8) var(--sp-6);
+  border: none;
   border-radius: var(--law-radius-lg);
   text-align: center;
+  background: var(--c-sunken);
 }
 
 .emptyTitle {
@@ -330,17 +337,17 @@
 .cards {
   display: flex;
   flex-direction: column;
-  gap: var(--sp-2);
+  gap: var(--sp-3);
   margin-top: var(--sp-4);
 }
 
 /* 去框（2026-10-22 V4）：卡片不再靠 1px 描边划分，改用底槽色块。
    弹窗底是 --c-canvas（白），卡片用 --c-panel（灰），靠明度差就够，不需要框线。 */
 .card {
-  padding: var(--sp-4) var(--sp-5);
+  padding: var(--sp-5);
   border: 0;
   border-radius: var(--r-panel);
-  background: var(--c-panel);
+  background: var(--c-sunken);
 }
 
 .cardHead {
@@ -634,9 +641,9 @@
   display: flex;
   align-items: center;
   width: 100%;
-  min-height: 30px;
-  padding: 0 var(--law-space-md);
-  border-radius: var(--law-radius-md);
+  min-height: var(--size-control);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-control);
   color: var(--law-text-secondary);
   font-size: var(--law-text-sm);
   line-height: var(--law-leading-sm);
@@ -649,9 +656,9 @@
 }
 
 .tabSelected {
-  background: var(--law-surface-selector);
-  color: var(--law-text-primary);
-  font-weight: var(--law-weight-medium);
+  background: var(--c-accent-soft);
+  color: var(--c-accent);
+  font-weight: 550;
 }
 
 /* ---- permissions (T38) -------------------------------------------------- */
@@ -909,4 +916,8 @@
   .modeGroup {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+@media (max-width: 520px) {
+  .formGrid { grid-template-columns: minmax(0, 1fr); }
 }

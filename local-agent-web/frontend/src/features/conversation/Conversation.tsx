@@ -1,9 +1,10 @@
-﻿import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+﻿import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
 import { ConversationRail } from './ConversationRail'
 import type { RailQuestion } from './ConversationRail'
-import { Bulb, Pencil, Quote as QuoteIcon } from '../../components/icons'
+import { Pencil, Quote as QuoteIcon } from '../../components/icons'
+import { WelcomePanel } from './WelcomePanel'
 import { ScrollToBottom } from '../../components/ScrollToBottom'
 import { IconCopyButton, MarkdownMessage } from './MarkdownMessage'
 import { splitQuotedMessage } from './quote'
@@ -27,6 +28,7 @@ import styles from './Conversation.module.css'
 
 interface ConversationProps {
   scenario: ConversationScenario
+  onUsePrompt?: (prompt: string) => void
   /** 真会话只在用户停留底部时跟随增量；原型基线不自动改滚动位置。 */
   autoFollow?: boolean
   /**
@@ -597,51 +599,15 @@ interface PickedSelection {
 }
 
 /**
- * 空态的线稿水印：一份文件 → 一条虚线路径 → 带行号的锚点。
- *
- * 只画「读文件、给行号」这一件本产品真做的事，不再借用参考产品的卡通形象与
- * 书页构图；颜色全部取自语义 token，浅色/深色两套主题都成立。纯装饰，
- * 所以 `aria-hidden`，也不抢标题层级。
+ * 欢迎区沿用应用品牌，纯装饰，不参与标题层级。
  */
-function EmptyArt() {
-  return (
-    <svg className={styles.emptyArt} viewBox="0 0 180 150" aria-hidden="true" focusable="false">
-      {/* 图纸网格：与页面底纹同一节拍，更淡一档。 */}
-      <g stroke="var(--law-border-l1)" strokeWidth="1" strokeDasharray="2 6">
-        <path d="M30 0v150M90 0v150M150 0v150M0 30h180M0 90h180" />
-      </g>
-      {/* 文件：三行内容，末行短一截。 */}
-      <rect x="18" y="34" width="46" height="60" rx="6" fill="none"
-        stroke="var(--law-accent-500)" strokeWidth="1.5" strokeLinejoin="round" opacity="0.85" />
-      <g stroke="var(--law-accent-400)" strokeWidth="1.6" strokeLinecap="round" opacity="0.7">
-        <path d="M29 50h24M29 60h20M29 70h13" />
-      </g>
-      {/* 路径：从文件出发，落到右侧的行号锚点。 */}
-      <path className={styles.emptyArtTrace} d="M68 64c16 0 14-24 30-24s14 26 30 26"
-        fill="none" stroke="var(--law-accent-400)" strokeWidth="1.4" strokeDasharray="4 5" strokeLinecap="round" />
-      {/* 锚点：一圈虚线 + 一个实心点。 */}
-      <circle cx="128" cy="66" r="13" fill="none" stroke="var(--law-accent-400)"
-        strokeWidth="1.2" strokeDasharray="3 4" opacity="0.8" />
-      <circle cx="128" cy="66" r="3.4" fill="var(--law-accent-500)" />
-      {/* 行号标签：方括号夹住一道刻度。 */}
-      <g stroke="var(--law-text-caption)" strokeWidth="1.2" strokeLinecap="round" opacity="0.6" fill="none">
-        <path d="M108 96h-6v18h6M148 96h6v18h-6" />
-      </g>
-      <path d="M118 105h20" stroke="var(--law-accent-500)" strokeWidth="1.6" strokeLinecap="round" />
-      {/* 两处小色点：只取语义色，不新增品牌色。 */}
-      <rect x="152" y="24" width="5" height="5" rx="1.2" fill="var(--law-amber-400)" transform="rotate(20 154.5 26.5)" />
-      <circle cx="24" cy="118" r="2.4" fill="var(--law-green-500)" opacity="0.75" />
-    </svg>
-  )
-}
-
 /**
  * The conversation column: message flow plus the closing statistics line.
  *
  * Loading and empty replace the flow rather than sitting above it: a skeleton
  * next to real messages would claim both are the same kind of thing.
  */
-export function Conversation({ scenario, autoFollow = false, onToggleTool, focusTurnId, errorActions, onEditMessage, renderTurnChanges, onDetachCommand, onQuote }: ConversationProps) {
+export function Conversation({ scenario, autoFollow = false, onToggleTool, focusTurnId, errorActions, onEditMessage, renderTurnChanges, onDetachCommand, onQuote, onUsePrompt }: ConversationProps) {
   const loading = scenario.loading ?? null
   const empty = scenario.empty ?? null
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -726,7 +692,7 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
   }, [focusTurnId, scenario.messages])
 
   return (
-    <div className={styles.wrap}>
+    <div className={styles.wrap} data-empty-conversation={loading === null && empty !== null ? 'true' : undefined}>
     <div
       className={styles.scroll}
       role="log"
@@ -752,104 +718,37 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
         ) : null}
 
         {loading === null && empty !== null ? (
-          <div className={styles.empty}>
-            {/* 底纹与线稿都是装饰：读屏与测试只认下面这块简报。 */}
-            <span className={styles.emptyGrid} aria-hidden="true" />
-            <EmptyArt />
-            <div className={styles.emptyBoard}>
-              <p className={styles.emptyMeta} aria-hidden="true">
-                <span className={styles.emptyMetaDot} />
-                本机工作台
-                <span className={styles.emptyMetaRule} />
-              </p>
-              <h2 className={styles.emptyTitle}>{empty.title}</h2>
-              <p className={styles.emptyText}>{empty.description}</p>
-              {empty.highlightsTitle === undefined || empty.highlights === undefined ? null : (
-                <section className={styles.emptyBrief} aria-label={empty.highlightsTitle}>
-                  <div className={styles.emptyBriefHead}>
-                    <span className={styles.emptyBriefMark} aria-hidden="true"><Bulb size={14} /></span>
-                    <h3 className={styles.emptyBriefTitle}>{empty.highlightsTitle}</h3>
-                    <span className={styles.emptyBriefRule} aria-hidden="true" />
-                  </div>
-                  <ol className={styles.emptyList}>
-                    {empty.highlights.map((item, index) => (
-                      <li key={item} className={styles.emptyItem}>
-                        <span className={styles.emptyIndex} aria-hidden="true">
-                          {String(index + 1).padStart(2, '0')}
-                        </span>
-                        <span className={styles.emptyItemText}>{item}</span>
-                      </li>
-                    ))}
-                  </ol>
-                </section>
-              )}
-              {empty.hint === undefined ? null : <p className={styles.emptyHint}>{empty.hint}</p>}
-            </div>
-          </div>
+          <WelcomePanel empty={empty} onUsePrompt={onUsePrompt} />
         ) : null}
 
         {loading === null && empty === null ? (
           <>
             {turns.map((turn, index) => {
               const stats = turnStats.get(turn.lastId)
-              // 这一轮的父 = 上一轮；编辑时退回"父之后"再发，旧这一轮及其后续进旧分支（不删）。
               const parentTurnId = index === 0 ? null : turns[index - 1].id
               const groups = groupRows(turn.rows)
-              // 身份行挂在**第一个包含非用户消息的组**前：分组后不能再按 rowIndex 判断。
-              const firstReplyGroup = groups.findIndex((group) => (
-                (group.kind === 'single' ? [group.row] : group.rows).some((row) => row.kind !== 'user')
-              ))
-              return (
-                <div key={turn.id} data-turn-id={turn.id} className={styles.turn}>
-                  {groups.map((group, groupIndex) => {
-                    const single = group.kind === 'single' ? group.row : null
-                    const toolRows = group.kind === 'tools' ? group.rows : []
-                    const key = single === null
-                      ? `tools:${toolRows[0]?.id ?? String(groupIndex)}`
-                      : single.id
-                    // 只有**最后一轮**能编辑（2026-10-21）：改更早的一轮等于把后面全部作废，
-                    // 而用户多半只是想改刚发出去的这句。要看旧轮次请走对话地图的「从这里继续」。
-                    const editHandler = index === turns.length - 1 ? onEditMessage : undefined
-                    const renderMessage = (row: MessageView) => (
-                      <Message
-                        message={row}
-                        onToggleTool={onToggleTool}
-                        errorActions={errorActions}
-                        onDetachCommand={onDetachCommand}
-                        parentTurnId={parentTurnId}
-                        onEdit={editHandler}
-                      />
-                    )
-                    return (
-                      <Fragment key={key}>
-                        {groupIndex === firstReplyGroup ? <AssistantIdentity /> : null}
-                        {single !== null
-                          ? renderMessage(single)
-                          : toolRows.length === 1
-                            ? renderMessage(toolRows[0]!)
-                            : (
-                              <ToolGroup
-                                rows={toolRows}
-                                onToggleTool={onToggleTool}
-                                onDetachCommand={onDetachCommand}
-                              />
-                            )}
-                      </Fragment>
-                    )
-                  })}
+              const prompts = groups.filter((group) => group.kind === 'single' && group.row.kind === 'user')
+              const replies = groups.filter((group) => !(group.kind === 'single' && group.row.kind === 'user'))
+              const operationCount = turn.rows.filter((row) => row.kind === 'tool').length
+              const editHandler = index === turns.length - 1 ? onEditMessage : undefined
+              const renderMessage = (row: MessageView) => <Message key={row.id} message={row} onToggleTool={onToggleTool} errorActions={errorActions} onDetachCommand={onDetachCommand} parentTurnId={parentTurnId} onEdit={editHandler} />
+              const renderGroup = (group: TurnGroup) => group.kind === 'single'
+                ? renderMessage(group.row)
+                : group.rows.length === 1 ? renderMessage(group.rows[0]!)
+                  : <ToolGroup key={`tools:${group.rows[0]?.id ?? turn.id}`} rows={group.rows} onToggleTool={onToggleTool} onDetachCommand={onDetachCommand} />
+              return <div key={turn.id} data-turn-id={turn.id} className={styles.turn}>
+                {prompts.map(renderGroup)}
+                {replies.length === 0 ? null : <section className={styles.response} aria-label="智能体回复">
+                  <div className={styles.responseHead}><AssistantIdentity />{operationCount === 0 ? null : <span className={styles.operationCount}>{operationCount} 项工具操作</span>}</div>
+                  <div className={styles.responseBody}>{replies.map(renderGroup)}</div>
                   <WebSources rows={turn.rows} answer={turn.answerParts.join('\n\n')} />
-                  {/* 这一轮改了哪些文件：先看"做了什么"，再看"花了多少"。 */}
-                  {renderTurnChanges === undefined ? null : renderTurnChanges(turn.id)}
-                  {/* 轮尾收口（2026-10-22）：记录在左、动作在右，同一行；动作默认透明，悬停才显形。
-                      此前它们是两条独立的行，一轮下来多占两份高度，而且和正文同级、抢注意力。 */}
-                  {stats === undefined && turn.answerParts.join('').trim() === '' ? null : (
-                    <div className={styles.footer}>
-                      {stats === undefined ? <span /> : <TurnStats stats={stats} />}
-                      <TurnActions text={turn.answerParts.join('\n\n')} onQuote={onQuote} />
-                    </div>
-                  )}
-                </div>
-              )
+                  {renderTurnChanges?.(turn.id)}
+                  {stats === undefined && turn.answerParts.join('').trim() === '' ? null : <div className={styles.footer}>
+                    {stats === undefined ? <span /> : <TurnStats stats={stats} />}
+                    <TurnActions text={turn.answerParts.join('\n\n')} onQuote={onQuote} />
+                  </div>}
+                </section>}
+              </div>
             })}
             {scenario.stats === null ? null : <TurnStats stats={scenario.stats} />}
             {scenario.activity == null ? null : <RunActivity key={scenario.activity.id} activity={scenario.activity} />}

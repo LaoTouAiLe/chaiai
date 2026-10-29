@@ -13,19 +13,8 @@
   flex-wrap: wrap;
   gap: var(--sp-2);
   align-items: center;
-}
-
-.toolbar select {
-  min-width: 0;
-  flex: 1;
-  min-height: 32px;
-  padding: var(--sp-1) var(--sp-2);
-  color: var(--c-text-1);
-  background: var(--c-panel);
-  border: 1px solid var(--c-line);
-  border-radius: var(--r-control);
-  font: inherit;
-  font-size: var(--fs-body);
+  /* 状态在左、按钮在右（2026-10-28）：状态行从顶部挪到这里，把上方整块让给终端内容。 */
+  justify-content: space-between;
 }
 
 .note {
@@ -36,21 +25,7 @@
   overflow-wrap: anywhere;
 }
 
-.approval {
-  flex-shrink: 0;
-  padding: var(--sp-4);
-  border: 1px solid var(--c-line);
-  border-radius: var(--r-overlay);
-  background: var(--c-panel);
-  font-size: var(--fs-body);
-  line-height: var(--lh-body);
-}
-.approval > strong { color: var(--c-text-1); font-size: var(--fs-ui); }
-.approval > p { margin-top: var(--sp-2); color: var(--c-text-2); }
-.approval dl { margin-block: var(--sp-4); }
-.approval dt { margin-bottom: var(--sp-1); color: var(--c-text-3); font-size: var(--fs-meta); }
-.approval dd { margin: 0 0 var(--sp-3); color: var(--c-text-1); overflow-wrap: anywhere; font-family: var(--font-mono-code); }
-.approval > .toolbar { margin-top: var(--sp-4); }
-
-.screen { display: flex; flex-direction: column; flex: 1; gap: var(--sp-2); min-height: 200px; }
-.emulator { flex: 1; min-height: 160px; min-width: 0; overflow: hidden; padding: var(--sp-2); background: #16181d; border-radius: var(--r-control); }
+/* 审批卡与多终端下拉已随启动审批一起移除（2026-10-28），只留 emulator 本身。
+   背景跟随主题：写死深色时浅色主题下会出现一块突兀的黑。终端内容的颜色由 xterm 的
+   `theme` 决定（`TerminalPane.tsx` 里跟随 `data-theme` 切换），这里只管外圈。 */
+.emulator { flex: 1; min-height: 160px; min-width: 0; overflow: hidden; padding: var(--sp-2); background: var(--c-canvas); border-radius: var(--r-control); }

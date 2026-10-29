@@ -17,6 +17,11 @@ const ALL_SCENARIOS = [
   'long-text',
   'approval',
   'approval-expired',
+  // 2026-10-28：提问接管（待答）与它的下一步（已回答、输入区恢复）。
+  'question',
+  'question-answered',
+  // 2026-10-28：待发队列（本轮进行中，三条已排队）。
+  'queue',
   'settings-models',
   'settings-empty',
   'model-menu',
@@ -176,6 +181,52 @@ test('an approval takes over the composer and a stale one offers no decision', a
   // cannot: the composer comes back while the outcome stays on screen.
   await expect(page.getByRole('textbox', { name: '给智能体发消息' })).toBeVisible()
   await expect(page.getByRole('button', { name: '发送消息' })).toBeVisible()
+})
+
+test('a question takes over the composer and an answered one gives it back', async ({ page }) => {
+  // 2026-10-28（§6.14）：提问与审批是两条"等你"的通道，接管与交还的规则相同。
+  await page.goto('/?state=question')
+  // 侧栏那行会话的可见文本里也有"测试环境"，所以断言限定在卡片内。
+  const card = page.getByRole('region', { name: '提问' })
+  await expect(card).toBeVisible()
+  // 题组形态（2026-10-28）：右上角进度、可选项、自由输入、翻页与整组提交。
+  await expect(card.getByText('1/3')).toBeVisible()
+  await expect(card.getByRole('button', { name: '测试环境' })).toBeVisible()
+  await expect(card.getByRole('textbox', { name: '第 1 题的回答' })).toBeVisible()
+  await expect(card.getByRole('button', { name: '下一题' })).toBeVisible()
+  await expect(card.getByRole('button', { name: '全部跳过' })).toBeVisible()
+  // 待答期间原输入框必须不可达。
+  await expect(page.getByRole('textbox', { name: '给智能体发消息' })).toHaveCount(0)
+
+  await page.goto('/?state=question-answered')
+  // 答完之后卡片**不再占位**（2026-10-28 用户实测反馈）：答案已在回答里，输入区交还。
+  await expect(page.getByRole('region', { name: '提问' })).toHaveCount(0)
+  await expect(page.getByRole('textbox', { name: '第 1 题的回答' })).toHaveCount(0)
+  // 有结局的卡片不该成为"发下一条消息"的障碍。
+  await expect(page.getByRole('textbox', { name: '给智能体发消息' })).toBeVisible()
+})
+
+test('the outbox lists queued messages in order and keeps the input usable', async ({ page }) => {
+  // 2026-10-28（消息队列）：本轮进行中仍然可以继续写；排好的三条按顺序列出，可调序、可删。
+  await page.goto('/?state=queue')
+  const queue = page.getByRole('region', { name: '待发送的消息' })
+  await expect(queue).toBeVisible()
+  await expect(queue).toContainText('待发送 3 条 · 本轮结束后自动发送')
+
+  const items = queue.getByRole('listitem')
+  await expect(items).toHaveCount(3)
+  await expect(items.nth(0)).toContainText('顺手把 README 的安装步骤也补上')
+  await expect(items.nth(2)).toContainText('PR 描述的说明')
+
+  // 边界箭头禁用（第一行不能再上移、最后一行不能再下移）。
+  await expect(queue.getByRole('button', { name: '上移第 1 条' })).toBeDisabled()
+  await expect(queue.getByRole('button', { name: '下移第 3 条' })).toBeDisabled()
+  // 原型态不接处理器：删除键照实画出来但不假装可点（与审批卡同一条约定）；
+  // "点了真的会删"由 `Composer.test.tsx` 的队列用例覆盖。
+  await expect(queue.getByRole('button', { name: '删除第 2 条' })).toBeDisabled()
+
+  // 队列不接管输入区：本轮跑着也能继续写草稿。
+  await expect(page.getByRole('textbox', { name: '给智能体发消息' })).toBeVisible()
 })
 
 test('the composer stays keyboard reachable', async ({ page }) => {
@@ -608,7 +659,7 @@ test('the task centre states where each task is, what it waits for and the next 
   for (const label of ['排队中', '正在执行', '在等你的决定', '已完成', '失败', '已取消', '需要人工核对']) {
     await expect(dialog.getByText(label, { exact: true }).first()).toBeVisible()
   }
-  for (const waiting of ['在等空闲执行位', '没有在等外部输入', '在等你的决定（审批）', '已结束，等你核对']) {
+  for (const waiting of ['在等空闲执行位', '没有在等外部输入', '在等你的决定（审批或回答提问）', '已结束，等你核对']) {
     await expect(dialog.getByText(waiting, { exact: true }).first()).toBeVisible()
   }
 

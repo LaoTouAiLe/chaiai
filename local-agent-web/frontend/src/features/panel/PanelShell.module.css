@@ -6,11 +6,14 @@
   flex: 0 0 auto;
   width: var(--rendered-width);
   min-height: 0;
-  background: var(--c-panel);
+  background: var(--c-canvas);
   font-family: var(--font-ui);
   border-left: 1px solid var(--c-line);
   transition: opacity var(--dur-panel) ease;
   animation: panel-in var(--dur-panel) var(--ease-panel);
+  margin: 8px 8px 8px 0;
+  border: 1px solid var(--c-line);
+  border-radius: 16px;
 }
 
 .panel[data-resizing='true'] {
@@ -28,11 +31,13 @@
 .surface {
   display: flex;
   flex-direction: column;
-  width: calc(var(--rendered-width) - 1px);
+  width: calc(var(--rendered-width) - 2px);
   height: 100%;
   min-height: 0;
   container-type: inline-size;
   overflow: hidden;
+  border-radius: 16px;
+  background: var(--c-canvas);
 }
 
 @keyframes panel-in {
@@ -101,7 +106,7 @@
   align-items: center;
   justify-content: space-between;
   flex: 0 0 auto;
-  min-height: 52px;
+  min-height: var(--law-header-height);
   padding: var(--sp-2) var(--sp-4);
 }
 
@@ -280,6 +285,7 @@
   font-size: var(--fs-heading);
   font-weight: 600;
   line-height: var(--lh-heading);
+  letter-spacing: -.035em;
 }
 
 .menuLead {
@@ -294,22 +300,24 @@
   align-items: center;
   gap: var(--sp-3);
   width: 100%;
-  min-height: 76px;
+  min-height: 70px;
   padding: var(--sp-3);
   margin-bottom: var(--sp-2);
   border: 1px solid var(--c-line);
-  border-radius: var(--r-overlay);
+  border-radius: var(--r-panel);
   background: var(--c-raised);
   text-align: left;
   animation: content-in var(--dur-panel) var(--ease-out) both;
   animation-delay: calc(var(--item-index) * 30ms);
   transition: border-color var(--dur-hover-out) ease, background-color var(--dur-hover-out) ease, transform var(--dur-hover-out) var(--ease-out), box-shadow var(--dur-hover-out) ease;
+  box-shadow: none;
 }
 
 .menuItem:hover {
   border-color: var(--c-line-strong);
-  box-shadow: var(--sh-menu);
+  box-shadow: none;
   transform: translateY(-2px);
+  background: var(--c-accent-soft);
 }
 
 .menuItem:active {
@@ -697,7 +705,7 @@
 
 @media (max-width: 480px) {
   .panel {
-    --rendered-width: 100vw;
+    --rendered-width: calc(100vw - 16px);
   }
   .resizer {
     display: none;

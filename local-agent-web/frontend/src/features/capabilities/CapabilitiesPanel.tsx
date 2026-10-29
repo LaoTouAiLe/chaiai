@@ -9,6 +9,7 @@
 // 展示组件不认识 fetch：数据由 `CapabilitiesSection` 取好、映射成视图模型后传进来（与
 // `PermissionSection` 同一分工）。
 
+import { Close } from '../../components/icons'
 import { useBodyScrollLock } from '../../components/useBodyScrollLock'
 import type { CapabilityReason, CapabilitiesView } from '../../fixtures/types'
 import styles from './CapabilitiesPanel.module.css'
@@ -76,8 +77,8 @@ export function CapabilitiesPanel({
           </p>
         </div>
         {onClose === undefined || embedded ? null : (
-          <button type="button" className={styles.close} onClick={onClose}>
-            关闭
+          <button type="button" className={styles.close} onClick={onClose} aria-label="关闭能力面板" title="关闭">
+            <Close />
           </button>
         )}
       </header>

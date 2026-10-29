@@ -151,13 +151,15 @@
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
+  justify-content: flex-end;
   gap: var(--law-space-lg);
   padding-top: var(--law-space-xs);
 }
 
 .hint {
-  flex: 1 1 auto;
+  flex: 1 1 100%;
   color: var(--c-text-3);
   font-size: var(--fs-meta);
   line-height: var(--lh-meta);
@@ -165,6 +167,8 @@
 
 .reject,
 .allow {
+  flex: 0 0 auto;
+  white-space: nowrap;
   height: 34px;
   padding: 0 var(--sp-4);
   border-radius: var(--r-control);
@@ -188,7 +192,7 @@
 .allow {
   border: 0;
   background: var(--c-accent);
-  color: #ffffff;
+  color: var(--c-text-inverse);
 }
 
 .allow:hover {

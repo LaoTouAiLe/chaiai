@@ -10,7 +10,6 @@
 
 import { useEffect, useState } from 'react'
 
-import { useBodyScrollLock } from '../../components/useBodyScrollLock'
 import type { TaskState, TasksView } from '../../fixtures/types'
 import {
   TASK_FILTERS,
@@ -30,7 +29,7 @@ interface TasksPanelProps {
   onOpenSession: (sessionId: string) => void
   /** 人工核对结案（§17.1 唯一例外）：不传就不渲染结案按钮（原型与测试保持纯展示）。 */
   onCloseReview?: (taskId: string, outcome: 'completed' | 'cancelled') => void
-  /** 关闭面板；不传就是纯展示（测试与原型用）。 */
+  /** 返回会话；不传就是纯展示（测试与原型用）。 */
   onClose?: () => void
 }
 
@@ -38,7 +37,8 @@ interface TasksPanelProps {
 const OPEN_LABEL: Record<TaskState, string> = {
   queued: '打开会话',
   running: '打开会话',
-  waiting_user: '打开会话做决定',
+  // "做决定"只对审批成立：提问要的是"回答一句"（2026-10-28）。
+  waiting_user: '打开会话处理',
   completed: '查看结果',
   failed: '查看结果',
   cancelled: '查看结果',
@@ -59,8 +59,6 @@ const ROW_NOTE: Partial<Record<TaskState, string>> = {
 }
 
 export function TasksPanel({ view, errorText = null, onOpenSession, onClose, onCloseReview }: TasksPanelProps) {
-  // 挂载即打开（父组件条件渲染）：锁住背后页面，否则滚到底会带动会话区（2026-10-26）。
-  useBodyScrollLock()
   const [filter, setFilter] = useState<TaskFilter>('all')
   const [now, setNow] = useState(Date.now)
   const counts = view === null ? null : taskFilterCounts(view)
@@ -74,19 +72,18 @@ export function TasksPanel({ view, errorText = null, onOpenSession, onClose, onC
   }, [live])
 
   return (
-    <div className={styles.overlay} role="presentation">
-      <section className={styles.dialog} role="dialog" aria-modal="true" aria-label="任务中心">
+      <section className={styles.page} aria-label="任务中心">
         <header className={styles.head}>
           <div>
-            <h2 className={styles.title}>任务中心</h2>
+            <span className={styles.eyebrow}>工作区</span>
+            <h1 className={styles.title}>任务中心</h1>
             <p className={styles.note}>
-              当前工作区的任务与它们到哪一步了。"在等什么"由任务状态决定，这一页不读会话内部状态，
-              也没有改任务的入口——任务状态只由提交、取消和重启收口产生。
+              查看任务进度、处理等待事项，或回到会话继续工作。
             </p>
           </div>
           {onClose === undefined ? null : (
             <button type="button" className={styles.close} onClick={onClose}>
-              关闭
+              <span aria-hidden="true">←</span> 返回会话
             </button>
           )}
         </header>
@@ -175,6 +172,5 @@ export function TasksPanel({ view, errorText = null, onOpenSession, onClose, onC
           </>
         )}
       </section>
-    </div>
   )
 }

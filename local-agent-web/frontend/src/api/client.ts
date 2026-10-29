@@ -416,6 +416,24 @@ export function resolveApproval(
   )
 }
 
+/** 提问答复（2026-10-28，§6.14）：空答复与未知 action 都由服务端按"跳过"处理。 */
+export function resolveQuestion(
+  sessionId: string,
+  questionId: string,
+  payload: {
+    action: 'answer' | 'skip'
+    answer?: string | null
+    /** 整组逐题结果（2026-10-28）：`index` 对齐题组，空 `answer` = 该题跳过。 */
+    answers?: readonly { index: number; answer: string }[]
+    client_request_id: string
+  },
+): Promise<Schemas['CommandResultView']> {
+  return request(
+    `/api/sessions/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(questionId)}`,
+    { method: 'POST', body: JSON.stringify(payload) },
+  )
+}
+
 // ---- 模型连接（§6.8）--------------------------------------------------------
 
 export function listModelConnections(): Promise<ModelConnectionList> {

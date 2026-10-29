@@ -110,6 +110,16 @@ describe('ContextMeter', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 
+  it('renders a fresh session as 0 / window instead of unknown', () => {
+    // 2026-10-28：新会话已用确实是 0，窗口来自连接配置。
+    // 以前两个都显示"未知"，用户会以为计量器坏了。
+    render(<MeterPanel meter={{ usedTokens: 0, windowTokens: 128_000, scope: 'unknown' }} />)
+
+    expect(screen.getByText('0 / 128,000 tokens')).toBeInTheDocument()
+    expect(screen.getByText('0%')).toBeInTheDocument()
+    expect(screen.getByText(/新会话 · 还没有发出过请求/)).toBeInTheDocument()
+  })
+
   it('keeps the same detail reachable without a pointer', () => {
     render(<MeterPanel meter={{ usedTokens: null, windowTokens: null, scope: 'unknown' }} />)
     const panel = screen.getByRole('region', { name: '上下文详情' })

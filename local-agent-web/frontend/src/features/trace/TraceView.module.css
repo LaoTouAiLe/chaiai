@@ -332,22 +332,23 @@
 .turns {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-xl);
+  gap: var(--sp-5);
 }
 
 .turn {
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--law-border-l1);
+  border: 1px solid var(--c-line);
   border-radius: var(--law-radius-lg);
-  background: var(--law-bg-layer-1);
+  background: var(--c-canvas);
 }
 
 .turnCard {
   display: flex;
   flex-direction: column;
-  padding: var(--law-space-lg) var(--law-space-xl);
+  padding: var(--sp-5);
   border-bottom: 1px solid var(--law-border-l1);
+  background: var(--c-sunken);
 }
 
 .turnHead {
@@ -378,8 +379,8 @@
 .metrics {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
-  gap: var(--law-space-md) var(--law-space-lg);
-  margin-top: var(--law-space-md);
+  gap: var(--sp-3) var(--sp-4);
+  margin-top: var(--sp-4);
 }
 
 .metric {

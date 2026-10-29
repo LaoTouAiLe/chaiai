@@ -49,6 +49,28 @@ beforeEach(() => {
   mock.nextId.mockImplementation(() => `req-${String(++next)}`)
 })
 
+it('keeps submission pending until the refreshed snapshot is available to the queue', async () => {
+  const client = new QueryClient()
+  const localWrapper = ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>
+  let finishRefresh!: () => void
+  const refresh = new Promise<void>(resolve => { finishRefresh = resolve })
+  const invalidate = vi.spyOn(client, 'invalidateQueries').mockImplementation(filters =>
+    filters?.queryKey?.[0] === 'snapshot' ? refresh : Promise.resolve())
+  mock.submit.mockResolvedValueOnce({ status: 'running' })
+  const { result, unmount } = renderHook(() => useSubmitMessage('s1'), { wrapper: localWrapper })
+  let done = false
+  let pending!: Promise<unknown>
+  act(() => { pending = result.current.mutateAsync({ text: '队首消息' }).then(() => { done = true }) })
+  await waitFor(() => expect(invalidate).toHaveBeenCalled())
+  expect(done).toBe(false)
+  expect(result.current.isPending).toBe(true)
+  await act(async () => { finishRefresh(); await pending })
+  expect(done).toBe(true)
+  unmount()
+  invalidate.mockRestore()
+  client.clear()
+})
+
 describe('side chat creation lifecycle', () => {
   it('reuses pending and completed creation across pane unmounts until the tab records it', async () => {
     const client = new QueryClient()

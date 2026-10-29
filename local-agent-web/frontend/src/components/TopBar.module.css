@@ -1,87 +1,13 @@
-/**
- * 顶栏（2026-10-22 V1 三段式）。
- *
- * 左段 = 工作区 + 标题 + 页签组（页签紧跟标题，不再贴右）；
- * 右段 = 只放"管旁边那一栏"的开关。
- * 长标题只压缩左段自己（`max-width` + 省略号），页签不参与压缩。
- */
-.bar {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sp-4);
-  height: var(--law-header-height);
-  padding: 0 var(--sp-6) 0 var(--sp-5);
-  border-bottom: 1px solid var(--c-line);
-  background: var(--c-canvas);
-}
-
-.lead {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-4);
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.left {
-  min-width: 0;
-  max-width: 46%;
-  overflow: hidden;
-  flex: 0 1 auto;
-}
-
-.breadcrumb {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--c-text-3);
-  font-size: var(--fs-meta);
-  line-height: 16px;
-}
-
-.title {
-  margin: 0;
-  font-size: var(--fs-title);
-  line-height: var(--lh-title);
-  font-weight: 600;
-  color: var(--c-text-1);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.right {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: var(--sp-2);
-}
-
-/* 页签组与右栏开关已改用原语（components/ui），这里不再维护各自的胶囊样式。 */
-
-/* 侧聊标记（§21.7）：当前会话是从别处开出来的侧聊，点一下可提升为正式会话 */
-.sideChatTag {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-1);
-  flex: 0 0 auto;
-  height: 24px;
-  padding: 0 var(--sp-2);
-  margin-left: var(--sp-2);
-  border-radius: var(--r-control);
-  background: var(--c-accent-soft);
-  color: var(--c-accent);
-  font-size: var(--fs-meta);
-  line-height: 24px;
-}
-
-.sideChatTag:hover {
-  background: var(--c-hover);
-}
-
-.sideChatHint {
-  color: var(--c-text-3);
-  font-size: var(--fs-caption);
-}
+.bar { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; min-height: var(--law-header-height); padding: 16px 28px; gap: 16px; border-bottom: 1px solid var(--c-line); background: var(--c-canvas); }
+.left { display: flex; flex-direction: column; min-width: 0; gap: 7px; }
+.breadcrumb { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 10px; line-height: 14px; color: var(--c-text-3); }
+.breadcrumb svg { flex: 0 0 auto; }
+.breadcrumb span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.title { margin: 0; min-width: 0; color: var(--c-text-1); font-size: 15px; line-height: 22px; font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.actions { display: flex; align-items: center; gap: 16px; flex: 0 0 auto; }
+.panelLabel { font-size: 11px; }
+.sideChatTag { padding: 4px 8px; border-radius: 6px; border: 1px solid var(--c-line); color: var(--c-accent); font-size: 11px; white-space: nowrap; }
+.sideChatHint { margin-left: 7px; color: var(--c-text-3); }
+@media (max-width: 900px) { .bar { padding-inline: 20px; } .actions { gap: 10px; } .panelLabel { display: none; } }
+@media (max-width: 600px) { .bar { padding: 12px 16px; min-height: 82px; flex-wrap: wrap; gap: 10px; } .left { flex: 1 1 120px; } .actions { gap: 8px; } .title { max-width: 100%; font-size: 14px; } }
+@media (max-width: 430px) { .bar { flex-direction: column; align-items: stretch; } .left { flex-basis: auto; } .actions { justify-content: space-between; } }
