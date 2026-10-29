@@ -6,9 +6,12 @@
 <title>技术实现说明 · chaiai 文档</title>
 <meta name="description" content="chaiai 技术实现说明：架构、请求生命周期、安全判据、沙箱、记忆与压缩、浏览器与持久进程。" />
 <meta name="color-scheme" content="light" />
+<meta name="theme-color" content="#faf9f6" />
+<link rel="icon" type="image/svg+xml" href="../../assets/logo.svg" />
 <link rel="stylesheet" href="../assets/docs.css" />
 </head>
 <body>
+<a class="skip-link" href="#doc-content">跳到正文</a>
 
 <header class="topbar">
   <div class="topbar__inner">
@@ -38,6 +41,40 @@
     </nav>
   </div>
 </header>
+
+<details class="mobile-directory">
+  <summary><span class="directory-icon" aria-hidden="true">☷</span><span>文档导航</span><span class="directory-current">技术实现说明</span><span class="directory-chevron" aria-hidden="true">⌄</span></summary>
+  <nav class="mobile-tree" aria-label="移动文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="../01-install.html">01 安装与第一次启动</a>
+      <a href="../02-model.html">02 连接一个模型</a>
+      <a href="../03-permissions.html">03 权限三档与目录授权</a>
+      <a href="../04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="../05-map.html">05 会话地图与分支追问</a>
+      <a href="../06-data.html">06 数据中台</a>
+      <a href="../07-settings.html">07 设置项与生效时机</a>
+      <a href="../08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="index.html" aria-current="page">概览</a>
+      <a href="01-architecture.html">01 架构总览</a>
+      <a href="02-lifecycle.html">02 一轮请求的生命周期</a>
+      <a href="03-tools.html">03 工具层与安全判据</a>
+      <a href="04-sandbox.html">04 写侧沙箱与权限判定</a>
+      <a href="05-memory.html">05 记忆与上下文压缩</a>
+      <a href="06-browser-terminal.html">06 浏览器与持久进程</a>
+      <a href="07-frontend-data.html">07 前端数据流与轮次展示</a>
+      <a href="08-testing.html">08 测试与验收方式</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+</details>
 
 <div class="layout layout--plain">
   <nav class="sidebar" aria-label="文档目录">
@@ -71,7 +108,8 @@
     <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
   </nav>
 
-  <main class="doc">
+  <main class="doc doc--overview" id="doc-content">
+    <nav class="breadcrumbs" aria-label="当前位置"><a href="../index.html">文档</a><span aria-hidden="true">/</span><span aria-current="page">技术实现概览</span></nav>
     <p class="kicker">INTERNALS · 面向开发者</p>
     <h1>技术实现说明</h1>
     <p class="lead">
@@ -83,6 +121,12 @@
       <span class="pill">最后更新 2026-10-27</span>
       <span class="pill">8 章 · 已写完</span>
     </div>
+
+    <nav class="quick-routes" aria-label="技术阅读入口">
+      <a class="quick-route" href="01-architecture.html"><span class="route-number">01</span><strong>看清整体架构</strong><span>界面、服务与执行链 <b aria-hidden="true">↗</b></span></a>
+      <a class="quick-route" href="02-lifecycle.html"><span class="route-number">02</span><strong>跟随一轮请求</strong><span>从提交到工具执行 <b aria-hidden="true">↗</b></span></a>
+      <a class="quick-route" href="04-sandbox.html"><span class="route-number">03</span><strong>理解安全边界</strong><span>权限判定与写侧沙箱 <b aria-hidden="true">↗</b></span></a>
+    </nav>
 
     <div class="note">
       <strong>写作口径：</strong>正文里出现的行为结论必须能指到 <code>文件:行号</code>；

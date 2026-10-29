@@ -120,9 +120,63 @@ def _json_text(value: Any, depth: int = 0) -> str:
     return opening + "\n" + indent + (",\n" + indent).join(items) + "\n" + "  " * depth + closing
 
 
+#: 正文抽取库（2026-10-28 接入 trafilatura）：**惰性导入**——它拖 lxml、htmldate 等依赖，
+#: 启动时并不需要；只有真的抓到 HTML 才值得付这份导入开销。导入失败不算致命：如实回退到
+#: 内置的标签剥离器，并在 ``structure`` 位置（这里借用第三个返回值）说明用了回退，
+#: 不静默降级——"抽出来的东西比以往差"必须能被看见。
+_TRAFILATURA: Any = None
+_TRAFILATURA_FAILED = False
+
+#: 抽取库给出的正文至少要有这么多字才算可用：再短基本等于没抽到正文。
+MIN_EXTRACTED_CHARS = 400
+#: 抽取库正文相对标签剥离器的保留比例下限。低于它说明这次抽取把大量内容判成了模板
+#: （2026-10-28 实测：某赛程页 28442 字被抽成 964 字，占 3.4%），此时宁可回退到旧的
+#: 全量文本——噪声多但至少数据在，比"干净地丢掉战绩表格"更可用。
+MIN_RETENTION_RATIO = 0.25
+
+
+def _trafilatura_module() -> Any:
+    global _TRAFILATURA, _TRAFILATURA_FAILED
+    if _TRAFILATURA is not None or _TRAFILATURA_FAILED:
+        return _TRAFILATURA
+    try:
+        import trafilatura
+    except ImportError:
+        _TRAFILATURA_FAILED = True
+        return None
+    _TRAFILATURA = trafilatura
+    return _TRAFILATURA
+
+
+def _markdown_from_html(raw: str, url: str) -> str | None:
+    """用抽取库把 HTML 转成 Markdown；库缺失或抽不出内容时返回 ``None``。"""
+    module = _trafilatura_module()
+    if module is None:
+        return None
+    try:
+        extracted = module.extract(
+            raw,
+            url=url or None,
+            output_format="markdown",
+            include_links=True,
+            include_tables=True,
+            include_formatting=True,
+            favor_recall=True,
+        )
+    except Exception:  # noqa: BLE001 - 第三方库的异常类型不向外泄漏，统一按"抽取失败"处理
+        return None
+    return extracted or None
+
+
 def extract_document(
     raw: str, content_type: str, url: str, *, json_pointer: str = "", json_fields: list[str] | None = None,
-) -> tuple[str | None, str, str | None]:
+) -> tuple[str | None, str, str | None, str | None]:
+    """抽取出 ``(标题, 正文, JSON 结构说明, 抽取说明)``。
+
+    第四个返回值（2026-10-28 新增）只说"这份正文是怎么来的"：抽取库成功时为 ``None``，
+    回退到内置解析、或 JSON 结构定位失败时给出原因。它与正文一起进 ``note``，因为
+    "正文比以往差"和"正文抽取失败"都必须让模型与用户看得见。
+    """
     kind = content_type.split(";", 1)[0].strip().lower()
     is_json = kind == "application/json" or kind.endswith("+json")
     if is_json:
@@ -130,7 +184,7 @@ def extract_document(
             try:
                 parsed = json.loads(raw, parse_float=Decimal)
             except ValueError:
-                return None, raw.strip(), "JSON 无法完整解析；未建立结构定位"
+                return None, raw.strip(), "JSON 无法完整解析；未建立结构定位", None
         else:
             try:
                 parsed = json.loads(raw, parse_float=Decimal)
@@ -144,15 +198,35 @@ def extract_document(
             rows = selected if isinstance(selected, list) else [selected]
             selected = [{field: json_at(row, field) for field in json_fields} for row in rows]
         body = _json_text(selected) if json_pointer or json_fields else raw.strip()
-        return None, body, structure
+        return None, body, structure, None
     if json_pointer or json_fields:
         raise WebAccessError("只有 JSON 响应支持 json_pointer/json_fields")
     if kind in {"text/html", "application/xhtml+xml"}:
         parser = _DocumentParser(url)
         parser.feed(raw)
         parser.close()
-        return " ".join("".join(parser.title).split()) or None, parser.text(), None
-    return None, raw.strip(), None
+        baseline = parser.text()
+        title = " ".join("".join(parser.title).split()) or None
+        markdown = _markdown_from_html(raw, url)
+        # 正文短到没有"取舍"可做时（整页就一两行），回退与否结果一样，不必加说明——
+        # 说明只在"本可以抽出更多、但选择了回退"时才有信息量。
+        trivial = len(baseline) < MIN_EXTRACTED_CHARS
+        if markdown is None:
+            # 库缺失或抽不出内容：回退不是"失败"，但必须说明，否则用户会把旧噪声当新结果。
+            return title, baseline, None, None if trivial else (
+                "正文抽取库不可用或未抽到正文，已回退到内置解析（含导航等噪声）"
+            )
+        if len(markdown) < MIN_EXTRACTED_CHARS:
+            return title, baseline, None, None if trivial else (
+                f"正文抽取只得到 {len(markdown)} 字（过短），已回退到内置解析（含导航等噪声）"
+            )
+        if baseline and len(markdown) < len(baseline) * MIN_RETENTION_RATIO:
+            return title, baseline, None, (
+                f"正文抽取判定为模板的内容过多（{len(markdown)}/{len(baseline)} 字），"
+                "已回退到内置解析（含导航等噪声）以免丢失表格或列表数据"
+            )
+        return title, markdown, None, None
+    return None, raw.strip(), None, None
 
 
 def content_version(text: str) -> str:

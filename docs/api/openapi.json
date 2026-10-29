@@ -1505,6 +1505,7 @@
             "enum": [
               "submit_message",
               "resolve_approval",
+              "resolve_question",
               "cancel_task"
             ],
             "title": "Operation",
@@ -1541,6 +1542,7 @@
               "idle",
               "running",
               "awaiting_approval",
+              "awaiting_input",
               "blocked",
               "completed",
               "failed"
@@ -1557,6 +1559,7 @@
             "enum": [
               "completed",
               "awaiting_approval",
+              "awaiting_input",
               "failed",
               "running",
               "cancelled"
@@ -2609,6 +2612,8 @@
             "model_call_started": "#/components/schemas/ModelCallStartedEvent",
             "model_usage_reported": "#/components/schemas/ModelUsageReportedEvent",
             "plan_updated": "#/components/schemas/PlanUpdatedEvent",
+            "question_required": "#/components/schemas/QuestionRequiredEvent",
+            "question_resolved": "#/components/schemas/QuestionResolvedEvent",
             "session_snapshot": "#/components/schemas/SessionSnapshotEvent",
             "step_completed": "#/components/schemas/StepCompletedEvent",
             "step_started": "#/components/schemas/StepStartedEvent",
@@ -2657,6 +2662,12 @@
           },
           {
             "$ref": "#/components/schemas/ApprovalResolvedEvent"
+          },
+          {
+            "$ref": "#/components/schemas/QuestionRequiredEvent"
+          },
+          {
+            "$ref": "#/components/schemas/QuestionResolvedEvent"
           },
           {
             "$ref": "#/components/schemas/MemoryRecalledEvent"
@@ -3573,7 +3584,7 @@
         "type": "object"
       },
       "JobWaitingEvent": {
-        "description": "任务进入 `waiting_user`：等用户在页面上做决定（例如审批）。",
+        "description": "任务进入 `waiting_user`：等你处理——审批一个动作，或回答 Agent 的一个提问（2026-10-28）。",
         "properties": {
           "event_id": {
             "minLength": 1,
@@ -6483,6 +6494,378 @@
         "title": "PreferencesView",
         "type": "object"
       },
+      "QuestionAnswerItem": {
+        "additionalProperties": false,
+        "description": "题组里某一题的答复（2026-10-28）：`index` 对齐 `QuestionView.items`，空 `answer` = 该题跳过。",
+        "properties": {
+          "answer": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Answer",
+            "type": "string"
+          },
+          "index": {
+            "maximum": 4.0,
+            "minimum": 0.0,
+            "title": "Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index"
+        ],
+        "title": "QuestionAnswerItem",
+        "type": "object"
+      },
+      "QuestionAnswerRequest": {
+        "additionalProperties": false,
+        "description": "提问答复（2026-10-28，架构 §15.3）。\n\n**一次提交整组**：`answers` 是逐题结果，用户翻页答完点一次\"提交\"。`answer` 保留给单题写法\n（只问了一题时）。空答复、越界 `index` 与未知 `action` 一律按\"跳过\"处理（失败闭合），与\n图内节点的判定同一口径——两处各判一次会造出两个真相。",
+        "properties": {
+          "action": {
+            "default": "answer",
+            "enum": [
+              "answer",
+              "skip"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer"
+          },
+          "answers": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/QuestionAnswerItem"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answers"
+          },
+          "client_request_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Client Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_request_id"
+        ],
+        "title": "QuestionAnswerRequest",
+        "type": "object"
+      },
+      "QuestionItemView": {
+        "description": "题组里的一题（含用户对它的答复）。`answer` 为空且 `skipped` 为真 = 这题被跳过。",
+        "properties": {
+          "allow_free_text": {
+            "default": true,
+            "title": "Allow Free Text",
+            "type": "boolean"
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer"
+          },
+          "index": {
+            "minimum": 0.0,
+            "title": "Index",
+            "type": "integer"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Options",
+            "type": "array"
+          },
+          "question": {
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          },
+          "skipped": {
+            "default": false,
+            "title": "Skipped",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "index",
+          "question"
+        ],
+        "title": "QuestionItemView",
+        "type": "object"
+      },
+      "QuestionRequiredEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "question_required",
+            "default": "question_required",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/QuestionRequiredPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "QuestionRequiredEvent",
+        "type": "object"
+      },
+      "QuestionRequiredPayload": {
+        "description": "提问出现（2026-10-28）：与 `approval_required` 同构。",
+        "properties": {
+          "question": {
+            "$ref": "#/components/schemas/QuestionView"
+          }
+        },
+        "required": [
+          "question"
+        ],
+        "title": "QuestionRequiredPayload",
+        "type": "object"
+      },
+      "QuestionResolvedEvent": {
+        "properties": {
+          "event_id": {
+            "minLength": 1,
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "const": "question_resolved",
+            "default": "question_resolved",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/QuestionResolvedPayload"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "session_id": {
+            "minLength": 1,
+            "title": "Session Id",
+            "type": "string"
+          },
+          "stream_sequence": {
+            "minimum": 1,
+            "title": "Stream Sequence",
+            "type": "integer"
+          },
+          "task_id": {
+            "minLength": 1,
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "session_id",
+          "occurred_at",
+          "stream_sequence",
+          "task_id",
+          "run_id",
+          "payload"
+        ],
+        "title": "QuestionResolvedEvent",
+        "type": "object"
+      },
+      "QuestionResolvedPayload": {
+        "description": "提问有了结局：`answered` 或 `skipped`。",
+        "properties": {
+          "question_id": {
+            "minLength": 1,
+            "title": "Question Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "answered",
+              "skipped",
+              "expired"
+            ],
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question_id",
+          "state"
+        ],
+        "title": "QuestionResolvedPayload",
+        "type": "object"
+      },
+      "QuestionView": {
+        "description": "提问的**派生视图状态**（2026-10-28，架构 §6.14）。\n\n底层只有 `pending_question`（当前请求）与 `question_history`（答复记录），没有状态机字段：\n`pending` / `answered` / `skipped` / `expired` 全部在这里推导。\n\n映射规则：挂着活的 interrupt 且有待决请求 → `pending`；有对应答复记录 → `answered`\n（至少一题给了答复）或 `skipped`（整组跳过 / 无人值守跳过）；有待决请求但 interrupt 已不在了\n（运行在执行中断里结束） → `expired`，页面不给按钮。\n\n**一次挂起对应一次提交**：`items` 是整组题，用户翻页答完一起提交；页面用 `items` 的长度做\n\"1/3\"式的进度，服务端不记录\"答到第几题\"。",
+        "properties": {
+          "answer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer"
+          },
+          "answered_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answered At"
+          },
+          "asked_at": {
+            "format": "date-time",
+            "title": "Asked At",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/QuestionItemView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "question": {
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          },
+          "question_id": {
+            "minLength": 1,
+            "title": "Question Id",
+            "type": "string"
+          },
+          "run_id": {
+            "minLength": 1,
+            "title": "Run Id",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "answered",
+              "skipped",
+              "expired"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "tool_call_id": {
+            "minLength": 1,
+            "title": "Tool Call Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "question_id",
+          "run_id",
+          "tool_call_id",
+          "question",
+          "state",
+          "asked_at"
+        ],
+        "title": "QuestionView",
+        "type": "object"
+      },
       "ReadonlyResearchRequest": {
         "additionalProperties": false,
         "description": "只接受工作区内的相对 glob 与字面关键词，不接受控制流。",
@@ -7149,6 +7532,16 @@
               }
             ]
           },
+          "question": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/QuestionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "schema_version": {
             "default": 1,
             "title": "Schema Version",
@@ -7164,6 +7557,7 @@
               "idle",
               "running",
               "awaiting_approval",
+              "awaiting_input",
               "blocked",
               "completed",
               "failed"
@@ -13632,6 +14026,85 @@
           }
         },
         "summary": "侧聊提升为正式会话"
+      }
+    },
+    "/api/sessions/{session_id}/questions/{question_id}": {
+      "post": {
+        "description": "回答或跳过一个挂起的提问：空答复按跳过处理（失败闭合）。",
+        "operationId": "resolve_question_api_sessions__session_id__questions__question_id__post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "title": "Question Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuestionAnswerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResultView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "提交提问答复"
       }
     },
     "/api/sessions/{session_id}/recovery": {

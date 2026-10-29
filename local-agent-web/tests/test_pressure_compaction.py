@@ -213,7 +213,9 @@ def test_tiny_prune_threshold_never_expands_model_view():
 def test_pressure_summary_and_kept_steps_share_remaining_prompt_budget(tmp_path, app_config, model_factory, frozen):
     from local_agent.context.token_budget import estimate_tokens
 
-    context = _context(tmp_path, app_config, model_factory, capacity=20000, keep=1)
+    # 2026-10-29：`ask_user` 改成题组（复合 schema）+ 工具规范加了一条提问说明后，固定前缀
+    # 多出约 300 tokens；这几条压力用例的模拟窗口随之上调 1000（断言\"压完必须 <1\"不变）。
+    context = _context(tmp_path, app_config, model_factory, capacity=21000, keep=1)
     app_config.llm.max_tokens = 4096
     app_config.memory.compression.tool_step_budget_chars = 20000
     app_config.memory.compression.summary_max_chars = 12000
@@ -237,7 +239,9 @@ def test_pressure_summary_and_kept_steps_share_remaining_prompt_budget(tmp_path,
 def test_pressure_keeps_original_task_and_exact_completed_plan_even_if_model_summary_drifts(tmp_path, app_config, model_factory):
     from local_agent.graph.state import PlanStep
 
-    context = _context(tmp_path, app_config, model_factory, capacity=20000, keep=1)
+    # 2026-10-29：`ask_user` 改成题组（复合 schema）+ 工具规范加了一条提问说明后，固定前缀
+    # 多出约 300 tokens；这几条压力用例的模拟窗口随之上调 1000（断言\"压完必须 <1\"不变）。
+    context = _context(tmp_path, app_config, model_factory, capacity=21000, keep=1)
     app_config.llm.max_tokens = 4096
     state = _state(8, body_size=6000)
     state.update(task_goal="核对全部检索方法，只读不修改", plan=[
@@ -269,7 +273,9 @@ def test_insufficient_evidence_room_does_not_destroy_summary_or_advance_coverage
 ):
     from local_agent.graph.state import PlanStep
 
-    context = _context(tmp_path, app_config, model_factory, capacity=20000, keep=1)
+    # 2026-10-29：`ask_user` 改成题组（复合 schema）+ 工具规范加了一条提问说明后，固定前缀
+    # 多出约 300 tokens；这几条压力用例的模拟窗口随之上调 1000（断言\"压完必须 <1\"不变）。
+    context = _context(tmp_path, app_config, model_factory, capacity=21000, keep=1)
     app_config.llm.max_tokens = 4096
     state = _state(8, body_size=6000)
     state.update(task_goal="核对全部检索方法，只读不修改", plan=[

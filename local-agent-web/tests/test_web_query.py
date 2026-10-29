@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from local_agent.tools.web_query import clean_query
+from local_agent.tools.web_query import clean_query, keyword_variants
 
 
 @pytest.mark.parametrize(
@@ -96,3 +96,39 @@ def test_falls_back_when_cleanup_would_leave_almost_nothing() -> None:
     cleaned = clean_query("10:12 啊啊")
     assert cleaned.text == "10:12 啊啊"
     assert not cleaned.changed
+
+
+# ---- 关键词变体（2026-10-28）------------------------------------------------
+
+
+def test_variant_drops_the_question_opening_that_collapses_the_search() -> None:
+    """实测：整句「如何用 pandas…」在 Bing 上只召回"如何"的词典义，去掉问法就正常。"""
+    variants = keyword_variants("如何用 pandas 读取 excel 文件")
+    assert variants[0] == "pandas 读取 excel 文件"
+
+
+def test_variant_moves_a_bare_year_off_the_front() -> None:
+    """实测：以「2026年…」开头的查询会被坍缩到"2026年"的百科/放假日历。"""
+    variants = keyword_variants("2026年诺贝尔文学奖得主是谁")
+    assert variants and variants[0].startswith("诺贝尔文学奖得主")
+    assert "2026年" in variants[0]
+
+
+def test_variant_is_not_invented_when_it_would_change_meaning() -> None:
+    """「1 加 1 等于几」没有可删的首词：宁可不生成变体，也不发一句面目全非的查询。"""
+    assert keyword_variants("1 加 1 等于几") == []
+
+
+def test_variant_removes_question_particles_in_the_middle() -> None:
+    """实测：`…线程池 什么区别` 在 Bing 上 0/5，去掉"什么"两字后同一时刻 5/5。"""
+    variants = keyword_variants("python asyncio 和线程池有什么区别")
+    assert "asyncio 线程池 区别" in variants
+    assert all("什么" not in variant for variant in variants)
+    assert all("区别" in variant for variant in variants)  # "区别"是有信息量的词，不能删
+
+
+def test_variants_are_never_empty_or_overlong() -> None:
+    for raw in ("Model Context Protocol MCP", "明天的天气", "LOL的S16全球赛目前各个战队的战绩怎么样？"):
+        for variant in keyword_variants(raw):
+            assert 4 <= len(variant) <= 120
+            assert variant != raw.strip()

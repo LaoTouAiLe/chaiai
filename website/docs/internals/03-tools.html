@@ -6,9 +6,12 @@
 <title>工具层与安全判据 · 技术实现说明 · chaiai</title>
 <meta name="description" content="chaiai 工具层：能力归属、注册表与放行清单三张表，安全门与执行侧两道门，破坏性命令底线只能追加，只读工具才允许并行。" />
 <meta name="color-scheme" content="light" />
+<meta name="theme-color" content="#faf9f6" />
+<link rel="icon" type="image/svg+xml" href="../../assets/logo.svg" />
 <link rel="stylesheet" href="../assets/docs.css" />
 </head>
 <body>
+<a class="skip-link" href="#doc-content">跳到正文</a>
 
 <header class="topbar">
   <div class="topbar__inner">
@@ -32,12 +35,46 @@
     </a>
     <nav class="topnav" aria-label="站点导航">
       <a href="../index.html">文档首页</a>
-      <a href="index.html" aria-current="page">技术实现</a>
+      <a href="index.html" class="topnav__section">技术实现</a>
       <a class="topnav__out" href="../../site.html">返回官网</a>
       <a class="topnav__out" href="https://github.com/LaoTouAiLe/chaiai" target="_blank" rel="noreferrer noopener">GitHub</a>
     </nav>
   </div>
 </header>
+
+<details class="mobile-directory">
+  <summary><span class="directory-icon" aria-hidden="true">☷</span><span>文档导航</span><span class="directory-current">工具层与安全判据</span><span class="directory-chevron" aria-hidden="true">⌄</span></summary>
+  <nav class="mobile-tree" aria-label="移动文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="../01-install.html">01 安装与第一次启动</a>
+      <a href="../02-model.html">02 连接一个模型</a>
+      <a href="../03-permissions.html">03 权限三档与目录授权</a>
+      <a href="../04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="../05-map.html">05 会话地图与分支追问</a>
+      <a href="../06-data.html">06 数据中台</a>
+      <a href="../07-settings.html">07 设置项与生效时机</a>
+      <a href="../08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="index.html">概览</a>
+      <a href="01-architecture.html">01 架构总览</a>
+      <a href="02-lifecycle.html">02 一轮请求的生命周期</a>
+      <a href="03-tools.html" aria-current="page">03 工具层与安全判据</a>
+      <a href="04-sandbox.html">04 写侧沙箱与权限判定</a>
+      <a href="05-memory.html">05 记忆与上下文压缩</a>
+      <a href="06-browser-terminal.html">06 浏览器与持久进程</a>
+      <a href="07-frontend-data.html">07 前端数据流与轮次展示</a>
+      <a href="08-testing.html">08 测试与验收方式</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+</details>
 
 <div class="layout layout--plain">
   <nav class="sidebar" aria-label="文档目录">
@@ -71,7 +108,8 @@
     <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
   </nav>
 
-  <main class="doc">
+  <main class="doc" id="doc-content">
+    <nav class="breadcrumbs" aria-label="当前位置"><a href="../index.html">文档</a><span aria-hidden="true">/</span><a href="index.html">技术实现</a><span aria-hidden="true">/</span><span aria-current="page">工具层与安全判据</span></nav>
     <p class="kicker">INTERNALS · 第 3 章</p>
     <h1>工具层与安全判据</h1>
     <p class="lead">
@@ -84,7 +122,8 @@
         一个工具从"已实现"到"模型真能调起来"，要过三张表。三张表都不在同一个文件里，这是刻意的：
         每张表负责一个不同的问题，混在一起就会出现"注册了就等于授权"。
       </p>
-      <table>
+      <div class="table-scroll" role="region" aria-label="1 三张表决定一个工具能不能跑表格，可横向滚动" tabindex="0">
+<table>
         <thead><tr><th>表</th><th>位置</th><th>回答什么</th><th>对不上时</th></tr></thead>
         <tbody>
           <tr>
@@ -107,6 +146,7 @@
           </tr>
         </tbody>
       </table>
+</div>
       <p>
         能力归属的校验是<strong>双向</strong>的：能力表里有但没实现，报错；实现了但没登记能力，也报错
         （<code>tools/tool_registry.py:213-223</code>）。理由是这类错误只会以"模型怎么从来不用这个工具"的形式

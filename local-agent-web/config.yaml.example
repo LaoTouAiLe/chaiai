@@ -330,6 +330,22 @@ git:
   timeout_seconds: 20
   max_output_chars: 20000
 
+# 右栏终端（2026-10-28，契约 §23）。只决定"用什么 shell 打开、带哪些环境变量"，不改写边界：
+# 终端内的命令仍受当前权限档位的写侧沙箱约束。
+# shell：
+#   auto        ＝ 优先 PowerShell 7（pwsh）→ 系统自带 Windows PowerShell → cmd（推荐）
+#   powershell  ＝ 固定 Windows PowerShell 5.1
+#   pwsh        ＝ 固定 PowerShell 7
+#   cmd         ＝ 固定 cmd.exe
+#   找不到就退回 cmd：不会因为"该用哪个 shell"让整个终端不可用。
+# load_profile：
+#   true（默认）＝ 加载 shell 的 profile。conda / venv 的 `(base)` 提示符靠它，代价是启动慢一点
+#                  （加载个人配置常见 1–3 秒）。
+#   false        ＝ 加 -NoProfile，启动快，但提示符与别名不生效；cmd 没有 profile 概念。
+terminal:
+  shell: auto
+  load_profile: true
+
 # 技能（v0.5 T55，契约 §16.5、工具定义 §6.12）。把"指令"从"每轮都发"变成"按需加载"：
 # 清单（只有名字与描述）随运行时快照发给模型，正文由 skill_load 按需取——两者都不进稳定前缀，
 # 所以关掉它时前缀与快照逐字节不变。**默认关闭**，关闭时 skill 能力完全不可见。

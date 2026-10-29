@@ -145,6 +145,13 @@ class WebSearchResult(BaseModel):
     retrieved_at: str | None = None
     provider: str | None = None
     executed_query: str | None = None
+    #: 本次结果对查询的覆盖度（2026-10-28，仅 HTML 兼容后端给）。
+    #:
+    #: 为什么要它：此前"搜到 8 条全都不相关"与"搜到 8 条高度相关"在返回结构上完全一样，
+    #: 模型只能靠读内容自己发现，实测因此空转了 30 多次工具调用。``none`` 表示一条都不沾
+    #: （通常是查询写法或后端能力问题，应当换词/换后端），``low`` 表示沾边但证据薄
+    #: （可用于回答，但必须说明缺口），``high`` 表示多数结果是相关来源。
+    coverage: Literal["high", "low", "none"] | None = None
 
 
 class WebFetchResult(BaseModel):

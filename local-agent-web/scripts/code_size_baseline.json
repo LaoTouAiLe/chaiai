@@ -1,10 +1,7 @@
 {
   "exceptions": {
-    "file:application/projection.py": {
-      "file_lines": 2084
-    },
     "file:application/service.py": {
-      "file_lines": 4891
+      "file_lines": 4868
     },
     "function:api/browsers.py::build_browser_router": {
       "complexity": 24
@@ -60,9 +57,6 @@
     },
     "function:tools/shell_tools.py::run_shell_command": {
       "complexity": 26
-    },
-    "function:tools/web_tools.py::search": {
-      "complexity": 22
     },
     "function:ui/decision_streaming.py::stream_decision": {
       "complexity": 31

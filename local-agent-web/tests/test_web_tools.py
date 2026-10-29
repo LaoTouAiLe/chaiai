@@ -991,3 +991,123 @@ def test_html_backend_rejects_domain_filter_instead_of_ignoring_it() -> None:
             transport=lambda url, *_: web_tools.WebResponse(url, 200, "text/html", html),
             domains=["example.com"],
         )
+
+
+# ---- 字符集嗅探（2026-10-28）----------------------------------------------
+
+
+def test_gbk_page_is_decoded_through_its_meta_charset() -> None:
+    """响应头不写 charset、页面自述 gbk：按页面自述解，不能交出一页乱码。"""
+    html = '<html><head><meta charset="gbk"></head><body><p>英雄联盟赛事</p></body></html>'
+    text = web_tools._decode_response(
+        html.encode("gbk"), content_encoding="", content_type="text/html"
+    )
+    assert "英雄联盟赛事" in text
+    assert "\ufffd" not in text
+
+
+def test_undecodable_page_is_retried_as_gb18030() -> None:
+    """头与页面都没声明编码时，按 utf-8 解出替换字符就换 GB18030 再解一次，取好的那份。"""
+    payload = "<html><body><p>英雄联盟赛事</p></body></html>".encode("gbk")
+    text = web_tools._decode_response(payload, content_encoding="", content_type="text/html")
+    assert "英雄联盟赛事" in text
+
+
+def test_explicit_header_charset_wins_over_sniffing() -> None:
+    text = web_tools._decode_response(
+        "純文字".encode("big5"), content_encoding="", content_type="text/html; charset=big5"
+    )
+    assert text == "純文字"
+
+
+# ---- 覆盖度与变体补搜（2026-10-28）----------------------------------------
+
+
+def _algo(title: str, url: str, snippet: str = "") -> str:
+    return f'<li class="b_algo"><h2><a href="{url}">{title}</a></h2><p>{snippet}</p></li>'
+
+
+def test_search_says_none_when_no_result_matches_the_query() -> None:
+    """一条都不沾时必须明说，不能把品牌首页当结果交出去（2026-10-28 实测的失效形态）。"""
+    page = _algo("英雄联盟官方网站", "https://lol.qq.com/") + _algo(
+        "WeGame 商店", "https://www.wegame.example/26"
+    )
+
+    result = web_tools.search(
+        "S16 瑞士轮 战绩",
+        config=WebAccessConfig(enabled=True, provider="bing_html", max_results=3, prefetch_pages=0),
+        transport=lambda url, *_: web_tools.WebResponse(url, 200, "text/html", page),
+    )
+
+    assert result.coverage == "none"
+    assert "没有找到与查询沾边的来源" in (result.note or "")
+
+
+def test_search_drops_off_topic_hits_instead_of_passing_them_on() -> None:
+    page = _algo("瑞士旅游攻略", "https://travel.example/ch", "瑞士 2026 最佳季节") + _algo(
+        "S16 瑞士轮 战绩汇总", "https://esports.example/s16", "瑞士轮三轮打完，战绩如下"
+    )
+
+    result = web_tools.search(
+        "S16 瑞士轮 战绩",
+        config=WebAccessConfig(enabled=True, provider="bing_html", max_results=5, prefetch_pages=0),
+        transport=lambda url, *_: web_tools.WebResponse(url, 200, "text/html", page),
+    )
+
+    assert [hit.url for hit in result.results] == ["https://esports.example/s16"]
+    assert "与查询不沾边" in (result.note or "")
+
+
+def test_search_retries_with_a_keyword_variant_and_reports_what_it_ran() -> None:
+    """原查询整页跑偏时，用去问法的变体补一次；实际执行的句子必须能被看见。"""
+    seen: list[str] = []
+
+    def transport(url: str, *_args) -> web_tools.WebResponse:
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(url).query).get("q", [""])[0]
+        seen.append(query)
+        # 带"如何"的原句只会召回词典义；去掉问法之后才拿得到正经结果。
+        if "pandas" in query and "如何" not in query:
+            page = _algo("pandas 读取 Excel 官方文档", "https://pandas.example/io",
+                         "pandas 读取 excel 文件的方法")
+        else:
+            page = _algo("如何（汉语词语）_百度百科", "https://baike.example/how", "如何的意思")
+        return web_tools.WebResponse(url, 200, "text/html", page)
+
+    result = web_tools.search(
+        "如何用 pandas 读取 excel 文件",
+        config=WebAccessConfig(enabled=True, provider="bing_html", max_results=3, prefetch_pages=0),
+        transport=transport,
+    )
+
+    assert result.coverage == "high"
+    assert "pandas" in (result.executed_query or "")
+    assert "自动改用" in (result.note or "")
+    assert len(seen) <= 3  # 原句 + 最多两个变体，绝不无限重试
+
+
+def test_variant_is_judged_against_the_original_question() -> None:
+    """变体之间要比**同一把尺**（原问题的词元），否则删词越多的变体越容易胜出。
+
+    实测反例：`读取 excel 文件` 顶掉了更贴题的 `pandas 读取 excel 文件`。
+    """
+    def transport(url: str, *_args) -> web_tools.WebResponse:
+        from urllib.parse import parse_qs, urlsplit
+
+        query = parse_qs(urlsplit(url).query).get("q", [""])[0]
+        if "如何" in query:
+            page = _algo("如何（汉语词语）", "https://baike.example/how", "如何的意思")
+        elif "pandas" in query:
+            page = _algo("pandas 读取 excel 文件", "https://pandas.example/io", "官方文档")
+        else:
+            page = _algo("读取 excel 文件的方法", "https://generic.example/read", "通用读写教程")
+        return web_tools.WebResponse(url, 200, "text/html", page)
+
+    result = web_tools.search(
+        "如何用 pandas 读取 excel 文件",
+        config=WebAccessConfig(enabled=True, provider="bing_html", max_results=3, prefetch_pages=0),
+        transport=transport,
+    )
+    assert result.executed_query == "pandas 读取 excel 文件"
+    assert result.results[0].url == "https://pandas.example/io"

@@ -81,6 +81,26 @@ BASE_ENV_KEYS: tuple[str, ...] = (
     "LC_ALL",
 )
 
+#: 右栏终端额外继承的变量（2026-10-28）：只补"工具链提示"这一类，让 conda/venv 的提示符
+#: （``(base) PS ...``）在终端里出现——缺了这些变量，终端看不出自己在哪个环境里，和用户自己
+#: 开的终端是两个样子。
+#:
+#: 仍然**不含任何密钥类名字**：:func:`build_environment` 对放行名单再做一次密钥名过滤，
+#: 所以即使这里手滑写了 ``XXX_API_KEY`` 也透传不出去。
+TERMINAL_ENV_KEYS: tuple[str, ...] = (
+    "CONDA_DEFAULT_ENV",
+    "CONDA_PREFIX",
+    "CONDA_PROMPT_MODIFIER",
+    "CONDA_SHLVL",
+    "CONDA_EXE",
+    "CONDA_PYTHON_EXE",
+    "VIRTUAL_ENV",
+    "VIRTUAL_ENV_PROMPT",
+    "PROMPT",
+    "PYTHONIOENCODING",
+    "PYTHONUTF8",
+)
+
 _WINDOWS_EXECUTABLE_SUFFIXES: tuple[str, ...] = (".exe", ".cmd", ".bat", ".com")
 
 #: 执行方式（架构 §6.6）。
@@ -734,12 +754,72 @@ def resolve_platform(configured: str, *, override: str | None = None) -> str:
     return configured
 
 
+#: Windows PowerShell 5.1 的固定位置（系统自带，不依赖 PATH）。
+_WINDOWS_POWERSHELL_PARTS: tuple[str, ...] = (
+    "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+
+
+def resolve_terminal_shell(preference: str = "auto") -> tuple[str, bool]:
+    """挑一个终端 shell，返回 ``(可执行文件路径, 是否 PowerShell)``。
+
+    为什么默认用 PowerShell（2026-10-28 用户要求）：用户自己开的终端就是 PowerShell，
+    进到应用里却变成 cmd，命令写法与提示符都不一样。``cmd`` 仍是可选值——PowerShell 要加载
+    profile，比 cmd 慢，习惯 cmd 的人也不该被强制换掉。
+
+    **找不到就退回 cmd**：不在"该用哪个 shell"上抛错。抛错会让终端整个不可用，而 cmd 一定
+    存在；配置写了 ``pwsh`` 但没装时同理，退回系统自带的 Windows PowerShell。
+    """
+    system_root = Path(os.environ.get("SystemRoot", "C:/Windows"))
+    cmd = str(system_root / "System32" / "cmd.exe")
+    if preference == "cmd":
+        return cmd, False
+    if preference in ("auto", "pwsh"):
+        found = shutil.which("pwsh")
+        if found is not None:
+            return found, True
+    if preference in ("auto", "pwsh", "powershell"):
+        legacy = system_root.joinpath(*_WINDOWS_POWERSHELL_PARTS)
+        if legacy.is_file():
+            return str(legacy), True
+    return cmd, False
+
+
+def terminal_argv(shell: str, *, load_profile: bool) -> list[str]:
+    """交互式终端的启动参数。
+
+    - ``cmd`` 用 ``/D /Q``：关掉 AutoRun（注册表里的命令会让终端行为随机器变化）与回显；
+    - PowerShell：默认加载 profile——conda 的 ``(base)`` 提示符就是 profile 里那个 ``prompt``
+      函数给出的；``load_profile=False`` 时加 ``-NoProfile``，启动快但没有环境提示。
+    """
+    name = Path(shell).name.casefold()
+    if name in ("powershell.exe", "pwsh.exe", "powershell", "pwsh"):
+        return [shell] if load_profile else [shell, "-NoProfile"]
+    return [shell, "/D", "/Q"]
+
+
 def build_environment(env_keys: tuple[str, ...]) -> dict[str, str]:
-    """构造子进程环境：只含基础变量与显式放行的变量名，不含任何密钥。"""
+    """构造子进程环境：只含基础变量与显式放行的变量名，不含任何密钥。
+
+    放行名单有两类来源：用户显式声明的（已过 :func:`validate_env_keys`）与代码里的常量
+    （例如 :data:`TERMINAL_ENV_KEYS`）。常量这一路没有校验入口，所以这里**统一再过滤一次**
+    密钥类名字——多一道判断的代价可以忽略，漏传一个 ``XXX_API_KEY`` 的代价不行。
+    """
     environment = {key: os.environ[key] for key in BASE_ENV_KEYS if key in os.environ}
     for key in env_keys:
-        environment[key] = os.environ.get(key, "")
+        # 1. 密钥类名字一律不传（常量名单也要过这一关）；
+        # 2. **进程里没有的变量不要写空串**：conda 的 profile 钩子会拿 `$env:CONDA_EXE`
+        #    去调程序，一个空值会让它自己崩在启动阶段（2026-10-28 实测）；"变量不存在"
+        #    时钩子会走另一条分支。
+        if _is_secret_key(key) or key not in os.environ:
+            continue
+        environment[key] = os.environ[key]
     return environment
+
+
+def _is_secret_key(name: str) -> bool:
+    """变量名看起来像密钥（``*_API_KEY`` / ``*_TOKEN`` / ``*_PASSWORD`` 等）。"""
+    upper = name.upper()
+    return any(hint in upper for hint in _SECRET_ENV_HINTS)
 
 
 def _normalize_executable(name: str) -> str:

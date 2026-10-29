@@ -1,7 +1,7 @@
 {
   "api_version": "0.4.0",
-  "config_defaults_sha256": "51ce718752dbdea37e90a23b7f03a1bde6cc3cf0159c1ced943d591fd51a6c39",
-  "config_schema_sha256": "d15cd6cb3bb091fe4ca0bca63ccf72791c3fe311835ef68b80a7fdcacb7f43bd",
+  "config_defaults_sha256": "2df3d3475b8a8c3f8cccacc948536fc4f28a407f759b15e3d265604489fb5147",
+  "config_schema_sha256": "dd589511f873134cd69586e697b9fcf072a784468ba10084afdc42b1618de044",
   "database_versions": {
     "chat": 14,
     "long_term": 3,
@@ -32,6 +32,8 @@
     "tool_completed",
     "approval_required",
     "approval_resolved",
+    "question_required",
+    "question_resolved",
     "memory_recalled",
     "memory_written",
     "model_call_started",
@@ -46,8 +48,8 @@
     "task_cancelled"
   ],
   "manifest_version": 1,
-  "openapi_sha256": "0426ff9ed46d9a2a6b84ac547c8754ff68152a61328a28067f313bfaf906089a",
-  "package_version": "0.1.1",
+  "openapi_sha256": "764bb949adf8fc677f682dec33e04e6a3f69c79512ed37380c23c810b8c50b4f",
+  "package_version": "0.2.0",
   "release_status": "candidate",
   "release_target": "1.0.0"
 }

@@ -6,9 +6,12 @@
 <title>前端数据流与轮次展示 · 技术实现说明 · chaiai</title>
 <meta name="description" content="chaiai 前端数据流：草稿、快照与流式尾部各自放在哪，流式与快照怎么对账，投影 DTO 为什么只回引用而不回原始字节。" />
 <meta name="color-scheme" content="light" />
+<meta name="theme-color" content="#faf9f6" />
+<link rel="icon" type="image/svg+xml" href="../../assets/logo.svg" />
 <link rel="stylesheet" href="../assets/docs.css" />
 </head>
 <body>
+<a class="skip-link" href="#doc-content">跳到正文</a>
 
 <header class="topbar">
   <div class="topbar__inner">
@@ -32,12 +35,46 @@
     </a>
     <nav class="topnav" aria-label="站点导航">
       <a href="../index.html">文档首页</a>
-      <a href="index.html" aria-current="page">技术实现</a>
+      <a href="index.html" class="topnav__section">技术实现</a>
       <a class="topnav__out" href="../../site.html">返回官网</a>
       <a class="topnav__out" href="https://github.com/LaoTouAiLe/chaiai" target="_blank" rel="noreferrer noopener">GitHub</a>
     </nav>
   </div>
 </header>
+
+<details class="mobile-directory">
+  <summary><span class="directory-icon" aria-hidden="true">☷</span><span>文档导航</span><span class="directory-current">前端数据流与轮次展示</span><span class="directory-chevron" aria-hidden="true">⌄</span></summary>
+  <nav class="mobile-tree" aria-label="移动文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="../01-install.html">01 安装与第一次启动</a>
+      <a href="../02-model.html">02 连接一个模型</a>
+      <a href="../03-permissions.html">03 权限三档与目录授权</a>
+      <a href="../04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="../05-map.html">05 会话地图与分支追问</a>
+      <a href="../06-data.html">06 数据中台</a>
+      <a href="../07-settings.html">07 设置项与生效时机</a>
+      <a href="../08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="index.html">概览</a>
+      <a href="01-architecture.html">01 架构总览</a>
+      <a href="02-lifecycle.html">02 一轮请求的生命周期</a>
+      <a href="03-tools.html">03 工具层与安全判据</a>
+      <a href="04-sandbox.html">04 写侧沙箱与权限判定</a>
+      <a href="05-memory.html">05 记忆与上下文压缩</a>
+      <a href="06-browser-terminal.html">06 浏览器与持久进程</a>
+      <a href="07-frontend-data.html" aria-current="page">07 前端数据流与轮次展示</a>
+      <a href="08-testing.html">08 测试与验收方式</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+</details>
 
 <div class="layout layout--plain">
   <nav class="sidebar" aria-label="文档目录">
@@ -71,7 +108,8 @@
     <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
   </nav>
 
-  <main class="doc">
+  <main class="doc" id="doc-content">
+    <nav class="breadcrumbs" aria-label="当前位置"><a href="../index.html">文档</a><span aria-hidden="true">/</span><a href="index.html">技术实现</a><span aria-hidden="true">/</span><span aria-current="page">前端数据流与轮次展示</span></nav>
     <p class="kicker">INTERNALS · 第 7 章</p>
     <h1>前端数据流与轮次展示</h1>
     <p class="lead">
@@ -80,7 +118,8 @@
 
     <div class="prose">
       <h2>1 三处状态，各有唯一归属</h2>
-      <table>
+      <div class="table-scroll" role="region" aria-label="1 三处状态，各有唯一归属表格，可横向滚动" tabindex="0">
+<table>
         <thead><tr><th>状态</th><th>放在哪</th><th>为什么</th></tr></thead>
         <tbody>
           <tr>
@@ -100,6 +139,7 @@
           </tr>
         </tbody>
       </table>
+</div>
       <p>
         三条纪律都在文件头写死了：<code>stores/stream.ts:3-5</code> 只做"存/取/清"，判定逻辑全在纯函数里，
         "容器只存结果，不藏规则——规则散了就没法单独测"；<code>stores/ui.ts:4-5</code> 明写"别把服务端状态搬进来"；

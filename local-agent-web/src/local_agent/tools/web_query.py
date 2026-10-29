@@ -69,6 +69,9 @@ _LEADING_TIMESTAMP = re.compile(r"^\s*[\[(（]?\s*\d{1,2}:\d{2}(?::\d{2})?\s*[\]
 _TRAILING_TIMESTAMP = re.compile(r"\s*[\[(（]?\s*\d{1,2}:\d{2}(?::\d{2})?\s*[\])）]?\s*$")
 _TRAILING_URL = re.compile(r"\s*https?://\S+\s*$", re.IGNORECASE)
 
+#: 片段切分边界：中英文标点与空白（不切英文单词与数字）。
+_SPLIT_PUNCT = re.compile(r"[\s，。、；：！？（）()【】\[\]“”\"'—\-/]+")
+
 #: 数字后面紧跟这些字时说明它是数量而不是榜单序号。
 #: 这张表是"宁可多收"的：漏收一个字会误删真实查询，多收一个字只是漏洗一次榜单。
 _MEASURE_HEADS = frozenset(
@@ -219,3 +222,165 @@ def clean_query(raw: str) -> QueryCleanup:
     if len(text) < MIN_RESULT_CHARS:
         return QueryCleanup(original, original)
     return QueryCleanup(text, original, tuple(removed))
+
+
+# ---- 关键词变体（2026-10-28）-------------------------------------------------
+#
+# 起因是一次可复现的退化：Bing 对中文长问句会**坍缩到最靠前的那一个词**。
+# 实测（同日、同 UA）：
+#   「如何用 pandas 读取 excel 文件」→ 全是"如何"的词典/歌词页；
+#   「2026年诺贝尔文学奖得主是谁」  → 全是"2026年"的百科/放假日历；
+#   「pandas 读取 excel 文件」      → 官方文档与教程（正确）。
+# 所以这里生成**同一问题的另一种说法**，由调用方在原句覆盖度不够时补一次；这不是改写语义，
+# 只是把疑问词/虚词去掉、把年份这类弱区分度词挪到后面——每个变体都会原样写进
+# ``executed_query``，用户能核对"到底搜了什么"。
+
+#: 只在开头出现的疑问/祈使词：出现在句首会把整条查询锚到词典义上。**长的在前**，
+#: 否则 ``如何用 pandas…`` 只剥掉"如何"，剩下的"用"会继续占着首位。
+_VARIANT_HEADS = (
+    "如何用", "怎么样", "为什么", "是什么", "请问", "求问", "帮我", "如何", "怎么", "怎样", "为何",
+)
+#: 结尾的疑问词：去掉它们不改变查询指向。**不要与上面 `_QUESTION_TAILS` 合并**：那个是
+#: ``_is_question`` 用来"判断这是不是提问"的（含"几""哪"），语义不同，复用会让清洗逻辑跑偏。
+_VARIANT_TAILS = (
+    "怎么样", "怎么办", "是什么", "是谁", "是多少", "有多少", "为什么", "有哪些",
+    "如何", "什么", "多少", "吗", "呢", "呀", "啊", "？", "?",
+)
+#: 中日韩查询没有空格，只能按功能词断开成"可检索的片段"。
+_CJK_FUNCTION_SPLIT = re.compile(r"[的之和与及或是在有把被对这那了]")
+#: 纯年份片段：区分度低却常被搜索引擎当成主语，所以统一挪到末尾。
+_YEAR_ONLY = re.compile(r"^(?:19|20)\d{2}年?$")
+MAX_VARIANT_CHARS = 120
+
+
+#: 粘在中文片段开头的年份（``2026年诺贝尔文学奖得主``）：切开后年份由 `_join` 挪到末尾。
+_LEADING_YEAR = re.compile(r"^((?:19|20)\d{2}年?)(.+)$")
+
+#: **可以出现在任意片段里**的疑问/语气成分（2026-10-28 实测）：只剥句首尾不够用。
+#: `python asyncio 和线程池有什么区别` 的自动变体保留了"什么区别"，Bing 仍坍缩到"什么"（0/5）；
+#: 再去掉"什么"两字，同一时刻 `asyncio 线程池 区别` 就拿到 5/5 相关结果。
+#: 注意**不包含"区别"本身**：它是有信息量的关键词，删了反而变差（同一次实测）。
+_QUESTION_PARTICLES = (
+    "什么时候", "什么地方", "为什么", "有没有", "什么", "如何", "怎么", "怎样",
+    "哪些", "哪个", "多少", "是否", "吗", "呢", "呀", "啊", "吧",
+)
+#: 剥完剩不到这么多字就保留原片段：``多少钱`` 不能变成 ``钱`` 之外的空。
+MIN_PIECE_AFTER_STRIP = 2
+
+
+def _strip_question_particles(piece: str) -> str:
+    """去掉片段首尾的疑问/语气成分（只在还剩得下字时才删）。"""
+    text = piece
+    changed = True
+    while changed:
+        changed = False
+        for particle in _QUESTION_PARTICLES:  # 长的在前，避免"为什么"被"什么"切坏
+            if text.startswith(particle) and len(text) - len(particle) >= MIN_PIECE_AFTER_STRIP:
+                text = text[len(particle):]
+                changed = True
+                break
+            if text.endswith(particle) and len(text) - len(particle) >= MIN_PIECE_AFTER_STRIP:
+                text = text[: -len(particle)]
+                changed = True
+                break
+    return text.strip()
+
+
+def _pieces(text: str) -> list[str]:
+    """把查询切成片段：标点/空白 → 功能词 → 剥疑问成分 → 剥开头年份。"""
+    pieces: list[str] = []
+    for chunk in _SPLIT_PUNCT.split(text):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if len(chunk) > 8 and not re.search(r"\s", chunk):
+            pieces.extend(part for part in _CJK_FUNCTION_SPLIT.split(chunk) if part.strip())
+        else:
+            pieces.append(chunk)
+    exploded: list[str] = []
+    for piece in pieces:
+        stripped = _strip_question_particles(piece)
+        if not stripped:
+            continue
+        match = _LEADING_YEAR.match(stripped)
+        if match is not None:
+            exploded.extend([match.group(1), match.group(2).strip()])
+        else:
+            exploded.append(stripped)
+    return [piece.strip() for piece in exploded if piece.strip()]
+
+
+def _join(pieces: list[str]) -> str:
+    """去重、把年份挪到末尾、拼成一句可检索的词串。
+
+    只对**长度 ≥2 的片段**去重：``1 加 1 等于几`` 里两个 "1" 都是有效成分，去掉一个就把算式改了。
+    """
+    seen: set[str] = set()
+    unique: list[str] = []
+    for piece in pieces:
+        if not piece:
+            continue
+        if len(piece) > 1:
+            if piece in seen:
+                continue
+            seen.add(piece)
+        unique.append(piece)
+    years = [piece for piece in unique if _YEAR_ONLY.match(piece)]
+    rest = [piece for piece in unique if not _YEAR_ONLY.match(piece)]
+    return " ".join(rest + years)[:MAX_VARIANT_CHARS].strip()
+
+
+def core_query(raw: str) -> str:
+    """原问题去掉疑问成分后的**主题串**（不删任何实词片段）；产生不出更短的就返回原句。
+
+    用途是给搜索结果打分时提供**同一把尺**（2026-10-28）：直接用原句会让"怎么样/目前/各个"
+    这类口语成分把词元分母撑大；而用"某个变体"当尺又会被"删了首词"的变体带偏
+    （``python 3.14`` 的变体只有 ``3.14``，拿它当尺会把 "Download Python" 判成跑题）。
+    """
+    base = _normalize(raw)
+    if not base:
+        return ""
+    text = base.splitlines()[0].strip().rstrip("？?！!。. ")
+    for head in _VARIANT_HEADS:
+        if text.startswith(head) and len(text) - len(head) >= MIN_RESULT_CHARS:
+            text = text[len(head):]
+            break
+    for tail in sorted(_VARIANT_TAILS, key=len, reverse=True):
+        if text.endswith(tail) and len(text) - len(tail) >= MIN_RESULT_CHARS:
+            text = text[: -len(tail)]
+            break
+    joined = _join(_pieces(text))
+    return joined if MIN_RESULT_CHARS <= len(joined) else base
+
+
+def keyword_variants(raw: str) -> list[str]:
+    """给出"去掉疑问词/虚词"与"去掉首片段"两种变体（不含原句本身）。
+
+    保守点：任何一个变体都不短于 4 个字符、不超过 120 个字符；产生不出来就返回空列表，
+    调用方据此保持原句——宁可只搜一次，也不发一条面目全非的查询出去。
+    """
+    base = _normalize(raw)
+    if not base:
+        return []
+    text = base.splitlines()[0].strip().rstrip("？?！!。. ")
+
+    for head in _VARIANT_HEADS:
+        if text.startswith(head) and len(text) - len(head) >= MIN_RESULT_CHARS:
+            text = text[len(head):]
+            break
+    for tail in sorted(_VARIANT_TAILS, key=len, reverse=True):
+        if text.endswith(tail) and len(text) - len(tail) >= MIN_RESULT_CHARS:
+            text = text[: -len(tail)]
+            break
+
+    pieces = _pieces(text)
+    variants: list[str] = []
+    keyword = _join(pieces)
+    if keyword and keyword != base:
+        variants.append(keyword)
+    # "去掉首片段"只对**有意义的首词**成立：``1 加 1 等于几`` 的 "1" 不是主语，删了只会跑偏。
+    if len(pieces) > 1 and len(pieces[0]) > 2:
+        without_first = _join(pieces[1:])
+        if without_first and without_first != base and without_first not in variants:
+            variants.append(without_first)
+    return [item for item in variants if MIN_RESULT_CHARS <= len(item) <= MAX_VARIANT_CHARS]

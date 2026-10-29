@@ -15,7 +15,7 @@
 > cron jobs — most of the skeleton an agent needs is already running here, and the rest is being finished.
 > Everything follows one rule: implement it yourself, or you do not really understand it.
 >
-> v0.1.1 is still evolving: APIs will move and boundaries are being sharpened. **Not recommended as a production
+> v0.2.0 is still evolving: APIs will move and boundaries are being sharpened. **Not recommended as a production
 > dependency** — but it is **readable, inspectable and changeable**: the trade-offs are written down in
 > `ARCHITECTURE.md` and `docs/`, not hidden behind "internal implementation".
 >
@@ -107,7 +107,8 @@ copy `config.yaml.example` / `.env.example` — **do not overwrite an existing `
 | Action | Handling |
 | --- | --- |
 | Read files inside the workspace, list directories, search | no approval |
-| Write files, run commands, start a terminal | approval card — "Allow once" applies to that one call only |
+| Write files, run commands | approval card — "Allow once" applies to that one call only |
+| Open a terminal | no approval: opening it *is* the grant; writes stay bounded by the sandbox |
 | Write outside the workspace | grant that directory first; grants are revocable, and reads still work after revoking |
 | High-risk deletions | two-stage approval: the first "allow" asks again |
 
@@ -168,7 +169,7 @@ A panel beside the conversation, so you can inspect while you chat:
 | Files | Workspace file tree, click to read, filter by path |
 | Changes | Files changed in this session, `+N −M` per file, red/green diff |
 | Browser | Live view and address bar of the controlled browser |
-| Terminal | Persistent terminal I/O; commands need approval |
+| Terminal | One tab per terminal, opens ready to use — real PowerShell by default, conda/venv prompts included; commands are not approved one by one, writes stay sandboxed |
 | Tasks | Cross-session task state and checkpoints |
 
 ### Tasks and automation

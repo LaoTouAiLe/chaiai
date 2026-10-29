@@ -2400,6 +2400,8 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/sessions/{session_id}/branches/{branch_id}",
         "/api/sessions/{session_id}/branches/{branch_id}/select",
         "/api/sessions/{session_id}/approvals/{approval_id}",
+        # 2026-10-28：提问答复（架构 §6.14）——与审批并列的另一条"等人"入口。
+        "/api/sessions/{session_id}/questions/{question_id}",
         "/api/sessions/{session_id}/model",
         "/api/model-connections",
         "/api/model-connections/{connection_id}",

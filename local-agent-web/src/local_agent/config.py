@@ -947,6 +947,21 @@ class JobsConfig(_StrictModel):
     max_task_seconds: float | None = Field(default=None, gt=0)
 
 
+class TerminalConfig(_StrictModel):
+    """右栏受控终端（架构 §23）。
+
+    **只影响"用哪个 shell、带哪些环境变量"**，不改变写侧沙箱：终端内的命令永远受当前权限档位
+    的写边界约束（§23「边界」一节）。
+    """
+
+    #: 用哪个 shell。``auto`` = 优先 PowerShell 7（``pwsh``）→ 系统自带 Windows PowerShell → cmd；
+    #: 也可以固定成 ``cmd`` / ``powershell`` / ``pwsh``。找不到就退回 cmd，不抛错。
+    shell: Literal["auto", "cmd", "powershell", "pwsh"] = "auto"
+    #: 是否加载 shell 的 profile（默认**是**）。关掉启动更快，但 conda/venv 的提示符与别名不会生效，
+    #: 终端看起来就"不像自己的终端"了。``cmd`` 没有 profile 概念，此项对它无效。
+    load_profile: bool = True
+
+
 class WorkflowsConfig(_StrictModel):
     """确定性工作流的实际资源上限（v0.7 T65/T66，架构 §18.2）。"""
 
@@ -1017,6 +1032,8 @@ class AppConfig(_StrictModel):
     mcp: McpConfig = Field(default_factory=McpConfig)
     jobs: JobsConfig = Field(default_factory=JobsConfig)
     workflows: WorkflowsConfig = Field(default_factory=WorkflowsConfig)
+    #: 右栏受控终端的 shell 与环境（2026-10-28）。只影响"用什么 shell 打开"，不改写边界。
+    terminal: TerminalConfig = Field(default_factory=TerminalConfig)
 
     def capability_default_layer(self) -> dict[str, bool]:
         """**出厂默认开关表**（架构 §16.1）：用户没在页面改过开关时生效的那一组。

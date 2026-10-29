@@ -6,9 +6,12 @@
 <title>架构总览：两层界面与一支执行链 · 技术实现说明 · chaiai</title>
 <meta name="description" content="chaiai 架构总览：React 页面只发请求、FastAPI 单一入口、ApplicationService 管台账与投影、LangGraph 按轮推进，状态落在本机 SQLite。" />
 <meta name="color-scheme" content="light" />
+<meta name="theme-color" content="#faf9f6" />
+<link rel="icon" type="image/svg+xml" href="../../assets/logo.svg" />
 <link rel="stylesheet" href="../assets/docs.css" />
 </head>
 <body>
+<a class="skip-link" href="#doc-content">跳到正文</a>
 
 <header class="topbar">
   <div class="topbar__inner">
@@ -32,12 +35,46 @@
     </a>
     <nav class="topnav" aria-label="站点导航">
       <a href="../index.html">文档首页</a>
-      <a href="index.html" aria-current="page">技术实现</a>
+      <a href="index.html" class="topnav__section">技术实现</a>
       <a class="topnav__out" href="../../site.html">返回官网</a>
       <a class="topnav__out" href="https://github.com/LaoTouAiLe/chaiai" target="_blank" rel="noreferrer noopener">GitHub</a>
     </nav>
   </div>
 </header>
+
+<details class="mobile-directory">
+  <summary><span class="directory-icon" aria-hidden="true">☷</span><span>文档导航</span><span class="directory-current">架构总览：两层界面与一支执行链</span><span class="directory-chevron" aria-hidden="true">⌄</span></summary>
+  <nav class="mobile-tree" aria-label="移动文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="../01-install.html">01 安装与第一次启动</a>
+      <a href="../02-model.html">02 连接一个模型</a>
+      <a href="../03-permissions.html">03 权限三档与目录授权</a>
+      <a href="../04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="../05-map.html">05 会话地图与分支追问</a>
+      <a href="../06-data.html">06 数据中台</a>
+      <a href="../07-settings.html">07 设置项与生效时机</a>
+      <a href="../08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="index.html">概览</a>
+      <a href="01-architecture.html" aria-current="page">01 架构总览</a>
+      <a href="02-lifecycle.html">02 一轮请求的生命周期</a>
+      <a href="03-tools.html">03 工具层与安全判据</a>
+      <a href="04-sandbox.html">04 写侧沙箱与权限判定</a>
+      <a href="05-memory.html">05 记忆与上下文压缩</a>
+      <a href="06-browser-terminal.html">06 浏览器与持久进程</a>
+      <a href="07-frontend-data.html">07 前端数据流与轮次展示</a>
+      <a href="08-testing.html">08 测试与验收方式</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+</details>
 
 <div class="layout layout--plain">
   <nav class="sidebar" aria-label="文档目录">
@@ -71,7 +108,8 @@
     <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
   </nav>
 
-  <main class="doc">
+  <main class="doc" id="doc-content">
+    <nav class="breadcrumbs" aria-label="当前位置"><a href="../index.html">文档</a><span aria-hidden="true">/</span><a href="index.html">技术实现</a><span aria-hidden="true">/</span><span aria-current="page">架构总览：两层界面与一支执行链</span></nav>
     <p class="kicker">INTERNALS · 第 1 章</p>
     <h1>架构总览：两层界面与一支执行链</h1>
     <p class="lead">
@@ -121,7 +159,8 @@ LangGraph 图          graph/builder.py:119
           <code>frontend/src/api/client.ts:1</code>）。接口改了而页面没跟上，是编译期错误，不是运行时惊喜。
         </li>
       </ul>
-      <table>
+      <div class="table-scroll" role="region" aria-label="2 界面为什么不碰文件表格，可横向滚动" tabindex="0">
+<table>
         <thead><tr><th>界面负责</th><th>服务端负责</th></tr></thead>
         <tbody>
           <tr><td>把输入变成一次请求，带上幂等键</td><td>判定这次请求是谁、能不能跑、跑没跑过</td></tr>
@@ -130,10 +169,12 @@ LangGraph 图          graph/builder.py:119
           <tr><td>从不重发用户消息，重试由人发起</td><td>同 id 同参数的重试直接回放，不再跑图</td></tr>
         </tbody>
       </table>
+</div>
 
       <h2>3 四层职责</h2>
       <p>按依赖方向从外到内，每层只做一件事；跨层的调用方向单一，不回头。</p>
-      <table>
+      <div class="table-scroll" role="region" aria-label="3 四层职责表格，可横向滚动" tabindex="0">
+<table>
         <thead><tr><th>层</th><th>目录</th><th>只负责</th><th>明确不做</th></tr></thead>
         <tbody>
           <tr>
@@ -162,6 +203,7 @@ LangGraph 图          graph/builder.py:119
           </tr>
         </tbody>
       </table>
+</div>
       <p>
         <code>persistence/</code> 只有一句话的定位："Checkpoint 与会话索引"（<code>persistence/__init__.py:1</code>）；
         <code>context/prompt_context.py:1-11</code> 则把提示拆成"稳定前缀"与"动态快照"两块，前者在同一会话内字节不变。
