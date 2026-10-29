@@ -33,6 +33,8 @@ from local_agent.application.models import (
     ModelCallRecordView,
     PlanStepStatus,
     PlanView,
+    QuestionState,
+    QuestionView,
     SessionSnapshot,
     ToolStatus,
     ToolUseView,
@@ -52,6 +54,8 @@ EventType = Literal[
     "tool_completed",
     "approval_required",
     "approval_resolved",
+    "question_required",
+    "question_resolved",
     "memory_recalled",
     "memory_written",
     "model_call_started",
@@ -80,6 +84,8 @@ EVENT_TYPES: Final[tuple[EventType, ...]] = (
     "tool_completed",
     "approval_required",
     "approval_resolved",
+    "question_required",
+    "question_resolved",
     "memory_recalled",
     "memory_written",
     "model_call_started",
@@ -288,6 +294,21 @@ class ApprovalRequiredPayload(BaseModel):
     approval: ApprovalView
 
 
+class QuestionRequiredPayload(BaseModel):
+    """提问出现（2026-10-28）：与 `approval_required` 同构。"""
+
+    model_config = ConfigDict(extra="ignore")
+    question: QuestionView
+
+
+class QuestionResolvedPayload(BaseModel):
+    """提问有了结局：`answered` 或 `skipped`。"""
+
+    model_config = ConfigDict(extra="ignore")
+    question_id: str = Field(min_length=1)
+    state: QuestionState
+
+
 class ApprovalResolvedPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
     approval_id: str = Field(min_length=1)
@@ -438,6 +459,16 @@ class ApprovalResolvedEvent(_TaskEnvelope):
     payload: ApprovalResolvedPayload
 
 
+class QuestionRequiredEvent(_TaskEnvelope):
+    event_type: Literal["question_required"] = "question_required"
+    payload: QuestionRequiredPayload
+
+
+class QuestionResolvedEvent(_TaskEnvelope):
+    event_type: Literal["question_resolved"] = "question_resolved"
+    payload: QuestionResolvedPayload
+
+
 class MemoryRecalledEvent(_TaskEnvelope):
     event_type: Literal["memory_recalled"] = "memory_recalled"
     payload: MemoryRecalledPayload
@@ -491,7 +522,7 @@ class JobProgressEvent(_JobEnvelope):
 
 
 class JobWaitingEvent(_JobEnvelope):
-    """任务进入 `waiting_user`：等用户在页面上做决定（例如审批）。"""
+    """任务进入 `waiting_user`：等你处理——审批一个动作，或回答 Agent 的一个提问（2026-10-28）。"""
 
     event_type: Literal["job_waiting"] = "job_waiting"
     payload: JobStatePayload
@@ -578,6 +609,8 @@ EventEnvelope = Annotated[
     | ToolCompletedEvent
     | ApprovalRequiredEvent
     | ApprovalResolvedEvent
+    | QuestionRequiredEvent
+    | QuestionResolvedEvent
     | MemoryRecalledEvent
     | MemoryWrittenEvent
     | ModelCallStartedEvent

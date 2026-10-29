@@ -51,7 +51,10 @@ def readonly_child_capabilities(parent: tuple[str, ...]) -> tuple[str, ...]:
 #: 新增工具时必须同时登记能力归属：漏登记会在构造注册表时失败（见
 #: :meth:`~local_agent.tools.tool_registry.ToolRegistry.build`），不留"静默不给模型"或"静默给错"。
 CAPABILITY_TOOLS: Mapping[str, tuple[str, ...]] = {
-    "task_lifecycle": ("task_control",),
+    # 2026-10-28：`ask_user` 是"执行中问一句并等你回答"（架构 §6.14）。挂在 `task_lifecycle` 下
+    # 而不是另开能力：它和 `task_control` 是同一件事的两个出口（一个结束本轮、一个挂起后继续），
+    # 另开开关只会造出"能结束但不能问"的怪状态。追加在末尾，前面的绑定顺序不变。
+    "task_lifecycle": ("task_control", "ask_user"),
     "plan": ("update_plan",),
     "files_read": ("list_dir", "read_file"),
     # 2026-10-22：`search_files` 是"按内容搜/按名字找"的合并入口（同一能力、同一只读门）。

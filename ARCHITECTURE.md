@@ -216,6 +216,9 @@ AgentState
 │
 ├── pending_approval: ApprovalRequest | None    # 覆盖语义
 ├── approval_history: Annotated[list[ApprovalDecision], operator.add]
+├── pending_question: QuestionRequest | None    # 覆盖语义：当前等用户回答的那一个提问（2026-10-28）
+├── question_asked_at: datetime | None         # 覆盖语义：提问提出时刻（等答复时长从它算起）
+├── question_history: Annotated[list[QuestionAnswer], operator.add]  # 追加型：答复记录（投影据它推导状态）
 │
 ├── memory_refs: list[MemoryReference]     # 覆盖语义：当前轮召回结果，需去重
 ├── memory_write_candidates: Annotated[list[MemoryCandidate], operator.add]
@@ -261,6 +264,7 @@ Reducer 规则：
 - 使用追加 reducer 的字段必须在节点提交更新前按事件 ID 去重；`operator.add` 本身不会去重。工具事件与工具结果的事件 ID 是 `run_id + tool_call_id`：跨轮复用同一个 `tool_call_id` 时两条记录互不覆盖，也不会被误判成“已完成”。工具执行前查询**当前任务**的 `tool_events` / `tool_results`，已确认成功的同一 `run_id + tool_call_id` 不得再次执行；同理，上一轮的批准（`approval_history`）不能授权本轮复用了同一调用 ID 的动作。
 - 如果文件或 Shell 副作用已发生、但进程在 Checkpoint 提交前崩溃，单靠 State 无法证明“恰好执行一次”；不正常重启后，未获 Checkpoint 确认的待执行副作用一律视为不确定，不得自动重放，应提示用户核对文件状态或命令影响后再决定后续操作。普通页面重绘和重复审批提交也必须避免二次执行。
 - 放行标记必须在**每一条放行路径**上写入：安全门放行要写，**人工批准之后**也必须写——批准后是从审批节点直接进执行节点的，不经过安全门，漏写就检测不到"批准后执行中崩溃"，重启后会把同一个副作用再执行一次。
+- `pending_question`（2026-10-28）是**覆盖语义**，与 `pending_approval` **互斥**：两者不允许同时非空。写入这两处的节点各断言一次；投影层若在旧 Checkpoint 上同时读到一个，按"先处理提问"返回并在 `decision_trace` 记一条，不静默取其一。理由是恢复路径靠"哪个字段非空"分流（§17.5），两个都非空就没有确定答案。
 - 更早运行遗留的放行标记要在**执行前**拦住，而不是等反思发现——那时副作用已经又跑过一次。判定按**工具名**匹配（副作用可能已经改过目标文件，动作指纹必然已经变了），只读工具不受影响；同一批遗留只提示人工核对一次，否则一次异常结束会变成永久阻断，用户没有任何解除手段。
 - 如果未来引入并行分支，追加字段必须增加去重 reducer 或使用唯一事件 ID。
 
@@ -297,6 +301,32 @@ ToolResult
 ├── truncated
 ├── output_preview
 └── output_digest
+
+QuestionRequest                      # 2026-10-28：等用户回答的一组问题（1–5 题）
+├── question_id: str                 # 稳定标识，用于答复接口与幂等
+├── run_id: str                      # 与 tool_call_id 一起构成作用域（同审批）
+├── tool_call_id: str                # 对应的 ask_user 调用
+├── items: list[QuestionItem]        # 题组；**一次挂起对应一次提交**，不记录"答到第几题"
+└── asked_at: datetime
+
+QuestionItem
+├── question: str                    # 面向用户的问题正文（已过脱敏）
+├── options: list[str]               # 最多 3 个候选（空 = 只能自由输入）
+└── allow_free_text: bool            # 是否允许自定义输入
+
+QuestionAnswer                      # 一次提问的**整组**答复（追加进 question_history）
+├── question_id: str                 # 与 QuestionRequest 同一个 id
+├── run_id: str
+├── tool_call_id: str
+├── answers: list[QuestionItemAnswer]  # 与 items 按 index 对齐
+├── action: "answer" | "skip"        # 整组汇总：全跳过才是 skip
+└── at: datetime
+
+QuestionItemAnswer
+├── index: int                       # 对齐 QuestionRequest.items 的下标
+├── question: str                    # 题目原文（脱敏后）；请求被清掉后仍能展示是哪一问
+├── answer: str                      # 答复原文（脱敏后）；空串表示这题被跳过
+└── skipped: bool
 
 ReflectionResult
 ├── goal_achieved: bool
@@ -362,6 +392,7 @@ LangGraph 只使用 `StateGraph`。不使用旧版 LangChain Agent。
 | `agent_decision_node` | 判断下一步动作并生成工具调用 |
 | `safety_gate_node` | 对工具调用做安全分类 |
 | `approval_interrupt_node` | 中断等待人工审批 |
+| `question_interrupt_node` | 中断等待用户回答一个提问（2026-10-28；无人值守会话不挂起） |
 | `tool_execution_node` | 执行已通过检查的工具 |
 | `reflection_node` | 新工具循环只做机械校验；闲聊记忆审核和旧协议反思仍保留 |
 | `compression_node` | 上下文压缩 |
@@ -494,6 +525,38 @@ approval_interrupt_node
 - `reject`：为被拒及同批取消的每个调用补齐 ToolMessage 与 denied 审计记录，结束当前动作；
   进入 `tool_feedback_node`，由不绑定工具的模型结合原问题与实际拒绝原因回答，再收尾，不自动重试。
   任务未完成时保持 blocked；说明生成失败仍返回确定性摘要，不留下空回答。
+
+需要用户补充一句信息（主模型调用 `ask_user`，2026-10-28）：
+
+```text
+safety_gate_node
+  ↓
+question_interrupt_node
+  ├── 回答 → tool_execution_node（先为该调用补 ToolMessage，再执行同批其余调用）
+  └── 跳过 → 同上，ToolMessage 记"用户跳过，未提供信息"
+```
+
+契约：
+
+- **一次问一组**：`ask_user` 收 1–5 题（每题最多 3 个候选），**一次挂起、一次提交**——页面把整组
+  做成可翻页的题组（右上角 `1/3`），用户答完点"提交"才恢复。不是"答一题挂一次"。
+- **同批其余调用排队**：进 `deferred_tool_calls`（与多审批串行**同一张表**），答完这组后由
+  `route_after_tool_execution` 送回安全门接着处理；不为提问另开排队通道。
+- **必须补 ToolMessage**：`ask_user` 的调用在恢复后必须有对应应答，否则历史里留下"有调用、无结果"，
+  下一轮发给 OpenAI 兼容端点会被 400 拒绝（§4.2 的同类记录）。
+- **先落结果再继续**：答复以 `ToolMessage` 写回，工具事件与结果按既有格式落 `tool_events` / `tool_results`，
+  之后才执行同批剩余调用。
+- **无人值守不挂起**（与审批同一口径）：`session_kind != interactive` 时不 interrupt，直接把
+  "当前会话无人值守，无法向用户提问"作为该调用的结果返回，由模型自行收尾——否则定时任务会永久停在挂起态。
+- **interrupt 之前不得有副作用**：该节点在 resume 时会被整体重放，只允许读 State 与调 `interrupt()`；
+  载荷必须可 JSON 序列化（会写进 Checkpoint）。
+- **与审批互斥**：`pending_question` 与 `pending_approval` 不允许同时非空（§4.2）。
+- **等待期禁止开新一轮**：与审批同一条约束（§15.2 的 `SESSION_BUSY`），否则挂起会被新输入丢掉。
+  此时**会话状态**为 `awaiting_input`——`SessionState` 闭集新增取值（2026-10-28），与 `awaiting_approval`
+  并列，投影按 `pending_question` 分流；任务侧照旧是 `waiting_user`（§17.3）。**`TurnFinalState` 不新增取值**：
+  提问挂起不是轮次终态，加进去会让"本轮是否结束"变得含混。
+- **与 `task_control(need_input)` 的分工**：后者仍是"本轮到此为止、等你开新话题"的收尾声明（§5.4），
+  不挂起；`ask_user` 只用于"执行中还缺一个输入，拿到就继续"。两者并存，不互相替代。
 
 主循环工具失败或安全拒绝会回传模型；重试耗尽进入 `tool_feedback_node`，只生成一次说明，
 不继续执行工具。达到调用上限且仍需继续/重试时也经该节点收尾，但使用独立的上限提示，
@@ -1021,6 +1084,7 @@ glob(
 
 | 能力 | 工具 |
 | --- | --- |
+| `task_lifecycle` | `task_control`、`ask_user`（2026-10-28） |
 | `plan` | `update_plan` |
 | `files_read` | `list_dir`、`read_file` |
 | `code_search` | `grep`、`glob` |
@@ -1195,6 +1259,38 @@ MCP 后台状态读取与页面设置访问共用应用层 SQLite 锁，启动�
 握手与工具清单共用启动时限；调用超时不自动重试。错误响应不包含输入凭据。
 源码入口默认配置与 .env 固定到源码项目目录，显式 --config/--env 仍优先；冻结形态沿用用户数据目录。
 MCP 页面显示总开关、子 Agent 限制、隐藏原因和设置库不可用状态；参数按 JSON 数组输入以保留空格。
+
+### 6.14 `ask_user`（2026-10-28）
+
+```text
+ask_user(
+    questions: list[{
+        question: str,          # 面向用户的问题正文；非空、最长 500 字符
+        options: list[str] = [], # 最多 3 个候选；空 = 只能自由输入
+        allow_free_text: bool = True,
+    }],                          # 1–5 题；超过 5 题在参数校验阶段被拒
+    question: str = "",          # 兼容单题写法（questions 为空时才用）
+)
+```
+
+作用：主模型执行到中途、发现缺**它自己查不到也推不出来**的输入时，把这一轮**挂起**问用户；用户
+翻页答完整组、点一次"提交"后**同一个 run** 继续，整组问答以一条工具结果回到模型。图的流转见 §5.3。
+
+- **能力归属**：`task_lifecycle`（§6.9）。它属于控制流，不产生副作用。
+- **安全分类**：免审批（与 `update_plan` / `task_control` 同级）。它不读写任何外部资源，只影响用户自己；
+  只读档不拒绝它。
+- **失败闭合**：
+  - 任一题的问题为空 / 超长 / 含控制字符，或选项超过 3 个、题数超过 5 → 参数校验失败，
+    **整组不挂起**，按普通工具错误回给模型；
+  - **无人值守会话**（`session_kind != interactive`）→ 不挂起，整组按跳过返回；
+  - 单题答复超长（>2000 字符）→ 截断并在 `ToolMessage` 里注明已截断，不静默丢弃；
+  - 提交时某题为空 → 该题记 `skipped`（不是"用户答了空字符串"），整组都空才算整组跳过。
+- **对外只暴露"问题"与"答复"**：问题正文过 `SecurityPolicy.redact` 后才进 DTO 与事件；答复进模型侧用原文、
+  进展示与落库侧脱敏（与审批的 `redacted_arguments` 同一口径，§15.8）。
+- **不做**：选项 / 多选 / 表单（P1）、超时自动跳过（P2）、把提问当审批用。两者的状态字段、审计与恢复路径
+  必须分开（§5.3、§17.5）。
+- **与 `task_control(need_input)` 的区别**：后者是"本轮到此收尾、等你开新话题"，不挂起；`ask_user` 会挂起，
+  答复后由同一个 run 继续。两个工具的说明文字必须互相指认，避免模型混用。
 
 
 ## 7. AGENTS.md 加载与系统 Prompt
@@ -1905,6 +2001,7 @@ test_model_connection(id)        select_default_model(id)
 select_session_model(session_id, id)
 submit_message(session_id, text, client_request_id)
 resolve_approval(session_id, approval_id, decision, client_request_id)
+resolve_question(session_id, question_id, answer, action, client_request_id)   # 2026-10-28
 set_session_mode(session_id, mode, expected_mode)
 end_interrupted_request(session_id, request_id, expected_snapshot_id)
 ```
@@ -1930,6 +2027,9 @@ v0.6 起（§17.2）新增**任务用例**：一次提交在 `jobs.background=tr
 所有会话**执行状态修改**共用同一条互斥边界（每会话单飞）：
 
 - 已有执行在运行时，不同 `client_request_id` 的第二个执行请求返回稳定错误 `SESSION_BUSY`，**不进入队列**。
+  - **页面的"待发队列"是另一层**（2026-10-28）：本轮运行中输入框仍可接收消息，但那些消息只存在于浏览器
+    内存里（刷新即丢），由页面在本轮结束后自己逐条调用 `submit_message`。它**不改变**本节口径——服务端
+    仍然不排队、仍然以 `SESSION_BUSY` 拒绝并发提交；§17.2 的 `queued`（任务状态）也不是它。
 - 相同 id、相同操作、相同规范化参数的重试返回原请求关联结果，不再次调用模型或工具。
 - 相同 id 但参数不同返回 `IDEMPOTENCY_CONFLICT`。
 - 幂等台账必须跨服务重启保留到会话删除，记录请求 id、操作、参数摘要、`run_id`、状态与结果引用；它只保护
@@ -1960,6 +2060,7 @@ PATCH /api/sessions/{session_id}/mode
 POST /api/sessions/{session_id}/recovery
 POST /api/sessions/{session_id}/cancel
 POST /api/sessions/{session_id}/approvals/{approval_id}
+POST /api/sessions/{session_id}/questions/{question_id}      # 2026-10-28：提交提问答复
 ```
 
 - 提交消息、审批和查询走普通 HTTP：POST 可在服务端同步运行 Graph，SSE 只投影进度，**不成为任务真源**。
@@ -1975,6 +2076,16 @@ POST /api/sessions/{session_id}/approvals/{approval_id}
   轮次 `task_status`（`graph/state.py`）、轮次 `TurnFinalState` 与最终结果 `final_result.state`
   （`application/models.py`）；会话回到 `idle`，持久化 `TurnRecord.final_state` 为 `cancelled` 并记录结束时间。它与任务索引的 `cancelled` **同名同义**：都是"被中止"，不是"执行失败"，
   页面据此显示「已停止」而不是"失败"。该轮的消息（取消前已产出的部分）照常投影，不被丢掉。
+- `POST /api/sessions/{session_id}/questions/{question_id}`（2026-10-28）提交一次提问答复：
+  `{action, answers: [{index: int, answer: str}], client_request_id}`，其中 `answers` 是**整组**逐题结果
+  （`index` 对齐 `QuestionView.items`，空 `answer` = 该题跳过；`answer` 单值字段保留给单题写法）。
+  与审批同一套纪律——
+  预检"这个提问是不是还在等"（不是就报不可答复，**不** resume，避免答非所问）、`client_request_id` 幂等
+  （同一次答复的重试复用同一个键，成功后不换）、成功后**接上原来那条等待中的任务**（不新登记任务，
+  与 `resolve_approval` 的 `resume_job` 同口径）、失败闭合（未知 `action` 或空答复按 `skip` 处理）。
+  挂起期间同一会话的提交仍是 `SESSION_BUSY`（§15.2），页面用提问卡接管输入区。
+  **命令结果**：提问挂起时 `CommandResultView.status` 取 `awaiting_input`（2026-10-28 新增的取值，
+  与 `awaiting_approval` 并列；会话状态同值）。不能落成 `completed`——那会让提交方以为这一轮跑完了。
 - `GET /api/tasks`（§17.6）是任务中心的**唯一**端点，只读：按工作区列出任务的状态、已运行时长与"在等什么"，
   字段全部由**任务索引 + 会话索引**推出，**不读任何会话的 Checkpoint**。它与 SSE 无关，也不产生事件。
 - 浏览器先建立会话级 SSE，再提交消息。首次连接与重连都先发送由当前 Checkpoint 投影的 `session_snapshot`，
@@ -1996,6 +2107,7 @@ message_started / message_delta / message_completed
 plan_updated / step_started / step_completed
 tool_started / tool_output / tool_completed
 approval_required / approval_resolved
+question_required / question_resolved                                    # 2026-10-28
 memory_recalled / memory_written
 model_call_started / model_usage_reported / model_call_completed
 task_completed / task_failed
@@ -2020,6 +2132,9 @@ job_queued / job_progress / job_waiting / job_completed / task_cancelled   # v0.
   §17.3）。它们与轮次无关，是**任务索引的单向投影**，因此信封里 `task_id`（= `job_id`）非空而
   `run_id` 允许为空——**这是唯一一类**这样的业务事件（`session_snapshot` 是另一类：两者都可空）。
   强行要求 `run_id` 非空只能靠伪造一个值，而伪造标识正是本节禁止的。
+- `question_required / question_resolved`（2026-10-28）与 `approval_required / approval_resolved` 同构：
+  前者载荷是 `QuestionView`，后者是 `{question_id, state}`；`event_id` 由 `question_id` + 事件类型确定，
+  同一 Checkpoint 重放只播一次。它们**不新开任务维度**，`task_id` / `run_id` 与所属轮次一致。
 
 ### 15.5 错误模型
 
@@ -2029,6 +2144,12 @@ job_queued / job_progress / job_waiting / job_completed / task_cancelled   # v0.
 会话互斥与幂等至少固定 `SESSION_BUSY`、`IDEMPOTENCY_CONFLICT`、`RECOVERY_REQUIRED` 三个错误码：
 第一个可在当前请求结束后重试；第二个要求客户端生成新 id 或修正请求；第三个禁止自动重试副作用并给出人工核对入口。
 异常原文默认只进本地受控日志；API 不返回密钥、绝对私人路径或未经脱敏的供应商响应；用户确认展示的思考使用独立、脱敏且有界的字段。
+
+**错误文案的真源在后端**（2026-10-28）：页面**不维护"错误码 → 中文"的映射表**，一律展示
+`ErrorView.message`（需要"下一步"时再拼 `hint`）。页面只保留两类本地判断，都不是文案：
+① 传输层失败（不是 `ApiError`）→ 说"本机服务没有响应"；② 脱敏兜底（文案混入密钥样式串或 URL）
+→ 退回一句通用说法。理由：码表会与后端分叉，后端新增一个错误码时前端永远慢一拍，同一个错误
+还会在两处被写成两种说法。
 
 ### 15.6 模型用量记录
 
@@ -2115,6 +2236,7 @@ content_hash / canonical_text / source_versions
 | 工具 | 工具名、等待/执行/成功/失败、脱敏参数、耗时、输出摘要与证据 | 密钥、私人绝对路径、无界 stdout/stderr、未经审批的危险操作入口 |
 | 记忆/RAG | 是否命中、来源类型、安全引用、写入成功/失败 | 未经脱敏的长期记忆正文、向量或内部评分细节 |
 | 审批 | 动作、参数、影响、风险、批准/拒绝结果 | 把前端按钮当成授权真源 |
+| 提问（2026-10-28） | 问题正文、答复或跳过、提交结果 | 把答复当成审批授权；未脱敏的答复正文 |
 | Web 查询 | v0.5 实现后复用同一工具时间线 | v0.4 伪造联网、搜索结果或进度 |
 
 事件轨迹、日志与导出使用同一脱敏规则。前端可以用"正在分析""正在调用工具"等产品状态表达阶段，但不能把
@@ -2770,7 +2892,7 @@ running / waiting_user ──► needs_review                 （重启无法证
 
 | 判定 | 写入的状态 | 依据 |
 | --- | --- | --- |
-| 可恢复 | 不变 / `waiting_user` | Checkpoint 里**还挂着活的 interrupt**：这一轮在等用户，走既有审批恢复 |
+| 可恢复 | 不变 / `waiting_user` | Checkpoint 里**还挂着活的 interrupt**：这一轮在等用户。**按字段分流**（2026-10-28）：`pending_question` 非空 → 走提问恢复（§15.3 的答复接口），否则走既有审批恢复。两者互斥见 §4.2；都非空时按提问处理并记决策轨迹 |
 | 可证明未开始 | `failed` | 任务是 `queued`：worker 取出前先写 `running`，所以停在 `queued` 就是**图从未启动**，没有任何工具副作用 |
 | 可证明终态 | `completed` / `failed` | `reported_run == Checkpoint 当前 run`，且该轮 `task_status` 已是终态 |
 | 需人工核对 | `needs_review` | 以上都证不了：**可能已部分执行** |
@@ -2826,7 +2948,7 @@ running / waiting_user ──► needs_review                 （重启无法证
 | --- | --- | --- |
 | `queued` | 在等空闲执行位（并发上限由 `jobs.max_concurrent_jobs` 决定） | 索引 |
 | `running` | 正在执行（没有在等外部输入） | 索引 |
-| `waiting_user` | 在等你的决定（审批） | 索引 |
+| `waiting_user` | 在等你的决定（审批，或回答 Agent 的一个提问——2026-10-28） | 索引 |
 | `completed` / `failed` / `cancelled` / `needs_review` | 已结束 | 索引 + `detail` 里的原因 |
 
 **已运行时长**：`running` 从 `started_at` 起**本地实时**计时（只动页面时钟，不改索引）；已有 `finished_at`
@@ -2836,7 +2958,7 @@ running / waiting_user ──► needs_review                 （重启无法证
 
 - **在跑**（`queued` / `running`）：可以**取消**（既有 `POST /api/sessions/{id}/cancel`，§17.4）；
   文案必须写明取消**不撤销**已经发生的副作用。
-- **在等你**（`waiting_user`）：**打开那个会话**做决定——审批卡在会话里，任务中心不重复一遍审批 UI。
+- **在等你**（`waiting_user`）：**打开那个会话**做决定——审批卡或提问卡在会话里，任务中心不重复一遍这套 UI。
 - **需要人工核对**（`needs_review`）：**打开那个会话**核对，再**重新提交**（那是**新任务**）。
   **不提供"重跑旧输入"的按钮**：重跑要么变成"替用户重放"，要么要求把用户原文存进任务索引——后者是
   第二套业务真源（§17.1 明令禁止）。**不提供"回滚"**。
@@ -3492,6 +3614,10 @@ ruff/mypy/OpenAPI/前端类型漂移检查。计数和跳过理由在 v0.9 计�
 - **明示不做**：不做"超时自动批准"，不做"预检后跳过审批"（预检属于调度器，在 J2，不在图里）。
 - **不变的部分**：`interactive` 会话行为与现值逐字节一致；安全门、动作指纹、参数校验、审批通道均不变。
 - **验收**：无人值守会话遇到需审批动作时，一次 `invoke` 内结束，留下 reject 决策与成对的 ToolMessage，无 `awaiting_approval` 残留；既有审批用例全过；重启后不出现等待审批的孤儿会话。
+- **2026-10-28 追加：提问同样不挂起**。无人值守会话调用 `ask_user` 时（§6.14）不调用
+  `interrupt()`，直接返回"当前会话无人值守，无法向用户提问"作为该调用的结果，由模型自行收尾。
+  同样的理由：没人能回答，真挂起来会永久停在 `awaiting_input`。验收加一条——这类会话出现
+  `ask_user` 时一次 `invoke` 内结束、无 `awaiting_input` 残留、无待答卡片。
 
 ### 21.5 定时任务（2026-10-22，J2）
 
@@ -3629,12 +3755,12 @@ Node 同步/异步子进程可用，未授权磁盘写入仍拒绝。实现不�
 
 本节撤销 v1.0「不实现全屏终端」对**用户手动终端**的限制。文件/改动/步骤仍按 §21.6 只读。
 
-- **授权**：先请求启动审批，再由用户在终端页确认或拒绝。审批绑定服务端解析的工作区、Shell、权限档位与启动指纹，5 分钟有效，一次批准最多启动一个进程。批准前不创建 PTY、不物化写授权；配置改变则原审批失效。Agent 工具与无人值守会话的审批不变，不将终端注册为免审 Agent 能力。
-- **边界**：仅受控模式；Windows ConPTY + 既有受限令牌 + 工作区写侧沙箱。启动 cwd 固定为工作区根；终端内 `cd` 不扩大写权限。只读档保持只读，其余档仅工作区与专属临时目录可写，不带入外部目录授权，不提供退出沙箱、任意启动命令或环境变量透传。当前平台不能保证写边界时拒绝启动。
+- **授权**（2026-10-28 起**取消启动审批**）：在右栏打开终端即启动一个。授权粒度是**终端级**——用户主动打开终端，视同授权该终端内的全部输入，不逐条审批；Agent 工具与无人值守会话的审批不变，终端仍不注册为免审 Agent 能力。启动仍绑定服务端解析的工作区、Shell、权限档位与启动指纹，审计写 `decision=approve`（语义是「打开即授予」）。旧 `decision` 接口保留兼容：对已启动的终端重复批准是幂等的，拒绝一个运行中的终端返回 409。
+- **边界**：仅受控模式；Windows ConPTY + 既有受限令牌 + 工作区写侧沙箱。启动 cwd 固定为工作区根；终端内 `cd` 不扩大写权限。只读档保持只读，其余档仅工作区与专属临时目录可写，不带入外部目录授权，不提供退出沙箱或任意启动命令。**shell 由 `terminal.shell` 选择**（2026-10-28；默认 `auto`：`pwsh` → 系统自带 Windows PowerShell → `cmd`，找不到就退回 `cmd`），`terminal.load_profile` 决定是否加载 profile。环境只继承基础变量与工具链提示（`CONDA_*`、`VIRTUAL_ENV`、`PROMPT` 等），**密钥类变量名一律不透传**（`build_environment` 会对放行名单再做一次过滤）。当前平台不能保证写边界时拒绝启动。
 - **启动与回收**：通过 `security/process_guard.py` 的终端入口创建；进程挂起创建，装入独立 `KILL_ON_JOB_CLOSE` Job 并接入既有 IPC 层后才恢复。失败不裸跑。Shell 退出、显式结束、空闲 30 分钟、服务退出均回收整棵进程树。生命周期线程挂应用 lifespan，不在应用服务构造时启动。
 - **会话**：首版每工作区可列出/选择已有终端，最多同时 4 个；刷新、切换面板和 WebSocket 断线保留进程，同一时刻仅一个连接拥有输入权。服务重启不恢复进程；旧标识返回明确不存在。每个终端只保留最近 2 MiB 输出（结束后最多保留 8 份缓冲），重连重放并明确提示截断，输出不落日志、数据库或长期记忆。
 - **接口**：`GET /api/terminals?workspace_id=`；`POST /api/terminals/requests`（`workspace_id`）；`POST /api/terminals/requests/{approval_id}/decision`（`decision=approve|reject`、`cols`、`rows`）；`DELETE /api/terminals/{terminal_id}`；`WS /api/terminals/{terminal_id}/stream`。HTTP 结果均 `no-store`。审批与启动结果写聊天库 `terminal_audit`（schema v13），只记身份、指纹、目录、Shell、决定、状态、时间，不记输入/输出或环境值。
 - **传输**：WS 同样验证 Host 与 Origin，浏览器必须同源或为已配置开发源。控制帧为 JSON（客户端 `resize`；服务端 `reset`/`truncated`/`exit`），输入/输出为原始二进制；单次输入最多 16 KiB，输入队列最多 16 帧，溢出即拒绝；尺寸为 20–400 列/5–200 行。开发代理显式启用 WS。断线不会重新执行命令。
-- **界面**：新增「终端」标签；先展示工作区、Shell、权限范围与「启动后输入不逐条审批」，用户明确点击批准才启动。采用 xterm，支持输入、复制粘贴、Ctrl+C、缩放、断线重连、结束终端。关闭工作面板保留进程，「结束终端」回收进程树。
+- **界面**：新增「终端」标签，**一个标签一个终端**——点一次开一个，没有「新建」「结束」按钮，也没有多终端下拉。采用 xterm，支持输入、复制粘贴、Ctrl+C、缩放、断线重连。关闭标签即结束该终端并回收进程树；关闭整个工作面板保留进程。
 - **本次不做**：直通模式、外部写授权、Agent 复用该终端、侧边对话、浏览器、跨服务重启恢复、POSIX 无沙箱降级、终端内容审计。
-- **验收**：审批前无进程；拒绝/过期/配置变化/重复批准不产生额外进程；非法 Host/Origin 无法连接；真实 ConPTY 输入/REPL/Ctrl+C/resize 可用；工作区内可写、未授权外部与保护目录不可写；断线重连不重跑；关闭后子孙进程退出；生成 API、前端类型、构建和真实服务验证。
+- **验收**：打开标签即产生且只产生一个进程；启动失败落成 `failed` 并带原因、不重复启动；非法 Host/Origin 无法连接；真实 ConPTY 输入/REPL/Ctrl+C/resize 可用；工作区内可写、未授权外部与保护目录不可写；断线重连不重跑；关闭标签后子孙进程退出；生成 API、前端类型、构建和真实服务验证。

@@ -792,6 +792,62 @@ class ApprovalView(_Dto):
         return _require_timezone(value)
 
 
+QuestionState = Literal["pending", "answered", "skipped", "expired"]
+
+
+class QuestionItemView(_Dto):
+    """题组里的一题（含用户对它的答复）。`answer` 为空且 `skipped` 为真 = 这题被跳过。"""
+
+    index: int = Field(ge=0)
+    question: str = Field(min_length=1)
+    #: 最多 3 个可选答案（空 = 只能自由输入）。
+    options: list[str] = Field(default_factory=list)
+    allow_free_text: bool = True
+    #: 用户对这一题的答复（已脱敏）；未答或跳过时为 `None`。
+    answer: str | None = None
+    skipped: bool = False
+
+
+class QuestionView(_Dto):
+    """提问的**派生视图状态**（2026-10-28，架构 §6.14）。
+
+    底层只有 `pending_question`（当前请求）与 `question_history`（答复记录），没有状态机字段：
+    `pending` / `answered` / `skipped` / `expired` 全部在这里推导。
+
+    映射规则：挂着活的 interrupt 且有待决请求 → `pending`；有对应答复记录 → `answered`
+    （至少一题给了答复）或 `skipped`（整组跳过 / 无人值守跳过）；有待决请求但 interrupt 已不在了
+    （运行在执行中断里结束） → `expired`，页面不给按钮。
+
+    **一次挂起对应一次提交**：`items` 是整组题，用户翻页答完一起提交；页面用 `items` 的长度做
+    "1/3"式的进度，服务端不记录"答到第几题"。
+    """
+
+    question_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    tool_call_id: str = Field(min_length=1)
+    #: 第一题的正文（单题兼容；多题时以 `items` 为准）。
+    question: str = Field(min_length=1)
+    #: 整组题（1–5 题）。旧 Checkpoint 的单题请求在这里是一条一题的列表。
+    items: list[QuestionItemView] = Field(default_factory=list)
+    state: QuestionState
+    #: 单题兼容的答复副本（只有一题时等于它的答复）；多题时给 `None`，逐题看 `items`。
+    answer: str | None = None
+    asked_at: datetime
+    answered_at: datetime | None = None
+    #: 失效或跳过时的说明；正文由调用方给出，不含原始异常。
+    note: str | None = None
+
+    @field_validator("asked_at")
+    @classmethod
+    def _asked_tz(cls, value: datetime) -> datetime:
+        return _require_timezone(value)
+
+    @field_validator("answered_at")
+    @classmethod
+    def _answered_tz(cls, value: datetime | None) -> datetime | None:
+        return None if value is None else _require_timezone(value)
+
+
 # ---- 记忆 / RAG（§15.8）---------------------------------------------------
 
 
@@ -1127,7 +1183,9 @@ class ContextMeterView(_Dto):
 # ---- 会话快照（§15.4 / §6.6）---------------------------------------------
 
 
-SessionState = Literal["idle", "running", "awaiting_approval", "blocked", "completed", "failed"]
+SessionState = Literal[
+    "idle", "running", "awaiting_approval", "awaiting_input", "blocked", "completed", "failed"
+]
 
 #: 一轮最终结果的对外状态。``blocked``：本轮已结束、这条回答有效，但目标未达成（在等用户补充）。
 #: 它既不能冒充 ``completed``，也不该被当成 ``failed`` 丢掉——它带着一条真实生成的回答。
@@ -1203,6 +1261,8 @@ class SessionSnapshot(_Dto):
     messages: list[MessageView] = Field(default_factory=list)
     plan: PlanView | None = None
     approval: ApprovalView | None = None
+    #: 正在等用户回答的那一个提问（2026-10-28，架构 §6.14）。与 `approval` **互斥**。
+    question: QuestionView | None = None
     memory: MemoryUseView | None = None
     #: 这个会话**自己的**下一轮模型选择；`None` = 跟随默认连接。
     #: 页面据此把"我看到的选择"回传，写入才不会被另一个页面悄悄覆盖（§6.1）。
@@ -1306,7 +1366,15 @@ class SessionSummaryView(_Dto):
         return _require_timezone(value)
 
 
-Operation = Literal["submit_message", "resolve_approval", "cancel_task"]
+Operation = Literal["submit_message", "resolve_approval", "resolve_question", "cancel_task"]
+
+#: 一次命令的结局（与 `CommandResultView.status` 同值）。
+#: ``running`` 只在 ``jobs.background=true`` 时出现（§17.2）：命令已被接受、任务已进入运行。
+#: ``cancelled`` 只在取消命令上出现（§17.4）：任务已被中止。
+#: ``awaiting_input``（2026-10-28）：提问挂起——与 ``awaiting_approval`` 并列的第二种"等你"。
+CommandStatus = Literal[
+    "completed", "awaiting_approval", "awaiting_input", "failed", "running", "cancelled"
+]
 
 
 class CommandResultView(_Dto):
@@ -1326,7 +1394,9 @@ class CommandResultView(_Dto):
     run_id: str | None = None
     #: 稳定结果引用：本次命令对应的 Checkpoint 快照标识。
     snapshot_id: str = Field(min_length=1)
-    status: Literal["completed", "awaiting_approval", "failed", "running", "cancelled"]
+    status: Literal[
+        "completed", "awaiting_approval", "awaiting_input", "failed", "running", "cancelled"
+    ]
     session_state: SessionState
     replayed: bool = False
     #: 后台任务标识（§17.2）：只有 `jobs.background=true` 的提交带上它；其余为 `None`。

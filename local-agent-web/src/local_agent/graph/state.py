@@ -183,6 +183,11 @@ def approval_key(record: ApprovalDecision) -> str:
     return record["approval_id"]
 
 
+def question_key(record: QuestionAnswer) -> str:
+    """提问答复的去重键：同一次提问只记一条答复（重放不会重复追加）。"""
+    return record["question_id"]
+
+
 def model_call_key(record: ModelCallRecord) -> str:
     """模型调用记录的去重键：同一次调用只落一条（重试是新 id，因此不会被吞掉）。"""
     return record.model_call_id
@@ -433,6 +438,61 @@ def latest_runtime_snapshot(
     return best
 
 
+class QuestionItem(TypedDict):
+    """题组里的一题（2026-10-28，架构 §6.14）。
+
+    题组形态是"考试式"的：用户翻页作答、最后**一次性提交**，所以每题只描述
+    "问什么、有什么可选"，不记录"答到第几题"——翻页是页面自己的事，服务端不参与。
+    """
+
+    #: 面向用户的问题正文（写入前已过 ``SecurityPolicy.redact``）。
+    question: str
+    #: 最多 3 项的可选答案（空列表 = 只能自由输入）。
+    options: list[str]
+    #: 是否允许自由输入（`False` 时只能从 `options` 里选）。
+    allow_free_text: bool
+
+
+class QuestionRequest(TypedDict):
+    """等用户回答的一组问题（架构 §4.2 的 ``pending_question``、§6.14）。
+
+    与 ``ApprovalRequest`` **分属两条通道**：审批问的是"这个动作能不能做"（带指纹、放行、
+    二次确认），提问问的是"缺的那个输入是什么"。两者互斥，投影与恢复都按字段分流。
+
+    **一次挂起只对应一次提交**：用户答完所有题点"提交"，一次 ``resume`` 带回整组答案；
+    不存在"答一题挂一次"。
+    """
+
+    question_id: str
+    run_id: str
+    tool_call_id: str
+    #: 1–5 题（超过 5 题的调用在工具参数校验阶段就被拒）。
+    items: list[QuestionItem]
+    asked_at: datetime
+
+
+class QuestionItemAnswer(TypedDict):
+    """题组里某一题的结果。`answer` 为空串表示用户跳过了这一题。"""
+
+    index: int
+    question: str
+    answer: str
+    skipped: bool
+
+
+class QuestionAnswer(TypedDict):
+    """一次提问的**整组**答复（追加进 ``question_history``，供投影推导状态）。"""
+
+    question_id: str
+    run_id: str
+    tool_call_id: str
+    #: 与 `pending_question.items` 一一对应（按 index 对齐）。
+    answers: list[QuestionItemAnswer]
+    #: 整组汇总：全部跳过时是 `skip`，否则 `answer`。
+    action: Literal["answer", "skip"]
+    at: datetime
+
+
 class AgentState(TypedDict, total=False):
     """短期记忆 State（架构 §4.2）。``total=False`` 允许节点只提交局部更新。"""
 
@@ -515,6 +575,13 @@ class AgentState(TypedDict, total=False):
     #: `pending_approval` 在决策后会被清空，所以等待时长必须靠这个独立字段留存。
     approval_requested_at: datetime | None
     approval_history: Annotated[list[ApprovalDecision], operator.add]
+
+    # 提问（2026-10-28，架构 §6.14）：与 ``pending_approval`` **互斥**（架构 §4.2）
+    pending_question: QuestionRequest | None
+    #: 本轮最近一次提问的提出时刻；``pending_question`` 在答复后被清空，等待时长靠它留存。
+    question_asked_at: datetime | None
+    #: **追加型**：整条会话的答复记录（投影据此推导 pending/answered/skipped）。
+    question_history: Annotated[list[QuestionAnswer], operator.add]
 
     # 记忆与检索
     memory_refs: list[MemoryReference]

@@ -92,7 +92,11 @@ LEGAL_TRANSITIONS: Mapping[str, frozenset[str]] = {
 #: 任务做完了，后者会把"被中止"说成"执行失败"。
 _STATE_FOR_RESULT: Mapping[str, str] = {
     "completed": JOB_STATE_COMPLETED,
+    # 两种"等你"都停在 `waiting_user`，由各自的恢复命令把它推回 `running`，因此都不是终态。
+    # 2026-10-28 补 `awaiting_input`：漏了这一项时同步提交会在这里 KeyError，表现为 500
+    # （真实服务实测；单测的 harness 没有任务运行时，因此照不到这条路径）。
     "awaiting_approval": JOB_STATE_WAITING_USER,
+    "awaiting_input": JOB_STATE_WAITING_USER,
     "failed": JOB_STATE_FAILED,
     "cancelled": JOB_STATE_CANCELLED,
 }

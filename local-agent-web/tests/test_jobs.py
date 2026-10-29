@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from local_agent.application.jobs import (
+    _STATE_FOR_RESULT,
     LEGAL_TRANSITIONS,
     UNRESOLVED_DETAIL,
     JobRuntime,
@@ -494,3 +495,17 @@ def test_update_state_still_refuses_terminal_rewrite(tmp_path: Path):
     job = _review_job(store)
     with pytest.raises(JobStoreError):
         store.update_state(job.job_id, "completed")
+
+
+def test_every_command_status_maps_to_a_job_state() -> None:
+    """命令结局 → 任务状态必须齐全（架构 §17.2、§17.3）。
+
+    2026-10-28 实证：新增 `awaiting_input` 时漏了这张表，同步提交在收尾处 KeyError，
+    真实服务返回 500——单测的 harness 没有任务运行时照不到这条路径，所以在这里守住。
+    """
+    from typing import get_args
+
+    from local_agent.application.models import CommandStatus
+
+    # `running` 不在这张表里：它是"命令已被接受、任务还在跑"（§17.2），不经过收尾结算。
+    assert set(_STATE_FOR_RESULT) == set(get_args(CommandStatus)) - {"running"}

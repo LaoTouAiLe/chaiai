@@ -29,6 +29,8 @@ REQUEST_ID_MAX_CHARS = 128
 MESSAGE_MAX_CHARS = 100_000
 PATH_MAX_CHARS = 4096
 REASON_MAX_CHARS = 2000
+#: 提问答复的长度上限（与拒绝理由同值，2026-10-28）；超出部分由请求校验挡掉，不让它进 State。
+QUESTION_ANSWER_MAX_CHARS = 2000
 #: 服务凭据（Tavily）的长度上限：常见密钥是几十个字符，512 只用来挡住"粘进来一整篇文档"。
 KEY_MAX_CHARS = 512
 
@@ -142,6 +144,27 @@ class ResolveTaskReviewRequest(_Request):
 
     #: `completed`（核对后视为已完成）或 `cancelled`（确认没做完 / 放弃）。
     outcome: Literal["completed", "cancelled"]
+
+
+class QuestionAnswerItem(_Request):
+    """题组里某一题的答复（2026-10-28）：`index` 对齐 `QuestionView.items`，空 `answer` = 该题跳过。"""
+
+    index: int = Field(ge=0, le=4)
+    answer: str = Field(default="", max_length=QUESTION_ANSWER_MAX_CHARS)
+
+
+class QuestionAnswerRequest(_Request):
+    """提问答复（2026-10-28，架构 §15.3）。
+
+    **一次提交整组**：`answers` 是逐题结果，用户翻页答完点一次"提交"。`answer` 保留给单题写法
+    （只问了一题时）。空答复、越界 `index` 与未知 `action` 一律按"跳过"处理（失败闭合），与
+    图内节点的判定同一口径——两处各判一次会造出两个真相。
+    """
+
+    action: Literal["answer", "skip"] = "answer"
+    answer: str | None = Field(default=None, max_length=QUESTION_ANSWER_MAX_CHARS)
+    answers: list[QuestionAnswerItem] | None = None
+    client_request_id: str = Field(min_length=1, max_length=REQUEST_ID_MAX_CHARS)
 
 
 class ApprovalDecisionRequest(_Request):

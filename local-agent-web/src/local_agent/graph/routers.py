@@ -40,6 +40,8 @@ ROUTE_TOOL = "tool"
 ROUTE_EXECUTE = "execute"
 ROUTE_REFLECT = "reflect"
 ROUTE_TO_APPROVAL = "approval"
+#: 安全门发现有待回答的提问（2026-10-28，架构 §5.3）。
+ROUTE_TO_QUESTION = "question"
 ROUTE_APPROVE = "approve"
 ROUTE_EDIT = "edit"
 ROUTE_REJECT = "reject"
@@ -286,12 +288,28 @@ def _plan_has_unfinished_steps(state: AgentState) -> bool:
 
 
 def route_after_safety(state: AgentState) -> str:
-    """安全门之后：有待审批的动作先走审批，有放行调用就执行，否则直接反思。"""
+    """安全门之后：有待审批的动作先走审批，有待回答的提问去提问节点，有放行调用就执行，否则直接反思。
+
+    审批与提问**互斥**（架构 §4.2）：安全门一次最多写其中一个，所以这里的先后顺序只是兜底，
+    不会改变任何既有路径。
+    """
     if state.get("pending_approval") is not None:
         return ROUTE_TO_APPROVAL
+    if state.get("pending_question") is not None:
+        return ROUTE_TO_QUESTION
     if state.get("pending_tool_calls"):
         return ROUTE_EXECUTE
     return ROUTE_CHAT if state.get("session_mode") == "chat" else ROUTE_REFLECT
+
+
+def route_after_question(state: AgentState) -> str:
+    """提问节点之后：一律回执行节点（2026-10-28）。
+
+    答复已经以 ``ToolMessage`` 写回 State；若同批还有排队未处理的调用（``deferred_tool_calls``），
+    ``route_after_tool_execution`` 会把流程送回安全门接着处理；否则回模型由它决定下一步。
+    不直接连模型节点，是为了让"同批剩余调用"与"答复后继续"共用同一条既有回路。
+    """
+    return ROUTE_EXECUTE
 
 
 def route_after_tool_execution(state: AgentState) -> str:

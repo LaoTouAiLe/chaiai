@@ -87,7 +87,7 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
     # `mcp__<server>__<tool>`（双下划线），由下面的 `mcp__` 前缀分支处理（一律审批）。
     "mcp_tool_search",
 )
-CONTROL_TOOLS: tuple[str, ...] = ("update_plan", "task_control")
+CONTROL_TOOLS: tuple[str, ...] = ("update_plan", "task_control", "ask_user")
 
 #: 写入类工具（本版本只放行其中的安全子集）。
 WRITE_TOOLS: tuple[str, ...] = ("edit_file", "write_file", "download_file")
@@ -690,7 +690,10 @@ class SecurityPolicy:
                 reason=self.cancellation.refusal_reason(),
             )
         if tool_name in CONTROL_TOOLS:
-            return SafetyDecision(allowed=True, requires_approval=False, reason="当前任务计划更新")
+            # 2026-10-28：`ask_user` 与计划/终点声明同级免审批（它不读写任何外部资源，只影响用户自己）。
+            # 既有两个工具的 reason 文案逐字不变，避免既有审计文案漂移。
+            reason = "向用户提问并等待答复" if tool_name == "ask_user" else "当前任务计划更新"
+            return SafetyDecision(allowed=True, requires_approval=False, reason=reason)
         if tool_name in INTERACTIVE_TOOLS:
             return self._classify_interactive(tool_name, args)
         if tool_name in READ_ONLY_TOOLS:

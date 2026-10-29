@@ -45,6 +45,7 @@ from local_agent.api.schemas import (
     OssTestResult,
     PermissionsModeRequest,
     PickDirectoryView,
+    QuestionAnswerRequest,
     RecoveryRequest,
     RenameRequest,
     ResolveTaskReviewRequest,
@@ -245,11 +246,37 @@ def _connection_draft(
     )
 
 
+def _register_question_routes(router: APIRouter, service: Any) -> None:
+    """注册提问答复端点（2026-10-28，架构 §6.14）。
+
+    单独一个注册函数而不是塞进 `build_router`：那个函数已经贴着规模棘轮的上限（行数与圈复杂度），
+    而这条端点与审批那条是同族的一小段，边界放在这里更清楚。
+    """
+
+    @router.post(
+        "/sessions/{session_id}/questions/{question_id}",
+        response_model=CommandResultView,
+        responses=_STATE_CONFLICT,
+        summary="提交提问答复",
+    )
+    def resolve_question(
+        session_id: str, question_id: str, payload: QuestionAnswerRequest
+    ) -> CommandResultView:
+        """回答或跳过一个挂起的提问：空答复按跳过处理（失败闭合）。"""
+        return service.resolve_question(
+            session_id,
+            question_id,
+            payload.answer,
+            payload.action,
+            payload.client_request_id,
+            answers=[item.model_dump() for item in payload.answers or []],
+        )
+
+
 def build_router(runtime: ApiRuntime) -> APIRouter:
     """构造业务路由（不含 SSE 与静态托管）。"""
     router = APIRouter(prefix="/api")
     service = runtime.service
-
     @router.get("/data-center/memories", response_model=MemoryPageView, summary="只读记忆列表")
     def memory_page(workspace_id: str | None = None,
                     kind: Literal["all", "medium", "fact", "conclusion"] = "all",
@@ -745,6 +772,7 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
             confirm_recursive=payload.confirm_recursive,
         )
 
+    _register_question_routes(router, service)
     # ---- 模型连接（T29A；§6.8）------------------------------------------------
     # 这组接口只读写"连接设置"：密钥只进凭据存储，读接口只回"已配置 / 未配置 / 仅本次进程内"。
     # 它们**不能**改安全策略、工具权限或 Graph 配置，也没有传入连接 id/版本的旁路。

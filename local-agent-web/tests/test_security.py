@@ -1186,6 +1186,8 @@ def test_registry_exposes_only_read_tools_in_chat_mode(app_config: AppConfig, tm
     ]
     assert [tool.name for tool in registry.tools_for("tool")] == [
         "task_control",
+        # 2026-10-28：`ask_user`（执行中提问）排在 `task_control` 之后，与 `CAPABILITY_TOOLS` 同序。
+        "ask_user",
         "update_plan",
         "list_dir",
         "read_file",
@@ -1296,6 +1298,8 @@ def test_tool_mode_binds_registered_tools(
 
     assert model.bound_tools == [
         "task_control",
+        # 2026-10-28：`ask_user`（执行中提问）排在 `task_control` 之后，与 `CAPABILITY_TOOLS` 同序。
+        "ask_user",
         "update_plan",
         "list_dir",
         "read_file",

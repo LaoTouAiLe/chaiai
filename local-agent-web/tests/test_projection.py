@@ -17,6 +17,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from pydantic import ValidationError
 
 from local_agent.application import errors as app_errors
+from local_agent.application import pending_views
 from local_agent.application import projection as proj
 from local_agent.application.models import (
     ApprovalView,
@@ -238,7 +239,7 @@ def test_pending_and_approval_arguments_are_sanitized_before_display() -> None:
 
     request = _pending_request()
     request["arguments"] = {"api_key": "sk-abcdefgh", "target": "C:\\Users\\me\\.env"}
-    approval = proj.project_approval(_state(pending_approval=request), has_live_interrupt=True)
+    approval = pending_views.project_approval(_state(pending_approval=request), has_live_interrupt=True)
     assert approval is not None
     assert approval.redacted_arguments == {}
 
@@ -715,7 +716,7 @@ def _pending_request() -> dict[str, Any]:
 
 
 def test_approval_is_pending_while_the_interrupt_is_live() -> None:
-    view = proj.project_approval(_state(pending_approval=_pending_request()), has_live_interrupt=True)
+    view = pending_views.project_approval(_state(pending_approval=_pending_request()), has_live_interrupt=True)
     assert isinstance(view, ApprovalView)
     assert view.state == "pending"
     assert view.risk == "high"
@@ -724,7 +725,7 @@ def test_approval_is_pending_while_the_interrupt_is_live() -> None:
 
 
 def test_approval_expires_when_the_interrupt_is_gone() -> None:
-    view = proj.project_approval(_state(pending_approval=_pending_request()), has_live_interrupt=False)
+    view = pending_views.project_approval(_state(pending_approval=_pending_request()), has_live_interrupt=False)
     assert view is not None
     assert view.state == "expired"
     assert "未执行任何操作" in (view.note or "")
@@ -743,14 +744,14 @@ def test_approval_progresses_from_executing_to_approved() -> None:
             "created_at": LATER,
         }
     ]
-    executing = proj.project_approval(
+    executing = pending_views.project_approval(
         _state(pending_approval=None, approval_history=history, tool_results=[]),
         has_live_interrupt=False,
     )
     assert executing is not None
     assert executing.state == "executing"
 
-    approved = proj.project_approval(
+    approved = pending_views.project_approval(
         _state(pending_approval=None, approval_history=history),
         has_live_interrupt=False,
     )
@@ -759,7 +760,7 @@ def test_approval_progresses_from_executing_to_approved() -> None:
 
 
 def test_rejected_and_edited_approvals_keep_their_outcome() -> None:
-    rejected = proj.project_approval(
+    rejected = pending_views.project_approval(
         _state(
             pending_approval=None,
             approval_history=[
@@ -781,7 +782,7 @@ def test_rejected_and_edited_approvals_keep_their_outcome() -> None:
     assert rejected.state == "rejected"
     assert rejected.note == "范围太大"
 
-    edited = proj.project_approval(
+    edited = pending_views.project_approval(
         _state(
             pending_approval=None,
             approval_history=[
@@ -806,7 +807,7 @@ def test_rejected_and_edited_approvals_keep_their_outcome() -> None:
 
 
 def test_no_approval_means_no_row() -> None:
-    assert proj.project_approval(_state(), has_live_interrupt=False) is None
+    assert pending_views.project_approval(_state(), has_live_interrupt=False) is None
 
 
 def test_browser_arguments_are_bounded_and_allowlisted_without_changing_execution_input() -> None:
@@ -816,7 +817,7 @@ def test_browser_arguments_are_bounded_and_allowlisted_without_changing_executio
         "reasoning_content": "private-reasoning", "api_key": "private-key",
     }
     state = _state(pending_approval=_pending_request() | {"tool_name": "edit_file", "arguments": arguments})
-    view = proj.project_approval(state, has_live_interrupt=True)
+    view = pending_views.project_approval(state, has_live_interrupt=True)
     assert view is not None
     assert set(view.redacted_arguments) == {"path", "old_text"}
     assert len(view.redacted_arguments["old_text"]) < 2100
@@ -828,7 +829,7 @@ def test_browser_arguments_are_bounded_and_allowlisted_without_changing_executio
 
 
 def test_inside_workspace_approval_uses_relative_target_and_impact(tmp_path: Path) -> None:
-    view = proj.project_approval(
+    view = pending_views.project_approval(
         _state(pending_approval=_pending_request() | {
             "tool_name": "edit_file", "arguments": {"path": "notes.txt"},
             "impact_summary": f"修改 {tmp_path.as_posix()}/notes.txt：202 行（T10）",
@@ -864,7 +865,7 @@ def test_approval_without_recorded_ids_does_not_break_the_session_view() -> None
     这两个字段，或 ``pending_approval`` 已被清掉。把空串直接塞进 DTO，等于**把一个字段缺失升级成
     整页不可用**；这与这一层既有的 ``_NOT_RECORDED`` 口径（"如实说没有记录，不猜一个合理的值"）一致。
     """
-    decided = proj.project_approval(
+    decided = pending_views.project_approval(
         _state(
             pending_approval=None,
             approval_history=[
@@ -889,7 +890,7 @@ def test_approval_without_recorded_ids_does_not_break_the_session_view() -> None
     request = _pending_request()
     request["run_id"] = ""
     request["tool_call_id"] = ""
-    pending = proj.project_approval(_state(pending_approval=request), has_live_interrupt=True)
+    pending = pending_views.project_approval(_state(pending_approval=request), has_live_interrupt=True)
     assert pending is not None
     assert pending.run_id == proj._NOT_RECORDED
     assert pending.tool_call_id == proj._NOT_RECORDED
@@ -1076,6 +1077,31 @@ def test_context_meter_never_invents_a_ratio() -> None:
 
     current = proj.project_context(_state(task_status="running"))
     assert current.scope == "current"
+
+
+def test_fresh_session_reports_zero_used_instead_of_unknown() -> None:
+    """新会话的「0」是事实，不是猜（2026-10-28：用户反馈"未知会让人以为是 bug"）。
+
+    判据是"state 里连键都没有"——表示**从未组装过请求**；键在但取不到值（旧 Checkpoint、
+    失败的那一轮）仍返回 `None`，不补 0。
+    """
+    fresh = proj.project_context({}, window_hint=128_000)
+    assert fresh.used_tokens == 0
+    assert fresh.window_tokens == 128_000
+    # 还没有请求可描述，口径仍是"尚未组装"。
+    assert fresh.scope == "unknown"
+
+    # 连接没声明窗口时，只剩"已用 0"；比例仍然算不出来（分母未知）。
+    no_window = proj.project_context({})
+    assert no_window.used_tokens == 0
+    assert no_window.window_tokens is None
+    assert no_window.scope == "unknown"
+
+    # 跑过但没记上用量：保持未知，绝不补 0。
+    recorded_but_empty = proj.project_context(
+        {"token_usage": {}, "context_budget": {}}, window_hint=128_000
+    )
+    assert recorded_but_empty.used_tokens is None
 
 
 def test_final_result_appears_only_when_the_turn_is_terminal() -> None:
@@ -1731,7 +1757,7 @@ def test_trace_numeric_token_counts_preserve_recorded_zero(value: int | str) -> 
 def test_approval_target_comes_from_the_structured_request() -> None:
     # 目标取结构化参数，不从影响摘要文本里反推；认不出的工具如实为空。
     def target(tool_name: str, arguments: dict[str, Any]) -> str | None:
-        view = proj.project_approval(
+        view = pending_views.project_approval(
             _state(
                 pending_approval={
                     "approval_id": "ap-1",
@@ -1764,7 +1790,7 @@ def test_approval_shows_resolved_external_target_and_confirmation_stage(tmp_path
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     external = tmp_path / "outside"
-    view = proj.project_approval(
+    view = pending_views.project_approval(
         _state(pending_approval=_pending_request() | {
             "tool_name": "delete_file",
             "arguments": {"path": external.as_posix(), "recursive": True},
@@ -1803,7 +1829,7 @@ def test_project_and_user_paths_with_spaces_are_preserved() -> None:
 
 
 def test_approval_target_is_sanitized_and_absent_after_the_request_is_gone() -> None:
-    pending = proj.project_approval(
+    pending = pending_views.project_approval(
         _state(
             pending_approval=_pending_request()
             | {"tool_name": "run_shell", "arguments": {"cwd": "C:\\Users\\someone\\private"}}
@@ -1814,7 +1840,7 @@ def test_approval_target_is_sanitized_and_absent_after_the_request_is_gone() -> 
     assert pending.target == "C:\\Users\\someone\\private"
 
     # 请求已被清掉（只剩决定）时没有原始参数可比对，如实为空而不是去别处猜。
-    decided = proj.project_approval(
+    decided = pending_views.project_approval(
         _state(
             pending_approval=None,
             approval_history=[

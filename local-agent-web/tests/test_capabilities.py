@@ -44,7 +44,9 @@ from local_agent.tools.tool_registry import ToolRegistry
 
 #: 当前核心工具序列；显式列出，避免由被测实现生成期望。
 CORE_TOOL_ORDER = (
-    "task_control", "update_plan", "list_dir", "read_file", "grep", "glob", "search_files",
+    # 2026-10-28：`ask_user`（执行中提问并等待回答）与 `task_control` 同属 `task_lifecycle`，
+    # 按 `CAPABILITY_TOOLS` 的顺序紧跟其后。
+    "task_control", "ask_user", "update_plan", "list_dir", "read_file", "grep", "glob", "search_files",
     "edit_file", "write_file", "delete_file", "download_file",
     # 2026-10-27：常驻记忆（§10.7）挂在 files_write 能力下，排在写文件工具之后（`CAPABILITY_TOOLS` 的顺序）。
     "memory",
@@ -137,6 +139,7 @@ def test_only_read_tools_are_visible_to_read_only_profiles(
 
     assert researcher == [
         "task_control",
+        "ask_user",
         "update_plan",
         "list_dir",
         "read_file",
@@ -159,6 +162,7 @@ def test_only_read_tools_are_visible_to_read_only_profiles(
     ]
     assert reviewer == [
         "task_control",
+        "ask_user",
         "list_dir",
         "read_file",
         "grep",
@@ -192,6 +196,7 @@ def test_tool_order_is_stable_across_calls_and_profiles(
 
     assert _names(registry.tools_for("tool", PROFILES["reviewer"])) == [
         "task_control",
+        "ask_user",
         "list_dir",
         "read_file",
         "grep",

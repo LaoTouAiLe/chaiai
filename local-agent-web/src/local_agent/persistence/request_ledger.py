@@ -17,6 +17,8 @@ from typing import Final, TypedDict
 #: 操作名：与 §6.1 的两个"执行状态修改"用例一一对应。
 OPERATION_SUBMIT: Final[str] = "submit_message"
 OPERATION_RESOLVE_APPROVAL: Final[str] = "resolve_approval"
+#: 提交一次提问答复（2026-10-28，架构 §15.3）：与审批决定同构的一次"执行状态修改"。
+OPERATION_RESOLVE_QUESTION: Final[str] = "resolve_question"
 
 #: 台账状态。只有这三个：执行中、成功、失败。
 STATUS_EXECUTING: Final[str] = "executing"

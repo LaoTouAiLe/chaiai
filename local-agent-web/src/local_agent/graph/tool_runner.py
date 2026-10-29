@@ -17,6 +17,7 @@ from typing import (
     Any,
     cast,
 )
+from uuid import uuid4
 
 from langchain_core.messages import (
     AnyMessage,
@@ -26,6 +27,7 @@ from langchain_core.messages import (
 from langchain_core.messages.tool import ToolCall
 from langgraph.runtime import Runtime
 from langgraph.types import interrupt
+from pydantic import ValidationError
 
 from local_agent.capabilities import is_visible
 from local_agent.exceptions import (
@@ -38,12 +40,16 @@ from local_agent.graph.state import (
     AgentState,
     DecisionRecord,
     ErrorEvent,
+    QuestionAnswer,
+    QuestionItemAnswer,
+    QuestionRequest,
     RuntimeContext,
     ToolEvent,
     approval_key,
     decision_record_key,
     error_event_key,
     merge_appended,
+    question_key,
     tool_event_key,
     tool_result_key,
 )
@@ -77,6 +83,7 @@ from local_agent.session_kind import SESSION_KIND_INTERACTIVE
 from local_agent.tools.file_tools import OUTPUT_PREVIEW_CHARS
 from local_agent.tools.mcp_tools import MCP_SEARCH_TOOL_NAME
 from local_agent.tools.plan_tools import (
+    AskUser,
     PlanUpdate,
     TaskControl,
 )
@@ -142,6 +149,9 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
     history = list(state.get("approval_history", []))
     allowed: list[ToolCall] = []
     approval: ApprovalRequest | None = None
+    #: 这一批里"等待用户回答"的那一个提问（2026-10-28）。与 ``approval`` **互斥**：两个字段
+    #: 同时非空会让恢复路径无法判断该 resume 哪一个（架构 §4.2、§17.5）。
+    question: QuestionRequest | None = None
     #: 这一批里"排在审批卡后面"的调用：本轮只问第一个，其余排进 `deferred_tool_calls`。
     deferred_calls: list[ToolCall] = []
     messages: list[AnyMessage] = []
@@ -157,7 +167,7 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
     # 否则检索就是个摆设。注意这不是"绑给模型的范围"（那个由 tools_for 控制）。
     _registry = runtime.context.tool_registry
     external_names = tuple(_registry.external_names()) if _registry is not None else ()
-    for call in batch:
+    for index, call in enumerate(batch):
         call_id = _call_id(call)
         name = call["name"]
         arguments = dict(call.get("args") or {})
@@ -182,6 +192,40 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
             )
         else:
             decision = policy.classify_tool(name, arguments)
+
+        if name == "ask_user" and decision.allowed:
+            try:
+                arguments = AskUser.model_validate(arguments).model_dump(exclude_none=True)
+            except ValidationError as error:
+                decision = SafetyDecision(
+                    allowed=False, requires_approval=False,
+                    reason=f"提问参数不合法：{error}", reason_kind="input",
+                )
+
+        if name == "ask_user" and decision.allowed:
+            # 提问通道（2026-10-28，架构 §5.3/§6.14）：一次只问一个。
+            # 已经有更早的审批在等（approval 非 None）或已经问过一条时，本条排队，等前面的
+            # 处理完由 `route_after_tool_execution` 回到安全门再问——这样两个通道**不会同时挂起**。
+            if question is None and approval is None:
+                question = _build_question(
+                    run_id=_run_id(state),
+                    tool_call_id=call_id,
+                    arguments=arguments,
+                    policy=policy,
+                )
+                # 本条之后的调用整体排队：它们是"问完之后还要做的事"，现在还没有结局。
+                deferred_calls.extend(batch[index + 1 :])
+                records.append(
+                    _decision(
+                        state,
+                        stage="safety_gate",
+                        summary="向用户提问并等待答复",
+                        tool_call_id=call_id,
+                    )
+                )
+                break
+            deferred_calls.append(call)
+            continue
 
         if decision.requires_approval:
             # 指纹**只在确实要进审批时**才算：它包含删除目标的目录摘要（对目录是递归扫描），
@@ -336,10 +380,14 @@ def safety_gate_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
         # 排队结果每批重算：这一批没问完的留在这里，执行完当前批准的动作后由路由回到本节点续问。
         "deferred_tool_calls": deferred_calls,
         "pending_approval": approval,
+        "pending_question": question,
         "decision_trace": merge_appended(
             state.get("decision_trace", []), records, decision_record_key
         ),
     }
+    if isinstance(question, Mapping):
+        # 与审批同一条口径：只有**本次新提问**时才写提出时刻，否则会把先前那次抹成 None。
+        update["question_asked_at"] = question.get("asked_at")
     if isinstance(approval, Mapping):
         # **只有本次新提出审批时**才覆盖"本轮最近一次审批请求时刻"。安全门在一个 run 里会因工具
         # 循环被反复执行，后几次没有新审批（`approval is None`）；若无条件写入，就会把先前那次
@@ -987,6 +1035,215 @@ def approval_interrupt_node(state: AgentState, runtime: Runtime[RuntimeContext])
         update.update({"pending_tool_calls": [], "deferred_tool_calls": [], "messages": messages,
                        "tool_events": events, "tool_results": results})
     return update
+
+
+#: 用户答复的长度上限（与审批拒绝理由同值）；超出部分截断并在 ToolMessage 里注明。
+_QUESTION_ANSWER_MAX_CHARS = 2000
+
+#: 跳过提问时给模型的话。必须说清"没有拿到信息"与"不要重复问"，否则模型会原地再问一次。
+_QUESTION_SKIPPED_NOTE = "用户跳过了这个提问，未提供信息；不要重复询问同一件事。"
+
+
+def question_interrupt_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
+    """人工提问节点（2026-10-28，架构 §6.14）。
+
+    与 :func:`approval_interrupt_node` 同构：安全门已把请求写进 ``pending_question``，本节点
+    用 ``interrupt()`` 挂起等用户答复，恢复后把答复变成该 ``ask_user`` 调用的一条 ``ToolMessage``
+    （缺了它历史里就是"有调用、无结果"，下一轮会被 OpenAI 兼容端点 400 拒绝）。
+
+    **本节点在 resume 时会被整体重放**：``interrupt()`` 之前只读 State，不写盘、不发请求。
+    无人值守会话不挂起（同 §21.4）：没人能回答，真挂起来会永久停在 ``awaiting_input``。
+    """
+    request = state.get("pending_question")
+    if not isinstance(request, Mapping):
+        return {}
+
+    unattended = str(state.get("session_kind") or SESSION_KIND_INTERACTIVE) != SESSION_KIND_INTERACTIVE
+    if unattended:
+        reply: Mapping[str, Any] = {"action": "skip", "answers": []}
+    else:
+        reply = _as_mapping(interrupt(_question_prompt(request)))
+
+    action = "answer" if str(reply.get("action") or "").strip().lower() == "answer" else "skip"
+    policy = runtime.context.security_policy
+    items = _question_items(request)
+    answers = _question_answers(
+        reply if action == "answer" else {}, items=items, policy=policy
+    )
+    # 整组汇总：一题都没答就是"跳过"（失败闭合——不能让模型把空串当成有效输入）。
+    if all(item["skipped"] for item in answers):
+        action = "skip"
+
+    question_id = str(request.get("question_id") or "")
+    tool_call_id = str(request.get("tool_call_id") or "")
+    run_id = _run_id(state)
+    if action == "answer":
+        content = _question_reply_text(items, answers)
+        summary = f"用户回答了提问（{len(answers)} 题）"
+    else:
+        content = _QUESTION_SKIPPED_NOTE
+        summary = "无人值守：提问按跳过处理" if unattended else "用户跳过了提问"
+    truncated = len(content) > OUTPUT_PREVIEW_CHARS
+
+    preview = content[:OUTPUT_PREVIEW_CHARS]
+    record = QuestionAnswer(
+        question_id=question_id,
+        run_id=run_id,
+        tool_call_id=tool_call_id,
+        answers=cast(Any, answers),
+        action=cast(Any, action),
+        at=datetime.now(timezone.utc),
+    )
+    update: AgentState = {
+        "pending_question": None,
+        "messages": [ToolMessage(content=content, tool_call_id=tool_call_id, name="ask_user")],
+        "tool_events": merge_appended(
+            state.get("tool_events", []),
+            [ToolEvent(
+                tool_call_id=tool_call_id, tool_name="ask_user", status="ok",
+                output_preview=preview, output_digest=_digest(content), run_id=run_id,
+            )],
+            tool_event_key,
+        ),
+        "tool_results": merge_appended(
+            state.get("tool_results", []),
+            [ToolResultRecord(
+                tool_call_id=tool_call_id, tool_name="ask_user", status="ok", truncated=truncated,
+                output_preview=preview, output_digest=_digest(content), run_id=run_id,
+            )],
+            tool_result_key,
+        ),
+        "question_history": merge_appended(
+            state.get("question_history", []), [record], question_key
+        ),
+        "decision_trace": merge_appended(
+            state.get("decision_trace", []),
+            [_decision(state, stage="question_interrupt", summary=summary, tool_call_id=tool_call_id)],
+            decision_record_key,
+        ),
+    }
+    return update
+
+
+#: 一次最多问几题、单题正文与单个选项的字符上限（与工具参数校验同一口径）。
+_MAX_QUESTIONS = 5
+_QUESTION_TEXT_MAX_CHARS = 500
+_QUESTION_OPTION_MAX_CHARS = 80
+
+
+def _build_question(
+    *, run_id: str, tool_call_id: str, arguments: Mapping[str, Any], policy: SecurityPolicy
+) -> QuestionRequest:
+    """构造待回答的**题组**。正文与选项在进 State 前就脱敏（展示层不再二次处理，§6.14）。"""
+    items: list[dict[str, Any]] = []
+    raw = arguments.get("questions")
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        for entry in raw:
+            if not isinstance(entry, Mapping):
+                continue
+            text = policy.redact(str(entry.get("question") or "").strip()[:_QUESTION_TEXT_MAX_CHARS])
+            if not text:
+                continue
+            options: list[str] = []
+            for option in entry.get("options") or []:
+                cleaned = policy.redact(str(option).strip()[:_QUESTION_OPTION_MAX_CHARS])
+                if cleaned and cleaned not in options:
+                    options.append(cleaned)
+            items.append({
+                "question": text,
+                "options": options[:3],
+                "allow_free_text": bool(entry.get("allow_free_text", True)),
+            })
+    if not items:  # 兼容单题写法（`question`）
+        legacy = policy.redact(
+            str(arguments.get("question") or "").strip()[:_QUESTION_TEXT_MAX_CHARS]
+        )
+        items = [{"question": legacy, "options": [], "allow_free_text": True}]
+    return QuestionRequest(
+        question_id=uuid4().hex,
+        run_id=run_id,
+        tool_call_id=tool_call_id,
+        items=cast(Any, items[:_MAX_QUESTIONS]),
+        asked_at=datetime.now(timezone.utc),
+    )
+
+
+def _question_items(request: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """题组视图；旧 Checkpoint（只有单句 `question`）按一题处理，旧挂起不会因此打不开。"""
+    raw = request.get("items")
+    items: list[dict[str, Any]] = []
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        for entry in raw:
+            if not isinstance(entry, Mapping):
+                continue
+            items.append({
+                "question": str(entry.get("question") or ""),
+                "options": [str(option) for option in (entry.get("options") or [])],
+                "allow_free_text": bool(entry.get("allow_free_text", True)),
+            })
+    if not items:
+        items = [
+            {"question": str(request.get("question") or ""), "options": [], "allow_free_text": True}
+        ]
+    return items
+
+
+def _question_answers(
+    reply: Mapping[str, Any], *, items: list[dict[str, Any]], policy: SecurityPolicy | None
+) -> list[QuestionItemAnswer]:
+    """把一次提交归一成**逐题**结果：越界索引丢弃，空答复按该题跳过（失败闭合）。"""
+    by_index: dict[int, str] = {}
+    raw = reply.get("answers")
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        for entry in raw:
+            if not isinstance(entry, Mapping):
+                continue
+            try:
+                index = int(str(entry.get("index")))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < len(items):
+                by_index[index] = str(entry.get("answer") or "")
+    elif reply.get("answer"):  # 旧载荷（单题、单值）
+        by_index[0] = str(reply.get("answer") or "")
+
+    answers: list[QuestionItemAnswer] = []
+    for index, item in enumerate(items):
+        text = by_index.get(index, "").strip()
+        if len(text) > _QUESTION_ANSWER_MAX_CHARS:
+            text = text[:_QUESTION_ANSWER_MAX_CHARS]
+        if policy is not None:
+            text = policy.redact(text)
+        answers.append(
+            QuestionItemAnswer(
+                index=index,
+                question=str(item.get("question") or ""),
+                answer=text,
+                skipped=not text,
+            )
+        )
+    return answers
+
+
+def _question_reply_text(
+    items: Sequence[Mapping[str, Any]], answers: Sequence[Mapping[str, Any]]
+) -> str:
+    """给模型看的整组答复。逐题一行：题目 → 答复（或"跳过"）。"""
+    lines = [f"用户回答了 {len(answers)} 个问题："]
+    for index, (item, answer) in enumerate(zip(items, answers), start=1):
+        text = str(answer.get("answer") or "") if not answer.get("skipped") else "（跳过，未提供）"
+        lines.append(f"{index}. {item.get('question') or ''} → {text}")
+    return "\n".join(lines)
+
+
+def _question_prompt(request: Mapping[str, Any]) -> dict[str, Any]:
+    """提问的挂起载荷（必须可 JSON 序列化，会写进 Checkpoint）。"""
+    asked_at = request.get("asked_at")
+    return {
+        "question_id": str(request.get("question_id") or ""),
+        "items": _question_items(request),
+        "asked_at": asked_at.isoformat() if isinstance(asked_at, datetime) else "",
+    }
 
 
 def _approval_prompt(request: Mapping[str, Any], *, stage: int) -> dict[str, Any]:

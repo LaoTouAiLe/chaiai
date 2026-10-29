@@ -388,6 +388,8 @@ def test_graph_nodes_match_plan() -> None:
         "agent_decision_node",
         "safety_gate_node",
         "approval_interrupt_node",
+        # 2026-10-28：提问挂起（与审批并列的另一条"等人"出口）。
+        "question_interrupt_node",
         "tool_execution_node",
         "tool_feedback_node",
         "reflection_node",

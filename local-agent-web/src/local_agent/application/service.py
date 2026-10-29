@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hashlib
 import json
 import logging
 import os
@@ -45,7 +44,6 @@ from urllib.parse import urlsplit
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.types import Command
 from pydantic import TypeAdapter
 
 from local_agent import config as config_module
@@ -55,6 +53,7 @@ from local_agent.application import cron as cron_module
 from local_agent.application import errors as app_errors
 from local_agent.application import events as app_events
 from local_agent.application import projection as proj
+from local_agent.application import resolution as resolution_commands
 from local_agent.application.cron_models import (
     CronJobsView,
     CronJobView,
@@ -80,6 +79,7 @@ from local_agent.application.models import (
     CapabilityCheckView,
     CapabilityStatusView,
     CommandResultView,
+    CommandStatus,
     CompressionView,
     ConversationMapView,
     CredentialStoreState,
@@ -119,6 +119,11 @@ from local_agent.application.recovery import (
     child_completion_proven,
     classify_interrupted_job,
 )
+from local_agent.application.resolution import (
+    _digest,
+    question_events,
+)
+from local_agent.application.resolution import status_from_snapshot as _status_from_snapshot
 from local_agent.application.tool_stream import ToolStream
 from local_agent.application.workspace_models import GitDiffView, GitStatusView, WorkspaceFilesView
 from local_agent.attachments import AttachmentStore, LoadedAttachment
@@ -202,7 +207,6 @@ from local_agent.persistence.job_store import (
     TERMINAL_JOB_STATES,
 )
 from local_agent.persistence.request_ledger import (
-    OPERATION_RESOLVE_APPROVAL,
     OPERATION_SUBMIT,
     STATUS_COMPLETED,
     STATUS_EXECUTING,
@@ -227,10 +231,7 @@ from local_agent.workflow_contracts import WorkflowRequest
 #: 任务的终态（`TASK_TERMINAL_STATUSES`）、重启后的任务判定与它的纯函数都在
 #: :mod:`local_agent.application.recovery`（§17.5）——这里只做 I/O 与写索引，不重复判定逻辑。
 
-#: 一次命令的结局（与 `CommandResultView.status` 同值）。
-#: ``running`` 只在 ``jobs.background=true`` 时出现（§17.2）：命令已被接受、任务已进入运行。
-#: ``cancelled`` 只在取消命令上出现（§17.4）：任务已被中止。
-CommandStatus = Literal["completed", "awaiting_approval", "failed", "running", "cancelled"]
+# `CommandStatus` 定义在 `application/models.py`（DTO 的字段类型），这里导入同名符号。
 
 #: 取消命令的操作名（§15.2）。它**不进幂等台账**：取消天然幂等，重复调用是空操作。
 OPERATION_CANCEL = "cancel_task"
@@ -241,8 +242,7 @@ _WATCHDOG_INTERVAL_SECONDS = 1.0
 _LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
 
-#: 允许的审批决定（与 `ui/approval_ui.py` 的载荷一致；这里不导入那个模块——它依赖 Streamlit）。
-APPROVAL_DECISIONS: Final[frozenset[str]] = frozenset({"approve", "edit", "reject"})
+# 允许的审批决定（`APPROVAL_DECISIONS`）随两个恢复命令一起放在 `application/resolution.py`。
 
 #: 旧配置模式（没有设置库）**没有"连接"这个实体**：用量记录里如实标注来源，而不是编一个
 #: 看起来像连接 id 的随机串（§15.6 的"不编造数据"）。公开视图要求这两个字段非空，所以它们
@@ -3030,66 +3030,29 @@ class ApplicationService:
         session_id: str,
         approval_id: str,
         decision: str,
-        client_request_id: str,
-        *,
+        client_request_id: str, *,
         edited_arguments: Mapping[str, Any] | None = None,
         reason: str = "",
         confirm_recursive: bool = False,
     ) -> CommandResultView:
-        """对挂起的审批给出决定并恢复该运行。"""
-        if decision not in APPROVAL_DECISIONS:
-            msg = f"未知的审批决定：{decision}"
-            raise ValueError(msg)
-        digest = _digest(
-            OPERATION_RESOLVE_APPROVAL,
-            session_id,
-            approval_id,
-            decision,
-            json.dumps(edited_arguments or {}, sort_keys=True, ensure_ascii=False),
-            reason,
-            str(confirm_recursive),
+        """对挂起的审批给出决定并恢复该运行（实现见 `application/resolution.py`）。"""
+        return resolution_commands.resolve_approval(
+            self, session_id, approval_id, decision, client_request_id,
+            edited_arguments=edited_arguments, reason=reason, confirm_recursive=confirm_recursive,
         )
-        session = self._session_or_raise(session_id)
-        resume = {
-            "decision": decision,
-            "confirm_recursive": confirm_recursive,
-            "edited_arguments": dict(edited_arguments) if edited_arguments else None,
-            "reason": reason,
-        }
 
-        prepared: list[_RunEnv] = []
-
-        def prepare() -> None:
-            """审批与密钥都先备好，再落台账（同 `submit_message`：预检失败不该留下"执行中"）。"""
-            self._require_pending_approval(session, approval_id)
-            # 恢复用**这一轮固定**的连接，而不是当前设置里的（§6.8 的停止条件）。密钥也按**那个版本**取：
-            # 之后轮换过密钥也不影响这次恢复（凭据引用带版本）。
-            prepared.append(
-                self._run_env(session, self._binding_for_resume(session), for_resume=True)
-            )
-
-        def run() -> CommandResultView:
-            return self._execute(
-                session,
-                request_id=client_request_id,
-                operation=OPERATION_RESOLVE_APPROVAL,
-                payload=Command(resume=resume),
-                resolve_decision=(approval_id, decision),
-                env=prepared[0],
-            )
-
-        return self._guarded(
-            session,
-            request_id=client_request_id,
-            operation=OPERATION_RESOLVE_APPROVAL,
-            arguments_digest=digest,
-            run=run,
-            precheck=prepare,
-            # 审批恢复不新建 run：绑定的就是**正在恢复的那一轮**（挂起的 interrupt 属于它）。
-            bind_run=lambda: self._current_run_id(session),
-            # 审批恢复接上"等待用户"的那个任务，而不是新登记一个（§17.2）。
-            resume_job=True,
-        )
+    def resolve_question(
+        self,
+        session_id: str,
+        question_id: str,
+        answer: str | None,
+        action: str,
+        client_request_id: str,
+        *, answers: Sequence[Mapping[str, Any]] | None = None,
+    ) -> CommandResultView:
+        """回答（或跳过）一个挂起的问题组并恢复该运行（2026-10-28，§6.14；实现见 `resolution.py`）。"""
+        return resolution_commands.resolve_question(self, session_id, question_id, answer, action,
+                                                    client_request_id, answers=answers)
 
     # ---- 内部：执行前的校验 --------------------------------------------------
 
@@ -3107,16 +3070,7 @@ class ApplicationService:
             raise app_errors.recovery_required(session_id=session.session_id, request_id=request_id,
                 detail="请先核对并结束此前中断的请求，不会自动重发。", occurred_at=_now())
 
-    def _require_pending_approval(self, session: Session, approval_id: str) -> None:
-        """这个审批是不是还真的在等这一步决定？不是就别 resume——那会答非所问。"""
-        view = self._read(session)
-        current = proj.project_approval(
-            view.values, has_live_interrupt=view.has_live_interrupt, secrets=self._secrets
-        )
-        if current is None or current.state != "pending" or current.approval_id != approval_id:
-            raise app_errors.approval_not_actionable(
-                session_id=session.session_id, approval_id=approval_id, occurred_at=_now()
-            )
+    # 两种"还在等吗"的前置校验在 `application/resolution.py`（与各自命令放在一起）。
 
     # ---- 内部：互斥 + 幂等 ---------------------------------------------------
 
@@ -3191,7 +3145,7 @@ class ApplicationService:
             if not jobs.background:
                 # 请求内执行：记账与状态迁移都在这条线程上完成，与 v0.5 的可见行为一致。
                 return jobs.run_now(job, run)
-            jobs.dispatch(job, run, on_done=lock.release)
+            resolution_commands.dispatch_guarded(self, session, request_id, job, run, lock.release)
             handed_off = True
             return self._accepted(session, request_id=request_id, operation=operation, job=job)
         finally:
@@ -3528,6 +3482,12 @@ class ApplicationService:
         读的是台账的 `result_ref`（当时那一份 Checkpoint），不是"当前快照"：会话后来又跑完几轮
         之后，当前快照属于**新的一轮**，拿它当旧请求的结果会返回别人的 run、状态和内容。
         """
+        if entry["error_code"] == resolution_commands.CANCELLED_BEFORE_START:
+            # worker 证明执行入口从未调用；没有该请求的 run，不能借用后来轮次的标识。
+            snapshot = self._snapshot(session, self._read(session))
+            return self._result(request_id=request_id, operation=operation, session=session,
+                                snapshot=snapshot, status="cancelled", replayed=True).model_copy(
+                                    update={"run_id": None, "error": None})
         ref = entry["result_ref"] or ""
         view = self._read_checkpoint(session, ref) if ref else None
         if view is None or not _ref_matches_run(view, entry["run_id"]):
@@ -4202,6 +4162,8 @@ class ApplicationService:
                     snapshot = snapshot.model_copy(update={
                         "session_state": "blocked", "interrupted_request_id": entries[-1]["request_id"],
                         "approval": None,
+                        # 提问同样收起来：这一轮的执行台账还没收口，页面不该再给一个点不动的卡片。
+                        "question": None,
                     })
             finally:
                 lock.release()
@@ -4245,14 +4207,37 @@ class ApplicationService:
             answer_streaming=self._session_answer_streaming(session),
             workspace_root=Path(session.workspace_root),
             confirmation_stage=view.confirmation_stage,
+            # 新会话没有请求快照，窗口只能来自连接配置；拿不到就保持"未知"（不猜）。
+            context_window_hint=self._session_context_window(session.session_id),
         )
         branch = self._sqlite_access(lambda: self._conversations.active(session.session_id))
         changes: dict[str, Any] = {"mode": "chat" if session.mode == "chat" else "agent"}
-        if snapshot.current_task is not None and snapshot.session_state in {"running", "awaiting_approval"}:
+        if snapshot.current_task is not None and snapshot.session_state in {
+            "running", "awaiting_approval", "awaiting_input"
+        }:
             changes["current_answer_streaming"] = self._current_answer_streaming(view.values)
         if branch is not None:
             changes.update(branch_id=branch.branch_id, branch_title=branch.title)
         return snapshot.model_copy(update=changes)
+
+    def _session_context_window(self, session_id: str) -> int | None:
+        """这个会话下一轮会用多大窗口；读不到就 ``None``（页面显示"未知"，不猜）。
+
+        为什么必须在这里读：投影层不碰设置库（§19.4），否则同一份 Checkpoint 会因为设置变化
+        投影出不同字节。选择顺序与会话自己的模型选择一致——会话选过就用会话的，否则用默认连接。
+        """
+        store = self._connections
+        if store is None:
+            return None
+        try:
+            selection = (self._sqlite_access(partial(store.session_selection, session_id))
+                         or self._sqlite_access(store.default_selection))
+            if selection is None:
+                return None
+            connection = self._sqlite_access(partial(store.get, selection.connection_id))
+        except ModelSettingsError:
+            return None
+        return connection.context_window_tokens if connection is not None else None
 
     def _session_model_selection(self, session_id: str) -> ModelSelectionView | None:
         """会话**自己的**下一轮模型选择（`None` = 跟随默认）。
@@ -4646,6 +4631,14 @@ class ApplicationService:
                 )
             )
 
+        # 提问（2026-10-28，架构 §15.4）：与审批同构，各自只播一次。
+        events.extend(
+            question_events(
+                snapshot, has_live_interrupt=view.has_live_interrupt,
+                announced=announced, envelope=envelope,
+            )
+        )
+
         if include_terminal and not view.has_live_interrupt and not announced.terminal:
             # 终态只播一次：它是"这一轮结束"的唯一标记，重复播会让客户端以为又结束了一次。
             announced.terminal = True
@@ -4699,6 +4692,8 @@ class _AnnouncedFacts:
     memory_written: bool = False
     approval_required: bool = False
     approval_resolved: bool = False
+    question_required: bool = False
+    question_resolved: bool = False
     terminal: bool = False
 
 
@@ -4813,22 +4808,7 @@ def _seconds_since(instant: str, now: datetime) -> float:
     return max(0.0, (now - moment).total_seconds())
 
 
-def _status_from_snapshot(snapshot: SessionSnapshot) -> CommandStatus:
-    """命令结局由**那一份快照**的会话状态决定：挂起 → 等待审批，失败 → 失败，其余完成。
-
-    **被取消的一轮看 `final_result.state`**（2026-10-13）：取消后会话状态就回到 `idle`（用户要的正是
-    "又能用了"），所以只看会话状态会把"你自己停的"报成 `completed`——提交那条命令的响应必须如实
-    说是 `cancelled`（§17.4）。
-    """
-    state = snapshot.session_state
-    if state == "awaiting_approval":
-        return "awaiting_approval"
-    if state == "failed":
-        return "failed"
-    final = snapshot.final_result
-    if final is not None and final.state == "cancelled":
-        return "cancelled"
-    return "completed"
+# `_status_from_snapshot` 的实现已移到 `application/resolution.py`（与本模块的两个恢复命令同族）。
 
 
 def _ref_matches_run(view: _ThreadView, run_id: str | None) -> bool:
@@ -4855,10 +4835,7 @@ def _run_id_of(chunk: Any) -> str | None:
     return None
 
 
-def _digest(*parts: str) -> str:
-    """规范化参数摘要：同样的参数必须得到同样的摘要（幂等判定的基础）。"""
-    material = "\x1f".join(parts)
-    return hashlib.sha256(material.encode()).hexdigest()
+# `_digest` 的实现已移到 `application/resolution.py`（两种恢复命令共用），这里只导入同名符号。
 
 
 def _media_type_from_url(url: str) -> str:

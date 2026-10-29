@@ -21,6 +21,7 @@ __all__ = [
     "MEMORY_WRITE_NODE",
     "PLANNER_NODE",
     "PREPARE_CONTEXT",
+    "QUESTION_INTERRUPT_NODE",
     "RECALL_MEMORY",
     "REFLECTION_NODE",
     "REJECTED_REPLY",
@@ -43,6 +44,7 @@ PLANNER_NODE = "planner_node"
 AGENT_DECISION_NODE = "agent_decision_node"
 SAFETY_GATE_NODE = "safety_gate_node"
 APPROVAL_INTERRUPT_NODE = "approval_interrupt_node"
+QUESTION_INTERRUPT_NODE = "question_interrupt_node"
 TOOL_EXECUTION_NODE = "tool_execution_node"
 REFLECTION_NODE = "reflection_node"
 MEMORY_WRITE_NODE = "memory_write_node"

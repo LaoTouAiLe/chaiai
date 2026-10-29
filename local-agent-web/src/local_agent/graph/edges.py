@@ -37,6 +37,7 @@ from local_agent.graph.nodes import (
     MEMORY_WRITE_NODE,
     PLANNER_NODE,
     PREPARE_CONTEXT,
+    QUESTION_INTERRUPT_NODE,
     RECALL_MEMORY,
     REFLECTION_NODE,
     RETRIEVE_CODE_NODE,
@@ -61,6 +62,7 @@ from local_agent.graph.routers import (
     ROUTE_REJECT,
     ROUTE_RETRY,
     ROUTE_TO_APPROVAL,
+    ROUTE_TO_QUESTION,
     ROUTE_TO_SAFETY,
     ROUTE_TOOL,
     ROUTE_TOOL_FEEDBACK,
@@ -70,6 +72,7 @@ from local_agent.graph.routers import (
     route_after_approval,
     route_after_compression,
     route_after_decision,
+    route_after_question,
     route_after_safety,
     route_after_task_memory,
     route_after_tool_execution,
@@ -123,7 +126,14 @@ def add_minimal_chat_edges(graph: ChatStateGraph) -> None:
             ROUTE_REFLECT: REFLECTION_NODE,
             ROUTE_CHAT: COMPRESSION_NODE,
             ROUTE_TO_APPROVAL: APPROVAL_INTERRUPT_NODE,
+            # 提问挂起（2026-10-28）：与审批并列的另一条"等人"出口，两者互斥。
+            ROUTE_TO_QUESTION: QUESTION_INTERRUPT_NODE,
         },
+    )
+    graph.add_conditional_edges(
+        QUESTION_INTERRUPT_NODE,
+        route_after_question,
+        {ROUTE_EXECUTE: TOOL_EXECUTION_NODE},
     )
     graph.add_conditional_edges(
         APPROVAL_INTERRUPT_NODE,

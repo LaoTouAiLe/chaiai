@@ -174,7 +174,8 @@ def _snapshot(**overrides: Any) -> SessionSnapshot:
 
 
 def test_event_type_set_matches_contract() -> None:
-    # 契约里的 24 种事件（19 + v0.6 T59 的任务生命周期五项），一个不多一个不少。
+    # 契约里的事件全集（原始 19 + v0.6 T59 的任务生命周期五项 + 2026-10-28 的提问两项），
+    # 一个不多一个不少。
     assert EVENT_TYPES == (
         "session_snapshot",
         "message_started",
@@ -188,6 +189,9 @@ def test_event_type_set_matches_contract() -> None:
         "tool_completed",
         "approval_required",
         "approval_resolved",
+        # 2026-10-28：提问（与审批同构的两条）
+        "question_required",
+        "question_resolved",
         "memory_recalled",
         "memory_written",
         "model_call_started",

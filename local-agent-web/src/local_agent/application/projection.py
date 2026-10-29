@@ -33,8 +33,6 @@ from local_agent.application import errors as app_errors
 from local_agent.application.errors import ErrorCategory, ErrorView
 from local_agent.application.models import (
     SCHEMA_VERSION,
-    ApprovalState,
-    ApprovalView,
     AssistantMessageView,
     CompressionView,
     ContextMeterView,
@@ -78,11 +76,10 @@ from local_agent.application.models import (
 )
 from local_agent.config import redact_secrets
 from local_agent.context.web_citations import cited_source
-from local_agent.exceptions import WorkspaceBoundaryError
 from local_agent.graph.projection import message_id, project_messages
 from local_agent.graph.scope import tool_scope_key
 from local_agent.message_flags import is_tool_image_message
-from local_agent.security.path_guard import ExternalPathPolicy, resolve_target
+from local_agent.security.path_guard import ExternalPathPolicy
 from local_agent.tools.web_identity import source_id
 from local_agent.tools.web_tools import WebAccessError, check_url
 
@@ -1304,149 +1301,7 @@ def _retrieval_available(state: Mapping[str, Any]) -> bool:
     return _stage_failed(state, STAGE_RECALL_MEMORY) or _stage_failed(state, STAGE_RETRIEVE_CODE)
 
 
-# ---- 审批 ------------------------------------------------------------------
-
-
-def _approval_target(
-    tool_name: Any, arguments: Any, secrets: Iterable[str], workspace_root: Path | None
-) -> tuple[str | None, bool]:
-    """审批的规范化展示目标：**从结构化请求参数取**，不从影响摘要文本里反推。
-
-    认不出的工具或没有相应参数的请求一律 `None`：宁可让卡片少一行"目标"，
-    也不要猜一个看起来合理的路径（§15.8）。
-    """
-    if not isinstance(arguments, Mapping):
-        return None, False
-    name = str(tool_name or "")
-    raw: Any = None
-    if name in {"edit_file", "write_file", "delete_file"}:
-        raw = arguments.get("path")
-    elif name == "run_shell":
-        raw = arguments.get("cwd") or "."
-    if raw is None:
-        return None, False
-    if workspace_root is None:
-        return _optional_sanitized(raw, secrets), False
-    try:
-        resolved = resolve_target(
-            str(raw),
-            base_dir=workspace_root,
-            workspace_root=workspace_root,
-            external_policy=_DISPLAY_EXTERNAL_POLICY,
-        )
-    except WorkspaceBoundaryError:
-        return None, False
-    # 审批卡必须能让用户核对完整目标；与普通输出一样只抹密钥。
-    path = resolved.path.as_posix() if resolved.external else resolved.path.relative_to(workspace_root.resolve()).as_posix()
-    target = _KEY_LIKE.sub(_MASK, redact_secrets(path, list(secrets)))
-    return target, resolved.external
-
-
-def project_approval(
-    state: Mapping[str, Any], *, has_live_interrupt: bool, secrets: Iterable[str] = (),
-    workspace_root: Path | None = None, confirmation_stage: int = 1,
-) -> ApprovalView | None:
-    """审批的派生视图状态。
-
-    底层只有 `pending_approval`（当前请求）与 `approval_history`（决定），没有状态机字段：
-    `pending`/`executing`/`approved`/`rejected`/`expired` 全部在这里推导（规则见
-    `models.ApprovalView` 的 docstring）。`edit` 归入 `approved` 并保留被改写的参数。
-    """
-    pending = _as_mapping(state.get("pending_approval"))
-    decisions = _mappings(state.get("approval_history"))
-
-    request: Mapping[str, Any] | None = pending
-    last_decision = decisions[-1] if decisions else None
-    approval_id = str(
-        (request or {}).get("approval_id") or (last_decision or {}).get("approval_id") or ""
-    )
-    if not approval_id:
-        return None
-
-    decided = next(
-        (item for item in reversed(decisions) if str(item.get("approval_id") or "") == approval_id),
-        None,
-    )
-    if decided is not None:
-        decision = str(decided.get("decision") or "")
-        call_id = str(decided.get("tool_call_id") or (request or {}).get("tool_call_id") or "")
-        # 决定与请求都带轮次：作用域用它 + 调用 id，跨轮复用同一个调用 id 时不会互相冒充。
-        run = str(decided.get("run_id") or (request or {}).get("run_id") or "")
-        if decision == "reject":
-            state_value: ApprovalState = "rejected"
-            note = _optional_str(decided.get("reason")) or "该操作未执行。"
-        else:
-            scope = tool_scope_key(run, call_id)
-            finished = any(
-                tool_scope_key(str(result.get("run_id") or ""), str(result.get("tool_call_id") or "")) == scope
-                for result in _mappings(state.get("tool_results"))
-            )
-            state_value = "approved" if finished else "executing"
-            note = None
-            if not finished and _run_failed(state, run):
-                state_value = "interrupted"
-                note = "本轮已结束，工具执行结果未完整记录；请以核对的文件或命令结果为准。"
-        target, outside = _approval_target(
-            (request or {}).get("tool_name"), (request or {}).get("arguments"), secrets, workspace_root
-        )
-        return ApprovalView(
-            approval_id=approval_id,
-            # `run_id` / `tool_call_id` 在旧 Checkpoint 里可能确实没有（决定记录早于这两个字段，或
-            # `pending_approval` 已被清掉）。DTO 要求非空，直接填空串会让**整个会话详情接口 500**——
-            # 实测一个会话因此完全打不开（`GET /api/sessions/{id}` → `ApprovalView` 校验失败）。
-            # 按这一层既有口径写 `_NOT_RECORDED`：如实说没有记录，不猜一个看起来合理的值。
-            run_id=run or _NOT_RECORDED,
-            tool_call_id=call_id or _NOT_RECORDED,
-            # 决定本身不带工具名，`pending_approval` 又可能已被清掉：从工具事件里补；
-            # 旧 Checkpoint 两处都没有时写"未记录"，而不是猜一个名字。
-            tool_name=_tool_name_of(state, run, call_id) or _NOT_RECORDED,
-            action_fingerprint=str(decided.get("action_fingerprint") or (request or {}).get("action_fingerprint") or "")
-            or _NOT_RECORDED,
-            redacted_arguments=_display_arguments((request or {}).get("arguments"), secrets),
-            edited_arguments=_display_arguments(decided.get("edited_arguments"), secrets),
-            # 目标只能从原始请求参数来；请求已被清掉时如实为空，不去别处猜。
-            target=target,
-            outside_workspace=outside,
-            impact_summary=_approval_impact(request, secrets, workspace_root),
-            risk="high" if bool((request or {}).get("requires_second_confirmation")) else "normal",
-            state=state_value,
-            created_at=_as_utc((request or {}).get("created_at")) or _as_utc(decided.get("created_at")) or _epoch(),
-            note=sanitize_text(note, secrets) if note is not None else None,
-        )
-
-    if request is None:
-        return None
-
-    approved_now = has_live_interrupt
-    approval_state: ApprovalState = "pending" if approved_now else "expired"
-    target, outside = _approval_target(request.get("tool_name"), request.get("arguments"), secrets, workspace_root)
-    return ApprovalView(
-        approval_id=approval_id,
-        # 与上面的"已决定"分支同一口径：缺失写 `_NOT_RECORDED`，绝不填空串——DTO 要求非空，
-        # 空串会让整个会话详情接口 500，把"某个字段没有记录"升级成"这个会话打不开"。
-        run_id=str(request.get("run_id") or "") or _NOT_RECORDED,
-        tool_call_id=str(request.get("tool_call_id") or "") or _NOT_RECORDED,
-        tool_name=str(request.get("tool_name") or ""),
-        action_fingerprint=str(request.get("action_fingerprint") or ""),
-        redacted_arguments=_display_arguments(request.get("arguments"), secrets),
-        target=target,
-        outside_workspace=outside,
-        confirmation_stage=2 if confirmation_stage == 2 else 1,
-        impact_summary=_approval_impact(request, secrets, workspace_root),
-        risk="high" if bool(request.get("requires_second_confirmation")) else "normal",
-        state=approval_state,
-        created_at=_as_utc(request.get("created_at")) or _epoch(),
-        note=None if approved_now else "该审批已失效，未执行任何操作。请重新发起请求。",
-    )
-
-
-def _approval_impact(request: Mapping[str, Any] | None, secrets: Iterable[str], workspace_root: Path | None) -> str:
-    text = str((request or {}).get("impact_summary") or "（未记录影响摘要）")
-    if workspace_root is not None:
-        root = workspace_root.resolve()
-        for prefix in (root.as_posix() + "/", str(root) + "\\"):
-            text = text.replace(prefix, "")
-    return sanitize_text(text.replace("（T10）", "").replace("(T10)", ""), secrets)[:DISPLAY_ARGUMENT_CHARS]
+# 两种“等待用户”的投影在 `application/pending_views.py`。
 
 
 def _epoch() -> datetime:
@@ -1818,16 +1673,33 @@ def _tool_elapsed_ms(state: Mapping[str, Any], run_id: str) -> int | None:
     return total if found else None
 
 
-def project_context(state: Mapping[str, Any]) -> ContextMeterView:
-    """计量器口径：只认已组装请求的估算输入占用与已确认窗口；未知就是未知。
+def project_context(
+    state: Mapping[str, Any], *, window_hint: int | None = None
+) -> ContextMeterView:
+    """计量器口径：读真实用量；窗口优先取请求快照，其次由调用方给出。
 
-    输出预留**单列**（`completion_reserve_tokens`），不重复计入已使用输入（§15.6）。
+    两个刻意的区分（2026-10-28，用户反馈"未知会让人以为计量器坏了"）：
+
+    - **新会话的「0」不是猜**：state 里连 `token_usage` / `context_budget` 两个键都没有，
+      说明这一会话**从未组装过请求**，已用就是 0。旧实现这里返回 `None`（页面显示"未知"），
+      但"还没开始"和"不知道"是两件事。
+    - **跑过却没记上用量仍然是「未知」**：键在、值取不到（旧 Checkpoint、请求失败没记用量）时
+      不补 0——那是真的不知道，编一个 0 会让"失败的那一轮"看起来没花过钱。
+
+    窗口同理：`window_hint` 由调用方从**当前连接配置**读出（投影层不读设置库，§19.4）。
+    新会话没有请求快照，窗口只能来自这里；拿不到就仍然是"未知"。
     """
     usage_map = _as_mapping(state.get("token_usage")) or {}
     budget_map = _as_mapping(state.get("context_budget")) or {}
     used = usage_map.get("prompt_tokens")
     reserve = usage_map.get("completion_reserve_tokens")
     window = budget_map.get("context_window_tokens")
+    if not (isinstance(window, int) and window > 0) and window_hint is not None:
+        window = window_hint
+    # 两个键都不存在 = 这个会话一次都没跑过（不是"跑了但没记上"）。
+    never_assembled = "token_usage" not in state and "context_budget" not in state
+    if never_assembled and used is None:
+        used = 0
     known = isinstance(used, int) and isinstance(window, int) and window > 0
     compression_map = _as_mapping(state.get("context_compression")) or {}
     compression = None
@@ -1837,10 +1709,15 @@ def project_context(state: Mapping[str, Any]) -> ContextMeterView:
             and isinstance(compression_map.get("run_id"), str) and compression_map.get("run_id")):
         compression = CompressionView.model_validate({key: compression_map[key]
             for key in ("operation_id", "run_id", "state")})
+    scope: Literal["current", "previous", "unknown"]
+    if never_assembled or not known:
+        scope = "unknown"
+    else:
+        scope = "current" if state.get("task_status") == "running" else "previous"
     return ContextMeterView(
         used_tokens=int(used) if isinstance(used, int) else None,
         window_tokens=int(window) if isinstance(window, int) and window > 0 else None,
-        scope=("current" if state.get("task_status") == "running" else "previous") if known else "unknown",
+        scope=scope,
         completion_reserve_tokens=int(reserve) if isinstance(reserve, int) else None,
         compression=compression,
     )
@@ -1929,7 +1806,7 @@ def project_turn_state(state: Mapping[str, Any]) -> TurnFinalState:
 
 
 def project_session_state(state: Mapping[str, Any], *, has_live_interrupt: bool) -> SessionState:
-    """会话状态只由"是否有待决审批""`task_status`""是否已有 run"决定。
+    """会话状态只由"是否有待决审批 / 待回答提问""`task_status`""是否已有 run"决定。
 
     刻意不看 `final_response`：新一轮开始时上一轮的回答仍在 State 里，用"有没有回答"判断会把
     正在运行的一轮说成空闲。
@@ -1939,7 +1816,9 @@ def project_session_state(state: Mapping[str, Any], *, has_live_interrupt: bool)
     侧栏与输入区卡在一个既不是"在跑"、也不是"能用"的状态上（§17.4 的"立刻可以发下一条"）。
     """
     if has_live_interrupt:
-        return "awaiting_approval"
+        # 2026-10-28：两种"等用户"必须分开（§17.6 的"在等什么"是状态的函数）——审批问的是
+        # "这个动作能不能做"，提问问的是"缺的那个输入是什么"。按字段分流，不靠猜测。
+        return "awaiting_input" if state.get("pending_question") else "awaiting_approval"
     task_status = str(state.get("task_status") or "")
     if task_status == "completed":
         return "completed"
@@ -2042,6 +1921,7 @@ def project_snapshot(
     answer_streaming: bool = False,
     workspace_root: Path | None = None,
     confirmation_stage: int = 1,
+    context_window_hint: int | None = None,
 ) -> SessionSnapshot:
     """把一个 State 投影成 `session_snapshot` 载荷。
 
@@ -2050,11 +1930,22 @@ def project_snapshot(
 
     `model_selection` 同理由调用方（设置库的读取者）给出：投影层只投影 State，
     不自己去读设置库——否则同一份 Checkpoint 会因为设置变化而投影出不同字节。
+
+    `context_window_hint` 同理：它是"当前绑定的连接声明了多大窗口"，只在 State 里没有请求
+    快照时兜底用（新会话），所以也必须由调用方给，投影层不查设置库。
     """
+    # 两种"等待用户"的派生视图在 `pending_views`。这里**函数内**导入：子视图需要本模块的
+    # 脱敏与映射工具，模块级导入会形成循环（聚合层 → 子视图 → 基础工具）。
+    from local_agent.application.pending_views import project_approval, project_question
+
     run_id = current_run_id(state)
     approval = project_approval(
         state, has_live_interrupt=has_live_interrupt, secrets=secrets,
         workspace_root=workspace_root, confirmation_stage=confirmation_stage,
+    )
+    # 提问与审批互斥（架构 §4.2）：同一时刻最多只有一个非 None，页面按这两项决定接管输入区。
+    question = project_question(
+        state, has_live_interrupt=has_live_interrupt, secrets=secrets
     )
     return SessionSnapshot(
         schema_version=SCHEMA_VERSION,
@@ -2067,6 +1958,7 @@ def project_snapshot(
         messages=project_messages_view(state, secrets=secrets),
         plan=project_plan(state, secrets=secrets),
         approval=approval,
+        question=question,
         memory=project_memory(state, secrets=secrets),
         model_selection=model_selection,
         # 同样是调用方给的配置投影（§19.4）：投影层不读设置库，否则同一份 Checkpoint 会因
@@ -2076,7 +1968,7 @@ def project_snapshot(
         usage=project_usage(state),
         model_calls=project_model_calls(state, run_id),
         turn_usages=project_turn_usages(state),
-        context=project_context(state),
+        context=project_context(state, window_hint=context_window_hint),
         runtime_context=project_runtime_context(state),
         final_result=project_final_result(state, secrets=secrets),
         workflow=project_workflow(state, secrets=secrets),

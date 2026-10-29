@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import queue
 import threading
 import time
@@ -20,7 +19,12 @@ from local_agent.persistence.terminal_audit import TerminalAudit
 from local_agent.security.path_guard import ExternalPathPolicy
 from local_agent.security.policy import SecurityPolicy
 from local_agent.security.process_guard import open_terminal_process
-from local_agent.security.shell_guard import build_environment
+from local_agent.security.shell_guard import (
+    TERMINAL_ENV_KEYS,
+    build_environment,
+    resolve_terminal_shell,
+    terminal_argv,
+)
 from local_agent.security.windows_pty import supported
 
 OUTPUT_LIMIT = 2 * 1024 * 1024
@@ -83,7 +87,9 @@ class TerminalManager:
         mode: Literal["read-only", "workspace-write"] = (
             "read-only" if current.mode == "read-only" else "workspace-write")
         policy.external_policy = ExternalPathPolicy(mode=mode, workspace_only=True)
-        shell = str(Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32" / "cmd.exe")
+        # shell 由配置决定（2026-10-28）：默认 PowerShell（和自己开的终端一致），
+        # 找不到就退回 cmd。它参与下面的指纹——换了 shell，旧请求自然失效。
+        shell, _powershell = resolve_terminal_shell(self.service._app_config.terminal.shell)
         signature = json.dumps([str(root), shell, current.mode, dict(current.grants),
                                 self.service._app_config.security.model_dump(mode="json")], sort_keys=True)
         return root, shell, policy, hashlib.sha256(signature.encode()).hexdigest()
@@ -105,28 +111,42 @@ class TerminalManager:
                                        if item.view.workspace_id == workspace_id])
 
     def request(self, workspace_id: str) -> TerminalView:
+        """创建并**立即启动**一个终端（2026-10-28：取消启动审批）。
+
+        为什么不走 pending → decide：终端的授权模型一直是"批准一次、终端内不再逐条审批"，
+        启动那张卡只是多点一次，没有增加任何边界——写权限由 `shell_sandbox_request` 决定，
+        与审批无关。现在打开即用；`decide` 接口保留，只为旧审计记录与旧客户端兼容。
+
+        审计仍写一条 `approve`：语义是"打开即授予"，不是"没有任何人授权"。
+        """
         with self._lock:
             if not self.listing(workspace_id).available:
                 raise TerminalError("当前服务无法提供受控终端。", 503)
+            if sum(item.view.status == "running" for item in self._items.values()) >= 4:
+                raise TerminalError("最多同时运行 4 个终端，请先结束一个。", 429)
             if len(self._items) >= 128:
                 for key, old in list(self._items.items()):
                     if old.view.status not in ("pending", "running"):
                         del self._items[key]
                         break
                 else:
-                    raise TerminalError("终端请求过多，请先拒绝未处理的请求。", 429)
+                    raise TerminalError("终端数量已达上限，请先关闭不用的终端。", 429)
             root, shell, policy, fingerprint = self._context(workspace_id)
-            view = TerminalView(approval_id=uuid.uuid4().hex, workspace_id=workspace_id,
-                                cwd=str(root), shell=shell,
-                                permission_mode="read-only" if policy.external_policy.mode == "read-only" else "workspace-write",
-                                status="pending", expires_at=(datetime.now(timezone.utc)
-                                + timedelta(minutes=5)).isoformat())
+            view = TerminalView(
+                approval_id=uuid.uuid4().hex, workspace_id=workspace_id,
+                cwd=str(root), shell=shell,
+                permission_mode=("read-only" if policy.external_policy.mode == "read-only"
+                                 else "workspace-write"),
+                status="pending",
+                expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat())
             item = _Terminal(view, fingerprint, time.monotonic() + 300)
+            item.decision = "approve"
             self._save(item)
             self._items[view.approval_id] = item
-            return view.model_copy()
+            return self._launch(item, policy=policy, cols=80, rows=24)
 
     def decide(self, approval_id: str, decision: TerminalDecision) -> TerminalView:
+        """旧审批接口（保留兼容）。新终端已直接启动，再 decide 会得到"已失效"。"""
         with self._lock:
             item = self._items.get(approval_id)
             if item is None:
@@ -139,7 +159,7 @@ class TerminalManager:
                 item.decision, item.view.status = "reject", "rejected"
                 self._save(item)
                 return item.view.model_copy()
-            root, shell, policy, fingerprint = self._context(item.view.workspace_id)
+            _root, _shell, policy, fingerprint = self._context(item.view.workspace_id)
             if time.monotonic() >= item.expires or fingerprint != item.fingerprint:
                 item.view.status = "expired"
                 self._save(item)
@@ -149,31 +169,45 @@ class TerminalManager:
             # Persist the explicit decision before any OS process can be launched.
             item.decision = "approve"
             self._save(item)
-            try:
-                sandbox = policy.shell_sandbox_request(cwd=root)
-                if sandbox is None:
-                    raise TerminalError("无法建立写入沙箱，终端未启动。", 503)
-                item.process = open_terminal_process([shell, "/D", "/Q"], cwd=root,
-                    env=build_environment(()), sandbox=sandbox, cols=decision.cols, rows=decision.rows)
-                item.view.terminal_id = uuid.uuid4().hex
-                item.view.status = "running"
-                item.activity = time.monotonic()
-                item.writer = threading.Thread(target=self._write_input, args=(item, item.process),
-                                               name="terminal-input", daemon=True)
-                item.writer.start()
-                if sandbox.skipped:
-                    item.view.detail = "部分目录未能授予写入权限，可能无法写入。"
-                self._save(item)
-            except Exception as exc:
-                logger.exception("User terminal launch failed")
-                item.ending.set()
-                if item.process is not None:
-                    item.process.close()
-                    item.process = None
-                item.view.status = "failed"
-                item.view.detail = f"受控终端启动失败：{exc}"
-                self._save(item)
-            return item.view.model_copy()
+            return self._launch(item, policy=policy, cols=decision.cols, rows=decision.rows)
+
+    def _launch(self, item: _Terminal, *, policy: SecurityPolicy, cols: int, rows: int) -> TerminalView:
+        """真正拉起 PTY 进程；`request` 与 `decide` 共用这一条路径，避免两处漂移。
+
+        启动失败不抛：落成 `status="failed"` 并带原因返回，前端据此显示"启动失败 · 原因"
+        （与工具侧失败闭合的写法一致：不要让 500 把一句能读懂的话吞掉）。
+        """
+        root = Path(item.view.cwd)
+        try:
+            sandbox = policy.shell_sandbox_request(cwd=root)
+            if sandbox is None:
+                raise TerminalError("无法建立写入沙箱，终端未启动。", 503)
+            settings = self.service._app_config.terminal
+            item.process = open_terminal_process(
+                terminal_argv(item.view.shell, load_profile=settings.load_profile),
+                # 终端额外带 conda/venv 的提示变量（2026-10-28）：否则 `(base)` 这类环境提示
+                # 不会出现，终端看起来和自己开的不是一回事。密钥类变量仍被 build_environment 过滤掉。
+                cwd=root, env=build_environment(TERMINAL_ENV_KEYS),
+                sandbox=sandbox, cols=cols, rows=rows)
+            item.view.terminal_id = uuid.uuid4().hex
+            item.view.status = "running"
+            item.activity = time.monotonic()
+            item.writer = threading.Thread(target=self._write_input, args=(item, item.process),
+                                           name="terminal-input", daemon=True)
+            item.writer.start()
+            if sandbox.skipped:
+                item.view.detail = "部分目录未能授予写入权限，可能无法写入。"
+            self._save(item)
+        except Exception as exc:
+            logger.exception("User terminal launch failed")
+            item.ending.set()
+            if item.process is not None:
+                item.process.close()
+                item.process = None
+            item.view.status = "failed"
+            item.view.detail = f"受控终端启动失败：{exc}"
+            self._save(item)
+        return item.view.model_copy()
 
     def _get(self, terminal_id: str) -> _Terminal:
         for item in self._items.values():
