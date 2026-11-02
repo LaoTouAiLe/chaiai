@@ -31,6 +31,7 @@ from local_agent.api.terminals import build_terminal_router
 from local_agent.application.browsers import BrowserManager
 from local_agent.application.cron import CronScheduler
 from local_agent.application.errors import ApplicationError
+from local_agent.application.maintenance import MemoryMaintenance
 
 #: OpenAPI 里的接口版本：跟着 v0.4 的契约走（不是包版本）。
 API_VERSION: Final[str] = "0.4.0"
@@ -65,13 +66,18 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
     # 每个测试都会新建 service，那样每建一个就泄漏一个后台线程。
     scheduler = CronScheduler(runtime.service)
     browsers = BrowserManager(runtime.service)
+    # 记忆维护（2026-11-02，§10.3）：`run_forgetting` 的判定早就有，入口只有 CLI。这里把它接上
+    # 定时器——启动时判定"长期记忆是否启用"，没启用就不起线程（不起空转线程）。
+    maintenance = MemoryMaintenance(runtime.service)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         runtime.service.cron_scheduler = scheduler
+        runtime.service.memory_maintenance = maintenance
         terminals = runtime.service.user_terminals()
         try:
             scheduler.start()
+            maintenance.start()
             terminals.start()
             browsers.start()
             yield
@@ -82,8 +88,12 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
                 finally:
                     terminals.close()
             finally:
-                scheduler.stop()
+                try:
+                    maintenance.stop()
+                finally:
+                    scheduler.stop()
                 runtime.service.cron_scheduler = None
+                runtime.service.memory_maintenance = None
 
     app = FastAPI(
         title="local-agent-web",

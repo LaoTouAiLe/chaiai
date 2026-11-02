@@ -82,6 +82,36 @@ def _policy(root: Path, app_config, mode="workspace-write", grants=None) -> Secu
 
 
 @WINDOWS
+def test_powershell_startup_and_native_child_keep_write_boundary(tmp_path: Path, app_config, node: str) -> None:
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell 7 not installed")
+    work, outside = tmp_path / "work", tmp_path / "outside"
+    work.mkdir(); outside.mkdir()
+    inside, forbidden = work / "allowed.txt", outside / "forbidden.txt"
+    child = work / "child.cjs"
+    child.write_text("""
+const fs=require('fs');
+fs.writeFileSync(process.argv[2],'allowed');
+let blocked=false;
+try{fs.writeFileSync(process.argv[3],'forbidden')}catch(e){blocked=e.code==='EACCES'||e.code==='EPERM'}
+console.log(JSON.stringify({blocked}));process.exit(blocked?0:9);
+""", encoding="utf-8")
+    script = work / "parent.ps1"
+    script.write_text("& $args[0] $args[1] $args[2] $args[3]\nexit $LASTEXITCODE\n", encoding="utf-8")
+    policy = _policy(work, app_config)
+    result = policy.processes.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-File", str(script), node, str(child), str(inside), str(forbidden)],
+        cwd=work, timeout_seconds=30, sandbox=policy.shell_sandbox_request(),
+    )
+    assert not result.timed_out, "PowerShell initialization did not finish"
+    assert result.exit_code == 0, result.stderr
+    assert json.loads(result.stdout) == {"blocked": True}
+    assert inside.read_text() == "allowed"
+    assert not forbidden.exists()
+
+
+@WINDOWS
 @pytest.mark.parametrize("mode", ["workspace-write", "read-only", "danger-full-access"])
 def test_sync_pipe_input_output_and_real_child_exit(tmp_path: Path, app_config, node: str, mode: str) -> None:
     script = tmp_path / "sync.cjs"
