@@ -123,6 +123,17 @@ memory:
     memory_char_limit: 2200        # 字符（不是 token）
     user_char_limit: 1375
 
+  # 后台记忆巩固（架构 §10.4，2026-11-02）：把最近的中期碎片交给模型判断，哪些值得固化成长期事实。
+  # **默认关闭**：它会在后台调一次模型（花钱）。开启前提是 medium_term.enabled=true（没有碎片就没有
+  # 可整理的东西），并且装过 `uv sync --extra memory`。
+  # 边界：只**新增**长期事实，不合并、不停用、不删除已有记忆；作用域与来源可信度只沿用、不提升。
+  consolidation:
+    enabled: false                 # 后台会调模型，默认关
+    interval_hours: 24             # 两次整理的最小间隔
+    max_medium_records: 40         # 一次最多看多少条中期碎片
+    max_long_facts: 40             # 一次最多看多少条已有长期事实（避免重复提炼）
+    max_promotions: 5              # 单次最多接受几条固化建议
+
   compression:
     enabled: true                  # 默认启用 Prompt 窗口压缩；Checkpoint 原始 messages 不删
     trigger_ratio: 0.8

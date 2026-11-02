@@ -57,6 +57,41 @@
       ]
     },
     {
+      "group": "file_changes",
+      "fields": [
+        {
+          "key": "max_baseline_kb",
+          "kind": "int",
+          "options": [],
+          "minimum": 64.0,
+          "maximum": 8192.0,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "max_session_mb",
+          "kind": "int",
+          "options": [],
+          "minimum": 20.0,
+          "maximum": 2048.0,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "keep_turns",
+          "kind": "int",
+          "options": [],
+          "minimum": 0.0,
+          "maximum": 200.0,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    },
+    {
       "group": "agents",
       "fields": [
         {
@@ -286,6 +321,41 @@
           "minimum": 0.0,
           "maximum": null,
           "minimum_exclusive": true,
+          "maximum_exclusive": false,
+          "nullable": false
+        }
+      ]
+    },
+    {
+      "group": "consolidation",
+      "fields": [
+        {
+          "key": "enabled",
+          "kind": "bool",
+          "options": [],
+          "minimum": null,
+          "maximum": null,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "interval_hours",
+          "kind": "int",
+          "options": [],
+          "minimum": 1.0,
+          "maximum": 720.0,
+          "minimum_exclusive": false,
+          "maximum_exclusive": false,
+          "nullable": false
+        },
+        {
+          "key": "max_promotions",
+          "kind": "int",
+          "options": [],
+          "minimum": 1.0,
+          "maximum": 20.0,
+          "minimum_exclusive": false,
           "maximum_exclusive": false,
           "nullable": false
         }

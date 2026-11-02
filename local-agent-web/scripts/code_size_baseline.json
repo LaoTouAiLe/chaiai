@@ -1,14 +1,14 @@
 {
   "exceptions": {
     "file:application/service.py": {
-      "file_lines": 4868
+      "file_lines": 4679
     },
     "function:api/browsers.py::build_browser_router": {
       "complexity": 24
     },
     "function:api/routes.py::build_router": {
-      "complexity": 110,
-      "function_lines": 921
+      "complexity": 102,
+      "function_lines": 906
     },
     "function:api/terminals.py::build_terminal_router": {
       "complexity": 26
@@ -18,9 +18,6 @@
     },
     "function:application/projection.py::_tool_outcome": {
       "complexity": 40
-    },
-    "function:application/service.py::ApplicationService._change_mcp_spec": {
-      "nesting": 7
     },
     "function:application/service.py::ApplicationService._turn_events": {
       "complexity": 29
@@ -48,9 +45,6 @@
     "function:tools/browser_tools.py::build_browser_tools.<locals>.browser": {
       "complexity": 30,
       "nesting": 7
-    },
-    "function:tools/file_tools.py::read_file_content": {
-      "complexity": 23
     },
     "function:tools/search_tools.py::grep_content": {
       "complexity": 25

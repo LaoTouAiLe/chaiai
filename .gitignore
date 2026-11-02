@@ -35,3 +35,13 @@ replay_pid*.log
 pref.json
 # 浏览器自动化工具（playwright-cli 等）的页面快照：调试用的临时产物
 .playwright-cli/
+
+# Playwright 跑测的中间产物（2026-11-02）：`test-results/` 已被 frontend/.gitignore 挡住，
+# 但手工排查时留下的 `test-results-stale/`、临时 e2e 工作区 `.tmp-e2e/` 与视觉基线备份
+# `__screenshots__.bak/` 不在这条规则里——它们曾经混在待提交清单里，容易误 add。
+**/test-results-*/
+local-agent-web/frontend/.tmp-e2e/
+local-agent-web/frontend/e2e/__screenshots__.bak/
+# 本机专用的 Playwright / 审查配置与产物
+**/*.local.config.ts
+.review-artifacts/

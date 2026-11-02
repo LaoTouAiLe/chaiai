@@ -33,6 +33,18 @@ dependencies = [
   "send2trash>=2.1.0",
   "croniter>=6.2.4",
   "trafilatura>=2.0,<3",
+  # 文档上传（2026-10-29）：`POST /sessions/{id}/files` 用 multipart 接收几十 MB 的
+  # pdf/docx。图片仍走 base64 JSON——那份 2 MB 上限下 33% 的开销无所谓，文档则不是。
+  "python-multipart>=0.0.20,<1",
+  # 文档提取（2026-10-29）：`read_file` 直接读 docx / xlsx / pptx / pdf。
+  # 为什么不学 hermes 用 firecrawl-anydoc：它要求 python_version >= 3.14，我们声明 >=3.10；
+  # 而且它要进 PyInstaller 目录包，能否被正确收集没有验证过。这四个都是纯 Python 或
+  # 只依赖 lxml（环境里本来就有，python-pptx 会带进 Pillow/XlsxWriter）。
+  # 版本按 2026-10-29 实测通过的具体版本锁定上界：解析行为与输出格式都被用例按现状约束。
+  "pypdf>=6.21.4,<7",
+  "python-docx>=1.2.0,<2",
+  "openpyxl>=3.1.5,<4",
+  "python-pptx>=1.0.2,<2",
 ]
 
 [project.optional-dependencies]
