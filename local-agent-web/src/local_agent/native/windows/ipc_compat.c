@@ -157,13 +157,26 @@ static BOOL patch_imports(HMODULE module) {
     BYTE *base = (BYTE*)module;
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)base;
     IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    /* IL-only images belong to the CLR, not the native loader. Touching their
+     * import stubs can reenter CLR loading while patch_lock is held. CoreCLR
+     * and native/mixed-mode modules still receive the normal hooks. */
+    if (nt->OptionalHeader.NumberOfRvaAndSizes > IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR) {
+        IMAGE_DATA_DIRECTORY clr_data = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR];
+        if (clr_data.VirtualAddress) {
+            DWORD image_size = nt->OptionalHeader.SizeOfImage;
+            if (image_size < sizeof(IMAGE_COR20_HEADER) || clr_data.Size < sizeof(IMAGE_COR20_HEADER)
+                || clr_data.VirtualAddress > image_size - sizeof(IMAGE_COR20_HEADER)) return FALSE;
+            IMAGE_COR20_HEADER *clr = (IMAGE_COR20_HEADER*)(base + clr_data.VirtualAddress);
+            if (clr->Flags & COMIMAGE_FLAGS_ILONLY) return TRUE;
+        }
+    }
     DWORD rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
     if (!rva) return TRUE;
     IMAGE_IMPORT_DESCRIPTOR *desc = (IMAGE_IMPORT_DESCRIPTOR*)(base+rva);
     for (; desc->Name; desc++) {
         IMAGE_THUNK_DATA *slot = (IMAGE_THUNK_DATA*)(base+desc->FirstThunk);
         IMAGE_THUNK_DATA *names = desc->OriginalFirstThunk ? (IMAGE_THUNK_DATA*)(base+desc->OriginalFirstThunk) : NULL;
-        for (;slot->u1.Function;slot++, names = names ? names+1 : NULL) {
+        for (;names ? names->u1.AddressOfData : slot->u1.Function;slot++, names = names ? names+1 : NULL) {
             void *replacement = NULL;
             if (names && !IMAGE_SNAP_BY_ORDINAL(names->u1.Ordinal)) {
                 IMAGE_IMPORT_BY_NAME *import = (IMAGE_IMPORT_BY_NAME*)(base+names->u1.AddressOfData);
@@ -215,15 +228,15 @@ __declspec(dllexport) DWORD WINAPI CompatInitialize(LPVOID unused) {
     (void)unused;
     if (InterlockedCompareExchange(&initialized,1,0)!=0) return ERROR_ALREADY_INITIALIZED;
     HMODULE kernel=GetModuleHandleW(L"kernel32.dll");
-    original_get_proc=(get_proc_fn)GetProcAddress(kernel,"GetProcAddress");
-    original_a=(pipe_a_fn)original_get_proc(kernel,"CreateNamedPipeA");
-    original_w=(pipe_w_fn)original_get_proc(kernel,"CreateNamedPipeW");
-    original_process_a=(process_a_fn)original_get_proc(kernel,"CreateProcessA");
-    original_process_w=(process_w_fn)original_get_proc(kernel,"CreateProcessW");
-    original_load_a=(load_a_fn)original_get_proc(kernel,"LoadLibraryA");
-    original_load_w=(load_w_fn)original_get_proc(kernel,"LoadLibraryW");
-    original_load_ex_a=(load_ex_a_fn)original_get_proc(kernel,"LoadLibraryExA");
-    original_load_ex_w=(load_ex_w_fn)original_get_proc(kernel,"LoadLibraryExW");
+    original_get_proc=(get_proc_fn)(void*)GetProcAddress(kernel,"GetProcAddress");
+    original_a=(pipe_a_fn)(void*)original_get_proc(kernel,"CreateNamedPipeA");
+    original_w=(pipe_w_fn)(void*)original_get_proc(kernel,"CreateNamedPipeW");
+    original_process_a=(process_a_fn)(void*)original_get_proc(kernel,"CreateProcessA");
+    original_process_w=(process_w_fn)(void*)original_get_proc(kernel,"CreateProcessW");
+    original_load_a=(load_a_fn)(void*)original_get_proc(kernel,"LoadLibraryA");
+    original_load_w=(load_w_fn)(void*)original_get_proc(kernel,"LoadLibraryW");
+    original_load_ex_a=(load_ex_a_fn)(void*)original_get_proc(kernel,"LoadLibraryExA");
+    original_load_ex_w=(load_ex_w_fn)(void*)original_get_proc(kernel,"LoadLibraryExW");
     if (!original_a||!original_w||!original_process_a||!original_process_w||!original_load_a||!original_load_w||!original_load_ex_a||!original_load_ex_w) return ERROR_PROC_NOT_FOUND;
     if (!initialize_logon()) return GetLastError()?GetLastError():ERROR_DLL_INIT_FAILED;
     return patch_modules()?ERROR_SUCCESS:ERROR_DLL_INIT_FAILED;

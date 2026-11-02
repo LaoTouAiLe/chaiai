@@ -32,6 +32,11 @@ from local_agent.security.path_guard import (
     is_within,
 )
 from local_agent.security.policy import SecurityPolicy
+from local_agent.tools.document_extract import (
+    DocumentIo,
+    ExtractOutcome,
+    extract_document,
+)
 from local_agent.tools.result_types import (
     DeleteFileResult,
     DirEntry,
@@ -184,6 +189,30 @@ def list_dir_entries(
     )
 
 
+def _validate_read_range(
+    start_page: int | None, end_page: int | None,
+    start_line: int | None, end_line: int | None,
+    start_char: int | None, max_chars: int,
+) -> None:
+    """统一校验文本与文档的读取区间，保持原有错误语义。"""
+    if max_chars < 1:
+        raise ValueError("max_chars 必须为正数")
+    if start_line is not None and start_line < 1:
+        raise ValueError("start_line 必须从 1 开始")
+    if end_line is not None and end_line < (start_line or 1):
+        raise ValueError("end_line 不能小于 start_line")
+    if start_char is not None and (start_char < 0 or start_line is not None or end_line is not None):
+        raise ValueError("start_char 必须非负，且不能与行区间同时使用")
+    if start_page is not None and start_page < 1:
+        raise ValueError("start_page 必须从 1 开始")
+    if end_page is not None and end_page < (start_page or 1):
+        raise ValueError("end_page 不能小于 start_page")
+    if (start_page is not None or end_page is not None) and (
+        start_line is not None or end_line is not None
+    ):
+        raise ValueError("文档的页区间与文本行区间不能同时使用")
+
+
 def read_file_content(
     path: str,
     *,
@@ -194,23 +223,26 @@ def read_file_content(
     start_char: int | None = None,
     expected_sha256: str | None = None,
     encoding: str = "utf-8-sig",
+    start_page: int | None = None,
+    end_page: int | None = None,
 ) -> ReadFileResult:
-    """流式读取文本页；行区间和全文件字符位置互斥，字符续读支持超长单行。"""
+    """读取一页文本；docx/xlsx/pptx/pdf 先提取成文本再按同一套分页返回（2026-10-29）。"""
     from local_agent.tools.text_stream import BinaryTextError, text_parts
 
-    if max_chars < 1:
-        raise ValueError("max_chars 必须为正数")
-    if start_line is not None and start_line < 1:
-        raise ValueError("start_line 必须从 1 开始")
-    if end_line is not None and end_line < (start_line or 1):
-        raise ValueError("end_line 不能小于 start_line")
-    if start_char is not None and (start_char < 0 or start_line is not None or end_line is not None):
-        raise ValueError("start_char 必须非负，且不能与行区间同时使用")
+    _validate_read_range(start_page, end_page, start_line, end_line, start_char, max_chars)
     resolved = policy.resolve_readable_file(path)
     before = policy.files.stat(resolved)
     _, file_sha256, _ = policy.files.read_prefix_and_sha256(resolved, 0)
     if expected_sha256 and expected_sha256.lower() != file_sha256:
         raise FileOperationError("expected_sha256 与当前文件不一致：文件已变化，请重新读取")
+    # 文档分流（2026-10-29）：必须在文本路径**之前**，否则会被二进制守卫挡掉
+    # （`text_stream.text_parts` 见到 NUL 就报"二进制文件"）。按魔数判格式，不看后缀。
+    document = _read_document(
+        resolved, policy, sha256=file_sha256, start_page=start_page, end_page=end_page,
+        max_chars=max_chars, start_char=start_char,
+    )
+    if document is not None:
+        return document
     # 轮级去重（2026-10-22，对齐 hermes 的 read 去重）：同一轮里用**同一组参数**重复读同一段、
     # 且文件 sha 没变，就不再返回原文。模型反复读同一段是常见空转，一次就是一次模型往返。
     # 文件一改 sha 就不同，不会命中；需要原文时换个范围或改 max_chars 即可绕过。
@@ -314,6 +346,109 @@ def read_file_content(
         next_start_line=next_start_line,
         partial_lines=sorted(partial), start_char=actual_start,
         next_start_char=next_char if has_more else None,
+    )
+
+
+def _read_document(
+    resolved: Path, policy: SecurityPolicy, *, sha256: str,
+    start_page: int | None, end_page: int | None,
+    max_chars: int, start_char: int | None,
+) -> ReadFileResult | None:
+    """提取文档并应用轮内去重；非文档交回流式文本读取。"""
+    outcome = extract_document(
+        DocumentIo.from_policy(resolved, policy),
+        sha256=sha256, start_page=start_page, end_page=end_page,
+    )
+    if outcome is not None:
+        result = _document_result(
+            outcome, resolved, policy,
+            sha256=sha256, max_chars=max_chars, start_char=start_char,
+        )
+        # 轮级去重（2026-10-29，与文本路径同口径）：一份 96K 字符的 xlsx 在一轮里被读两遍，
+        # 上下文里就是两份。key 带页范围与字符偏移——换参数永远能拿到原文。
+        doc_key = (str(resolved), sha256, start_page, end_page, start_char, max_chars)
+        if doc_key in policy.document_read_cache:
+            return result.model_copy(update={
+                "content": "",
+                "note": (
+                    "这段内容在本次任务中已经读过、文件也没有变化，因此没有重复返回原文。"
+                    "确实需要再看一遍时，换页范围（start_page/end_page）或改 max_chars 重新读取。"
+                ),
+            })
+        if len(policy.document_read_cache) >= 64:
+            policy.document_read_cache.clear()
+        policy.document_read_cache.add(doc_key)
+        return result
+    if start_page is not None or end_page is not None:
+        raise FileOperationError(
+            "start_page/end_page 只对 pdf/docx/xlsx/pptx 有效：这个文件按文本读取，"
+            "请改用 start_line 或 start_char"
+        )
+    return None
+
+
+def _document_result(
+    outcome: ExtractOutcome,
+    resolved: Path,
+    policy: SecurityPolicy,
+    *,
+    sha256: str,
+    max_chars: int,
+    start_char: int | None,
+) -> ReadFileResult:
+    """把文档提取结果装成与文本读取**同一套**返回结构（分页语义、续读位置一致）。
+
+    两个边界写在这里：
+    - **行号属于提取后的文本**，不是原文件的行号。写回类工具仍然拒绝二进制，所以
+      不会真的改坏文件，但模型不被告知就会拿这些行号去试。
+    - PDF 有两种"还有下文"：本次提取的文本没读完（``start_char`` 续），或者后面还有
+      没抽的页（``start_page`` 续）。两者都置 ``has_more``，靠 note 区分。
+    """
+    display = _display_path(resolved, policy.workspace_root)
+    notes = list(outcome.notes)
+    if outcome.kind is None:
+        return ReadFileResult(
+            path=display, sha256=sha256, is_binary=True, content="",
+            note="；".join(notes) or "二进制文件，未返回内容",
+        )
+    text = outcome.text
+    begin = max(0, start_char or 0)
+    if begin > len(text):
+        raise ValueError(f"start_char={begin} 超出本次提取到的 {len(text)} 字符")
+    chunk = text[begin:begin + max_chars]
+    end = begin + len(chunk)
+    remaining = len(text) - end
+    more_pages = outcome.total_pages > outcome.last_page
+    if remaining:
+        hint = f"传 start_char={end} 继续"
+        if outcome.first_page != 1 or outcome.last_page != outcome.total_pages:
+            # 偏移是**本次页范围内文本**的位置：只传 start_char 会退回默认第 1 页起，
+            # 页范围一变偏移就错位，所以必须把页范围一起带上。
+            hint += (
+                f"，并同时传 start_page={outcome.first_page}、"
+                f"end_page={outcome.last_page}（保持同一页范围）"
+            )
+        notes.append(f"本次提取的文本还有 {remaining} 字符未返回，{hint}")
+    header = (
+        f"以下内容从 {outcome.kind} 提取（不是原文，格式、图片与排版已丢失）。"
+        "行号指提取后文本的行号，不要用它们编辑原文件。"
+    )
+    return ReadFileResult(
+        path=display,
+        sha256=sha256,
+        line_count=text.count("\n") + 1 if text else 0,
+        content=chunk,
+        truncated=bool(remaining),
+        note="；".join([header, *notes]),
+        first_line=text[:begin].count("\n") + 1 if text else 0,
+        last_line=text[:end].count("\n") + 1 if text else 0,
+        has_more=bool(remaining or more_pages),
+        next_start_char=end if remaining else None,
+        start_char=begin,
+        extracted=outcome.kind,
+        page_count=outcome.total_pages,
+        first_page=outcome.first_page,
+        last_page=outcome.last_page,
     )
 
 
@@ -689,8 +824,13 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
         start_char: int | None = None,
         expected_sha256: str | None = None,
         encoding: str = "utf-8-sig",
+        start_page: int | None = None,
+        end_page: int | None = None,
     ) -> str:
-        """读取本机文本文件，返回内容、完整 Hash、行号与续读位置。
+        """读取本机文件，返回内容、完整 Hash、行号与续读位置。
+
+        文本文件按行/字符读取；**文档会自动提取成文本**，不需要先转换：
+        `.docx`、`.xlsx`、`.pptx`、`.pdf` 直接传路径就能读（2026-10-29）。
 
         Args:
             path: 工作区相对路径或本机外部绝对路径；敏感文件仍禁止读取。
@@ -702,13 +842,22 @@ def build_file_tools(policy: SecurityPolicy) -> list[BaseTool]:
                 has_more 为真时，传 next_start_char 续读，超长单行也能推进。
             expected_sha256: 续读传上页 sha256，文件变化会明确报错。
             encoding: 默认 UTF-8（兼容 BOM），可显式传 gbk、utf-16 等文本编码。
+            start_page: 文档起始页（1 基，含），**只对 pdf 有效**，默认 1。
+            end_page: 文档结束页（含），只对 pdf 有效，默认 start_page+4。
 
         大文件按流读取，不受写入大小预算限制。只读所需证据，无需通读无关内容。
+
+        文档读取的三条注意事项：
+        1. 提取会丢格式、图片与排版，拿到的是纯文本；`extracted` 字段标明来源格式；
+        2. 返回的**行号是提取后文本的行号**，不要拿它去 edit_file 改原文件（写路径会拒绝二进制）；
+        3. pdf 一页约 0.05 秒，默认只给 5 页，需要后面的页就用 `start_page` 直接跳，
+           不要从头翻；扫描件/图片型文档抽不出正文，返回里会明确说明。
         """
         return read_file_content(
             path, policy=policy, start_line=start_line, end_line=end_line,
             max_chars=max_chars, start_char=start_char,
             expected_sha256=expected_sha256, encoding=encoding,
+            start_page=start_page, end_page=end_page,
         ).model_dump_json()
 
     @tool

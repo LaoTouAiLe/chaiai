@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import tempfile
 from pathlib import Path
 
@@ -22,6 +23,7 @@ def main() -> None:
     data.mkdir(exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="mcp-browser-", dir=data) as directory:
         base = Path(directory)
+        os.environ["CHAIAI_HOME"] = str(base / "home")
         (base / "workspace").mkdir()
         config = AppConfig.model_validate({
             "workspace": {"root": str(base / "workspace")},

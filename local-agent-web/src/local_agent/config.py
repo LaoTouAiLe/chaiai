@@ -278,6 +278,25 @@ class AgentsConfig(_StrictModel):
     precedence: AgentsPrecedenceConfig = Field(default_factory=AgentsPrecedenceConfig)
 
 
+class FileChangesConfig(_StrictModel):
+    """文件改动账本的存储口径（2026-10-29）：设置页「文件改动与还原」改的就是这三项。
+
+    单位在这里用 KB / MB 而不是字节：页面上的数字是给人看的，配置里跟着同一套单位，
+    省掉"页面上 512 到底是不是 512 字节"这类解释成本。
+
+    默认值与 ``persistence/file_changes.py`` 的 ``MAX_BASELINE_BYTES`` / ``MAX_SESSION_BYTES``
+    / ``KEEP_TURNS`` 一致——那三个常量是"没走配置装配"（CLI、测试）时的兜底。两处必须同步，
+    ``tests/test_file_changes_settings.py`` 有断言守着。
+    """
+
+    #: 单个文件的"改前内容"上限；超过就不存原文，页面按原因说明（不静默跳）。
+    max_baseline_kb: int = Field(default=512, ge=64, le=8192)
+    #: 单会话存储上限（压缩后字节）。超了不再存新的，已存的仍可还原。
+    max_session_mb: int = Field(default=200, ge=20, le=2048)
+    #: 可还原的最近轮数；``0`` = 不限制。更早的轮次只能查看 diff、不能还原。
+    keep_turns: int = Field(default=20, ge=0, le=200)
+
+
 class ShortTermMemoryConfig(_StrictModel):
     """短期记忆：LangGraph Checkpoint（T03 启用）。"""
 
@@ -353,6 +372,37 @@ class CuratedMemoryConfig(_StrictModel):
     def any_enabled(self) -> bool:
         """两个 store 里是否至少有一个打开（都关 = 工具不注册、两块都不注入）。"""
         return self.enabled or self.user_profile_enabled
+
+
+class ConsolidationConfig(_StrictModel):
+    """后台记忆巩固（2026-11-02，架构 §10.4 的第三条写入链路）。
+
+    为什么需要它：中期与长期记忆的**写入触发点全在对话里**（任务完成 / 用户明确要求记住）。
+    不对话就不会有任何整理——碎片堆在中期库里没人提炼，同一件事换个说法又写一条，冲突行只增不减。
+
+    这个开关打开后，后台按间隔把"最近新增的中期碎片"交给模型判断：哪些值得固化成长期事实。
+
+    **默认关闭**：它会**在后台调一次模型**，是会花钱的动作；"偷偷花钱"比"少一个功能"糟得多。
+    关闭时后台连输入都不收集（不打开任何记忆库、不加载 embedding）。
+
+    四条边界（写在这里是为了防止后来人顺手放开）：
+
+    - 只**新增**长期事实：不合并、不停用、不删除已有记忆（改/删用户数据需要单独决定）；
+    - 依赖中期记忆：``medium_term.enabled=false`` 时本功能不可用（没有碎片可提炼），
+      后台直接跳过——不假装能整理；
+    - 靠"自上次成功整理以来有没有新增碎片"决定是否调用模型：没变化就跳过，零成本；
+    - 输入只来自记忆库，**不重读会话正文**（那是检索的事，且等于把无关正文再喂一遍模型）。
+    """
+
+    enabled: bool = False
+    #: 两次整理的最小间隔（小时）。默认一天一次。
+    interval_hours: int = Field(default=24, ge=1, le=24 * 30)
+    #: 一次最多看多少条中期碎片（按写入时间倒序取最近的）。
+    max_medium_records: int = Field(default=40, ge=1, le=200)
+    #: 一次最多看多少条已有长期事实（告诉模型"已经知道的"，避免重复提炼同一件事）。
+    max_long_facts: int = Field(default=40, ge=1, le=200)
+    #: 单次最多接受的固化条数（模型偶尔会一口气列十几条，超出部分丢弃并说明）。
+    max_promotions: int = Field(default=5, ge=1, le=20)
 
 
 class CompressionConfig(_StrictModel):
@@ -432,6 +482,8 @@ class MemoryConfig(_StrictModel):
     long_term: LongTermMemoryConfig = Field(default_factory=LongTermMemoryConfig)
     #: 常驻记忆（MEMORY.md / USER.md，架构 §10.7）。默认打开：没有内容时不产生 Prompt 字节。
     curated: CuratedMemoryConfig = Field(default_factory=CuratedMemoryConfig)
+    #: 后台巩固（2026-11-02，§10.4）。默认关闭：它会在后台调模型。
+    consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
     compression: CompressionConfig = Field(default_factory=CompressionConfig)
 
 
@@ -1034,6 +1086,8 @@ class AppConfig(_StrictModel):
     workflows: WorkflowsConfig = Field(default_factory=WorkflowsConfig)
     #: 右栏受控终端的 shell 与环境（2026-10-28）。只影响"用什么 shell 打开"，不改写边界。
     terminal: TerminalConfig = Field(default_factory=TerminalConfig)
+    #: 文件改动账本的存储口径（2026-10-29）：单文件上限 / 会话配额 / 保留轮数。
+    file_changes: FileChangesConfig = Field(default_factory=FileChangesConfig)
 
     def capability_default_layer(self) -> dict[str, bool]:
         """**出厂默认开关表**（架构 §16.1）：用户没在页面改过开关时生效的那一组。

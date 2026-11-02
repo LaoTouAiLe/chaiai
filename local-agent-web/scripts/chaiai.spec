@@ -51,6 +51,12 @@ for _distribution in (
     "uvicorn",
     "pydantic",
     "pydantic-settings",
+    # 文档提取（2026-10-29）：`read_file` 读 docx/xlsx/pptx/pdf。它们用 importlib.metadata
+    # 读版本（或至少将来可能），带上 .dist-info 的成本只有几百 KB；没装时被 except 跳过。
+    "pypdf",
+    "python-docx",
+    "openpyxl",
+    "python-pptx",
 ):
     try:
         datas += copy_metadata(_distribution)
@@ -91,6 +97,20 @@ for _package in ("chromadb", "chromadb_rust_bindings"):
     datas += _data
     binaries += _bin
     hiddenimports += [name for name in _hidden if not name.startswith("chromadb.test")]
+
+# 文档提取的四个解析库（2026-10-29）：`document_extract._import` 用 importlib 按名字
+# **延迟导入**，PyInstaller 的静态分析看不见它们——首次构建实测 `_internal/` 里
+# pypdf / docx / openpyxl / pptx **全部缺失**（只有被别的包静态引用的 lxml 与 PIL 进来了），
+# 表现会是"源码里能读文档、打包后一读就报缺少依赖"。这里整包收集（含子模块与 .dist-info）。
+# 注意两个名字不同：collect_all 用**导入名**（docx / pptx），copy_metadata 用**发行名**（python-docx / python-pptx）。
+for _package in ("pypdf", "docx", "openpyxl", "pptx"):
+    try:
+        _data, _bin, _hidden = collect_all(_package)
+    except Exception:
+        continue
+    datas += _data
+    binaries += _bin
+    hiddenimports += _hidden
 
 # 桌面窗口（2026-10-23）：pywebview 的 Windows 后端是"按平台字符串导入"的
 # （`webview.platforms.winforms` / `edgechromium`），静态分析看不到；它自带的

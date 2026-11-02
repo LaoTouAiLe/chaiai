@@ -226,7 +226,10 @@ class LongTermStore:
         workspace_root: Path | None = None,
         now: datetime | None = None,
     ) -> EntityRecord:
-        """写入实体；同 ``(scope, scope_key, entity_type, name)`` 已存在时**复用**该行。
+        """写入实体；同 ``(entity_type, scope, scope_key)`` 已存在时**复用**该行（``name`` 不参与判定）。
+
+        ``name`` 只是**展示名**：同一身份下第一次写入的名字会保留下来，之后换名字不会新建实体、
+        也不会改写已有名字（2026-11-02，见 :meth:`_find_entity_identity`）。
 
         ``entities`` 没有唯一约束（旧库可能已有重复行，加约束会让迁移失败），所以这里在
         事务里"先查后插"来保证身份唯一。作用域键由 :func:`~local_agent.scope.scope_key_for`
@@ -254,8 +257,9 @@ class LongTermStore:
         label = _require_text(name, "name")
         # "先查后插"必须在同一个锁里：只锁 INSERT 挡不住两个线程同时查不到、各自插一行
         with self._transaction():
-            existing = self._find_entity(
-                entity_type=identity, name=label, scope=clean_scope, scope_key=scope_key
+            # 身份**不含 name**（2026-11-02）：name 只是展示名，模型换一种叫法不该新建实体。
+            existing = self._find_entity_identity(
+                entity_type=identity, scope=clean_scope, scope_key=scope_key
             )
             if existing is not None:
                 return existing
@@ -293,7 +297,13 @@ class LongTermStore:
         project_id: str | None = None,
         workspace_root: Path | None = None,
     ) -> EntityRecord | None:
-        """按"作用域 + 身份"查实体，找不到返回 ``None``（不写入）。"""
+        """按**展示名** + 作用域查实体，找不到返回 ``None``（不写入）。
+
+        注意与 :meth:`record_entity` 的口径差异（2026-11-02）：本方法按 ``name`` 精确匹配，
+        用于读取与断言；**身份判定**（会不会复用同一行）不看 ``name``，见
+        :meth:`_find_entity_identity`。想知道"这个作用域下的实体是谁"，用 ``active_facts_with_entities``
+        或 ``_find_entity_identity``，不要用本方法。
+        """
         clean_scope, scope_key = _resolve_scope_key(
             scope, user_id=user_id, project_id=project_id, workspace_root=workspace_root
         )
@@ -506,6 +516,36 @@ class LongTermStore:
             )
             return cursor.rowcount > 0
 
+    def touch_accessed(
+        self, fact_ids: Sequence[str], *, now: datetime | None = None
+    ) -> int:
+        """把若干事实的 ``last_accessed_at`` 刷成当前时间，返回实际更新的行数。
+
+        为什么要有它（2026-11-02）：这张表从 T15 起就有 ``last_accessed_at``，但**从来没有任何
+        东西写过它**——老化基准因此退化成"写入时间"，常用但不新的记忆会被当作闲置记忆淘汰。
+        Codex 的巩固流水线正是靠 ``usage_count`` / ``last_usage`` 排 top-N 与淘汰的
+        （``codex-rs/memories/README.md`` 的 Phase 2 选择规则）。
+
+        三条口径：
+
+        - **只更新传入的 id**：调用方只传这一轮真正注入 Prompt 的那几条（最多 ``top_k`` 条），
+          不是"读到的全部候选"；
+        - **只动 ``active``**：已删除/过期/被取代的行不该因为被读到就"复活"；
+        - 幂等：重复刷同一个时间戳没有额外语义，返回的是行数而不是"变更"。
+        """
+        ids = [str(item) for item in fact_ids if str(item)]
+        if not ids:
+            return 0
+        stamp = _timestamp(_moment(now))
+        placeholders = ",".join("?" for _ in ids)
+        with self._transaction():
+            cursor = self.connection.execute(
+                f'UPDATE facts SET "last_accessed_at" = ?'
+                f' WHERE "id" IN ({placeholders}) AND "status" = ?',
+                (stamp, *ids, FACT_STATUS_ACTIVE),
+            )
+            return cursor.rowcount
+
     def expire_overdue(self, *, now: datetime | None = None) -> int:
         """把已到期的 ``active`` 事实落库改为 ``expired``，返回条数。
 
@@ -705,6 +745,26 @@ class LongTermStore:
         return records[:limit] if limit is not None and limit >= 0 else records
 
     # ------------------------------------------------------------------ 内部
+
+    def _find_entity_identity(
+        self, *, entity_type: str, scope: MemoryScope, scope_key: str
+    ) -> EntityRecord | None:
+        """按**身份** ``(entity_type, scope, scope_key)`` 找实体，**不看 name**（2026-11-02）。
+
+        为什么把 name 排除在外：name 是**展示名**（给人看的），身份是"这条记忆属于哪个实体"。
+        两者混在一起时，模型换一种叫法就会新建实体（实测：同一项目出现 ``local-agent-web``
+        与 ``project_id`` 两份），记忆被拆散、`known_facts` 重复、去重与召回都变差。
+
+        历史库里同一身份可能已有几行（旧实现按 name 去重留下的）：这里取**最早**一行，新写入都
+        归到它；其余行的 facts 不迁移——合并用户已积累的数据是另一件事（架构 §10.3 已写明）。
+        """
+        row = self.connection.execute(
+            f"SELECT {_ENTITY_COLUMNS} FROM entities"
+            ' WHERE "entity_type" = ? AND "scope" = ? AND "scope_key" = ?'
+            ' ORDER BY "created_at", "id" LIMIT 1',
+            (entity_type, scope, scope_key),
+        ).fetchone()
+        return _entity_from_row(row) if row is not None else None
 
     def _find_entity(
         self, *, entity_type: str, name: str, scope: MemoryScope, scope_key: str

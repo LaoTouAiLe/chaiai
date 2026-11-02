@@ -53,9 +53,8 @@ APPROVAL_NEW_TEXT = "已批准的新内容"
 def _approval_tool_calls(workspace: Path) -> dict[str, list[dict[str, Any]]]:
     """种下一份文件，并为两条输入各准备一次"必须人工审批"的大范围编辑。
 
-    为什么是 201 行替换成 1 行：``security.large_edit.max_changed_lines_without_approval`` 的出厂值
-    是 200，改动行数是 202，**真实地**越过免审上限——阈值本身仍然由产品代码裁决，这里只是照着它
-    构造一个确定性的输入，不在端到端里放宽任何安全配置。
+    用 201 行替换成 1 行验证长 diff 的折叠与展开。main 中显式启用批量编辑审批并将免审文件数
+    设为 0，确保单个文件的编辑也真实走审批；不再依赖已不参与裁决的旧行数阈值。
 
     ``expected_sha256`` 必须与磁盘上的字节逐字节一致（``edit_file`` 会校验），所以这里自己写字节、
     自己算 Hash；用 ``write_bytes`` 而不是 ``write_text`` 也是为了不让 Windows 把 ``\\n`` 改写成
@@ -131,7 +130,11 @@ def main() -> int:
         return 2
 
     data_dir = Path(args.data) if args.data is not None else Path(tempfile.mkdtemp(prefix=args.data_dir_name))
+    data_dir = data_dir.resolve()
     data_dir.mkdir(parents=True, exist_ok=True)
+    # base_dir 只决定配置相对路径，应用数据根自 2026-10-26 起独立解析。
+    # 假模型服务必须覆盖环境指针，避免读取真实设置或把测试会话写入用户库。
+    os.environ["CHAIAI_HOME"] = str(data_dir / "home")
     config_path = _write_config(data_dir, dist=dist, streaming=args.streaming)
 
     # 连接是从 llm 段幂等导入的，取密钥仍走它指向的环境变量：这里给个占位值，
@@ -139,6 +142,15 @@ def main() -> int:
     os.environ[FAKE_KEY_ENV] = "fake-key-for-e2e"
 
     config = load_config(config_path)
+    config = config.model_copy(update={
+        "model_settings": config.model_settings.model_copy(update={"credential_store": "memory"}),
+        # 测试不执行宿主用户的 PowerShell profile，保留产品默认 shell 和写入沙箱。
+        "terminal": config.terminal.model_copy(update={"load_profile": False}),
+    })
+    if args.approval_edit:
+        # 当前审批按不同文件数判定；用更严格的零免审额度验证首个编辑的审批生命周期。
+        config.security.require_approval.large_batch_edit = True
+        config.security.large_edit.max_files_without_approval = 0
     if args.compression_demo:
         config = config.model_copy(update={
             "llm": config.llm.model_copy(update={"context_window_tokens": 12000, "max_tokens": 512}),

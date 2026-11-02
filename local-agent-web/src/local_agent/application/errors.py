@@ -111,6 +111,10 @@ SIDE_EFFECT_UNCONFIRMED: Final[str] = "SIDE_EFFECT_UNCONFIRMED"
 #: 会话索引里没有这个 id（应用层用例的前置校验）。
 SESSION_NOT_FOUND: Final[str] = "SESSION_NOT_FOUND"
 WORKSPACE_NOT_FOUND: Final[str] = "WORKSPACE_NOT_FOUND"
+#: 还原文件改动这件事现在做不了（2026-10-29）：账本未接线、这一轮没有记录到改动、
+#: 或改前内容已超出保留范围被清理。**与"部分文件还原失败"不同**——后者是正常结果，
+#: 走 `RestoreResultView.failed` 如实报告，不抛这个码。
+CHANGES_RESTORE_UNAVAILABLE: Final[str] = "CHANGES_RESTORE_UNAVAILABLE"
 
 _ERROR_CATEGORY_OF: Final[dict[str, ErrorCategory]] = {
     SESSION_BUSY: "system",
@@ -147,6 +151,7 @@ _ERROR_CATEGORY_OF: Final[dict[str, ErrorCategory]] = {
     WORKSPACE_NOT_FOUND: "configuration",
     DIRECTORY_PICKER_UNAVAILABLE: "system",
     UNINSTALL_UNAVAILABLE: "system",
+    CHANGES_RESTORE_UNAVAILABLE: "system",
 }
 
 #: 同一次提交在条件满足后能否原样重试（§15.5）。
@@ -190,6 +195,7 @@ _RETRY_CONDITION: Final[dict[str, str]] = {
     WORKSPACE_NOT_FOUND: "刷新工作区列表后重新选择；新工作区可按路径添加。",
     DIRECTORY_PICKER_UNAVAILABLE: "确认本机桌面会话可用（远程桌面断开时弹不出窗口）后重新点击。",
     UNINSTALL_UNAVAILABLE: "不需要重试：安装版可直接卸载，绿色版关闭程序后删除程序文件夹即可。",
+    CHANGES_RESTORE_UNAVAILABLE: "刷新改动列表后重试；超出保留轮数的改动只能查看、不能还原。",
 }
 
 ERROR_CODES: Final[tuple[str, ...]] = tuple(_ERROR_CATEGORY_OF)
@@ -443,6 +449,27 @@ def workspace_not_found(*, workspace_id: str, occurred_at: datetime) -> Applicat
             diagnostic_id=diagnostic_id_for(WORKSPACE_NOT_FOUND, workspace_id),
             occurred_at=occurred_at,
             source="workspace",
+        )
+    )
+
+
+def changes_restore_unavailable(
+    *, detail: str, session_id: str, occurred_at: datetime
+) -> ApplicationError:
+    """这次还原请求本身不成立（2026-10-29）。
+
+    ``detail`` 只接受**我们自己生成的固定文本**（如"这一轮没有记录到任何文件改动"），
+    不要把路径或异常原文塞进来——错误信封是要给用户看、也要能贴到工单里的东西。
+    """
+    return ApplicationError(
+        ErrorView.for_code(
+            CHANGES_RESTORE_UNAVAILABLE,
+            title="这次还原没法执行",
+            message=f"{detail}；磁盘上的文件没有被改动。",
+            hint="刷新改动列表后重试；超出保留轮数的改动只能查看、不能还原。",
+            diagnostic_id=diagnostic_id_for(CHANGES_RESTORE_UNAVAILABLE, session_id, detail),
+            occurred_at=occurred_at,
+            source="changes",
         )
     )
 

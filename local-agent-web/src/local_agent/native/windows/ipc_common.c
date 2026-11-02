@@ -7,7 +7,7 @@
 
 DWORD ipc_machine(HANDLE process, WORD *machine) {
     typedef BOOL (WINAPI *wow2_fn)(HANDLE,USHORT*,USHORT*);
-    wow2_fn wow2 = (wow2_fn)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"IsWow64Process2");
+    wow2_fn wow2 = (wow2_fn)(void*)GetProcAddress(GetModuleHandleW(L"kernel32.dll"),"IsWow64Process2");
     if (!wow2) return ERROR_NOT_SUPPORTED;
     USHORT target = 0, native = 0;
     if (!wow2(process,&target,&native)) return GetLastError();

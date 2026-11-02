@@ -656,8 +656,11 @@ def test_built_tools_match_architecture_signatures(policy: SecurityPolicy) -> No
         "execute_code",
     ]
     assert list(tools["list_dir"].args) == ["path", "recursive", "include_hidden", "max_entries"]
+    # 2026-10-29：文档读取新增两个页参数——**追加在末尾**，前七个参数顺序不变，
+    # 老调用方按位置传参不会错位。
     assert list(tools["read_file"].args) == [
         "path", "start_line", "end_line", "max_chars", "start_char", "expected_sha256", "encoding",
+        "start_page", "end_page",
     ]
     assert list(tools["edit_file"].args) == [
         "path",

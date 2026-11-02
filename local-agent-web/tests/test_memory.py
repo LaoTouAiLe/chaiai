@@ -1589,6 +1589,7 @@ def _recall_long_term(
     config: LongTermMemoryConfig | None = None,
     top_k: int = recall.DEFAULT_TOP_K,
     now: datetime = LATER,
+    query: str = "",
 ) -> list[schemas.LongTermReference]:
     return recall.recall_long_term(
         store,
@@ -1597,6 +1598,7 @@ def _recall_long_term(
         project_id=project_id,
         top_k=top_k,
         now=now,
+        query=query,
     )
 
 
@@ -1840,6 +1842,147 @@ def test_recall_long_term_sorts_by_score_and_respects_top_k(
     assert [item["memory_id"] for item in references] == [high.record.id, mid.record.id]
     assert references[0]["score"] == pytest.approx(0.81)
     assert _recall_long_term(store, tmp_path, project_id=project_id, top_k=0, now=NOW) == []
+
+
+def test_recall_long_term_prefers_query_relevance_over_fixed_score(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """库超过 ``top_k`` 条后，与提问字面相关的那条仍能进结果。
+
+    这是 2026-11-02 修的那个洞：长期库没有向量，排序原本只看 ``confidence × importance``，
+    与"这轮问了什么"无关——库一旦超过 ``top_k`` 条，注入的永远是同一批高分事实。
+    """
+    project_id = scope.project_id_for(tmp_path)
+    entity = _project_entity(store, project_id)
+    # 15 条"更可信但与本轮问题无关"的事实：旧排序下它们正好占满 top_k=8
+    for index in range(15):
+        _write_fact(
+            store,
+            entity,
+            key=f"note{index}",
+            value=f"记录{index}",
+            confidence=0.99,
+            importance=1.0,
+            now=NOW,
+        )
+    target = _write_fact(
+        store,
+        entity,
+        key="test_runner",
+        value="pytest -q",
+        confidence=0.8,
+        importance=0.8,
+        now=NOW,
+    )
+
+    legacy = _recall_long_term(store, tmp_path, project_id=project_id, top_k=8, now=NOW)
+    assert target.record.id not in [item["memory_id"] for item in legacy]
+
+    recalled = _recall_long_term(
+        store, tmp_path, project_id=project_id, top_k=8, now=NOW, query="pytest 怎么跑"
+    )
+    assert recalled[0]["memory_id"] == target.record.id
+    # 相关度是**独立维度**：score 仍是 confidence × importance，不被它改写
+    assert recalled[0]["score"] == pytest.approx(0.8 * 0.8)
+    assert 0.0 < recalled[0]["relevance"] <= 1.0
+    # 映射成 memory_refs 时原样透传，且不能写进 similarity（那是"有多可信"）
+    mapped = recall.as_memory_reference(recalled[0])
+    assert mapped["relevance"] == pytest.approx(recalled[0]["relevance"])
+    assert mapped["similarity"] == pytest.approx(0.8 * 0.8)
+
+
+def test_recall_long_term_falls_back_when_no_term_matches(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """全零命中退回旧排序：与记忆毫无字面重叠的提问不会反而丢记忆。"""
+    project_id = scope.project_id_for(tmp_path)
+    entity = _project_entity(store, project_id)
+    _write_fact(store, entity, key="a", value=1, confidence=0.9, importance=0.9, now=NOW)
+    _write_fact(store, entity, key="b", value=2, confidence=0.8, importance=0.7, now=NOW)
+
+    legacy = _recall_long_term(store, tmp_path, project_id=project_id, now=NOW)
+    unrelated = _recall_long_term(
+        store, tmp_path, project_id=project_id, now=NOW, query="zzz-unrelated-topic"
+    )
+    assert [item["memory_id"] for item in unrelated] == [
+        item["memory_id"] for item in legacy
+    ]
+    # 零命中连 relevance 键都不写：返回对象与引入这个维度之前逐键相同
+    assert all("relevance" not in item for item in unrelated)
+
+
+def test_recall_long_term_matches_chinese_value_by_bigram(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """中文提问按二元组命中取值（不引入分词依赖），命中后压过更高分但无关的事实。"""
+    project_id = scope.project_id_for(tmp_path)
+    entity = _project_entity(store, project_id)
+    _write_fact(
+        store, entity, key="noise", value="无关的高分记录",
+        confidence=0.99, importance=1.0, now=NOW,
+    )
+    target = _write_fact(
+        store, entity, key="reply_language", value="中文回复",
+        confidence=0.8, importance=0.8, now=NOW,
+    )
+
+    recalled = _recall_long_term(
+        store, tmp_path, project_id=project_id, top_k=1, now=NOW, query="我一直用中文回复"
+    )
+    assert [item["memory_id"] for item in recalled] == [target.record.id]
+    assert 0.0 < recalled[0]["relevance"] <= 1.0
+
+
+def test_recall_long_term_uses_task_title_for_relevance(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """任务结论按 ``task_title`` 命中；命中的结论排在单纯分数更高的结论之前。"""
+    project_id = scope.project_id_for(tmp_path)
+    store.record_task_conclusion(
+        task_title="无关的其他任务",
+        conclusion="与本次问题无关",
+        project_scope=project_id,
+        confidence=0.95,
+        origin="owner",
+        now=NOW,
+    )
+    target = store.record_task_conclusion(
+        task_title="接通长期记忆",
+        conclusion="召回按相关度排序",
+        project_scope=project_id,
+        confidence=0.8,
+        origin="owner",
+        now=NOW,
+    )
+
+    recalled = _recall_long_term(
+        store, tmp_path, project_id=project_id, top_k=1, now=NOW, query="长期记忆怎么接通"
+    )
+    assert [item["memory_id"] for item in recalled] == [target.id]
+    assert 0.0 < recalled[0]["relevance"] <= 1.0
+
+
+def test_recall_marks_accessed_facts_only(
+    store: long_term.LongTermStore, tmp_path: Path
+) -> None:
+    """召回把**真正注入的那几条**标成"刚用过"（2026-11-02）。
+
+    这是刚做的一次改动：这张表从 T15 起就有 ``last_accessed_at``，但从未被写过，于是老化基准
+    一直是"写入时间"，常用的老记忆会被当闲置记忆淘汰。现在只标被注入的（最多 ``top_k`` 条），
+    没被注入的不动，已过期/删除的也不动。
+    """
+    project_id = scope.project_id_for(tmp_path)
+    entity = _project_entity(store, project_id)
+    high = _write_fact(store, entity, key="a", value=1, confidence=0.9, importance=0.9, now=NOW)
+    _write_fact(store, entity, key="b", value=2, confidence=0.8, importance=0.8, now=NOW)
+
+    references = _recall_long_term(store, tmp_path, project_id=project_id, top_k=1, now=LATER)
+
+    assert [item["memory_id"] for item in references] == [high.record.id]
+    touched = store.get_fact(high.record.id)
+    assert touched is not None and touched.last_accessed_at is not None
+    untouched = {item.key: item for item in store.list_facts(entity_id=entity.id)}["b"]
+    assert untouched.last_accessed_at is None
 
 
 def test_task_conclusions_are_recalled_by_project_scope(
@@ -3250,14 +3393,17 @@ def test_candidate_plan_derives_missing_subject(tmp_path: Path) -> None:
     )
 
     assert not isinstance(project_fact, RejectedCandidate)
-    assert project_fact[0].candidate.subject == tmp_path.name  # 工作区目录名
+    # subject 是**展示名**：缺省时按 entity_type 推导（project → 工作区目录名）
+    assert project_fact[0].candidate.subject == tmp_path.name
     assert project_fact[0].note is not None and "系统推导" in project_fact[0].note
     assert not isinstance(user_fact, RejectedCandidate)
     assert user_fact[0].candidate.subject == "local"  # 逻辑用户
-    assert isinstance(unknown, RejectedCandidate)  # 推不出来才拒绝
-    assert "subject" in unknown.reason
+    # 推导不出名字不再拒绝：用作用域键兜底，免得为一点展示信息丢掉整条记忆
+    assert not isinstance(unknown, RejectedCandidate)
+    assert unknown[0].candidate.subject == scope.project_id_for(tmp_path)
+    assert unknown[0].note is not None and "兜底" in unknown[0].note
     assert not isinstance(explicit, RejectedCandidate)
-    assert explicit[0].candidate.subject == "chaiai"  # 模型给的名字优先
+    assert explicit[0].candidate.subject == "chaiai"  # 模型给的名字照用（只是展示名）
     assert explicit[0].note is None
 
 
@@ -3360,6 +3506,7 @@ def test_writer_records_conflict_without_overwriting(
     store: long_term.LongTermStore, tmp_path: Path
 ) -> None:
     """长期事实与现有值冲突时保留当前值，但**仍算写入成功**（新行记 ``conflicted``）。"""
+    # 写链路的展示名是 "chaiai"（候选里给的），这里必须落在同一个实体上才谈得上"冲突"
     entity = _project_entity(store, scope.project_id_for(tmp_path))
     current = _write_fact(store, entity, key="language", value="中文", confidence=0.9, now=NOW)
 

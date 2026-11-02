@@ -262,6 +262,9 @@ def recall_memory_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> A
                     user_id=context.user_id,
                     top_k=recall.DEFAULT_TOP_K,
                     now=context.current_time,
+                    # 词面相关度（2026-11-02）：长期库没有向量，这一项是它唯一"随本轮问什么而变"
+                    # 的排序依据——不给它，库超过 top_k 条后注入的永远是同一批高分事实。
+                    query=query,
                 )
             )
         except (MemoryStoreError, sqlite3.Error, OSError) as exc:

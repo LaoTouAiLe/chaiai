@@ -7,12 +7,17 @@ import threading
 from pathlib import Path
 
 from local_agent.persistence.file_changes import MAX_BASELINE_BYTES, FileChangeLedger
-from local_agent.persistence.migrations import _CHAT_V11_FILE_CHANGES_SQL
+from local_agent.persistence.migrations import (
+    _CHAT_V11_FILE_CHANGES_SQL,
+    _CHAT_V15_FILE_SNAPSHOTS_SQL,
+)
 
 
 def make_ledger(tmp_path: Path) -> tuple[FileChangeLedger, Path]:
     connection = sqlite3.connect(":memory:")
     connection.executescript(_CHAT_V11_FILE_CHANGES_SQL)
+    # v15（2026-10-29）：按轮记录改前内容要的两列 + blob 账目表。
+    connection.executescript(_CHAT_V15_FILE_SNAPSHOTS_SQL)
     workspace = tmp_path / "ws"
     workspace.mkdir()
     ledger = FileChangeLedger(

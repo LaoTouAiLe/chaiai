@@ -88,10 +88,4 @@ class OssAttachmentStore:
             url=url,
         )
 
-    def delete_session(self, session_id: str) -> int:
-        """对象存储后端**不删对象**：只把决定权留给桶策略（历史会话可能仍引用）。
 
-        返回 0 表示"没有删除任何对象"，与"删了 0 个"在语义上一致，调用方不需要区分。
-        """
-        del session_id
-        return 0

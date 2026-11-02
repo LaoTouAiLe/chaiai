@@ -181,6 +181,23 @@ class CuratedMemoryPreferences(_Preference):
     user_char_limit: int = Field(default=1375, gt=0)
 
 
+class ConsolidationPreferences(_Preference):
+    """后台记忆巩固（2026-11-02，架构 §10.4）。
+
+    **默认关闭**：它会在后台**调一次模型**，是会花钱的动作。三条说明写在这里，页面的 note 只是转述：
+
+    - 前提是中期记忆已启用——没有碎片就没有可整理的东西；
+    - 只**新增**长期事实：不合并、不停用、不删除已有记忆；
+    - 自上次以来没有更新的碎片时**不调用模型**，所以"开着"不等于"每次都花钱"。
+    """
+
+    enabled: bool = False
+    #: 两次整理的最小间隔（小时）。
+    interval_hours: int = Field(default=24, ge=1, le=24 * 30)
+    #: 单次最多接受几条固化建议（模型偶尔会一口气列太多，超出丢弃）。
+    max_promotions: int = Field(default=5, ge=1, le=20)
+
+
 class CompressionPreferences(_Preference):
     """上下文压缩（2026-10-26：从"高级只读概览"搬进可改）。
 
@@ -235,12 +252,30 @@ class AgentsPreferences(_Preference):
         return self
 
 
+class FileChangesPreferences(_Preference):
+    """文件改动账本的存储口径（2026-10-29）：设置页「文件改动与还原」。
+
+    三项都**保存后立即生效**（下一次写盘就按新值走），与其它分组"下一次新任务生效"不同：
+    它们约束的是账本本身，不是某一轮任务的输入。页面说明文字必须照这个口径写，否则用户会
+    以为要等下一轮。
+
+    单位是 KB / MB（与 ``config.file_changes`` 同一套），存进文件系统前再换算成字节。
+    """
+
+    max_baseline_kb: int = Field(ge=64, le=8192)
+    max_session_mb: int = Field(ge=20, le=2048)
+    #: ``0`` = 不限制保留轮数（只受会话配额约束）。
+    keep_turns: int = Field(ge=0, le=200)
+
+
 class RuntimePreferences(_Preference):
     execution: ExecutionPreferences
     retrieval: RetrievalPreferences
     memory: LongTermPreferences
     #: 常驻记忆（2026-10-27）：``None`` = 这个字段出现之前保存的设置，按启动配置补齐。
     curated: CuratedMemoryPreferences | None = None
+    #: 后台巩固（2026-11-02），口径同上。
+    consolidation: ConsolidationPreferences | None = None
     # Missing fields in old settings/checkpoints keep the startup configuration.
     medium_term: MediumTermPreferences | None = None
     embedding: EmbeddingPreferences | None = None
@@ -250,6 +285,8 @@ class RuntimePreferences(_Preference):
     compression: CompressionPreferences | None = None
     #: 项目规则（2026-10-26），口径同上。
     agents: AgentsPreferences | None = None
+    #: 文件改动账本（2026-10-29）：``None`` = 这个字段出现之前保存的设置，按启动配置补齐。
+    file_changes: FileChangesPreferences | None = None
 
 
 class PreferenceValues(RuntimePreferences):
@@ -349,6 +386,10 @@ def initial_preferences(config: AppConfig) -> PreferenceValues:
         curated=CuratedMemoryPreferences(**config.memory.curated.model_dump(include={
             "enabled", "user_profile_enabled", "memory_char_limit", "user_char_limit",
         })),
+        consolidation=ConsolidationPreferences(**config.memory.consolidation.model_dump(include={
+            "enabled", "interval_hours", "max_promotions",
+        })),
+        file_changes=FileChangesPreferences(**config.file_changes.model_dump()),
     )
 
 
@@ -362,6 +403,8 @@ def complete_preferences(values: PreferenceValues, config: AppConfig) -> Prefere
         "compression": values.compression or defaults.compression,
         "agents": values.agents or defaults.agents,
         "curated": values.curated or defaults.curated,
+        "consolidation": values.consolidation or defaults.consolidation,
+        "file_changes": values.file_changes or defaults.file_changes,
     })
 
 
@@ -378,6 +421,13 @@ def apply_runtime_preferences(config: AppConfig, values: RuntimePreferences) -> 
     )
     if medium.enabled and not embedding.enabled:
         raise ValueError("启用中期记忆前，请先启用并配置 Embedding。")
+    if (
+        values.consolidation is not None
+        and values.consolidation.enabled
+        and not medium.enabled
+    ):
+        # 如实失败：没有中期库就没有碎片可整理，放任保存会变成"开了但不生效"。
+        raise ValueError("启用后台记忆巩固前，请先启用中期记忆：没有碎片就没有可整理的东西。")
     return config.model_copy(update={
         "embedding": embedding,
         "agent": config.agent.model_copy(update={
@@ -401,6 +451,10 @@ def apply_runtime_preferences(config: AppConfig, values: RuntimePreferences) -> 
             "curated": config.memory.curated if values.curated is None else (
                 config.memory.curated.model_copy(update=values.curated.model_dump())
             ),
+            # 后台巩固（2026-11-02）：三项可改；两个盘点上限仍取启动配置（不进设置页）。
+            "consolidation": config.memory.consolidation if values.consolidation is None else (
+                config.memory.consolidation.model_copy(update=values.consolidation.model_dump())
+            ),
         }),
         # 联网检索：只覆盖设置页管的那几项，``enabled`` / 两个 ``*_api_key_env`` / ``user_agent``
         # 仍取启动配置——``enabled`` 随后由能力开关回灌（``apply_capability_gates``）。
@@ -410,6 +464,10 @@ def apply_runtime_preferences(config: AppConfig, values: RuntimePreferences) -> 
         # 项目规则（2026-10-26）：只覆盖三项可改的，``filenames`` / ``precedence`` 仍取启动配置。
         "agents": config.agents if values.agents is None else (
             config.agents.model_copy(update=values.agents.model_dump())
+        ),
+        # 文件改动账本（2026-10-29）：三项全是可改的，没有"仍取启动配置"的字段。
+        "file_changes": config.file_changes if values.file_changes is None else (
+            config.file_changes.model_copy(update=values.file_changes.model_dump())
         ),
     })
 

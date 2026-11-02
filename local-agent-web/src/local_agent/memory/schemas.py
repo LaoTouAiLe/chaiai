@@ -129,6 +129,10 @@ class MemoryReference(TypedDict):
     scope_key: str
     similarity: float
     score: float
+    #: 与**本轮提问**的词面相关度（0–1，架构 §10.3，2026-11-02 补充）。
+    #: 只有长期层会填：长期库没有向量，这一项是它唯一"随本轮问什么而变"的排序依据。
+    #: 中期层用真实余弦相似度（``similarity``），不填这个字段（缺省 = 不适用）。
+    relevance: NotRequired[float]
     importance: float
     confidence: float
     created_at: str
@@ -152,6 +156,13 @@ class LongTermReference(TypedDict):
     召回，映射成 ``scope='project'``。
     与中期 :class:`MemoryReference` 的合并（以及是否进 Prompt）留给 T18/T19，
     现在不把两种排序口径混成一种，免得后面分不开。
+
+    ``relevance``（2026-11-02）：**只有给了查询文本才有这个键**。它是本轮提问与这条记忆的
+    词面相关度（0–1），用来解决"库超过 ``top_k`` 条之后，每轮注入的永远是同一批高分事实、
+    与当前问题无关"的问题。它**不改 ``score`` 的口径**（``score`` 仍是
+    ``confidence × 有效重要度``）：两者是独立维度，``score`` 回答"这条有多可信"，
+    ``relevance`` 回答"这条跟这次问的相关吗"。查询为空或全部零命中时这个键不出现，
+    此时排序与加这个维度之前**逐条相同**。
     """
 
     memory_id: str
@@ -165,6 +176,8 @@ class LongTermReference(TypedDict):
     updated_at: str
     expires_at: str | None
     score: float
+    #: 词面相关度（0–1）；缺省表示"这次召回没有查询文本"，见类文档最后一段。
+    relevance: NotRequired[float]
     #: 内容来源可信级别（架构 §16.2）；必填——召回到的每一条都必须能回答"它能不能自动进 Prompt"。
     origin: Origin
 

@@ -129,6 +129,7 @@ from .common import (  # noqa: F401 - 保留公共辅助函数的导入入口
     _tool_payloads,
     current_task_scope,
 )
+from .files import _FILE_REFS_KEY
 from .images import (  # noqa: F401 - 图片子系统，拆分前同样定义在 nodes 里
     _IMAGE_OMITTED_NOTE,
     _IMAGE_REFS_KEY,
@@ -361,7 +362,10 @@ def prepare_context_node(
     # URL。base64 留在 State 里会让每条 Checkpoint 都复制一份几 MB 的图（实测单条 12 MB、
     # 单会话 1.4 GB）；引用只是一条短字符串，库不会随图膨胀。
     attachments = runtime.context.user_attachments
-    if user_input.strip() or attachments:
+    # `getattr` 而不是直接取：测试与旧调用点会用 SimpleNamespace 伪造运行上下文，
+    # 少一个字段不该让整个入口节点炸掉（与 `image_reader` 同一处理）。
+    files = getattr(runtime.context, "user_files", ())
+    if user_input.strip() or attachments or files:
         message_id = f"{run_id}:user"
         image_refs = [
             (
@@ -370,6 +374,17 @@ def prepare_context_node(
                 else {"kind": "attachment", "id": item.attachment_id, "media_type": item.media_type}
             )
             for item in attachments
+        ]
+        # 文档引用（2026-10-29）：只记路径与大小，出站前由 `graph.files` 物化成一段提示。
+        # **不能拼进 content**：那条内容就是页面气泡正文（投影读 `message.content`）。
+        file_refs = [
+            {
+                "path": str(item.path),
+                "name": item.name,
+                "size": item.byte_count,
+                "suffix": item.path.suffix.lower(),
+            }
+            for item in files
         ]
         # 侧聊首轮（§21.7）：上下文单独作一条 SystemMessage 插在提问之前。
         # **不能拼进 HumanMessage**——那条会被存成 `conversation_turns.question`，
@@ -381,7 +396,10 @@ def prepare_context_node(
             HumanMessage(
                 content=user_input,
                 id=message_id,
-                additional_kwargs=({_IMAGE_REFS_KEY: image_refs} if image_refs else {}),
+                additional_kwargs={
+                    **({_IMAGE_REFS_KEY: image_refs} if image_refs else {}),
+                    **({_FILE_REFS_KEY: file_refs} if file_refs else {}),
+                },
             ),
         ]
         if attachments:
@@ -395,6 +413,19 @@ def prepare_context_node(
                     "media_type": item.media_type,
                 }
                 for item in attachments
+            ]
+        if files:
+            # 文档引用同样另记一份（2026-10-29）：页面靠它画出"这条消息带了哪些文件"。
+            # 与图片那条分开存——两者在页面上是完全不同的渲染（缩略图 vs 文件块）。
+            update["user_file_refs"] = [
+                {
+                    "run_id": run_id,
+                    "message_id": message_id,
+                    "attachment_id": item.attachment_id,
+                    "name": item.name,
+                    "size_bytes": item.byte_count,
+                }
+                for item in files
             ]
     return update
 

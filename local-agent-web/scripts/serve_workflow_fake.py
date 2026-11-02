@@ -38,13 +38,15 @@ def main() -> None:
     os.environ["WORKFLOW_EVAL_UNUSED"] = "offline-placeholder"
     with TemporaryDirectory(prefix="chaiai-v07-t69-browser-") as directory:
         root = Path(directory)
+        os.environ["CHAIAI_HOME"] = str(root / "home")
         for path, content in (*READ_CASE.seeds, *CODE_CASE.seeds):
             target = root / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(content.encode())
         config = _config(root, "coder")
         config.workflows = WorkflowsConfig(enabled=True)
-        config.security.large_edit.max_changed_lines_without_approval = 1
+        config.security.require_approval.large_batch_edit = True
+        config.security.large_edit.max_files_without_approval = 0
         config.memory.short_term.enabled = True
         config.memory.short_term.path = str(root / "data" / "checkpoints.sqlite")
         runtime = open_runtime(config, base_dir=root, model=WorkflowModel(messages=iter([])),

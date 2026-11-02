@@ -1,16 +1,16 @@
 {
   "schema_version": 1,
-  "compiler": "zig 0.17.0",
+  "compiler": "zig 0.15.2",
   "files": {
-    "ipc-compat-x64.dll": "103f0b3f4d195cf182d4af7ec2a30769cd885e509fb11726f7f633c45b022a31",
-    "ipc-loader-x64.exe": "843292a6a7b1f38d262a15db3420aeb16d161b1efa5bc0c057d56ac3409783e5",
-    "ipc-compat-x86.dll": "9bb3a505bce5d760213af395381f7971bad0331b2075232e02d112a1e2a4a17b",
-    "ipc-loader-x86.exe": "b2ce04e795b61061c41d2abd9a0f6c983bcce3a99f7ef8b9699a8c7f26a29553"
+    "ipc-compat-x64.dll": "b07de251b269d0589dbd975b38e3db390cd6567ab72e8fe031584cd23237c8a8",
+    "ipc-loader-x64.exe": "2d3ae98eadd764455341b311f167df80d8f14d480aaa463faf62852b06a7a0dc",
+    "ipc-compat-x86.dll": "de641d96832d25ac9bf7357c72490845d541174a086318298159ab8488cb07f3",
+    "ipc-loader-x86.exe": "900f0a9e1fad53e5837dac275f4177b99921ea71b9f432a1bd43c75b635a7fa4"
   },
   "sources": {
-    "ipc_common.c": "5dfffe9df0e90bd8b191a29211b0c20b87d1ba5a092982dbbc25010aa81f4bdc",
+    "ipc_common.c": "de4911a37553dc427df1ee64cd516bde88a27747dbbe997518318473a19a3e94",
     "ipc_common.h": "3725c21a1a00b8cbdeb7d12ebb86668d2ad4926680209b8dbcdacc4a2a94c8f3",
-    "ipc_compat.c": "3bb2438971b81244a6e1e27c92e7a9fba8aaad8ac4d41ac85098b55137687b09",
+    "ipc_compat.c": "4031ddeca8a660dcc8f7d3b306ff7c12ec06498cf99f9d097c656773bef50810",
     "ipc_loader.c": "1552cdeafc0be0c344de4fdb06e1f815b5d26c90335ed8096499572fcd5ddb88"
   }
 }

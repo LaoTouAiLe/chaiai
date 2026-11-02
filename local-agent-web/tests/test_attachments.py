@@ -40,6 +40,30 @@ def _at(day: int) -> datetime:
     return datetime(2026, 10, day, 9, 0, tzinfo=datetime.now().astimezone().tzinfo)
 
 
+def _docx_bytes() -> bytes:
+    import io
+
+    import docx
+
+    buffer = io.BytesIO()
+    document = docx.Document()
+    document.add_paragraph("内容")
+    document.save(buffer)
+    return buffer.getvalue()
+
+
+def _xlsx_bytes() -> bytes:
+    import io
+
+    import openpyxl
+
+    buffer = io.BytesIO()
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["a", "b"])
+    workbook.save(buffer)
+    return buffer.getvalue()
+
+
 def test_layout_is_year_month_day_then_session(tmp_path: Path) -> None:
     """落盘位置：``<数据根>/attachments/年/月/日/会话/内容哈希.扩展名``（2026-10-26 起基准是数据根）。"""
     store = _store(tmp_path)
@@ -133,25 +157,77 @@ def test_read_round_trips_and_rejects_foreign_or_malformed_ids(tmp_path: Path) -
         store.read(SESSION, f"2026/10/17/{SESSION}/{'0' * 16}.png")
 
 
-def test_delete_session_removes_every_day(tmp_path: Path) -> None:
-    """会话删除时连带删它**所有日期**的附件；别的会话不动。"""
-    store = _store(tmp_path)
-    store.save(SESSION, PNG, now=_at(15))
-    store.save(SESSION, PNG, now=_at(16))
-    keep = store.save(OTHER_SESSION, PNG, now=_at(16))
-
-    removed = store.delete_session(SESSION)
-
-    assert removed == 2
-    assert store.count_on(SESSION, date(2026, 10, 15)) == 0
-    assert store.count_on(SESSION, date(2026, 10, 16)) == 0
-    assert store.read(OTHER_SESSION, keep.attachment_id).data == PNG
-
-
 def test_invalid_session_id_is_rejected(tmp_path: Path) -> None:
     """会话 id 也要卡形状：它会被拼进路径，不能带分隔符。"""
     with pytest.raises(AttachmentError, match="会话 id 不合法"):
         _store(tmp_path).save("../evil", PNG, now=_at(16))
+
+
+def test_document_is_stored_under_the_same_root(tmp_path: Path) -> None:
+    """文档与图片同一个根、同一套引用形状——只是不转 `data:` URL（2026-10-29）。"""
+    store = _store(tmp_path)
+
+    saved = store.save_document(SESSION, _docx_bytes(), suffix_hint="报告.docx")
+
+    assert saved.attachment_id.endswith(".docx")
+    assert saved.media_type.endswith("wordprocessingml.document")
+    assert (store.root / saved.attachment_id).is_file()
+
+
+def test_document_suffix_follows_the_magic_bytes(tmp_path: Path) -> None:
+    """扩展名叫 .xls、内容其实是 XLSX：落盘按**真实格式**命名。
+
+    否则 `read_file` 的魔数分流会拿着后缀给出错误的提示（这正是下载目录里的真实情况）。
+    """
+    store = _store(tmp_path)
+
+    saved = store.save_document(SESSION, _xlsx_bytes(), suffix_hint="数据.xls")
+
+    assert saved.attachment_id.endswith(".xlsx")
+
+
+def test_document_rejects_non_documents(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(AttachmentError) as excinfo:
+        store.save_document(SESSION, PNG, suffix_hint="图.png")
+
+    assert "受支持的文档" in str(excinfo.value)
+
+
+def test_document_rejects_oversized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from local_agent import attachments as module
+
+    monkeypatch.setattr(module, "MAX_UPLOAD_DOCUMENT_BYTES", 128)
+    store = _store(tmp_path)
+
+    with pytest.raises(AttachmentError) as excinfo:
+        store.save_document(SESSION, _docx_bytes(), suffix_hint="a.docx")
+
+    assert "太大" in str(excinfo.value)
+
+
+def test_document_path_is_scoped_to_its_session(tmp_path: Path) -> None:
+    """文档引用解析出的路径同样只认本会话（与图片读取同一条防线）。"""
+    store = _store(tmp_path)
+    saved = store.save_document(SESSION, _docx_bytes(), suffix_hint="a.docx")
+
+    assert store.resolve_path(SESSION, saved.attachment_id).is_file()
+
+    with pytest.raises(AttachmentError) as excinfo:
+        store.resolve_path(OTHER_SESSION, saved.attachment_id)
+    assert "不属于当前会话" in str(excinfo.value)
+
+
+def test_image_reader_refuses_documents(tmp_path: Path) -> None:
+    """文档引用不能走图片接口：前端会把 `<img>` 指向它，必须明确拒绝而不是回一堆二进制。"""
+    store = _store(tmp_path)
+    saved = store.save_document(SESSION, _docx_bytes(), suffix_hint="a.docx")
+
+    with pytest.raises(AttachmentError) as excinfo:
+        store.read(SESSION, saved.attachment_id)
+
+    assert "不是图片" in str(excinfo.value)
 
 
 def test_per_message_limit_is_a_shared_constant() -> None:

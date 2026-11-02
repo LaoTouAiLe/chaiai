@@ -23,7 +23,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AnyMessage, ToolCall
 from langgraph.graph.message import add_messages
 
-from local_agent.attachments import LoadedAttachment
+from local_agent.attachments import FileAttachment, LoadedAttachment
 from local_agent.cancellation import CancellationToken
 from local_agent.capabilities import DEFAULT_PROFILE, PROFILES
 from local_agent.config import RunConfig
@@ -316,6 +316,21 @@ class UserAttachmentRef(TypedDict):
     message_id: str
     attachment_id: str
     media_type: str
+
+
+class UserFileRef(TypedDict):
+    """随一条用户消息提交的一份**文档**的引用（2026-10-29）。
+
+    与 :class:`UserAttachmentRef` 分开记：图片那条记的是"页面去哪取缩略图"，
+    文档这条记的是"这条消息带了哪些文件"（名字与体积，页面画附件块用）。
+    **都不回磁盘路径**——路径只给模型（写在出站提示里），页面不需要也不知道。
+    """
+
+    run_id: str
+    message_id: str
+    attachment_id: str
+    name: str
+    size_bytes: int
 
 
 class CompactionEvent(TypedDict):
@@ -617,6 +632,9 @@ class AgentState(TypedDict, total=False):
     #: 随用户消息提交的图片引用（累积；2026-10-16）。见 :class:`UserAttachmentRef`。
     #: 消息内容块里只有 `data:` URL ✗，所以"这条消息带了哪张图"必须另外记一份，页面才画得出缩略图 ✔。
     user_attachment_refs: Annotated[list[UserAttachmentRef], operator.add]
+    #: 随用户消息提交的**文档**引用（累积；2026-10-29）。与图片那条同一条口径：
+    #: 只记引用与展示信息，不记路径、不记字节。
+    user_file_refs: Annotated[list[UserFileRef], operator.add]
     #: 压力阶段保存的工具模型正文，按消息身份及原文指纹定位，跨轮合并。
     tool_output_overrides: Annotated[dict[str, str], merge_mapping]
 
@@ -694,6 +712,10 @@ class RuntimeContext:
     #: 为什么在运行期上下文而不是在 State 里：它是一次运行的**临时输入**，State 会进 Checkpoint。
     #: 2026-10-20 起 State 只存引用（短字符串），字节在文件系统/对象存储里，出站前才物化。
     user_attachments: tuple[LoadedAttachment, ...] = ()
+    #: 这次运行要交给模型的**文档**（2026-10-29）：只有绝对路径，没有字节。
+    #: 入口节点把它们写成一条「可读文件」提示进消息（不转 content block：端点不保证
+    #: 支持文档输入），模型自己用 `read_file` 读。
+    user_files: tuple[FileAttachment, ...] = ()
     #: 图片引用的读取器（2026-10-20）：出站前把引用物化成请求里能用的形态。
     #: 入参是引用（`attachment` / `file` / `url`），返回 `(字节, media_type)`、
     #: 或一个 http(s) URL 字符串（对象存储：不必下载）；读不到返回 ``None``（调用方用占位）。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,6 +64,7 @@ def main() -> None:
         args.temp_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="chaiai-browser-test-", dir=args.temp_root) as temporary:
         root = Path(temporary)
+        os.environ["CHAIAI_HOME"] = str(root / "home")
         config = AppConfig()
         config.workspace.root = str(root)
         config.memory.short_term.enabled = True

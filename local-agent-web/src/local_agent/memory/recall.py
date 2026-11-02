@@ -24,13 +24,23 @@
 在这里丢掉。``expires_at`` 存在但解析不了时**按已过期处理**——宁可少召回，也不把"读不出有效期"
 的记忆注入 Prompt（架构 §11.6：已删除/过期的记忆不得再召回）。
 
-长期（结构化）记忆（T15，架构 §10.3）与中期不同：事实**没有向量**，因此
-:func:`recall_long_term` 不接收查询文本、也没有相似度下限。它按作用域（事实走四种作用域，
-任务结论只按当前项目）过滤后，用 ``confidence × importance`` 排序；任务结论没有重要度字段，
-按**有效重要度 1.0** 处理（分数就等于 ``confidence``）。
+长期（结构化）记忆（T15，架构 §10.3）与中期不同：事实**没有向量**，因此没有相似度下限。
+它按作用域（事实走四种作用域，任务结论只按当前项目）过滤后，用 ``confidence × importance``
+算出 ``score``；任务结论没有重要度字段，按**有效重要度 1.0** 处理（分数就等于 ``confidence``）。
 ``memory.long_term`` 的 ``confidence_threshold`` / ``importance_threshold`` **只做召回过滤**，
 事实同时检查置信度与有效重要度；任务结论仅检查置信度，不受重要度阈值限制。
 不影响写入，也不参与冲突裁决。
+
+**词面相关度 ``relevance``（2026-11-02）**：``score`` 只回答"这条有多可信"，它与**本轮问了
+什么**无关——库一旦超过 ``top_k`` 条，注入的就永远是同一批高分事实。所以召回接受一个可选的
+``query``，按"提问词项是否出现在实体名 / 事实键 / 取值"算一个 0–1 的相关度，排序改为
+``relevance`` 优先、``score`` 次之。三条硬约束：
+
+- ``score`` 口径一个字不改（既有断言与页面展示都依赖它），相关度是**另一个维度**；
+- **全零退化为旧排序**：所有候选都没命中任何一个词项时，结果与加这个维度之前逐条相同，
+  所以"按我的习惯来"这类与记忆毫无字面重叠的提问不会反而丢记忆；
+- 只有词面重叠能帮上忙：中文提问对英文取值（"用什么编辑器" vs ``editor: vscode``）
+  匹配不上，那是 embedding 的活，本维度不假装能解决。
 
 **自动老化在召回时实时生效**（T18 裁定）：``aging_enabled=true`` 时，超过 ``forget_after_days``
 的事实当场排除，其余事实用线性衰减后的**有效重要度**做阈值判定、返回字段与排序分数。只在
@@ -41,6 +51,9 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -67,6 +80,8 @@ from local_agent.scope import (
     visible_scope_keys,
 )
 
+logger = logging.getLogger(__name__)
+
 #: 精确过滤之后作用域必然匹配，系数恒为 1.0（保留项，见模块 docstring）。
 SCOPE_MATCH_FACTOR = 1.0
 
@@ -78,6 +93,20 @@ OVERFETCH_FACTOR = 4
 
 #: 候选条数硬上限，避免一次查询拉回过多记录。
 MAX_CANDIDATES = 200
+
+#: 词面相关度最多用多少个查询词项：长提问会稀释权重，前几个已经覆盖真正想找的东西。
+MAX_RELEVANCE_TERMS = 8
+
+#: 只由这些虚字组成的 CJK 二元组（"我的" / "什么" / "怎么"…）不当作词项：
+#: 它们几乎每句都有，计入相关度只会放大噪声。
+_CJK_FUNCTION_CHARS = frozenset(
+    "的了是我你他她它们吗呢吧啊和与或有没不就都也还要这那个什么怎样如何请帮看下一会能可以把被给让对从到说做用"
+)
+
+#: 命中"身份"（实体名 / 事实键 / 任务标题）与命中"取值"的权重不同：
+#: 前者更能说明"在讲哪件事"，后者常常只是碰巧同字。
+_IDENTITY_HIT_WEIGHT = 1.0
+_VALUE_HIT_WEIGHT = 0.6
 
 #: 元数据缺失时的默认重要度/置信度。
 _DEFAULT_VALUE = 0.5
@@ -207,6 +236,7 @@ def recall_long_term(
     user_id: str | None = None,
     top_k: int = DEFAULT_TOP_K,
     now: datetime | None = None,
+    query: str = "",
 ) -> list[LongTermReference]:
     """按作用域召回长期事实与任务结论，返回按分数倒序的引用列表。
 
@@ -221,6 +251,8 @@ def recall_long_term(
         user_id: 逻辑用户；``None`` 时按 ``local`` 处理。
         top_k: 结果条数上限（与中期结果合并进 Prompt 时由调用方决定）。
         now: 当前时间，默认取 UTC 现在；测试可注入。
+        query: 本轮提问。给了它就把词面相关度 ``relevance`` 作为**第一排序键**（模块 docstring
+            的三条约束）；空串或全部零命中时，结果与引入相关度之前**逐条相同**。
 
     Returns:
         当前轮可注入 Prompt 的长期记忆引用；没有可用结果时返回空列表。
@@ -228,6 +260,7 @@ def recall_long_term(
     if top_k <= 0:
         return []
     moment = _moment(now)
+    terms = _query_terms(query)
     project_scope = project_id or project_id_for(workspace_root)
     scope_keys = visible_scope_keys(
         user_id=user_id, project_id=project_scope, workspace_root=workspace_root
@@ -241,13 +274,17 @@ def recall_long_term(
             continue
         importance = effective_importance(fact, config=config, now=moment)
         if _long_term_usable(fact.confidence, importance, config):
-            references.append(_fact_reference(entity, fact, importance=importance))
+            references.append(
+                _fact_reference(entity, fact, importance=importance, terms=terms)
+            )
     for conclusion in store.list_task_conclusions(project_scope=project_scope):
         if not is_auto_injectable(conclusion.origin):
             continue
         if conclusion.confidence >= config.confidence_threshold:
-            references.append(_conclusion_reference(conclusion, project_scope))
-    return _top_long_term(references, top_k)
+            references.append(_conclusion_reference(conclusion, project_scope, terms=terms))
+    selected = _top_long_term(references, top_k)
+    _touch_accessed(store, selected, moment)
+    return selected
 
 
 def _long_term_usable(
@@ -261,14 +298,21 @@ def _long_term_usable(
 
 
 def _fact_reference(
-    entity: EntityRecord, fact: FactRecord, *, importance: float
+    entity: EntityRecord,
+    fact: FactRecord,
+    *,
+    importance: float,
+    terms: Sequence[str] = (),
 ) -> LongTermReference:
     """事实 → 引用：内容带上实体名与键，否则只看值判断不出说的是什么。
 
     ``importance`` 是**有效重要度**（老化后），不是库里的原值：阈值、返回字段与排序分数都用它，
     否则超期事实会以满分被召回。
+
+    ``terms`` 非空时额外算出 ``relevance``（本轮提问的词面相关度）；为空时**不写这个键**，
+    返回对象与引入相关度之前逐键相同。
     """
-    return LongTermReference(
+    reference = LongTermReference(
         memory_id=fact.id,
         kind="fact",
         content=f"{entity.name} 的 {fact.key}：{_value_text(fact.value_json)}",
@@ -282,13 +326,20 @@ def _fact_reference(
         score=round(fact.confidence * importance, 6),
         origin=fact.origin,
     )
+    if terms:
+        relevance = _fact_relevance(entity, fact, terms)
+        # 零命中不写这个键：``0`` 与"没有这一维"等价，少一个键就少一种"以为命中了"的误读，
+        # 而且"全零退化"时返回对象与引入相关度之前逐键相同。
+        if relevance > 0.0:
+            reference["relevance"] = relevance
+    return reference
 
 
 def _conclusion_reference(
-    conclusion: TaskConclusionRecord, project_scope: str
+    conclusion: TaskConclusionRecord, project_scope: str, *, terms: Sequence[str] = ()
 ) -> LongTermReference:
     """任务结论 → 引用：没有 ``importance`` 列，按有效重要度 1.0（分数即 ``confidence``）。"""
-    return LongTermReference(
+    reference = LongTermReference(
         memory_id=conclusion.id,
         kind="task_conclusion",
         content=f"{conclusion.task_title}：{conclusion.conclusion}",
@@ -302,6 +353,11 @@ def _conclusion_reference(
         score=round(conclusion.confidence * CONCLUSION_IMPORTANCE, 6),
         origin=conclusion.origin,
     )
+    if terms:
+        relevance = _conclusion_relevance(conclusion, terms)
+        if relevance > 0.0:
+            reference["relevance"] = relevance
+    return reference
 
 
 def as_memory_reference(reference: LongTermReference) -> MemoryReference:
@@ -309,8 +365,10 @@ def as_memory_reference(reference: LongTermReference) -> MemoryReference:
 
     长期库没有向量，``similarity`` 位置放它的综合分（``confidence × importance``，任务结论即
     ``confidence``）——只用于排序与展示，**不是语义相似度**（见 ``schemas.MemoryReference``）。
+    词面相关度 ``relevance`` 原样透传：它是独立维度，**不写进 ``similarity``**，否则页面会把
+    "跟这次问的相关"读成"这条有多可信"。
     """
-    return MemoryReference(
+    mapped = MemoryReference(
         memory_id=reference["memory_id"],
         content=reference["content"],
         scope=reference["scope"],
@@ -325,17 +383,108 @@ def as_memory_reference(reference: LongTermReference) -> MemoryReference:
         kind="long_term_fact" if reference["kind"] == "fact" else "task_conclusion",
         origin=reference["origin"],
     )
+    if "relevance" in reference:
+        mapped["relevance"] = reference["relevance"]
+    return mapped
 
 
 def _top_long_term(
     references: list[LongTermReference], top_k: int
 ) -> list[LongTermReference]:
-    """去重后按分数倒序取前 ``top_k`` 条（``memory_refs`` 需去重）。"""
+    """去重后排序取前 ``top_k`` 条（``memory_refs`` 需去重）。
+
+    有词面相关度时按 ``relevance`` 优先、``score`` 次之；**全部零命中**（或本次召回没给
+    ``query``）时退回 ``score`` 排序——与引入相关度之前逐条相同，这是模块 docstring 里的
+    第二条硬约束。
+    """
     unique: dict[str, LongTermReference] = {}
     for reference in references:
         unique.setdefault(reference["memory_id"], reference)
-    ordered = sorted(unique.values(), key=lambda item: (-item["score"], item["memory_id"]))
+    values = list(unique.values())
+    if any(float(item.get("relevance", 0.0)) > 0.0 for item in values):
+        ordered = sorted(
+            values,
+            key=lambda item: (
+                -float(item.get("relevance", 0.0)),
+                -item["score"],
+                item["memory_id"],
+            ),
+        )
+    else:
+        ordered = sorted(values, key=lambda item: (-item["score"], item["memory_id"]))
     return ordered[:top_k]
+
+
+def _touch_accessed(
+    store: LongTermStore, selected: Sequence[LongTermReference], now: datetime
+) -> None:
+    """把这一轮真正注入 Prompt 的事实标成"刚用过"（best-effort）。
+
+    只标 ``kind == "fact"``：``task_conclusions`` 没有说话人访问时间这一列。
+    失败只记日志——访问时间影响的是**未来的**淘汰顺序，不该让这一次召回失败。
+    """
+    ids = [item["memory_id"] for item in selected if item["kind"] == "fact"]
+    if not ids:
+        return
+    try:
+        store.touch_accessed(ids, now=now)
+    except Exception:
+        logger.exception("更新记忆访问时间失败（不影响本轮召回）")
+
+
+def _query_terms(query: str) -> tuple[str, ...]:
+    """把提问切成用于词面相关度的词项（ASCII 词 + CJK 二元组，去虚字、去重、限量）。
+
+    为什么用二元组而不是整段中文：中文没有空格边界，整句当词项几乎命不中；二元组是
+    Lucene CJKAnalyzer 的同一取法（本项目的会话检索也用它，见 ``persistence/turn_index.py``），
+    能在不引入分词依赖的前提下覆盖多数重叠。只由虚字组成的二元组被丢掉——它们几乎每句都有。
+    """
+    text = (query or "").strip().lower()
+    if not text:
+        return ()
+    terms: list[str] = []
+    for token in re.findall(r"[0-9a-z][0-9a-z_.\-]*", text):
+        if len(token) >= 2:
+            terms.append(token)
+    for run in re.findall(r"[\u4e00-\u9fff]+", text):
+        if len(run) == 1:
+            if run not in _CJK_FUNCTION_CHARS:
+                terms.append(run)
+            continue
+        for index in range(len(run) - 1):
+            gram = run[index : index + 2]
+            if gram[0] in _CJK_FUNCTION_CHARS and gram[1] in _CJK_FUNCTION_CHARS:
+                continue
+            terms.append(gram)
+    return tuple(dict.fromkeys(terms))[:MAX_RELEVANCE_TERMS]
+
+
+def _fact_relevance(entity: EntityRecord, fact: FactRecord, terms: Sequence[str]) -> float:
+    """这条事实与本轮提问的词面相关度（0–1，口径见模块 docstring）。"""
+    identity = _hits(f"{entity.name}\n{fact.key}", terms)
+    value = _hits(_value_text(fact.value_json), terms) - identity
+    return _relevance_score(identity, value, len(terms))
+
+
+def _conclusion_relevance(conclusion: TaskConclusionRecord, terms: Sequence[str]) -> float:
+    """这条任务结论与本轮提问的词面相关度；标题比正文更能说明"在讲哪件事"。"""
+    identity = _hits(conclusion.task_title, terms)
+    body = _hits(conclusion.conclusion, terms) - identity
+    return _relevance_score(identity, body, len(terms))
+
+
+def _hits(text: str, terms: Sequence[str]) -> set[str]:
+    """哪些词项出现在这段文本里（大小写不敏感；词项本身已小写）。"""
+    lowered = text.lower()
+    return {term for term in terms if term in lowered}
+
+
+def _relevance_score(identity: set[str], value: set[str], total: int) -> float:
+    """身份命中按 1.0、取值命中按 0.6 累计，除以词项总数并截到 1.0。"""
+    if total <= 0:
+        return 0.0
+    raw = len(identity) * _IDENTITY_HIT_WEIGHT + len(value) * _VALUE_HIT_WEIGHT
+    return min(1.0, raw / total)
 
 
 def _value_text(value_json: str) -> str:

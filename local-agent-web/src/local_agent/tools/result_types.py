@@ -65,6 +65,18 @@ class ReadFileResult(BaseModel):
     partial_lines: list[int] = Field(default_factory=list)
     start_char: int = 0
     next_start_char: int | None = None
+    #: 本次内容是**从文档提取**的（2026-10-29）：值为格式标签 `docx`/`xlsx`/`pptx`/`pdf`。
+    #: `None` 表示按文本原样读取。
+    #:
+    #: 为什么必须让模型看见：提取会丢格式，而且**行号指提取后文本的行号**、不是原文件的行号。
+    #: 不说明这件事，模型会拿这些行号去 edit_file 改原文件——那条路径会拒绝二进制，
+    #: 但它仍会先把这当成一次失败去重试。
+    extracted: str | None = None
+    #: 文档总页数 / 幻灯片数（`extracted` 非空时才有意义）。
+    page_count: int = 0
+    #: 本次返回的页区间（1 基，含）。
+    first_page: int = 0
+    last_page: int = 0
 
 
 #: ``grep`` 的输出模式：正文命中 / 只列文件名 / 只给计数。

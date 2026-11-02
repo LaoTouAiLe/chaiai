@@ -43,12 +43,16 @@ SCHEMA_VERSION = 1
 #: 否则一次无害的字段重排就会让导出文件整体 diff。
 GROUP_ORDER: tuple[str, ...] = (
     "execution",
+    # 文件改动账本（2026-10-29）：紧随「任务执行」——同属"跑起来之后怎么记"的一组。
+    "file_changes",
     "agents",
     "retrieval",
     "memory",
     "medium_term",
     # 常驻记忆（2026-10-27）：排在中期之后、压缩之前——按"必到 → 按需 → 压缩"的阅读顺序。
     "curated",
+    # 后台巩固（2026-11-02）：紧跟在常驻记忆之后，同属"记忆怎么维护"这件事。
+    "consolidation",
     "compression",
     "embedding",
     "web_access",

@@ -154,21 +154,13 @@ def plan_writes(
     note: str | None = None
     if candidate.memory_type == "entity_fact" and payload is not None and not subject:
         # 模型经常漏填 subject（真实模型实证：用户说"请记住：我个人习惯用 pytest"，模型给出了
-        # 正确的 entity_type/key/value 却没给 subject），而 user / project 的实体名在本机是确定的：
-        # 为这点信息拒绝整条记忆，用户会觉得"明明说了记住却没记住"。
+        # 正确的 entity_type/key/value 却没给 subject）。subject 只是**展示名**，能推导就补上；
+        # 推不出来时下面用作用域键兜底——为这点信息拒绝整条记忆，用户会觉得"明明说了记住"。
         derived = _derive_subject(
             entity_type=payload.entity_type, workspace_root=workspace_root, user_id=user_id
         )
-        if derived is None:
-            return RejectedCandidate(
-                candidate=candidate,
-                reason=(
-                    "entity_fact 缺少 subject（实体名），且 entity_type "
-                    f"{payload.entity_type!r} 推导不出实体名，请在候选里给出 subject"
-                ),
-            )
-        subject, note = derived
-    effective = replace(candidate, subject=subject) if subject else candidate
+        if derived is not None:
+            subject, note = derived
     resolved = _resolve_scope(
         payload=payload,
         workspace_root=workspace_root,
@@ -182,7 +174,14 @@ def plan_writes(
             reason="无法确定 user/project 作用域（自动写入不写 global），本轮不写入记忆",
         )
     scope, scope_key = resolved
+    if payload is not None and not subject:
+        subject = scope_key
+        note = _append_note(note, f"实体名按作用域键兜底为 {scope_key!r}")
+    effective = replace(candidate, subject=subject) if subject else candidate
     if payload is not None:
+        # ``subject`` 是**展示名**，不参与身份判定——身份是
+        # ``(entity_type, scope, scope_key)``（见 ``long_term._find_entity_identity``）。
+        # 所以模型换一种叫法只是换个显示，不会再分裂出第二个实体（2026-11-02 实测过这次分裂）。
         return (
             WriteIntent(
                 candidate=effective,
@@ -206,6 +205,11 @@ def plan_writes(
             )
         )
     return tuple(intents)
+
+
+def _append_note(existing: str | None, extra: str) -> str:
+    """把说明追加到 note（多个原因用分号连起来，决策轨迹里能看出全部动作）。"""
+    return f"{existing}；{extra}" if existing else extra
 
 
 #: ``entity_fact`` 缺少 ``subject`` 时可按 ``entity_type`` 推导实体名的类型。

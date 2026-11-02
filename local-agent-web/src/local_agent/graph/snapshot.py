@@ -60,6 +60,7 @@ from local_agent.memory.short_term import (
     select_prompt_window,
 )
 
+from .files import materialize_message_files
 from .images import _resolve_message_images
 from .names import COMPRESSION_NODE, RECALL_MEMORY, RETRIEVE_CODE_NODE
 
@@ -133,7 +134,10 @@ def _prompt_window(
     )
     # 出站前才物化图片（2026-10-20）：State 与 Checkpoint 里始终只有引用；最近 K 轮之外的图
     # 换成文本占位，工具结果里的图（旧数据）一律剥离——端点只允许 user 消息带图。
-    return replace(window, messages=_resolve_message_images(projected, context))
+    resolved = _resolve_message_images(projected, context)
+    # 文档引用同样只在出站副本上物化（2026-10-29）：变成消息末尾一段
+    # 「文件路径 + 怎么读」的提示，模型据此自己调用 read_file。
+    return replace(window, messages=[materialize_message_files(item) for item in resolved])
 
 
 def _covered_messages(state: AgentState) -> int:

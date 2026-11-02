@@ -66,6 +66,7 @@ from local_agent.application.models import (
     TurnFinalState,
     TurnRecordView,
     TurnUsageView,
+    UserFileView,
     UserMessageView,
     WebSourceView,
     WorkflowChildView,
@@ -439,6 +440,20 @@ def project_messages_view(state: Mapping[str, Any], *, secrets: Iterable[str] = 
         attachment_id = str(_evt_field(ref, "attachment_id") or "")
         if message_key and attachment_id:
             attachments_by_message.setdefault(message_key, []).append(attachment_id)
+    # 文档同理（2026-10-29）：出站提示只给模型，页面要知道"这条消息带了哪些文件"必须看这里。
+    # 与图片分开收集——页面上是两种完全不同的渲染。
+    files_by_message: dict[str, list[UserFileView]] = {}
+    for ref in state.get("user_file_refs") or []:
+        message_key = str(_evt_field(ref, "message_id") or "")
+        attachment_id = str(_evt_field(ref, "attachment_id") or "")
+        if not (message_key and attachment_id):
+            continue
+        name = str(_evt_field(ref, "name") or "") or attachment_id
+        raw_size = _evt_field(ref, "size_bytes")
+        size = raw_size if isinstance(raw_size, int) and not isinstance(raw_size, bool) else 0
+        files_by_message.setdefault(message_key, []).append(
+            UserFileView(attachment_id=attachment_id, name=name, size_bytes=max(size, 0))
+        )
     overrides = state.get("reply_overrides")
     projected = project_messages(messages, overrides if isinstance(overrides, Mapping) else {})
 
@@ -465,6 +480,8 @@ def project_messages_view(state: Mapping[str, Any], *, secrets: Iterable[str] = 
                     text=sanitize_text(_text_of(message), secrets),
                     # 这条消息带的图片引用（只回引用；页面自己按会话去取缩略图）。
                     attachments=attachments_by_message.get(message_id(message), []),
+                    # 这条消息带的文档（2026-10-29）：只有名字与体积，没有磁盘路径。
+                    files=files_by_message.get(message_id(message), []),
                     created_at=None,
                 )
             )
@@ -792,6 +809,12 @@ def _tool_outcome(
         clipped = False
         if payload.get("is_binary"):
             summary = f"{summary} · 二进制，未展示正文"
+            # 拒读的二进制（旧版 .doc/.xls、非文档 ZIP）**原因与替代做法只在 note 里**，
+            # 而读取卡片不渲染 summary（前端 `adapters.ts` 的 `case 'read'` 只认
+            # path/lines/total）。不把 note 放进正文，用户点开看到的就是一片空白，
+            # 不知道文件为什么读不出来（2026-10-29 复查）。
+            text = sanitize_text(note, secrets) if note else None
+            clipped = False
         else:
             text, clipped = _bounded(sanitize_text(str(payload.get("content") or ""), secrets), TOOL_DETAIL_TEXT_CHARS)
             text = text or None

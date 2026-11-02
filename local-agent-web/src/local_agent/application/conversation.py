@@ -191,8 +191,24 @@ def sync(service: ApplicationService, session: Session) -> None:
     if sink is not None and sink._run_id is not None and proj.current_run_id(view.values) != sink._run_id:
         return
     rows = rows_from_view(service, session, view, branch.branch_id)
-    service._sqlite_access(lambda: service._conversations.sync(
-        session.session_id, branch.branch_id, rows, view.checkpoint_id))
+
+    def persist() -> None:
+        service._conversations.sync(
+            session.session_id, branch.branch_id, rows, view.checkpoint_id
+        )
+        # 用量账（v18，2026-11-02）：只写**本轮**的记录。`model_call_records` 跨轮累积，
+        # 整批写会在每次流式更新时对着几万行做一次主键探测；而别的轮次在它们自己结束时就写过了。
+        # 幂等由主键保证（`INSERT OR IGNORE`），所以重复 sync 不会把用量算两遍。
+        run_id = proj.current_run_id(view.values)
+        if run_id:
+            service._sessions.append_usage(
+                session.session_id,
+                session.workspace_root,
+                [record for record in view.values.get("model_call_records") or []
+                 if getattr(record, "run_id", "") == run_id],
+            )
+
+    service._sqlite_access(persist)
 
 
 def turn_snapshot(service: ApplicationService, session: Session, turn_id: str, *,

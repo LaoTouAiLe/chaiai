@@ -66,8 +66,4 @@ def test_rejects_a_non_image_before_uploading() -> None:
     assert captured == []
 
 
-def test_delete_session_never_touches_objects() -> None:
-    """对象存储后端不删对象：历史会话可能还引用着它们，生命周期交给桶策略。"""
-    _captured, backend = _backend()
 
-    assert backend.delete_session(SESSION) == 0

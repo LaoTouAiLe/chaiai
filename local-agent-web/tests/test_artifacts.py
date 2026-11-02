@@ -21,8 +21,10 @@ from local_agent.application.artifacts import artifacts, preview
 def _clear_artifact_cache():
     """每个用例前后清缓存：`id(service)` 会被复用，不清就会串到上一个用例的数据。"""
     artifacts_module._CACHE.clear()
+    artifacts_module._PREVIEW_DOC_CACHE.clear()
     yield
     artifacts_module._CACHE.clear()
+    artifacts_module._PREVIEW_DOC_CACHE.clear()
 
 
 def _session(session_id: str, *, title: str = "", kind: str = "interactive",
@@ -370,6 +372,81 @@ def test_binary_files_are_not_decoded_as_text(tmp_path: Path) -> None:
     assert view.kind == "binary"
     assert view.suffix == "docx"
     assert view.text is None, "二进制不得返回任何文本内容"
+
+
+def test_document_artifacts_preview_as_extracted_text(tmp_path: Path) -> None:
+    """docx / xlsx / pdf 现在能预览（2026-10-29）：返回提取文本，不再是一句"不支持"。"""
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph("第一段")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "姓名"
+    table.cell(0, 1).text = "张三"
+    document.save(str(tmp_path / "报告.docx"))
+    service = _service(sessions=[], root=tmp_path)
+
+    view = preview(service, path="报告.docx")
+
+    assert view.kind == "text"
+    assert "第一段" in (view.text or "")
+    assert "| 姓名 | 张三 |" in (view.text or "")
+
+
+def test_misnamed_xls_previews_as_text(tmp_path: Path) -> None:
+    """扩展名叫 .xls、内容其实是 XLSX：预览按魔数判，能读（实测存在的真实情况）。"""
+    import openpyxl
+
+    workbook = openpyxl.Workbook()
+    workbook.active.append(["名称", "编码"])
+    workbook.active.append(["中通", "zhongtong"])
+    real = tmp_path / "real.xlsx"
+    workbook.save(str(real))
+    (tmp_path / "数据.xls").write_bytes(real.read_bytes())
+    service = _service(sessions=[], root=tmp_path)
+
+    view = preview(service, path="数据.xls")
+
+    assert view.kind == "text"
+    assert "zhongtong" in (view.text or "")
+
+
+def test_legacy_doc_still_reports_binary(tmp_path: Path) -> None:
+    """真 OLE 老格式仍然明说"不支持预览"，不能假装读出来了。"""
+    (tmp_path / "old.doc").write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\x00" * 64)
+    service = _service(sessions=[], root=tmp_path)
+
+    view = preview(service, path="old.doc")
+
+    assert view.kind == "binary"
+    assert view.suffix == "doc"
+
+
+def test_document_preview_is_cached_between_requests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """同一个文件反复点开不重复解析（预览是同步 HTTP，0.5 秒一次体感很差）。"""
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph("缓存内容")
+    document.save(str(tmp_path / "c.docx"))
+    service = _service(sessions=[], root=tmp_path)
+
+    calls: list[str] = []
+    real = artifacts_module.extract_document
+
+    def counting(source, **kwargs):
+        calls.append(str(source.path))
+        return real(source, **kwargs)
+
+    monkeypatch.setattr(artifacts_module, "extract_document", counting)
+
+    first = preview(service, path="c.docx")
+    second = preview(service, path="c.docx")
+
+    assert first.kind == second.kind == "text"
+    assert len(calls) == 1, "第二次预览应当命中缓存"
 
 
 def test_plain_text_is_still_text(tmp_path: Path) -> None:

@@ -1489,6 +1489,28 @@ def test_binary_read_shows_no_body() -> None:
     assert "二进制" in (tool.outcome.summary or "")
 
 
+def test_rejected_binary_shows_its_reason_as_body() -> None:
+    """老格式 .doc 被拒时原因只在 note 里（2026-10-29）。
+
+    读取卡片**不渲染 summary**（前端 `adapters.ts` 的 `case 'read'` 只用 path/lines/total），
+    不把 note 放进正文，用户看到的就是一张空白卡片，不知道文件为什么读不出来。
+    """
+    tool = _only_tool(
+        _tool_state(
+            "read_file",
+            {
+                "path": "old.doc", "content": "", "line_count": 0, "truncated": False,
+                "is_binary": True,
+                "note": "这是旧版 Office 二进制格式（.doc / .xls / .ppt），请另存为 .docx 后再读。",
+            },
+        )
+    )
+
+    assert tool.outcome is not None
+    assert tool.outcome.text is not None
+    assert "另存为" in tool.outcome.text
+
+
 def test_outcome_text_and_target_are_sanitized() -> None:
     secret = "sk-" + "a" * 40
     tool = _only_tool(

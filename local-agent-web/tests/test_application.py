@@ -722,7 +722,7 @@ def test_stale_executing_without_proof_requires_human_review(
         request_id="req-x",
         session_id=session_id,
         operation="submit_message",
-        arguments_digest=app_service._digest("submit_message", session_id, text),
+        arguments_digest=_submit_digest(session_id, text),
     )
     before = _business_rows(harness)
 
@@ -1144,13 +1144,25 @@ def test_approval_events_are_projected(tmp_path: Path, model_factory: ModelFacto
 # ---- 恢复口径的回归（复审反例）----------------------------------------------
 
 
+def _submit_digest(session_id: str, text: str) -> str:
+    """``submit_message`` 的幂等摘要；**只在这里构造**，口径再变也只改一处。
+
+    2026-10-29 起 ``submit_message`` 把文档引用也纳入指纹（``service.py`` 里那段
+    ``_digest(OPERATION_SUBMIT, session_id, text, *attachments, "files", ...)``）：
+    即使没有附件和多文件，摘要里也多出 ``"files"`` 这一段。测试若仍按旧口径造台账行，
+    同一句话算出来的摘要对不上，会被判成"同 id 不同参数" → 收到 ``IDEMPOTENCY_CONFLICT``
+    而不是预期的 ``RECOVERY_REQUIRED``（2026-10-30 全量里那三条失败就是这个）。
+    """
+    return app_service._digest("submit_message", session_id, text, "files")
+
+
 def _register_only(harness: Harness, *, request_id: str, text: str, session_id: str) -> None:
     """模拟"请求刚登记、还没来得及绑定 run 就崩了"。"""
     harness.ledger.start(
         request_id=request_id,
         session_id=session_id,
         operation="submit_message",
-        arguments_digest=app_service._digest("submit_message", session_id, text),
+        arguments_digest=_submit_digest(session_id, text),
     )
 
 

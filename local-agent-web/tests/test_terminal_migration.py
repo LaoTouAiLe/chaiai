@@ -8,8 +8,15 @@ from local_agent.persistence.terminal_audit import TerminalAudit
 
 
 def _v13(path: Path) -> sqlite3.Connection:
+    """停在 v13。
+
+    **按版本号筛，不用 `[:-1]`**：切片依赖"v14 是最后一个迁移"，v15 一加进来它就把 v14 也
+    应用了，这个文件全部用例会一起失败（2026-10-29 实测）。按 `<= 13` 筛则与后续版本无关。
+    """
     connection = sqlite3.connect(path)
-    migrations._apply(connection, migrations._CHAT_MIGRATIONS[:-1])
+    migrations._apply(
+        connection, tuple(item for item in migrations._CHAT_MIGRATIONS if item[0] <= 13)
+    )
     return connection
 
 
@@ -23,11 +30,11 @@ def test_v14_accepts_existing_compatible_table_without_losing_audit_rows(tmp_pat
                status="rejected")
     before = connection.execute("SELECT * FROM terminal_audit").fetchall()
     assert migrations.current_version(connection) == 13
-    assert migrations.apply_migrations(connection) == 14
+    assert migrations.apply_migrations(connection) == migrations.CHAT_SCHEMA_VERSION
     assert connection.execute("SELECT * FROM terminal_audit").fetchall() == before
     connection.close()
     with sqlite3.connect(path) as reopened:
-        assert migrations.apply_migrations(reopened) == 14
+        assert migrations.apply_migrations(reopened) == migrations.CHAT_SCHEMA_VERSION
         assert reopened.execute("SELECT * FROM terminal_audit").fetchall() == before
         assert reopened.execute("SELECT COUNT(*) FROM schema_migrations WHERE version=14").fetchone() == (1,)
 
@@ -48,7 +55,7 @@ def test_v14_rolls_back_schema_and_version_when_registration_fails(
     assert ("terminal_audit" in migrations.table_names(connection)) is existing
     connection.execute("DROP TRIGGER fail_v14")
     connection.commit()
-    assert migrations.apply_migrations(connection) == 14
+    assert migrations.apply_migrations(connection) == migrations.CHAT_SCHEMA_VERSION
     connection.close()
 
 

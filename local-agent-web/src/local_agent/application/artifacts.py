@@ -27,6 +27,12 @@ from local_agent.application.data_center_models import (
     ArtifactView,
 )
 from local_agent.media import detect_image_media_type
+from local_agent.tools.document_extract import (
+    DocumentExtractError,
+    DocumentIo,
+    ExtractOutcome,
+    extract_document,
+)
 
 if TYPE_CHECKING:
     from local_agent.application.service import ApplicationService
@@ -63,6 +69,16 @@ BINARY_EXTS = frozenset({
     ".woff", ".woff2", ".ttf", ".otf", ".mp3", ".mp4", ".mov", ".avi",
     ".sqlite", ".db",
 })
+
+#: 文档预览一次给几页（2026-10-29）：面板没有翻页 UI，固定给前 N 页并置 truncated，
+#: 要看后面的页就让助手读（`read_file` 的 `start_page`）。实测 5 页约 0.25~0.5 s。
+PREVIEW_DOCUMENT_PAGES = 5
+
+#: 文档预览的提取缓存：键 = (路径, mtime_ns, 大小)。预览是**同步 HTTP**，
+#: 36 MB 的 PDF 抽 5 页要 0.5 s、3033 行的 xlsx 要 0.6 s（2026-10-29 实测），
+#: 没有缓存时用户来回点几次就会明显卡顿；键里带 mtime，文件一改自然失效。
+_PREVIEW_DOC_CACHE: dict[tuple[str, int, int], ExtractOutcome] = {}
+_PREVIEW_DOC_CACHE_MAX = 8
 
 IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp"})
 #: 内部执行单元：它们的产物属于父会话，单独列出只会制造噪声。
@@ -317,6 +333,36 @@ def artifacts(
     )
 
 
+def _preview_document(target: Path, size: int) -> ExtractOutcome | None:
+    """把文档提取成纯文本；不是文档、旧版二进制或解析失败都返回 ``None``。
+
+    返回 ``None`` 时调用方仍回 ``kind="binary"``——"这个格式读不出来"和"读出来是空的"
+    是两种结果，不能让失败伪装成一份空文档。
+    """
+    stat = target.stat()
+    key = (str(target), stat.st_mtime_ns, size)
+    cached = _PREVIEW_DOC_CACHE.get(key)
+    if cached is not None:
+        return cached
+    try:
+        outcome = extract_document(
+            DocumentIo.from_path(target),
+            sha256=f"{key[0]}:{key[1]}",
+            start_page=1,
+            end_page=PREVIEW_DOCUMENT_PAGES,
+        )
+    except DocumentExtractError:
+        # 损坏、加密、超出大小上限：一律按"不支持预览"处理。用户点开一个坏文件
+        # 不该看到 500，也不该看到一屏解析器堆栈。
+        return None
+    if outcome is None or not outcome.supported:
+        return None
+    if len(_PREVIEW_DOC_CACHE) >= _PREVIEW_DOC_CACHE_MAX:
+        _PREVIEW_DOC_CACHE.clear()
+    _PREVIEW_DOC_CACHE[key] = outcome
+    return outcome
+
+
 def preview(service: ApplicationService, *, path: str, workspace_id: str | None = None,
             scope: str = "workspace") -> ArtifactPreviewView:
     """预览一条产物的内容（§15.11.3）。
@@ -363,6 +409,20 @@ def preview(service: ApplicationService, *, path: str, workspace_id: str | None 
     # 比给一屏乱码诚实，也不会让人以为文件坏了。
     # 判定顺序保证不误伤文本：魔数图片在前，已知二进制扩展名其次，其余都按文本。
     if target.suffix.lower() in BINARY_EXTS:
+        # 文档预览（2026-10-29）：agent 早就能读 docx/xlsx/pptx/pdf，而这里一直说"不支持"，
+        # 同一个文件两种待遇。后缀只决定"要不要尝试"——真正的格式由提取层按魔数再判一次
+        # （"扩展名叫 .xls、内容其实是 XLSX"是实测存在的真实情况）。
+        outcome = _preview_document(target, size)
+        if outcome is not None:
+            text = proj.sanitize_text(outcome.text, service._secrets)
+            return ArtifactPreviewView(
+                kind="text",
+                text=text[:PREVIEW_TEXT_LIMIT],
+                size_bytes=size,
+                truncated=(
+                    len(text) > PREVIEW_TEXT_LIMIT or outcome.total_pages > outcome.last_page
+                ),
+            )
         return ArtifactPreviewView(kind="binary", size_bytes=size,
                                    suffix=target.suffix.lower().lstrip("."))
     # 文本**不因超限整份拒绝**（2026-10-22 实机反馈）：读前 N 字节照常返回，
