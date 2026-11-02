@@ -4,7 +4,8 @@
 // - 卡片头行：文件图标 + `编辑了 N 个文件` + 「查看变更」；
 // - **悬停**文件行 → 浮层里预览这个文件的 diff（只读、不吃鼠标）；
 // - **点击**文件行 → 仍打开右栏的改动页，与以前一致。
-// 刻意没有「撤销」：后端目前只有会话级 restore，没有还原文件的接口，不做假按钮。
+// 2026-10-29 起有「还原」：把这一轮改过的文件退回到**本轮开始前**，且**不回退对话**
+// （用户明确要求两者分开）。单文件的还原在右栏抽屉里，那一个退回到会话开始前。
 // 计数口径仍是**累计**（每次改动的行数相加），与右栏的"净变化"不是一回事，所以标题旁保留标注。
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -13,7 +14,8 @@ import { createPortal } from 'react-dom'
 
 import { useSessionChangeDiff, useSessionChanges } from '../../api/queries'
 import type { DiffLineView, FileDiffView } from '../../fixtures/types'
-import { splitPath, toFileDiffView, toTurnChanges } from './adapters'
+import { RestoreControl } from './RestoreControl'
+import { runIdOfTurn, splitPath, toFileDiffView, toTurnChanges } from './adapters'
 import styles from './TurnChanges.module.css'
 
 /** 最多渲染的条目数：超出只报数量，不无限往下堆。 */
@@ -240,6 +242,19 @@ export function TurnChanges({ sessionId, turnId, selectedPath, onSelect }: TurnC
           >
             查看变更
           </button>
+        )}
+        {sessionId === null ? null : (
+          <RestoreControl
+            sessionId={sessionId}
+            label="还原"
+            actions={[{
+              label: '本轮开始前',
+              note: `把这 ${changes.files.length} 个文件退回到本轮开始前的样子`,
+              scope: 'turn',
+              runId: runIdOfTurn(turnId),
+            }]}
+            className={styles.restoreExpanded}
+          />
         )}
       </header>
 

@@ -48,8 +48,10 @@ describe('设置页字段表与后端偏好模型一致（2026-10-26）', () => 
     // 下面三条都是「集合里没有多余/缺少项」——清单被清空或导出失败时它们会全部通过。
     // 这条是那道防线本身的防线。
     expect(schema.version).toBeGreaterThanOrEqual(1)
-    // 2026-10-27：9 → 10（新增「常驻记忆」curated）。这个数字刻意写死——它防的是"清单被清空"。
-    expect(schema.groups).toHaveLength(10)
+    // 2026-10-27：9 → 10（新增「常驻记忆」curated）；2026-10-29：10 → 11（新增「文件改动与还原」）；
+    // 2026-11-02：11 → 12（新增「记忆巩固」consolidation）。
+    // 这个数字刻意写死——它防的是"清单被清空"。
+    expect(schema.groups).toHaveLength(12)
     expect(schema.groups.reduce((total, group) => total + group.fields.length, 0)).toBeGreaterThan(40)
   })
 

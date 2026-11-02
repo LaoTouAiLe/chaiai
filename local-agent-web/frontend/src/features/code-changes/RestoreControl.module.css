@@ -1,0 +1,129 @@
+/* 还原控件（2026-10-29）：触发按钮 → 内联确认 → 内联结果。
+   刻意不用弹窗：确认与结果都贴着被还原的那一块，用户不用记住"我刚点是哪个文件"。 */
+
+.trigger {
+  padding: var(--law-space-xxs) var(--law-space-md);
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-xs);
+  background: transparent;
+  color: var(--law-text-secondary);
+  font-size: var(--law-text-xs);
+  cursor: pointer;
+}
+
+.trigger:hover {
+  color: var(--law-text-primary);
+  background: var(--law-hover);
+}
+
+.compact {
+  padding: 2px var(--law-space-sm);
+}
+
+.confirm,
+.result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-sm);
+  padding: var(--law-space-md);
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-sm);
+  background: var(--law-bg-layer-2);
+  font-size: var(--law-text-xs);
+}
+
+.summary {
+  margin: 0;
+  color: var(--law-text-primary);
+  line-height: var(--law-leading-xs);
+}
+
+.subhead {
+  margin: var(--law-space-xs) 0 0;
+  color: var(--law-text-secondary);
+}
+
+/* 基准单选：每项一行，选项名加粗、说明跟在后面。
+   两项以上就是"让用户决定退到哪"，所以必须一眼看清差别，不能只写"方案一/方案二"。 */
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--law-space-xs);
+  color: var(--law-text-primary);
+  line-height: var(--law-leading-xs);
+  cursor: pointer;
+}
+
+.option span {
+  display: flex;
+  flex-direction: column;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--law-space-xs);
+  color: var(--law-text-secondary);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm);
+}
+
+.actions button {
+  padding: var(--law-space-xxs) var(--law-space-md);
+  border: 1px solid var(--law-border-l1);
+  border-radius: var(--law-radius-xs);
+  background: transparent;
+  color: var(--law-text-primary);
+  font-size: var(--law-text-xs);
+  cursor: pointer;
+}
+
+.actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 危险动作（覆盖别人的改动 / 确认还原）：用错误色描边，但不做整块红底——
+   那样会读成"已经出错了"，而这里只是"要小心"。 */
+.danger {
+  border-color: var(--law-state-error) !important;
+  color: var(--law-state-error) !important;
+}
+
+.list {
+  margin: 0;
+  padding-left: var(--law-space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--law-space-xxs);
+  color: var(--law-text-primary);
+  list-style: disc;
+}
+
+.list code {
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-xxs);
+}
+
+.note {
+  margin-left: var(--law-space-xs);
+  color: var(--law-text-caption);
+}
+
+.error {
+  margin: 0;
+  color: var(--law-state-error);
+}

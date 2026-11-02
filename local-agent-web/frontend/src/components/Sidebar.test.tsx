@@ -1,6 +1,104 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import { Sidebar, type SidebarActions } from './Sidebar'
+import { Sidebar, type SidebarActions, type SidebarManagement } from './Sidebar'
+
+describe('Sidebar 未读与运行中（2026-10-30）', () => {
+  const actions: SidebarActions = {
+    onSelectWorkspace: vi.fn(), onAddWorkspace: vi.fn(), onSelectSession: vi.fn(),
+    onNewSession: vi.fn(), onOpenSettings: vi.fn(), onToggleCollapse: vi.fn(),
+  }
+
+  it('服务端给的未读会显示，正在跑的那行不叠未读', () => {
+    // 「未读」要回答的是"我离开之后它有没有新东西"，不是"它结束了没有"：
+    // 正在跑的那行有转圈指示，再叠未读只会让两种信号打架。
+    // 状态本身由服务端算（`sessions.last_read_at` vs `updated_at`），页面只负责显示。
+    const workspaces = [{
+      id: 'w1',
+      title: '工作区',
+      sessions: [
+        {
+          id: 's-done', title: '跑完了没看', status: 'completed' as const,
+          timeLabel: '刚刚', selected: false, unread: true,
+        },
+        {
+          id: 's-seen', title: '看过了', status: 'completed' as const,
+          timeLabel: '刚刚', selected: false, unread: false,
+        },
+        {
+          id: 's-running', title: '还在跑', status: 'running' as const,
+          timeLabel: '刚刚', selected: false, unread: true,
+        },
+      ],
+    }]
+    const { container } = render(<Sidebar workspaces={workspaces} actions={actions} />)
+
+    const unread = container.querySelectorAll('[data-unread="true"]')
+    expect(unread).toHaveLength(1)
+    expect(unread[0]).toHaveTextContent('跑完了没看')
+    // 正在跑的那行有它自己的状态文字（转圈的点对读屏不可见，这里靠文字兜住）。
+    expect(screen.getByText('正在执行')).toBeInTheDocument()
+  })
+})
+
+describe('Sidebar 归档会话的删除（2026-10-29）', () => {
+  const actions: SidebarActions = {
+    onSelectWorkspace: vi.fn(), onAddWorkspace: vi.fn(), onSelectSession: vi.fn(),
+    onNewSession: vi.fn(), onOpenSettings: vi.fn(), onToggleCollapse: vi.fn(),
+  }
+
+  function renderArchived(deleteSession: (id: string) => Promise<void>) {
+    const management: SidebarManagement = {
+      renameSession: vi.fn(async () => {}),
+      archiveSession: vi.fn(async () => {}),
+      renameWorkspace: vi.fn(async () => {}),
+      removeWorkspace: vi.fn(async () => {}),
+      restoreSession: vi.fn(async () => {}),
+      deleteSession,
+      exportSession: vi.fn(async () => {}),
+      archivedOpen: true,
+      onToggleArchived: vi.fn(),
+      archivedSessions: [{ id: 's-old', title: '旧会话' }],
+      archivedLoading: false,
+      archivedError: null,
+    }
+    return render(<Sidebar workspaces={[]} actions={actions} management={management} />)
+  }
+
+  it('第一次点击只把这一行切成确认态，不改任何数据', () => {
+    // 删除不可撤销，所以第一次点击**不是**删除，而是问一句。
+    const deleteSession = vi.fn(async () => {})
+    renderArchived(deleteSession)
+
+    fireEvent.click(screen.getByRole('button', { name: '删除会话「旧会话」' }))
+
+    expect(deleteSession).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /确认删除会话/ })).toBeInTheDocument()
+  })
+
+  it('确认之后才真的删除，成功后回到可选状态', async () => {
+    const deleteSession = vi.fn(async () => {})
+    renderArchived(deleteSession)
+
+    fireEvent.click(screen.getByRole('button', { name: '删除会话「旧会话」' }))
+    fireEvent.click(screen.getByRole('button', { name: /确认删除会话/ }))
+
+    await waitFor(() => expect(deleteSession).toHaveBeenCalledWith('s-old'))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: '删除会话「旧会话」' })).toBeInTheDocument(),
+    )
+  })
+
+  it('取消后既不删除，也不留在确认态', () => {
+    const deleteSession = vi.fn(async () => {})
+    renderArchived(deleteSession)
+
+    fireEvent.click(screen.getByRole('button', { name: '删除会话「旧会话」' }))
+    fireEvent.click(screen.getByRole('button', { name: '取消删除会话「旧会话」' }))
+
+    expect(deleteSession).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: '删除会话「旧会话」' })).toBeInTheDocument()
+  })
+})
 
 function renderSidebar(
   overrides: Partial<SidebarActions> = {},

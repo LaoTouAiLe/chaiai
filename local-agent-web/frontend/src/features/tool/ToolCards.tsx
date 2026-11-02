@@ -73,6 +73,7 @@ function ReadCard({ card }: { card: Extract<ToolCardView, { kind: 'read' }> }) {
       title={card.path}
       meta={`第 ${String(first)}–${String(last)} 行 / 共 ${String(card.totalLines)} 行`}
     >
+      {card.note ? <p className={styles.note} aria-label="读取说明">{card.note}</p> : null}
       <div className={styles.code}>
         {lines.map((line) => (
           <div key={line.number} className={styles.codeRow}>

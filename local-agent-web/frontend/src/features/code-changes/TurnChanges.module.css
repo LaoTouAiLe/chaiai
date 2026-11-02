@@ -12,6 +12,7 @@
 /* 头行：图标 + 标题 + 操作。它的高度比文件行略高，读起来像"标题条"而不是又一行文件。 */
 .head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-2) var(--sp-3);
@@ -24,6 +25,7 @@
 }
 
 .title {
+  flex-shrink: 0;
   color: var(--c-text-1);
   font-size: var(--fs-meta);
   line-height: var(--lh-meta);
@@ -32,12 +34,18 @@
 
 /* 口径标注：把"累计"写得比标题弱一档，只用来消除误解，不抢注意力。 */
 .scope {
+  flex-shrink: 0;
   color: var(--c-text-3);
   font-size: var(--fs-caption);
 }
 
 .grow {
   flex: 1 1 auto;
+}
+
+.restoreExpanded {
+  flex: 0 0 100%;
+  min-width: 0;
 }
 
 /* 头行的文字按钮：无边框、hover 才有底。 */

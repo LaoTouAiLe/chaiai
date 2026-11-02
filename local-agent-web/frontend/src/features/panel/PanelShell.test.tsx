@@ -4,8 +4,9 @@ import { PanelShell } from './PanelShell'
 
 const mocks = vi.hoisted(() => ({
   retry: vi.fn(), fileError: false, filePending: false, changesError: false,
-  changedPaths: [] as string[],
+  changedPaths: [] as string[], recordedPaths: [] as string[],
   closeBrowser: vi.fn().mockResolvedValue(undefined),
+  artifactDetail: vi.fn(),
 }))
 vi.mock('../../api/client', async original => ({ ...await original<typeof import('../../api/client')>(), closeBrowser: mocks.closeBrowser }))
 vi.mock('../../api/queries', () => ({
@@ -13,10 +14,13 @@ vi.mock('../../api/queries', () => ({
   useWorkspaceFiles: () => ({ data: { entries: [{ path: 'README.md', name: 'README.md', kind: 'file', size_bytes: 40 }] },
     isError: mocks.fileError, isPending: mocks.filePending, refetch: mocks.retry }),
   useSearchWorkspaceFiles: () => ({ data: { entries: [] }, isFetching: false, refetch: mocks.retry }),
-  useArtifactsDetail: () => ({ data: { kind: 'text', text: 'preview' } }),
-  useSessionChanges: () => ({ data: { turns: [], unrecorded: mocks.changedPaths.map(path => ({ path })) }, isPending: false, isError: mocks.changesError, refetch: mocks.retry }),
+  useArtifactsDetail: (...args: unknown[]) => {
+    mocks.artifactDetail(...args)
+    return { data: { kind: 'text', text: 'preview' } }
+  },
+  useSessionChanges: () => ({ data: { turns: [{ run_id: 'r1', files: mocks.recordedPaths.map(path => ({ path })) }], unrecorded: mocks.changedPaths.map(path => ({ path })) }, isPending: false, isError: mocks.changesError, refetch: mocks.retry }),
 }))
-vi.mock('../code-changes/ChangesPanel', () => ({ FileDiff: ({ path }: { path: string }) => <div>对比 {path}</div> }))
+vi.mock('../code-changes/ChangesPanel', () => ({ FileDiff: ({ path }: { path: string }) => <div>对比 {path}</div>, FileRestoreControl: () => <button>还原此文件</button> }))
 vi.mock('./SideChatPane', () => ({ SideChatPane: () => <div>侧聊内容</div> }))
 vi.mock('./TerminalPane', () => ({ default: () => <div>终端内容</div> }))
 vi.mock('./BrowserPane', () => ({ default: ({ requestId }: { requestId: string }) => <div data-request-id={requestId}>浏览器内容</div> }))
@@ -32,6 +36,7 @@ beforeEach(() => {
   mocks.filePending = false
   mocks.changesError = false
   mocks.changedPaths = []
+  mocks.recordedPaths = []
   document.documentElement.dataset.motion = 'reduced'
 })
 
@@ -49,6 +54,17 @@ it('switches tabs with arrow keys, closes the active tab to its neighbour and re
   fireEvent.click(screen.getByRole('button', { name: '关闭改动页' }))
   expect(screen.getByRole('button', { name: '工作面板首页' })).toHaveFocus()
   expect(screen.getByRole('navigation', { name: '工作面板功能' })).toBeVisible()
+})
+
+it('offers single file restore only for recorded changes in the active right panel', () => {
+  mocks.recordedPaths = ['src/main.ts']
+  mocks.changedPaths = ['generated.txt']
+  render(<PanelShell {...props} />)
+  choose('改动')
+  choose('main.ts')
+  expect(screen.getByRole('button', { name: '还原此文件' })).toBeVisible()
+  choose('generated.txt')
+  expect(screen.queryByRole('button', { name: '还原此文件' })).not.toBeInTheDocument()
 })
 
 it('resizes by keyboard within bounds and restores the saved home and width after remounting', () => {
@@ -78,6 +94,17 @@ it('separates restored tabs by session and uses a filename as the tab title', ()
   view.unmount()
   render(<PanelShell {...props} sessionId="s2" />)
   expect(screen.queryByRole('tab')).not.toBeInTheDocument()
+})
+
+it('keeps the attachment preview root when restoring a saved file tab', () => {
+  const path = '2026/10/30/s1/document.xlsx'
+  const view = render(<PanelShell {...props} focus={{ tab: 'files', path, scope: 'attachments' }} />)
+  expect(mocks.artifactDetail).toHaveBeenLastCalledWith(path, 'w1', 'attachments')
+  view.unmount()
+  mocks.artifactDetail.mockClear()
+  render(<PanelShell {...props} />)
+  expect(screen.getByRole('tab', { name: 'document.xlsx' })).toBeVisible()
+  expect(mocks.artifactDetail).toHaveBeenLastCalledWith(path, 'w1', 'attachments')
 })
 
 it('offers retry without claiming an empty file tree while loading or failed', () => {

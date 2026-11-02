@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { ApiError } from '../api/client'
 import styles from './Sidebar.module.css'
@@ -8,6 +8,13 @@ interface Props {
   kind: '会话' | '工作区'
   onRename: (title: string) => Promise<void>
   onRemove: () => Promise<void>
+  /**
+   * 导出这个会话（2026-10-30）：`markdown` 给人看、`json` 给程序用。
+   *
+   * 省略即不渲染这两个菜单项（工作区行没有导出）。它与 `blocked` 无关：
+   * 导出是只读的，会话正在跑的时候更应该允许把人已有的内容先带走。
+   */
+  onExport?: (format: 'markdown' | 'json') => Promise<void>
   blocked?: boolean
 }
 
@@ -18,7 +25,7 @@ function errorText(error: unknown): string {
 }
 
 /** 每行独立菜单；菜单动作不触发行选择，失败时保留输入。 */
-export function SidebarItemMenu({ title, kind, onRename, onRemove, blocked = false }: Props) {
+export function SidebarItemMenu({ title, kind, onRename, onRemove, onExport, blocked = false }: Props) {
   const [open, setOpen] = useState(false)
   const [dialog, setDialog] = useState<'rename' | 'remove' | null>(null)
   const [value, setValue] = useState(title)
@@ -27,12 +34,34 @@ export function SidebarItemMenu({ title, kind, onRename, onRemove, blocked = fal
   const root = useRef<HTMLDivElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
   const panel = useRef<HTMLDivElement>(null)
+  const menu = useRef<HTMLDivElement>(null)
+  const [position, setPosition] = useState({ top: 0, left: 0 })
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const place = () => {
+      const anchor = trigger.current?.getBoundingClientRect()
+      const bounds = menu.current?.getBoundingClientRect()
+      if (anchor === undefined || bounds === undefined) return
+      setPosition({
+        top: Math.max(8, Math.min(anchor.bottom + 4, window.innerHeight - bounds.height - 8)),
+        left: Math.max(8, Math.min(anchor.right - bounds.width, window.innerWidth - bounds.width - 8)),
+      })
+    }
+    place()
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+      window.removeEventListener('resize', place)
+      window.removeEventListener('scroll', place, true)
+    }
+  }, [open, error])
 
   useEffect(() => {
     if (!open) return
-    root.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    menu.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
     const outside = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false)
+      if (!root.current?.contains(event.target as Node) && !menu.current?.contains(event.target as Node)) setOpen(false)
     }
     document.addEventListener('pointerdown', outside)
     return () => document.removeEventListener('pointerdown', outside)
@@ -65,7 +94,7 @@ export function SidebarItemMenu({ title, kind, onRename, onRemove, blocked = fal
     if (event.key === 'Escape') { setOpen(false); trigger.current?.focus() }
     if (open && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) {
       event.preventDefault()
-      const items = [...(root.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])]
+      const items = [...(menu.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])]
       const index = items.indexOf(document.activeElement as HTMLElement)
       const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
         : (index + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
@@ -75,10 +104,16 @@ export function SidebarItemMenu({ title, kind, onRename, onRemove, blocked = fal
     <button ref={trigger} type="button" className={styles.moreButton}
       aria-label={`${kind}「${title}」的更多操作`} aria-haspopup="menu" aria-expanded={open}
       onClick={() => { setOpen(!open); setError(null) }}>⋯</button>
-    {open ? <div role="menu" aria-label={`${kind}操作`} className={styles.itemMenu}>
+    {open ? createPortal(<div ref={menu} role="menu" aria-label={`${kind}操作`} className={styles.itemMenu} style={position}>
       <button type="button" role="menuitem" onClick={() => {
         setValue(title); setDialog('rename'); setOpen(false); setError(null)
       }}>重命名</button>
+      {kind !== '会话' || onExport === undefined ? null : <>
+        <button type="button" role="menuitem" disabled={pending}
+          onClick={() => { void perform(() => onExport('markdown')) }}>导出 Markdown</button>
+        <button type="button" role="menuitem" disabled={pending}
+          onClick={() => { void perform(() => onExport('json')) }}>导出 JSON</button>
+      </>}
       <button type="button" role="menuitem" disabled={pending || blocked}
         title={blocked ? '请等待运行结束并完成审批后再操作' : undefined}
         onClick={() => {
@@ -86,7 +121,7 @@ export function SidebarItemMenu({ title, kind, onRename, onRemove, blocked = fal
           else void perform(onRemove)
         }}>{kind === '会话' ? '归档会话' : '移除工作区'}</button>
       {error === null ? null : <p role="alert" className={styles.actionError}>{error}</p>}
-    </div> : null}
+    </div>, document.body) : null}
     {dialog === null ? null : createPortal(
       <div className={styles.dialogBackdrop} onClick={(event) => {
         if (event.target === event.currentTarget) close()

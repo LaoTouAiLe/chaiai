@@ -63,6 +63,7 @@ export type ToolCardView =
   | { kind: 'file-mutation'; diff: FileDiffView }
   | {
     kind: 'read'
+    note?: string
     path: string
     lines: readonly ReadLineView[]
     /** Total lines in the file, so a windowed read can say "showing N of M". */
@@ -830,9 +831,23 @@ export interface CompressionRowView {
   tokensAfter: number | null
 }
 
+/**
+ * 用户消息里带的一份文档（2026-10-29）。
+ *
+ * 只有名字与体积：磁盘路径只写进给出站请求的提示里，页面既不需要也不该拿到。
+ */
+export interface UserFileRefView {
+  /** 附件引用（`2026/10/29/<会话>/<哈希>.<ext>`），仅用于标识与去重。 */
+  id: string
+  /** 落盘后的文件名（内容哈希 + 扩展名），不是用户的原文件名。 */
+  name: string
+  sizeBytes: number
+}
+
 export type MessageView =
   | { kind: 'compression'; id: string; compression: CompressionRowView }
-  | { kind: 'user'; id: string; text: string; at: string; attachments?: readonly string[] }
+  | { kind: 'user'; id: string; text: string; at: string; attachments?: readonly string[];
+      files?: readonly UserFileRefView[] }
   | { kind: 'assistant'; id: string; text: string; at: string; reasoning?: string;
       reasoningTruncated?: boolean; streaming?: boolean; reasoningRunning?: boolean }
   | { kind: 'tool'; id: string; tool: ToolRowView }

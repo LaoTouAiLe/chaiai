@@ -109,6 +109,9 @@ export function mapSidebar(inputs: SidebarInputs, now: number = Date.now()): Sid
         : (task === undefined ? 'idle' as const : SESSION_STATUS_BY_TASK[task]),
       stateLabel: task === undefined ? undefined : SESSION_STATE_LABEL[task],
       timeLabel: relativeTime(session.updated_at, now), selected,
+      // 未读由服务端算好（2026-10-30）：规则在 `Session.unread` 里一处实现，
+      // 页面只负责显示，不自己比时间。
+      unread: session.unread === true,
     }
   })
   const result: SidebarWorkspaceFixture[] = workspaces.map((workspace) => ({

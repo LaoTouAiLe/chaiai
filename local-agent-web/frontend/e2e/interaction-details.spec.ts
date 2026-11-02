@@ -123,21 +123,22 @@ test('轨迹表头贴住滚动区域，上滑不会压缩顶部栏', async ({ pa
   await page.screenshot({ path: info.outputPath('trace-scroll.png') })
 })
 
-test('工具错误可关闭和重新查看，切换页签保持关闭状态', async ({ page }, info) => {
+test('系统错误可关闭和重新查看，切换页签保持关闭状态', async ({ page }, info) => {
   const error: components['schemas']['ErrorView'] = {
-    code: 'TOOL_FAILED', diagnostic_id: 'ui-error-1', category: 'tool', severity: 'error',
-    title: '工具执行失败', message: '未能读取目标文件。', hint: '确认文件路径后重新提问。',
+    code: 'UNEXPECTED_ERROR', diagnostic_id: 'ui-error-1', category: 'system', severity: 'error',
+    title: '处理失败', message: '处理请求时遇到异常。', hint: '请查看诊断信息。',
     retryable: false, occurred_at: base.created_at,
   }
   await backend(page, { ...base, messages: [...(base.messages ?? []), { kind: 'error', message_id: 'e1', error }] })
-  await expect(page.getByRole('heading', { name: '工具执行失败' })).toBeVisible()
-  await page.getByRole('button', { name: '关闭错误提示：工具执行失败' }).click()
+  await expect(page.getByRole('button', { name: '处理失败', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '关闭错误提示：处理失败' }).click()
   await page.getByRole('tab', { name: '轨迹', exact: true }).click()
   await page.getByRole('tab', { name: '对话', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '工具执行失败' })).toHaveCount(0)
-  await page.getByRole('button', { name: '查看已关闭的错误：工具执行失败' }).click()
+  await expect(page.getByRole('button', { name: '处理失败', exact: true })).toHaveCount(0)
+  await page.getByRole('button', { name: '查看已关闭的错误：处理失败' }).click()
+  await page.getByRole('button', { name: '处理失败', exact: true }).click()
   await expect(page.getByText(error.message, { exact: true })).toBeVisible()
   await page.getByText('诊断信息', { exact: true }).click()
-  await expect(page.getByText('TOOL_FAILED · ui-error-1', { exact: true })).toBeVisible()
+  await expect(page.getByText('UNEXPECTED_ERROR · ui-error-1', { exact: true })).toBeVisible()
   await page.screenshot({ path: info.outputPath('dismissible-error.png') })
 })

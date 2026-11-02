@@ -1,14 +1,13 @@
 import { expect, test, type Locator, type Page } from '@playwright/test'
 
 // 真服务验收独立能力开关。
-// 2026-10-19 起「能力」并入设置（侧栏不再有独立的「能力与档位」入口），夹具走「设置 → 能力」。
+// 能力开关位于侧栏的能力中心。
 // 不假设"联网检索与抓取"有开关：它在当前服务端已是始终开启的基础能力。
 
 async function openCapabilities(page: Page): Promise<Locator> {
-  await page.getByRole('button', { name: '设置' }).click()
-  const settings = page.getByRole('dialog', { name: '设置' })
-  await expect(settings).toBeVisible()
-  await settings.getByRole('tab', { name: '能力', exact: true }).click()
+  await page.getByRole('button', { name: '能力中心', exact: true }).click()
+  const settings = page.getByRole('main')
+  await expect(settings.getByRole('heading', { name: '能力中心' })).toBeVisible()
   return settings
 }
 
@@ -27,8 +26,8 @@ test('能力开关保存后立即更新，关闭重开和刷新后仍一致', as
   await expect(toggle).toBeChecked({ checked: !initiallyOn })
   await expect(row).toContainText(initiallyOn ? '开关已关闭' : '可用')
 
-  await settings.getByRole('button', { name: '关闭设置' }).click()
-  await expect(settings).toHaveCount(0)
+  await settings.getByRole('button', { name: '返回会话' }).click()
+  await expect(settings.getByRole('heading', { name: '能力中心' })).toHaveCount(0)
 
   await openCapabilities(page)
   await expect(toggle).toBeChecked({ checked: !initiallyOn })

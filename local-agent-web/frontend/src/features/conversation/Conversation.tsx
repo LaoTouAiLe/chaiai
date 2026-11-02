@@ -23,6 +23,7 @@ import type {
   MessageView,
   ModelCallView,
   TurnStatsView,
+  UserFileRefView,
 } from '../../fixtures/types'
 import styles from './Conversation.module.css'
 
@@ -42,6 +43,13 @@ interface ConversationProps {
   errorActions?: ErrorActions
   /** 编辑并重发（2026-10-21）。省略即原型态：用户消息上不出现「编辑」按钮。 */
   onEditMessage?: EditMessageHandler
+  /**
+   * 打开一条用户消息带的上传附件（2026-10-30）：右栏按**附件根**预览。
+   *
+   * 省略即不可点（原型态、对话地图里的复用之）——那时文件块只显示名字与体积，
+   * 不会假装能点开。
+   */
+  onOpenAttachment?: (attachmentId: string) => void
   /**
    * 每轮末尾的改动摘要（2026-10-21）。
    *
@@ -74,22 +82,40 @@ export type EditMessageHandler = (
   parentTurnId: string | null,
   text: string,
   attachments: readonly string[],
+  /**
+   * 这条消息原本带的文档引用（2026-10-29）：编辑只改文字，附件要沿用——否则一改就丢。
+   * 带 `name` 是因为气泡要显示用户上传时的文件名，而不是落盘的内容哈希。
+   */
+  files?: readonly { id: string; name: string }[],
 ) => boolean
+
+/** 文件体积的短标签：附件块只用它，不必引一个通用格式化函数。 */
+function fileSizeLabel(size: number): string {
+  if (size >= 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`
+  if (size >= 1024) return `${Math.round(size / 1024)} KB`
+  return `${size} 字节`
+}
 
 function UserMessage({
   text,
   at,
   images,
+  files,
   parentTurnId,
   onEdit,
+  onOpenAttachment,
 }: {
   text: string
   at: string
   images?: readonly string[]
+  files?: readonly UserFileRefView[]
   parentTurnId: string | null
   onEdit?: EditMessageHandler
+  /** 打开附件预览（2026-10-30）；省略时文件块只显示、不可点。 */
+  onOpenAttachment?: (attachmentId: string) => void
 }) {
   const pictures = images ?? []
+  const docFiles = files ?? []
   // 点开看原图（2026-10-16）：缩略图有尺寸上限（220×160），截图里的小字、UI 细节得放大才看得清。
   const [zoomed, setZoomed] = useState<string | null>(null)
   // **就地编辑**（2026-10-21）：`null` = 不在编辑态。改动发生在这一条气泡上，不碰底部输入框——
@@ -105,9 +131,15 @@ function UserMessage({
 
   const submit = () => {
     if (onEdit === undefined || draft === null) return
-    // 与输入框同一条口径：只发图也算合法提交，所以空判要看图片。
-    if (draft.trim() === '' && pictures.length === 0) return
-    if (onEdit(parentTurnId, draft, pictures)) {
+    // 与输入框同一条口径：只发图/只带文件也算合法提交，所以空判要看附件。
+    if (draft.trim() === '' && pictures.length === 0 && docFiles.length === 0) return
+    // 文档沿用原消息的引用（2026-10-29）：编辑改的是文字，附件不该因此消失。
+    // 没有文件时**不传第 4 个实参**：老调用点与既有断言的形状保持不变。
+    const fileIds = docFiles.map((file) => ({ id: file.id, name: file.name }))
+    const accepted = fileIds.length === 0
+      ? onEdit(parentTurnId, draft, pictures)
+      : onEdit(parentTurnId, draft, pictures, fileIds)
+    if (accepted) {
       setSubmitted(draft)
       setDraft(null)
     }
@@ -150,6 +182,30 @@ function UserMessage({
                       onClick={() => setZoomed(src)}
                     >
                       <img src={src} alt="随消息发送的图片" loading="lazy" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {/* 随消息发送的**文档**（2026-10-29）：只显示文件名与体积，不提供下载/打开——
+                文件内容在磁盘上（`data/attachments/`），页面没有理由拿到它。要让助手读，
+                直接问；要自己看，走右栏的文件预览。 */}
+            {docFiles.length === 0 ? null : (
+              <ul className={styles.userFiles} aria-label="随这条消息发送的文件">
+                {docFiles.map((file) => (
+                  <li key={file.id} className={styles.userFile}>
+                    {/* 可点开（2026-10-30 实机反馈）：原来只能看名字，用户没法确认传上去的是哪一份。
+                        点开走右栏**附件根**预览，不是下载——文件仍在原处，助手也照旧能读。 */}
+                    <button
+                      type="button"
+                      className={styles.userFileButton}
+                      disabled={onOpenAttachment === undefined}
+                      aria-label={`预览附件 ${file.name}`}
+                      title={`${file.name} · 点击在右栏查看内容；文件保存在本机，助手也能直接读取`}
+                      onClick={() => onOpenAttachment?.(file.id)}
+                    >
+                      <span className={styles.userFileName}>{file.name}</span>
+                      <span className={styles.userFileSize}>{fileSizeLabel(file.sizeBytes)}</span>
                     </button>
                   </li>
                 ))}
@@ -365,6 +421,7 @@ function Message({
   errorActions,
   parentTurnId,
   onEdit,
+  onOpenAttachment,
   onDetachCommand,
 }: {
   message: MessageView
@@ -373,6 +430,7 @@ function Message({
   /** 这一轮之前的那一轮（没有就是会话开头）；编辑重发要退到这里。 */
   parentTurnId?: string | null
   onEdit?: EditMessageHandler
+  onOpenAttachment?: (attachmentId: string) => void
   onDetachCommand?: (commandId: string) => Promise<boolean>
 }) {
   switch (message.kind) {
@@ -382,8 +440,10 @@ function Message({
           text={message.text}
           at={message.at}
           images={message.attachments}
+          files={message.files}
           parentTurnId={parentTurnId ?? null}
           onEdit={onEdit}
+          onOpenAttachment={onOpenAttachment}
         />
       )
     case 'assistant':
@@ -607,7 +667,7 @@ interface PickedSelection {
  * Loading and empty replace the flow rather than sitting above it: a skeleton
  * next to real messages would claim both are the same kind of thing.
  */
-export function Conversation({ scenario, autoFollow = false, onToggleTool, focusTurnId, errorActions, onEditMessage, renderTurnChanges, onDetachCommand, onQuote, onUsePrompt }: ConversationProps) {
+export function Conversation({ scenario, autoFollow = false, onToggleTool, focusTurnId, errorActions, onEditMessage, onOpenAttachment, renderTurnChanges, onDetachCommand, onQuote, onUsePrompt }: ConversationProps) {
   const loading = scenario.loading ?? null
   const empty = scenario.empty ?? null
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -731,7 +791,7 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
               const replies = groups.filter((group) => !(group.kind === 'single' && group.row.kind === 'user'))
               const operationCount = turn.rows.filter((row) => row.kind === 'tool').length
               const editHandler = index === turns.length - 1 ? onEditMessage : undefined
-              const renderMessage = (row: MessageView) => <Message key={row.id} message={row} onToggleTool={onToggleTool} errorActions={errorActions} onDetachCommand={onDetachCommand} parentTurnId={parentTurnId} onEdit={editHandler} />
+              const renderMessage = (row: MessageView) => <Message key={row.id} message={row} onToggleTool={onToggleTool} errorActions={errorActions} onDetachCommand={onDetachCommand} parentTurnId={parentTurnId} onEdit={editHandler} onOpenAttachment={onOpenAttachment} />
               const renderGroup = (group: TurnGroup) => group.kind === 'single'
                 ? renderMessage(group.row)
                 : group.rows.length === 1 ? renderMessage(group.rows[0]!)

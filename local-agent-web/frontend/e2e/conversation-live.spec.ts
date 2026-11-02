@@ -47,10 +47,10 @@ test('两轮真实对话，刷新后内容一致', async ({ page }) => {
   await expect(page.getByRole('log', { name: '对话' }).getByText('第二轮')).toBeVisible()
 
   // 真会话菜单：选择写入服务端，下一轮才生效；之后可恢复跟随默认。
-  await page.getByRole('button', { name: '选择会话模型' }).click()
-  const menu = page.getByRole('region', { name: '模型选择' })
-  await expect(menu).toBeVisible()
   await input.fill('关闭模型面板后保留草稿')
+  await page.getByRole('button', { name: '选择会话模型' }).click()
+  const menu = page.getByRole('dialog', { name: '模型选择' })
+  await expect(menu).toBeVisible()
   await menu.getByRole('button', { name: '关闭模型选择' }).click()
   await expect(menu).toHaveCount(0)
   await expect(input).toHaveValue('关闭模型面板后保留草稿')

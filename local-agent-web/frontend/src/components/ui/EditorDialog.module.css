@@ -31,7 +31,7 @@
   border-bottom: 1px solid var(--law-border-l1);
 }
 .header h2 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -.03em; }
-.header p { margin: 7px 0 0; color: var(--law-text-secondary); font-size: 13px; line-height: 1.6; }
+.header p { margin: 7px 0 0; color: var(--law-text-secondary); font-size: var(--law-text-sm); line-height: 1.6; }
 .close {
   flex: none;
   display: grid;

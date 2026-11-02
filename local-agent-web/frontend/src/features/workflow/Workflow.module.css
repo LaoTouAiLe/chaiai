@@ -10,7 +10,7 @@
   border: 1px solid var(--law-border-l2);
   background: var(--law-bg-layer-1);
   border-radius: 8px;
-  font-size: 12px;
+  font-size: var(--law-text-fixed-sm);
   overflow-wrap: anywhere;
 }
 

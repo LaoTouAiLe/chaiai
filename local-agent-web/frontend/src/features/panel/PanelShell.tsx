@@ -6,7 +6,7 @@ import { sameFilePath } from '../conversation/fileLinks'
 import type { TraceView as TraceViewModel } from '../../fixtures/types'
 import { Button } from '../../components/ui/Button'
 import { SearchField } from '../../components/ui/SearchField'
-import { FileDiff } from '../code-changes/ChangesPanel'
+import { FileDiff, FileRestoreControl } from '../code-changes/ChangesPanel'
 import { FileIcon } from './fileIcon'
 import { languageOf, useHighlight } from './useHighlight'
 import { FileTree } from './FileTree'
@@ -71,6 +71,13 @@ interface PanelTab {
   param: string | null
   title?: string
   browserKey?: string
+  /**
+   * `files` 页的预览根（2026-10-30）：`attachments` = 用户上传的附件（相对附件根，
+   * 形如 `2026/10/30/<会话>/<哈希>.xlsx`），`workspace`/省略 = 工作区文件。
+   *
+   * 两者必须分开而不是靠路径形状猜：同一个 path 在两个根下完全可能是两个文件。
+   */
+  scope?: 'workspace' | 'attachments'
 }
 
 /**
@@ -110,6 +117,7 @@ function loadPanelState(sessionId: string | null): PersistedPanel | null {
       .filter((item): item is PanelTab =>
         typeof item?.id === 'string' && MENU.some((entry) => entry.id === item.kind))
       .map((item) => ({ id: item.id, kind: item.kind, param: typeof item.param === 'string' ? item.param : null,
+        scope: item.scope === 'attachments' ? 'attachments' as const : 'workspace' as const,
         title: typeof item.title === 'string' ? item.title.slice(0, 200) : undefined,
         browserKey: item.kind === 'browser' ? typeof item.browserKey === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(item.browserKey)
           ? item.browserKey : newRequestId() : undefined }))
@@ -145,7 +153,8 @@ export function PanelShell({
   onOpenStep?: (turnId: string) => void
   onClose: () => void
   /** 从对话流改动条点进来时，指定要看哪个文件。 */
-  focus?: { tab: Tab; path: string } | null
+  /** `scope` 只对 `files` 页有意义：`attachments` = 预览用户上传的附件（2026-10-30）。 */
+  focus?: { tab: Tab; path: string; scope?: 'workspace' | 'attachments' } | null
 }) {
   // 多标签（2026-10-23）：`tabs` 是打开着的页，`activeId === null` 表示在首屏菜单。
   // 同类可多开（两个文件页、两个侧聊页都行）——键用自增 id，不用 kind。
@@ -181,18 +190,20 @@ export function PanelShell({
     })))
   const active = tabs.find((item) => item.id === activeId) ?? null
 
-  const openTab = (kind: Tab, param?: string) => {
+  const openTab = (kind: Tab, param?: string, scope?: 'workspace' | 'attachments') => {
     counter.current += 1
     const id = `${kind}-${String(counter.current)}`
-    setTabs((previous) => [...previous, { id, kind, param: param ?? null, browserKey: kind === 'browser' ? newRequestId() : undefined }])
+    setTabs((previous) => [...previous, { id, kind, param: param ?? null, scope: kind === 'files' ? (scope ?? 'workspace') : undefined, browserKey: kind === 'browser' ? newRequestId() : undefined }])
     selectTab(id)
     // 终端：打开标签即启动一个（2026-10-28）。不再出审批卡，也不再由面板内部管理多个终端。
     if (kind === 'terminal') void startTerminal(id)
     return id
   }
 
-  const patchTab = (id: string, param: string | null) => {
-    setTabs((previous) => previous.map((item) => (item.id === id ? { ...item, param } : item)))
+  const patchTab = (id: string, param: string | null, scope?: 'workspace' | 'attachments') => {
+    setTabs((previous) => previous.map((item) => (item.id === id
+      ? { ...item, param, ...(scope === undefined ? {} : { scope }) }
+      : item)))
   }
 
   /**
@@ -354,14 +365,17 @@ export function PanelShell({
   // 从对话流的改动条点进来：已有改动页就切过去并定位文件，没有就开一个。
   useEffect(() => {
     if (!focus) return
+    // 附件与工作区文件是两个根：同一个 path 不该被当成同一页（2026-10-30）。
+    const scope = focus.scope ?? 'workspace'
     const existing = tabs.find((item) => item.kind === focus.tab
-      && (focus.tab !== 'files' || sameFilePath(item.param, focus.path)))
+      && (focus.tab !== 'files'
+        || ((item.scope ?? 'workspace') === scope && sameFilePath(item.param, focus.path))))
     if (existing !== undefined) {
       selectTab(existing.id)
-      patchTab(existing.id, focus.path)
+      patchTab(existing.id, focus.path, focus.scope)
       return
     }
-    openTab(focus.tab, focus.path)
+    openTab(focus.tab, focus.path, focus.scope)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在 focus 变化时触发
   }, [focus])
 
@@ -520,6 +534,7 @@ export function PanelShell({
             {active.kind === 'files' ? (
               <FilesTab
                 workspaceId={workspaceId}
+                scope={active.scope ?? 'workspace'}
                 openFile={active.param}
                 onOpenFile={(path) => patchTab(active.id, path)}
               />
@@ -559,8 +574,10 @@ export function PanelShell({
   )
 }
 
-function FilesTab({ workspaceId, openFile, onOpenFile }: {
+function FilesTab({ workspaceId, scope, openFile, onOpenFile }: {
   workspaceId: string | null
+  /** `attachments` = 预览用户上传的附件；那时不需要工作区，也没有文件树（2026-10-30）。 */
+  scope: 'workspace' | 'attachments'
   /** 当前打开的文件：提到页签的 param 里，切页签回来才不会丢。 */
   openFile: string | null
   onOpenFile: (path: string | null) => void
@@ -574,7 +591,7 @@ function FilesTab({ workspaceId, openFile, onOpenFile }: {
   const search = useSearchWorkspaceFiles(filter, workspaceId ?? undefined)
   const searching = filter.trim() !== ''
   // 预览必须带所属工作区：不传会按"启动工作区"解析，在别的会话工作区里必然读不到文件。
-  const content = useArtifactsDetail(openFile, workspaceId ?? undefined)
+  const content = useArtifactsDetail(openFile, workspaceId ?? undefined, scope)
 
   // 搜索模式用服务端结果（已过滤），否则用整棵树。两个分支都要用，所以提到最前。
   const treeEntries = searching
@@ -587,7 +604,7 @@ function FilesTab({ workspaceId, openFile, onOpenFile }: {
         path: entry.path ?? entry.name, kind: entry.kind, size: entry.size_bytes,
       }))
 
-  if (workspaceId === null) return <PanelEmpty kind="files" title="尚未选择工作区" hint="选择工作区后，在这里浏览和预览文件。" />
+  if (scope === 'workspace' && workspaceId === null) return <PanelEmpty kind="files" title="尚未选择工作区" hint="选择工作区后，在这里浏览和预览文件。" />
 
   if (openFile !== null) {
     return (
@@ -630,22 +647,28 @@ function FilesTab({ workspaceId, openFile, onOpenFile }: {
             ) : null}
           </div>
         </div>
-        <div className={styles.filesResizer} {...treeHandle} role="separator"
-          aria-label="拖动调整文件树宽度" aria-orientation="vertical" />
-        <FileTreeSide
-          width={treeWidth}
-          entries={treeEntries}
-          onSelectFile={onOpenFile}
-          selectedPath={openFile}
-          filter={filter}
-          onFilter={setFilter}
-          searching={searching}
-          searchFetching={search.isFetching}
-          truncated={listing.data?.truncated === true}
-          error={searching ? search.isError : listing.isError}
-          pending={listing.isPending && !searching}
-          onRetry={() => { void (searching ? search.refetch() : listing.refetch()) }}
-        />
+        {/* 附件预览不摆文件树（2026-10-30）：附件不在工作区里，树里永远点不到它，
+            留着只是一块空白 + 一条误导的分隔条。 */}
+        {scope === 'attachments' ? null : (
+          <>
+            <div className={styles.filesResizer} {...treeHandle} role="separator"
+              aria-label="拖动调整文件树宽度" aria-orientation="vertical" />
+            <FileTreeSide
+              width={treeWidth}
+              entries={treeEntries}
+              onSelectFile={onOpenFile}
+              selectedPath={openFile}
+              filter={filter}
+              onFilter={setFilter}
+              searching={searching}
+              searchFetching={search.isFetching}
+              truncated={listing.data?.truncated === true}
+              error={searching ? search.isError : listing.isError}
+              pending={listing.isPending && !searching}
+              onRetry={() => { void (searching ? search.refetch() : listing.refetch()) }}
+            />
+          </>
+        )}
       </div>
     )
   }
@@ -783,6 +806,7 @@ function ChangesTab({ sessionId, focusPath, onSelectFile }: {
           {selected !== null ? <Button size="sm" variant="ghost" aria-label="关闭改动详情" onClick={() => onSelectFile(null)}>关闭</Button> : null}
         </div>
         {selected !== null ? <div key={selected} className={styles.filesBody}>
+          {recorded.includes(selected) ? <FileRestoreControl sessionId={sessionId} path={selected} /> : null}
           <FileDiff sessionId={sessionId} path={selected} />
         </div> : <PanelEmpty kind="changes"
             title={changes.isPending ? '正在读取改动…' : changes.isError ? '暂时无法读取改动' : all.length === 0 ? '还没有文件改动' : '选择一个改动文件'}
@@ -813,7 +837,7 @@ function ChangesTab({ sessionId, focusPath, onSelectFile }: {
           /> : null}
         </div>
         <div className={styles.changesTreeFoot}>
-          <p className={styles.hint}>本次会话 · 只读对比</p>
+          <p className={styles.hint}>本次会话 · 文件对比与还原</p>
           {changes.data?.unrecorded_note ? <p className={styles.hint}>{changes.data.unrecorded_note}</p> : null}
         </div>
       </aside>

@@ -11,19 +11,10 @@ import { expect, test } from '@playwright/test'
  * 服务与输入由 `playwright.approval.config.ts` 拉起：
  * `scripts/serve_fake.py --decision tool --approval-edit` 会在工作区里种一份 `notes.txt`，
  * 并在收到 `T32_APPROVE` / `T32_REJECT` 时各发出一次"201 行替换成 1 行"的 `edit_file`
- * （改动 202 行 > 免审上限 200）——安全阈值仍然由产品代码裁决，端到端不放宽任何配置。
+ * （改动 202 行）；测试服务显式启用批量编辑审批，安全裁决仍走产品代码。
  */
 const REPLY = '这是假模型的固定回答。'
 const NEW_TEXT = '已批准的新内容'
-/**
- * 拒绝之后那一轮的回答。
- *
- * 拒绝**不会**让图继续往下走：`nodes.REJECTED_REPLY` 直接作为最终回答，且不产生工具结果
- * （见 `tests/test_graph_resume.py::test_delete_rejection_keeps_file_and_stops` 里
- * `graph.get_state(...).next == ()`）。所以这里不能断言假模型那句固定回答——那句话属于
- * "工具执行完之后接着往下生成"的那条路径。
- */
-const REJECTED_REPLY = '该动作已被你拒绝，我不会执行，也不会自动重试。'
 
 /** 新建会话并提交一句话；返回本次会话的输入区 locator。 */
 async function submit(page: import('@playwright/test').Page, text: string) {
@@ -46,7 +37,9 @@ async function expandEditRow(page: import('@playwright/test').Page) {
   await expect(row).toHaveAttribute('aria-expanded', 'false')
   await row.click()
   await expect(row).toHaveAttribute('aria-expanded', 'true')
-  return page.locator('figure').filter({ hasText: 'notes.txt' })
+  const diff = page.locator('figure').filter({ hasText: 'notes.txt' })
+  await diff.getByRole('button', { name: /还有 \d+ 行 · 展开/ }).click()
+  return diff
 }
 
 test('批准一次大范围编辑：卡片接管输入区，刷新不丢，批准后 diff 与工具结果一致', async ({ page }) => {
@@ -111,6 +104,10 @@ test('拒绝一次大范围编辑：卡片如实说未执行，文件没有任�
 
   const card = page.getByLabel('审批')
   await expect(card.getByText('等待审批', { exact: true })).toBeVisible()
+  const preview = '/api/data-center/artifacts/preview?path=notes.txt'
+  const before = await page.request.get(preview)
+  expect(before.ok()).toBe(true)
+  const original = (await before.json() as { text: string }).text
   await card.getByRole('button', { name: '拒绝' }).click()
 
   // 拒绝之后：卡片**收起成一行**只报告结果，输入区恢复（用户可以立刻重新发起请求）。
@@ -124,7 +121,11 @@ test('拒绝一次大范围编辑：卡片如实说未执行，文件没有任�
 
   // 没有任何结构化 diff：这次调用没有落盘，页面也不该显示"改了什么"。
   await expect(page.locator('figure')).toHaveCount(0)
-  // 拒绝不是"整轮失败"：图就此结束，并把"不会执行、也不会自动重试"如实写进回答。
-  await expect(page.getByText(REJECTED_REPLY)).toBeVisible()
-  await expect(page.getByText(REPLY)).toHaveCount(0)
+  // 拒绝会补齐 denied 工具结果，再交给模型解释；假模型返回固定回答。
+  await expect(page.getByText(REPLY)).toBeVisible()
+  await page.getByRole('button', { name: /失败 修改文件/ }).click()
+  await expect(page.getByText('用户拒绝执行 修改文件，该动作未执行，也不会自动重试。')).toBeVisible()
+  const after = await page.request.get(preview)
+  expect(after.ok()).toBe(true)
+  expect((await after.json() as { text: string }).text).toBe(original)
 })

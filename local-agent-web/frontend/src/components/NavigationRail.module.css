@@ -3,11 +3,11 @@
 .brand img { display: block; border-radius: 10px; }
 .compose { display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 auto; background: var(--c-accent); color: var(--c-text-inverse); border-radius: 12px; box-shadow: 0 3px 8px color-mix(in srgb, var(--c-accent) 18%, transparent); }
 .nav { display: flex; flex-direction: column; gap: 7px; width: 100%; min-height: 0; overflow-y: auto; scrollbar-width: none; }
-.item { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 0 0 auto; gap: 5px; width: 100%; min-height: 54px; border-radius: 11px; color: var(--c-text-3); font-size: 11px; line-height: 14px; transition: background 130ms ease, color 130ms ease; }
+.item { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 0 0 auto; gap: 5px; width: 100%; min-height: 54px; border-radius: 11px; color: var(--c-text-3); font-size: var(--law-text-fixed-xs); line-height: 14px; transition: background 130ms ease, color 130ms ease; }
 .item[aria-current='page'] { background: var(--c-accent-soft); color: var(--c-accent); font-weight: 600; }
 .item:hover, .utility:hover { color: var(--c-text-1); background: var(--c-hover); }
 .compose:hover { filter: brightness(1.08); }
-.badge { position: absolute; right: 0; top: 0; display: grid; place-items: center; min-width: 15px; height: 15px; padding: 0 3px; border-radius: 8px; background: var(--c-danger); color: #fff; font-size: 9px; }
+.badge { position: absolute; right: 0; top: 0; display: grid; place-items: center; min-width: 15px; height: 15px; padding: 0 3px; border-radius: 8px; background: var(--c-danger); color: #fff; font-size: var(--law-text-fixed-3xs); }
 .footer { margin-top: auto; display: flex; flex-direction: column; gap: 6px; padding-top: 8px; }
 .utility { width: 38px; height: 36px; display: grid; place-items: center; color: var(--c-text-3); border-radius: 10px; }
 .item:focus-visible, .utility:focus-visible, .compose:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -2px; }

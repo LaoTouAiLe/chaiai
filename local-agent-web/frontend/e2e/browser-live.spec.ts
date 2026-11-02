@@ -25,6 +25,7 @@ async function open(page: Page, withSteps = false) {
   const response = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === '/api/browsers')
   await panel.getByRole('button', { name: '浏览器', exact: true }).click()
   const body = await (await response).json() as { browser_id: string }
+  // 地址栏始终可输入；刷新按钮可用才表示浏览器连接已就绪。
   await expect(panel.getByRole('button', { name: '刷新网页' })).toBeEnabled()
   return { panel, errors, id: body.browser_id, cleanup: async () => {
     for (const id of requests) await page.request.delete(`/api/browsers/requests/${encodeURIComponent(id)}`)

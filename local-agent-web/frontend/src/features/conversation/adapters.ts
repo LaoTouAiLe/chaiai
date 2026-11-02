@@ -163,6 +163,7 @@ function outcomeCard(tool: ToolUse, outcome: ToolOutcome): ToolCardView {
         : body.split('\n').map((text, index) => ({ number: (firstLine ?? 1) + index, text }))
       return {
         kind: 'read',
+        note: outcome.summary ?? undefined,
         path: outcome.target ?? '读取结果',
         lines,
         totalLines: outcome.total ?? lines.length,
@@ -510,6 +511,13 @@ export function mapMessages(snapshot: Snapshot, tail: StreamTail | null = null):
           attachments: (message.attachments ?? []).map((id) =>
             attachmentUrl(snapshot.session_id, id),
           ),
+          // 随消息发出的**文档**（2026-10-29）：只搬名字与体积，没有可取回的地址——
+          // 文件内容进不了页面，要看就打开右栏的文件预览，或让助手读。
+          files: (message.files ?? []).map((file) => ({
+            id: file.attachment_id,
+            name: file.name,
+            sizeBytes: file.size_bytes,
+          })),
         })
         const compression = compactionByUser.get(message.message_id)
         if (compression !== undefined) {

@@ -51,6 +51,7 @@ import {
   submitMessage,
   getSessionChanges,
   getSessionChangeDiff,
+  restoreSessionChanges,
 } from './client'
 import type { components } from './schema.gen'
 import type { SubmissionContext } from './client'
@@ -173,6 +174,34 @@ export function useSessionChangeDiff(sessionId: string | null, path: string | nu
     queryFn: () => getSessionChangeDiff(sessionId ?? '', path ?? ''),
     enabled: sessionId !== null && path !== null,
     staleTime: 5000,
+  })
+}
+
+/**
+ * 还原文件改动（2026-10-29）：`scope=file` 退回会话开始前，`scope=turn` 退回本轮开始前。
+ *
+ * 成功之后做两件事：
+ * 1. 用服务端返回的 `changes` 直接替换总览缓存（项目里"服务端是真相"的统一做法）；
+ * 2. 让所有文件的 diff 查询失效——抽屉可能正开着，那份 diff 是**独立 key**，
+ *    不失效会继续显示还原前的红绿行。
+ */
+export function useRestoreChanges(sessionId: string | null) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (payload: {
+      scope: 'file' | 'turn'
+      path?: string
+      run_id?: string
+      paths?: string[]
+      force?: boolean
+    }) => restoreSessionChanges(sessionId ?? '', payload),
+    onSuccess: (result) => {
+      if (sessionId === null) return
+      queryClient.setQueryData(queryKeys.changes(sessionId), result.changes)
+      void queryClient.invalidateQueries({
+        queryKey: [...queryKeys.changes(sessionId), 'diff'],
+      })
+    },
   })
 }
 
@@ -517,7 +546,7 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
 
   const mutation = useMutation({
     networkMode,
-    mutationFn: async (request: { sessionId: string; text: string; context: SubmissionContext; attachments?: readonly string[] }) => {
+    mutationFn: async (request: { sessionId: string; text: string; context: SubmissionContext; attachments?: readonly string[]; files?: readonly { id: string; name: string }[] }) => {
       let pending = pendingMessages.get(queryClient)
       if (!pending) {
         pending = new Map()
@@ -527,8 +556,10 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
       const text = request.text
       // 附件也进签名（2026-10-16）：与后端 `_digest` 同一条口径——"同一段文字、换一张图再发"
       // 是两个不同的请求，不能被当成上一次的重放（那样图就永远发不出去）。
+      // 文档同理（2026-10-29）：换一份文件再发也是另一个请求。
       const attachments = [...(request.attachments ?? [])]
-      const signature = JSON.stringify([text, request.context.parent_turn_id ?? null, request.context.expected_branch_id ?? null, request.context.workflow ?? null, attachments])
+      const files = [...(request.files ?? [])]
+      const signature = JSON.stringify([text, request.context.parent_turn_id ?? null, request.context.expected_branch_id ?? null, request.context.workflow ?? null, attachments, files])
       const same = existing?.signature === signature
       const requestId = same ? existing.id : newRequestId()
       const boundContext = same ? existing.context : request.context
@@ -538,6 +569,7 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
         result = await submitMessage(request.sessionId, text, requestId, {
           ...boundContext,
           ...(attachments.length === 0 ? {} : { attachments }),
+          ...(files.length === 0 ? {} : { files }),
         })
       } catch (error) {
         // 明确拒绝且没有执行时，刷新后可换观测版本；网络中断仍保留原请求的上下文与幂等键。
@@ -574,7 +606,7 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
       // `context` 可**按次覆盖**：行内编辑（2026-10-21）要临时换 `parent_turn_id`，
       // 而它记在 hook 参数里、渲染期就定了。合并而不是整体替换，是因为其余几项
       // （branch / snapshot / workflow）仍该沿用当前上下文。
-      request: { text: string; attachments?: readonly string[]; context?: SubmissionContext },
+      request: { text: string; attachments?: readonly string[]; files?: readonly { id: string; name: string }[]; context?: SubmissionContext },
       options?: Parameters<typeof mutation.mutate>[1],
     ) => {
       if (sessionId === null) throw new Error('还没有打开会话')
@@ -583,13 +615,15 @@ export function useSubmitMessage(sessionId: string | null, context: SubmissionCo
         text: request.text,
         context: { ...context, ...(request.context ?? {}) },
         attachments: request.attachments,
+        files: request.files,
       }, options)
     },
     // Promise 回调在切换标签、组件卸载后仍会完成，侧聊据此恢复所属标签的失败草稿。
-    mutateAsync: (request: { text: string; attachments?: readonly string[]; context?: SubmissionContext }) => {
+    mutateAsync: (request: { text: string; attachments?: readonly string[]; files?: readonly { id: string; name: string }[]; context?: SubmissionContext }) => {
       if (sessionId === null) return Promise.reject(new Error('还没有打开会话'))
       return mutation.mutateAsync({ sessionId, text: request.text,
-        context: { ...context, ...(request.context ?? {}) }, attachments: request.attachments })
+        context: { ...context, ...(request.context ?? {}) }, attachments: request.attachments,
+        files: request.files })
     },
     isPending: belongsHere && mutation.isPending,
     isError: belongsHere && mutation.isError,

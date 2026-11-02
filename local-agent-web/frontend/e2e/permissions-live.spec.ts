@@ -13,7 +13,7 @@ test('三档写入真实设置库并在刷新后恢复，旧沙箱开关与接�
   await expect(group.getByRole('radio', { name: '工作区可写', exact: true })).toHaveAttribute('aria-checked', 'true')
   await expect(dialog.getByRole('switch', { name: '写侧沙箱' })).toHaveCount(0)
 
-  for (const [label, mode] of [['只读', 'read-only'], ['完全放行', 'danger-full-access'], ['工作区可写', 'workspace-write']]) {
+  for (const [label, mode] of [['只读', 'read-only'], ['常规免审', 'danger-full-access'], ['工作区可写', 'workspace-write']]) {
     const saved = page.waitForResponse(response => response.url().endsWith('/api/permissions') && response.request().method() === 'PUT')
     await group.getByRole('radio', { name: label, exact: true }).click()
     const response = await saved

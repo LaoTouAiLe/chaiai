@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   emptySessionScenario,
   errorsScenario,
@@ -27,7 +27,8 @@ describe('Conversation 复制与编辑（2026-10-21）', () => {
   it('edits the bubble in place and resends from the previous turn', () => {
     // 编辑第 2 轮 → `parentTurnId` 是上一轮（u1）：宿主退到"第一问之后"重发，
     // 旧的第二问及其回答进旧分支（不删除）。改动在**气泡原位**发生，不回填底部输入框。
-    const edited: [string | null, string, readonly string[]][] = []
+    // 第 4 项是文档引用（2026-10-29）：可选——不带文件的编辑调用仍然只有三个实参。
+    const edited: [string | null, string, readonly string[], (readonly { id: string; name: string }[])?][] = []
     render(
       <Conversation
         scenario={{ ...shellScenario, messages, stats: null }}
@@ -77,7 +78,7 @@ describe('Conversation 复制与编辑（2026-10-21）', () => {
     const withPicture = [
       { kind: 'user' as const, id: 'u1', text: '这张图是什么？', at: '', attachments: [picture] },
     ]
-    const edited: [string | null, string, readonly string[]][] = []
+    const edited: [string | null, string, readonly string[], (readonly { id: string; name: string }[])?][] = []
     render(
       <Conversation
         scenario={{ ...shellScenario, messages: withPicture, stats: null }}
@@ -108,6 +109,69 @@ describe('Conversation 复制与编辑（2026-10-21）', () => {
 
     expect(screen.queryByRole('button', { name: '编辑这条提问' })).not.toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: '复制' }).length).toBeGreaterThan(0)
+  })
+})
+
+describe('Conversation 文档附件（2026-10-29）', () => {
+  it('点文件块可以打开附件预览（2026-10-30）', () => {
+    // 原来只能看名字，用户没法确认传上去的是哪一份。
+    const onOpenAttachment = vi.fn()
+    const messages = [
+      {
+        kind: 'user' as const,
+        id: 'u1',
+        text: '看看',
+        at: '',
+        files: [{ id: '2026/10/30/a/b.docx', name: '报告.docx', sizeBytes: 10 }],
+      },
+    ]
+    render(
+      <Conversation
+        scenario={{ ...shellScenario, messages, stats: null }}
+        onOpenAttachment={onOpenAttachment}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '预览附件 报告.docx' }))
+
+    expect(onOpenAttachment).toHaveBeenCalledWith('2026/10/30/a/b.docx')
+  })
+
+  it('没有宿主回调时文件块不可点，不假装能打开', () => {
+    const messages = [
+      {
+        kind: 'user' as const,
+        id: 'u1',
+        text: '看看',
+        at: '',
+        files: [{ id: 'doc-1', name: '报告.docx', sizeBytes: 10 }],
+      },
+    ]
+    render(<Conversation scenario={{ ...shellScenario, messages, stats: null }} />)
+
+    expect(screen.getByRole('button', { name: '预览附件 报告.docx' })).toBeDisabled()
+  })
+
+  it('shows the uploaded name and size, not the storage hash', () => {
+    // 落盘名是内容哈希，用户认不出来——气泡必须显示上传时的文件名。
+    const messages = [
+      {
+        kind: 'user' as const,
+        id: 'u1',
+        text: '这份文件里写了什么',
+        at: '',
+        files: [
+          { id: '2026/10/29/a/b.docx', name: '季度报告.docx', sizeBytes: 1_258_291 },
+        ],
+      },
+    ]
+    render(<Conversation scenario={{ ...shellScenario, messages, stats: null }} />)
+
+    expect(screen.getByRole('list', { name: '随这条消息发送的文件' })).toBeInTheDocument()
+    expect(screen.getByText('季度报告.docx')).toBeInTheDocument()
+    expect(screen.getByText('1.2 MB')).toBeInTheDocument()
+    // 不提供下载/打开：文件内容在磁盘上，页面没有理由拿到它。
+    expect(screen.queryByRole('link')).toBeNull()
   })
 })
 

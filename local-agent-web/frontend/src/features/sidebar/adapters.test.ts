@@ -23,7 +23,7 @@ const session = (
   archived: false,
   created_at: updatedAt,
   updated_at: updatedAt,
-  last_checkpoint_id: null,
+  last_checkpoint_id: null, unread: false,
 })
 
 describe('mapSidebar', () => {

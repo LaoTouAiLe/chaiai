@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ClipboardEvent } from 'react'
 import { EditorDialog } from './ui/EditorDialog'
 import type {
   ComposerStateView,
@@ -18,21 +18,57 @@ import { useGeneralPreferences } from '../features/settings/preferencesContext'
 import { ContextMeter, MeterPanel } from './ContextMeter'
 import { quotePreview } from '../features/conversation/quote'
 import type { QueuedMessage } from '../stores/outbox'
-import { ImagePlus } from './icons'
+import { EMPTY_ATTACHMENT_DRAFT, useAttachmentDrafts } from '../stores/attachments'
+import { Doc, ImagePlus } from './icons'
+import { searchWorkspaceFiles } from '../api/client'
 import styles from './Composer.module.css'
+
+/**
+ * 路径含空白时加引号（2026-10-30）。
+ *
+ * 后端按「反引号 → 双引号 → 单引号」的优先级解析，这里必须用**同一套顺序**：
+ * 写进去能识别的形状，和发出去能识别的形状不一致，等于把用户的东西弄丢。
+ * 路径里三种引号都占了就退回裸路径——那种名字本来就少见，不值得为它再造一种转义。
+ */
+function quoteMentionPath(path: string): string {
+  if (!/\s/.test(path)) return path
+  for (const quote of ['`', '"', "'"]) {
+    if (!path.includes(quote)) return `${quote}${path}${quote}`
+  }
+  return path
+}
+
+/**
+ * 两个 git 作用域（2026-10-30）：`@diff` = 工作区未提交改动，`@staged` = 暂存区。
+ *
+ * 它们不是文件，但必须出现在候选里——否则用户不知道这个用法存在。
+ * 后端按裸词识别（见 `file_mentions.GIT_SCOPES`），插入时不需要引号。
+ */
+const GIT_SCOPE_ITEMS = [
+  { path: 'diff', name: '工作区改动' },
+  { path: 'staged', name: '暂存区改动' },
+] as const
 
 /**
  * Real wiring (T30). **Omitting it means prototype behaviour**: the input stays
  * uncontrolled and the send button stays permanently disabled, which is exactly
  * what the static baseline shows.
  */
-/** 一张**待发**的图片（2026-10-16）：服务端的引用 + 本地预览地址。 */
+/**
+ * 一条**待发**的附件：图片（2026-10-16）或文档（2026-10-29）。
+ *
+ * 两者在界面上不同：图片有本地缩略图、可点开放大；文档只有一个名字与体积标签。
+ * `kind` 是判据——发送时图片走 `attachments`、文档走 `files`，两条路在下游完全不同。
+ */
 interface PendingAttachment {
   /** 服务端的引用（相对路径）：随消息提交的就是它。 */
   id: string
-  /** 本地 object URL（缩略图用）；字节的权威在服务端，这里只是预览。 */
-  previewUrl: string
+  /** 本地 object URL（缩略图用）；文档没有。字节的权威在服务端，这里只是预览。 */
+  previewUrl?: string
   name: string
+  kind: 'image' | 'file'
+  /** 文档体积（`kind === 'file'` 时有）。 */
+  sizeBytes?: number
 }
 
 export interface ComposerActions {
@@ -44,12 +80,23 @@ export interface ComposerActions {
    * 字节在上传时就落盘了（见 `onAttachFile`）。
    *
    * 返回这次提交的去向（2026-10-28 起是三态）：
-   * - `sent` 已发出去；
+   * - `sent` 服务端已接受（异步提交须等 Promise 完成）；
    * - `queued` **被接受了，但进了待发队列**（本轮还在跑）——同样要清待发图片与草稿；
    * - `rejected` 没接受（空输入、带图不允许入队、队列已满、需先处理中断）。
    * **必须先问它、再清待发图片**——否则图片会凭空消失（2026-10-20 实测）。
    */
-  onSend: (attachmentIds: readonly string[]) => 'sent' | 'queued' | 'rejected'
+  onSend: (
+    attachmentIds: readonly string[],
+    /** 文档引用 + 展示名（2026-10-29）：`name` 只用于气泡显示，服务端会先净化。 */
+    files?: readonly { id: string; name: string }[],
+  ) => 'sent' | 'queued' | 'rejected' | Promise<'sent' | 'queued' | 'rejected'>
+  /**
+   * 把一份**文档**交给服务端（2026-10-29）：走 multipart，返回引用与展示用的名字/体积。
+   *
+   * 与 `onAttachFile` 分开而不是加一个"类型"参数：两者上传方式不同（base64 JSON vs
+   * multipart），返回值也不同（图片要预览地址，文档不要），合并只会让调用方写 if。
+   */
+  onAttachDocument?: (file: File) => Promise<{ id: string; name: string; sizeBytes: number }>
   /**
    * 把一张图交给服务端（2026-10-16）：成功给回引用与一个**本地预览地址**，失败**抛错**。
    *
@@ -137,6 +184,12 @@ interface ComposerProps {
    * 没有它时**不渲染任何占位**——正常排队时不该多一行字。
    */
   queueNotice?: string | null
+  /**
+   * 当前会话的工作区 id（2026-10-30）：`@` 引用按它搜文件。
+   *
+   * 省略即关闭引用：原型与侧边对话不传，也就不用为了一个提示去连 QueryClient。
+   */
+  workspaceId?: string
 }
 
 /** One copy of the running-state explanation, derived from `session.status`. */
@@ -153,17 +206,85 @@ const SEND_BLOCKED_TEXT = '任务进行中：可以先继续写草稿，但要�
  * card stays above it as a visible outcome, because a card that asks the user to
  * re-issue a request must not be the reason they cannot type one.
  */
-export function Composer({ mode = 'agent', session, plan, meter, takeover, modelMenu, state, stopped = false, actions, modelMenuActions, approvalActions, questionActions, canQueue = false, queued = [], queuePaused = false, onRemoveQueued, onMoveQueued, onEditQueued, onQueueEditingChange, queueScope, onResumeQueue, queueNotice = null }: ComposerProps) {
+export function Composer({ mode = 'agent', session, plan, meter, takeover, modelMenu, state, stopped = false, actions, modelMenuActions, approvalActions, questionActions, canQueue = false, queued = [], queuePaused = false, onRemoveQueued, onMoveQueued, onEditQueued, onQueueEditingChange, queueScope, onResumeQueue, queueNotice = null, workspaceId }: ComposerProps) {
   // `animations` 不再需要：用它的是那条压缩提示，而它 2026-10-16 搬进了对话流。
   const { send_shortcut: sendShortcut } = useGeneralPreferences()
   const modelTrigger = useRef<HTMLButtonElement>(null)
   const meterTrigger = useRef<HTMLButtonElement>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  /**
+   * `@` 引用（2026-10-30）：光标前那个还没写完的 `@路径`。
+   *
+   * 只记 `start`（`@` 的位置）与 `query`（已输入的部分）：插入时要靠它们把这段替换掉，
+   * 而不是在整段正文里做字符串替换——正文里可能还有另一个同名文件。
+   */
+  const [mention, setMention] = useState<{ start: number; query: string } | null>(null)
+  const [mentionItems, setMentionItems] = useState<readonly { path: string; name: string }[]>([])
+  const [mentionIndex, setMentionIndex] = useState(0)
+
+  /**
+   * 候选文件的搜索（2026-10-30）：停止输入 150ms 再发，避免每个字符一次请求。
+   *
+   * 不用 `useSearchWorkspaceFiles`：那是 react-query hook，原型页没有 Provider，
+   * 无条件调用会直接崩在渲染阶段。这里手写 debounce——`workspaceId` 没有时一次请求都不发。
+   */
+  useEffect(() => {
+    if (mention === null || workspaceId === undefined || mention.query.trim() === '') {
+      setMentionItems([])
+      return
+    }
+    let cancelled = false
+    const timer = setTimeout(() => {
+      void searchWorkspaceFiles(mention.query, workspaceId)
+        .then((view) => {
+          if (cancelled) return
+          // `path` 在契约里可空（目录项只需要名字），而插入正文的必须是可用路径：
+          // 用 flatMap 顺手收窄，比先 filter 再断言安全。
+          setMentionItems((view.entries ?? [])
+            .flatMap((entry) => (entry.kind === 'file' && typeof entry.path === 'string' && entry.path !== ''
+              ? [{ path: entry.path, name: entry.name }]
+              : []))
+            .slice(0, 6))
+          setMentionIndex(0)
+        })
+        .catch(() => { if (!cancelled) setMentionItems([]) })
+    }, 150)
+    return () => { cancelled = true; clearTimeout(timer) }
+  }, [mention, workspaceId])
+
+  /** 把正在输入的那段 `@query` 换成 `@路径 `，并把光标放到它后面。 */
+  const applyMention = (path: string) => {
+    if (mention === null || actions === undefined) return
+    const caret = inputRef.current?.selectionStart ?? mention.start + mention.query.length + 1
+    const inserted = `@${quoteMentionPath(path)} `
+    actions.onDraftChange(`${actions.draft.slice(0, mention.start)}${inserted}${actions.draft.slice(caret)}`)
+    setMention(null)
+    setMentionItems([])
+    const at = mention.start + inserted.length
+    requestAnimationFrame(() => {
+      inputRef.current?.focus()
+      inputRef.current?.setSelectionRange(at, at)
+    })
+  }
+
+  /**
+   * 候选 = 两个 git 作用域 + 文件搜索结果（2026-10-30）。
+   *
+   * 刚打出 `@`、搜索词还空的时候只有前两条——正好把「还能这么用」提示出来；
+   * 输入 `@d` 时也只剩 `@diff`，不会和文件结果抢位置。
+   */
+  const mentionOptions = mention === null ? [] : [
+    ...GIT_SCOPE_ITEMS.filter((item) => item.path.startsWith(mention.query)),
+    ...mentionItems,
+  ]
   // 待发图片（2026-10-16）：它是**这条草稿**的一部分，属于本地瞬态——刷新即丢（字节已在服务端）。
-  const [pending, setPending] = useState<readonly PendingAttachment[]>([])
-  const [attachError, setAttachError] = useState<string | null>(null)
-  const [attachBusy, setAttachBusy] = useState(false)
+  const localAttachmentScope = useId()
+  const attachmentScope = queueScope ?? localAttachmentScope
+  const attachmentDraft = useAttachmentDrafts(state => state.drafts[attachmentScope]) ?? EMPTY_ATTACHMENT_DRAFT
+  const updateAttachments = useAttachmentDrafts(state => state.update)
+  const { items: pending, error: attachError, uploading, sending: sendBusy } = attachmentDraft
+  const attachBusy = uploading !== null
   // 待发引用（2026-10-26）：状态在宿主（它负责拼进正文），这里只用来显示与取消。
   const quote = actions?.quote ?? ''
   const [queueEditor, setQueueEditor] = useState<{ id: string; text: string } | null>(null)
@@ -182,22 +303,51 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
     editingChange.current?.(false)
   }
 
-  /** 粘贴与选图走**同一条路**：两者都只是"拿到若干 File"，处理方式必须一样。 */
+  /** 粘贴与选文件走**同一条路**：两者都只是"拿到若干 File"，处理方式必须一样。 */
   async function attachFiles(files: readonly File[]) {
+    const current = useAttachmentDrafts.getState().drafts[attachmentScope] ?? EMPTY_ATTACHMENT_DRAFT
+    if (current.uploading !== null || current.sending) return
     const images = files.filter((file) => file.type.startsWith('image/'))
-    if (images.length === 0 || actions?.onAttachFile === undefined) return
-    setAttachError(null)
-    setAttachBusy(true)
+    // 非图片一律当文档交给服务端判（它按魔数认格式，认不出会给出可执行的拒绝理由）。
+    const documents = files.filter((file) => !file.type.startsWith('image/'))
+    if (current.items.filter(item => item.kind === 'file').length + documents.length > 5) {
+      updateAttachments(attachmentScope, draft => ({ ...draft, error: '每条消息最多附带 5 份文档，请移除多余文件后再选择。' }))
+      return
+    }
+    if (documents.some(file => file.size > 50 * 1024 * 1024)) {
+      updateAttachments(attachmentScope, draft => ({ ...draft, error: '单份文档不能超过 50 MB，请先拆分或压缩。' }))
+      return
+    }
+    if (images.length === 0 && documents.length === 0) return
+    // 先取成局部常量：`actions?.x === undefined` 拦不住后面的 `actions.x`（TS 不跨语句收窄）。
+    const uploadImage = actions?.onAttachFile
+    const uploadDocument = actions?.onAttachDocument
+    if (images.length > 0 && uploadImage === undefined) return
+    if (documents.length > 0 && uploadDocument === undefined) return
+    updateAttachments(attachmentScope, draft => ({ ...draft, error: null, uploading: files[0]?.name ?? '附件' }))
+    const append = (item: PendingAttachment) => updateAttachments(attachmentScope, draft => ({
+      ...draft, items: [...draft.items, item],
+    }))
     try {
-      for (const file of images) {
-        const attached = await actions.onAttachFile(file)
-        setPending((current) => [...current, { ...attached, name: file.name }])
+      if (uploadImage !== undefined) {
+        for (const file of images) {
+          updateAttachments(attachmentScope, draft => ({ ...draft, uploading: file.name }))
+          const attached = await uploadImage(file)
+          append({ ...attached, name: file.name, kind: 'image' })
+        }
+      }
+      if (uploadDocument !== undefined) {
+        for (const file of documents) {
+          updateAttachments(attachmentScope, draft => ({ ...draft, uploading: file.name }))
+          const attached = await uploadDocument(file)
+          append({ ...attached, kind: 'file' })
+        }
       }
     } catch (error) {
       // 服务端的拒绝理由是可执行的（格式/大小/当天张数），原样给用户看，不改写。
-      setAttachError(error instanceof Error ? error.message : '这张图没能上传')
+      updateAttachments(attachmentScope, draft => ({ ...draft, error: error instanceof Error ? error.message : '这个附件没能上传' }))
     } finally {
-      setAttachBusy(false)
+      updateAttachments(attachmentScope, draft => ({ ...draft, uploading: null }))
     }
   }
 
@@ -212,12 +362,46 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
   /** 发送：把待发图片的**引用**一起交出去；**只有调用方接受（sent / queued）后才清空**。 */
   function send() {
     if (actions === undefined) return
-    const ids = pending.map((item) => item.id)
-    // 先问后清：`rejected` 命中"空输入 / 带图不允许入队 / 队列已满 / 需先处理中断"时
-    // 什么都不做。若这里先清，用户看到的就是"问题没发出去、文字还在、图片没了"。
-    if (actions.onSend(ids) === 'rejected') return
-    setPending([])
-    setAttachError(null)
+    const current = useAttachmentDrafts.getState().drafts[attachmentScope] ?? EMPTY_ATTACHMENT_DRAFT
+    if (current.uploading !== null || current.sending) return
+    // 图片与文档分成两批交出去：下游是两条完全不同的路（data URL 内容块 vs 路径提示）。
+    const ids = pending.filter((item) => item.kind === 'image').map((item) => item.id)
+    const fileIds = pending
+      .filter((item) => item.kind === 'file')
+      .map((item) => ({ id: item.id, name: item.name }))
+    const clear = () => updateAttachments(attachmentScope, draft => ({ ...draft, items: [], error: null }))
+    const failed = () => updateAttachments(attachmentScope, draft => ({ ...draft, error: '消息未能发送，附件已保留，请核对状态后重试。' }))
+    try {
+      const result = actions.onSend(ids, fileIds)
+      if (typeof result === 'string') {
+        // 同步路径：`rejected` 命中"空输入 / 带附件不允许入队 / 队列已满 / 需先处理中断"，
+        // 那时什么都不清——否则用户看到的是"问题没发出去、文字还在、附件没了"。
+        if (result !== 'rejected') clear()
+        return
+      }
+      if (!result || typeof result.then !== 'function') return
+      // 带附件走异步：**先清空、失败再放回**（2026-10-30 实机反馈）。
+      // 原先等 Promise 落地才清，而那个 Promise 要等 `/messages` **整轮跑完** + 快照重取才
+      // resolve——结果是附件在输入框上方挂了几分钟，看起来像没发出去。
+      // 快照那份留到失败回滚用：被拒或网络错误时原样放回，用户不必重新选文件。
+      const snapshot = current.items
+      clear()
+      const restore = () => updateAttachments(attachmentScope, draft => ({ ...draft, items: snapshot }))
+      updateAttachments(attachmentScope, draft => ({ ...draft, sending: true }))
+      void result
+        .then((status) => {
+          if (status === 'rejected') restore()
+        })
+        .catch(() => {
+          restore()
+          failed()
+        })
+        .finally(() => {
+          updateAttachments(attachmentScope, draft => ({ ...draft, sending: false }))
+        })
+    } catch {
+      failed()
+    }
   }
   // 模式切换改成**两个常驻分段**，没有弹出菜单了：不再需要开关状态、外部点击与 Escape 处理（那些
   // 都是给下拉写的）。原型态（没有 `actions`）把两段都设为禁用——控件照实画出来，但不假装能点。
@@ -361,16 +545,30 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                 读者会以为那是"输入状态"，而它回答的是"这轮上下文为什么变小了"。 */}
             {/* 待发图片（2026-10-16）：粘贴或选图之后先在这里排队，发送时随消息一起交给模型。 */}
             {pending.length === 0 ? null : (
-              <ul className={styles.attachments} aria-label="待发送的图片">
-                {pending.map((item) => (
-                  <li key={item.id} className={styles.attachment}>
-                    <img className={styles.attachmentImage} src={item.previewUrl} alt="" />
+              <ul className={styles.attachments} aria-label="待发送的附件">
+                {pending.map((item, index) => (
+                  <li
+                    key={`${item.id}:${index}`}
+                    className={item.previewUrl === undefined
+                      ? `${styles.attachment} ${styles.attachmentDoc}`
+                      : styles.attachment}
+                  >
+                    {item.previewUrl === undefined ? (
+                      // 文件名可截断，扩展名与大小保留，便于发送前核对。
+                      <span
+                        className={styles.attachmentFile}
+                        title={`${item.name} · 上传后保存在本机，助手可直接读取；不需要就点右侧 × 移除`}
+                      ><Doc /><span className={styles.attachmentName}>{item.name.replace(/\.[^.]+$/, '')}</span><span>{item.name.match(/\.[^.]+$/)?.[0]}</span><span className={styles.attachmentSize}>{item.sizeBytes === undefined ? '' : item.sizeBytes >= 1024 * 1024 ? `${(item.sizeBytes / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(item.sizeBytes / 1024)} KB`}</span></span>
+                    ) : (
+                      <img className={styles.attachmentImage} src={item.previewUrl} alt="" />
+                    )}
                     <button
                       type="button"
                       className={styles.attachmentRemove}
-                      aria-label={`移除图片 ${item.name}`}
+                      aria-label={`移除${item.kind === 'file' ? '附件' : '图片'} ${item.name}`}
+                      disabled={sendBusy}
                       onClick={() =>
-                        setPending((current) => current.filter((row) => row.id !== item.id))
+                        updateAttachments(attachmentScope, draft => ({ ...draft, items: draft.items.filter((_, rowIndex) => rowIndex !== index) }))
                       }
                     >
                       ×
@@ -379,6 +577,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                 ))}
               </ul>
             )}
+            {uploading === null ? null : <p className={styles.uploadStatus} role="status">正在上传 {uploading}…</p>}
             {/* 待发引用（2026-10-26，追问）：只留一条，再点追问会替换掉上一条（引用是"当前
                 在问的那段"，不是收件箱，排队反而让用户分不清自己在问哪段）。 */}
             {quote === '' ? null : (
@@ -402,6 +601,21 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
               </div>
             )}
             <div className={styles.composer}>
+              {/* `@` 引用候选（2026-10-30）：贴在卡片上沿。用 mousedown 而不是 click——
+                  输入框先失焦会把弹层收掉，click 就再也收不到了。 */}
+              {mentionOptions.length === 0 ? null : (
+                <div className={styles.mentionMenu} role="listbox" aria-label="引用工作区文件或改动">
+                  {mentionOptions.map((item, index) => (
+                    <button key={item.path} type="button" role="option"
+                      aria-selected={index === mentionIndex}
+                      className={index === mentionIndex ? `${styles.mentionItem} ${styles.mentionActive}` : styles.mentionItem}
+                      onMouseDown={(event) => { event.preventDefault(); applyMention(item.path) }}>
+                      <span className={styles.mentionName}>{item.name}</span>
+                      <span className={styles.mentionPath}>{item.path}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <label className={styles.inputLabel}>
                 <span className="visually-hidden">给智能体发消息</span>
                 {/* A disabled input states why it is disabled, and points at that
@@ -420,7 +634,19 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                     actions === undefined
                       ? undefined
                       : (event) => {
-                        actions.onDraftChange(event.target.value)
+                        const next = event.target.value
+                        actions.onDraftChange(next)
+                        if (workspaceId === undefined) return
+                        // 只看光标**之前**：`@` 出现在后面不该影响当前正在打的这段。
+                        const caret = event.target.selectionStart ?? next.length
+                        const match = /(?:^|\s)@([^\s@]*)$/.exec(next.slice(0, caret))
+                        if (match === null) {
+                          setMention(null)
+                          setMentionItems([])
+                          return
+                        }
+                        const query = match[1] ?? ''
+                        setMention({ start: caret - query.length - 1, query })
                       }
                   }
                   onPaste={actions === undefined ? undefined : pasteImages}
@@ -428,6 +654,31 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                     actions === undefined
                       ? undefined
                       : (event) => {
+                        // `@` 候选优先吃掉方向键 / Enter / Tab / Esc（2026-10-30）：
+                        // 否则回车会一边插入路径、一边把消息发出去。
+                        if (mentionOptions.length > 0) {
+                          if (event.key === 'ArrowDown') {
+                            event.preventDefault()
+                            setMentionIndex((current) => (current + 1) % mentionOptions.length)
+                            return
+                          }
+                          if (event.key === 'ArrowUp') {
+                            event.preventDefault()
+                            setMentionIndex((current) => (current - 1 + mentionOptions.length) % mentionOptions.length)
+                            return
+                          }
+                          if ((event.key === 'Enter' || event.key === 'Tab') && !event.shiftKey) {
+                            event.preventDefault()
+                            applyMention(mentionOptions[mentionIndex]?.path ?? mentionOptions[0]!.path)
+                            return
+                          }
+                          if (event.key === 'Escape') {
+                            event.preventDefault()
+                            setMention(null)
+                            setMentionItems([])
+                            return
+                          }
+                        }
                         // Enter sends, Shift+Enter keeps the newline (chat convention).
                         const sendKey = sendShortcut === 'ctrl_enter' ? event.ctrlKey || event.metaKey : !event.ctrlKey && !event.metaKey
                         // 有待发图片时也允许发出（2026-10-16）：只贴一张图、不写字是合法提交。
@@ -451,7 +702,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                 </p>
               )}
               {attachError === null ? null : (
-                <p className={styles.attachError} role="status">
+                <p className={styles.attachError} role="alert">
                   {attachError}
                 </p>
               )}
@@ -528,10 +779,10 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                   <button
                     type="button"
                     className={styles.attach}
-                    disabled={actions?.onAttachFile === undefined || attachBusy}
+                    disabled={(actions?.onAttachFile === undefined && actions?.onAttachDocument === undefined) || attachBusy || sendBusy}
                     onClick={() => fileInput.current?.click()}
-                    aria-label={attachBusy ? '正在上传图片' : '加图片'}
-                    title={attachBusy ? '正在上传图片…' : '加图片（也可以直接把图片粘贴到输入框）'}
+                    aria-label={attachBusy ? '正在上传附件' : '添加附件'}
+                    title={attachBusy ? `正在上传 ${uploading}…` : '添加图片或文档（每条最多 5 份文档，单份不超过 50 MB；图片也可直接粘贴）'}
                   >
                     {attachBusy ? <span className={styles.attachSpinner} aria-hidden="true" /> : <ImagePlus />}
                   </button>
@@ -539,7 +790,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                     ref={fileInput}
                     className="visually-hidden"
                     type="file"
-                    accept="image/png,image/jpeg,image/gif,image/webp"
+                    accept="image/png,image/jpeg,image/gif,image/webp,.pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt"
                     multiple
                     onChange={(event) => {
                       void attachFiles(Array.from(event.target.files ?? []))
@@ -575,7 +826,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                       // Prototype mode keeps it permanently disabled (the fixture snapshot);
                       // real mode enables it once there is something to send.
                       // 有待发图片时也可以点（2026-10-16）：`canSend` 只管"草稿非空"。
-                      disabled={actions === undefined || (!actions.canSend && !canQueue && pending.length === 0)}
+                      disabled={actions === undefined || attachBusy || sendBusy || (!actions.canSend && !canQueue && pending.length === 0)}
                       onClick={actions === undefined ? undefined : () => send()}
                       aria-label="发送消息"
                       aria-describedby={sendBlockedReason === null ? undefined : 'composer-send-blocked'}
@@ -595,7 +846,6 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                 </div>
               </div>
             </div>
-            <div className={styles.helper} aria-hidden="true"><span>{sendShortcut === 'ctrl_enter' ? 'Ctrl / ⌘ + Enter 发送' : 'Enter 发送'}</span><span>Shift + Enter 换行</span></div>
           </>
         )}
       </div>

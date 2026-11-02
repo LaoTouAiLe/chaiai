@@ -11,7 +11,18 @@ export interface SidebarManagement {
   archiveSession: (id: string) => Promise<void>
   renameWorkspace: (id: string, title: string) => Promise<void>
   removeWorkspace: (id: string) => Promise<void>
+  /**
+   * 彻底删除一个**已归档**的会话（2026-10-29）：不可撤销，连同附件一起清掉。
+   * 只出现在归档列表里——未归档的会话在菜单里最多只能"归档"。
+   */
+  deleteSession: (id: string) => Promise<void>
   restoreSession: (id: string) => Promise<void>
+  /**
+   * 导出会话（2026-10-30）：`markdown` 给人看、`json` 给程序用。
+   *
+   * 只读动作，**不受行的忙碌状态限制**——会话正在跑的时候，用户更该能先把已有内容带走。
+   */
+  exportSession: (id: string, format: 'markdown' | 'json') => Promise<void>
   archivedOpen: boolean
   onToggleArchived: () => void
   archivedSessions: readonly { id: string; title: string }[]
@@ -32,6 +43,8 @@ interface SidebarSession {
   stateLabel?: string
   timeLabel: string
   selected: boolean
+  /** 服务端算好的未读（2026-10-30）。原型夹具省略 = 不显示。 */
+  unread?: boolean
 }
 
 /**
@@ -138,6 +151,11 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
   const [expandedWorkspaces, setExpandedWorkspaces] = useState<ReadonlySet<string>>(new Set())
   const [restoring, setRestoring] = useState<string | null>(null)
   const [restoreError, setRestoreError] = useState<string | null>(null)
+  // 删除（2026-10-29）：`confirming` = 正在问"确定吗"，`deleting` = 请求已发出。
+  // 两个状态分开是因为要防的是**误触**：第一次点击不改任何东西，只把按钮换成确认态。
+  const [confirming, setConfirming] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState<string | null>(null)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
   const query = search.trim().toLocaleLowerCase()
   const visibleWorkspaces = workspaces.map((workspace) => ({
     ...workspace,
@@ -189,20 +207,31 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
               {management === undefined || workspace.managed === false ? null : <SidebarItemMenu title={workspace.title} kind="工作区" onRename={(title) => management.renameWorkspace(workspace.id, title)} onRemove={() => management.removeWorkspace(workspace.id)} />}
             </div>
             <ul className={styles.sessions}>
-              {workspace.sessions.filter((session, index) => filtered || expandedWorkspaces.has(workspace.id) || index < 5 || session.selected).map((session) => <li key={session.id} aria-current={session.selected ? 'true' : undefined}>
+              {workspace.sessions.filter((session, index) => filtered || expandedWorkspaces.has(workspace.id) || index < 5 || session.selected).map((session) => {
+                // 未读由**服务端**给（2026-10-30）：`sessions.last_read_at` 与 `updated_at`
+                // 的比较只在那里实现一次。这里只补一条界面规则——正在跑/正在等我的行有
+                // 自己的指示（转圈、黄点），再叠一个未读只会让两种信号打架。
+                const unread = session.unread === true
+                  && !session.selected
+                  && session.status !== 'running'
+                  && session.status !== 'awaiting-approval'
+                  && session.status !== 'awaiting-input'
+                return <li key={session.id} aria-current={session.selected ? 'true' : undefined}
+                  data-unread={unread ? 'true' : undefined}>
                 <div className={styles.sessionRow} data-selected={session.selected ? 'true' : undefined}>
                   <button type="button" className={session.selected ? `${styles.session} ${styles.sessionSelected}` : styles.session} onClick={() => actions?.onSelectSession(session.id)}>
-                    <span className={`${styles.dot} ${statusClass(session.status)}`} aria-hidden="true" />
-                    <span className="visually-hidden">{STATUS_TEXT[session.status]}</span>
-                    <span className={styles.sessionTitle}>{session.title}</span>
+                    <span className={`${styles.dot} ${statusClass(session.status)}${unread ? ` ${styles.dotUnread}` : ''}`} aria-hidden="true" />
+                    <span className="visually-hidden">{STATUS_TEXT[session.status]}{unread ? '，有新内容' : ''}</span>
+                    <span className={unread ? `${styles.sessionTitle} ${styles.sessionUnread}` : styles.sessionTitle}>{session.title}</span>
                     <span className={styles.sessionMeta}>
                       {session.stateLabel === undefined ? <span aria-hidden="true">{session.status === 'running' ? '正在执行' : session.status === 'awaiting-approval' ? '等你确认' : session.status === 'awaiting-input' ? '等你回答' : session.status === 'completed' ? '任务已结束' : '本地会话'}</span> : <span className={styles.sessionState}>{session.stateLabel}</span>}
                       <span className={styles.sessionTime}>{session.timeLabel}</span>
                     </span>
                   </button>
-                  {management === undefined ? null : <SidebarItemMenu title={session.title} kind="会话" blocked={session.status === 'running' || session.status === 'awaiting-approval' || session.status === 'awaiting-input'} onRename={(title) => management.renameSession(session.id, title)} onRemove={() => management.archiveSession(session.id)} />}
+                  {management === undefined ? null : <SidebarItemMenu title={session.title} kind="会话" blocked={session.status === 'running' || session.status === 'awaiting-approval' || session.status === 'awaiting-input'} onRename={(title) => management.renameSession(session.id, title)} onRemove={() => management.archiveSession(session.id)} onExport={(format) => management.exportSession(session.id, format)} />}
                 </div>
-              </li>)}
+              </li>
+              })}
             </ul>
             {filtered || !workspace.sessions.some((session, index) => index >= 5 && !session.selected) ? null : <button type="button" className={styles.showMore} aria-label={`${workspace.title}${expandedWorkspaces.has(workspace.id) ? '收起会话' : '展示更多会话'}`} aria-expanded={expandedWorkspaces.has(workspace.id)} onClick={() => setExpandedWorkspaces((previous) => {
               const next = new Set(previous); if (!next.delete(workspace.id)) next.add(workspace.id); return next
@@ -219,16 +248,45 @@ export function Sidebar({ workspaces, collapsed = false, actions, addWorkspace, 
               {management.archivedLoading ? <p role="status">正在读取…</p> : null}
               {management.archivedError === null ? null : <p role="alert">{management.archivedError}</p>}
               {restoreError === null ? null : <p role="alert">{restoreError}</p>}
+              {deleteError === null ? null : <p role="alert">{deleteError}</p>}
               {!management.archivedLoading && management.archivedSessions.length === 0 ? <p className={styles.noResults}>没有已归档会话</p> : null}
-              {management.archivedSessions.map((item) => <div className={styles.archivedRow} key={item.id}>
+              {management.archivedSessions.map((item) => <div className={`${styles.archivedRow} ${confirming === item.id ? styles.archivedConfirm : ''}`} key={item.id}>
                 <span className={styles.sessionTitle} title={item.title}>{item.title}</span>
-                <button type="button" disabled={restoring !== null} aria-label={`恢复会话「${item.title}」`}
-                  onClick={async () => {
-                    setRestoring(item.id); setRestoreError(null)
-                    try { await management.restoreSession(item.id) }
-                    catch { setRestoreError('恢复未保存，请检查连接后重试。') }
-                    finally { setRestoring(null) }
-                  }}>{restoring === item.id ? '恢复中…' : '恢复'}</button>
+                {/* 删除是两步（2026-10-29）：第一次点只把这一行切成确认态，不改任何数据。
+                    归档列表是唯一入口——未归档的会话最多只能归档，删除永远不是一次误触。 */}
+                {confirming === item.id ? (
+                  <>
+                    <p className={styles.deleteWarning}>永久删除此会话的消息、附件及侧聊，无法恢复。</p>
+                    <button type="button" className={styles.deleteConfirmButton} disabled={deleting !== null}
+                      aria-label={`确认删除会话「${item.title}」，不可恢复`}
+                      onClick={async () => {
+                        setDeleting(item.id); setDeleteError(null)
+                        try {
+                          await management.deleteSession(item.id)
+                          setConfirming(null)
+                        } catch {
+                          setDeleteError('删除未完成，可能已清理部分数据，请重试以继续完成删除。')
+                        } finally { setDeleting(null) }
+                      }}>{deleting === item.id ? '删除中…' : '确认删除'}</button>
+                    <button type="button" disabled={deleting !== null}
+                      aria-label={`取消删除会话「${item.title}」`}
+                      onClick={() => setConfirming(null)}>取消</button>
+                  </>
+                ) : (
+                  <>
+                    <button type="button" disabled={restoring !== null || deleting !== null}
+                      aria-label={`恢复会话「${item.title}」`}
+                      onClick={async () => {
+                        setRestoring(item.id); setRestoreError(null)
+                        try { await management.restoreSession(item.id) }
+                        catch { setRestoreError('恢复未保存，请检查连接后重试。') }
+                        finally { setRestoring(null) }
+                      }}>{restoring === item.id ? '恢复中…' : '恢复'}</button>
+                    <button type="button" disabled={restoring !== null || deleting !== null}
+                      aria-label={`删除会话「${item.title}」`}
+                      onClick={() => { setConfirming(item.id); setDeleteError(null) }}>删除</button>
+                  </>
+                )}
               </div>)}
             </>}
           </section>}

@@ -52,7 +52,7 @@ import { ArtifactsPanel } from '../features/artifacts/ArtifactsPanel'
 import { PanelShell } from '../features/panel/PanelShell'
 import { TasksSection } from '../features/tasks/TasksSection'
 import type { components } from '../api/schema.gen'
-import { ApiError, archiveSession, getSessionSnapshot, promoteSideChat, detachCommand as requestDetachCommand, listSessions, removeWorkspace, renameSession, renameWorkspace, restoreSession, selectSession, uploadAttachment } from '../api/client'
+import { ApiError, archiveSession, deleteSession as requestDeleteSession, exportSession as requestExportSession, getSessionSnapshot, markSessionRead, promoteSideChat, detachCommand as requestDetachCommand, listSessions, removeWorkspace, renameSession, renameWorkspace, restoreSession, selectSession, uploadAttachment, uploadFile } from '../api/client'
 import { queryKeys, useHealth, useModelConnections, useSessions, useSnapshot, useSubmitMessage, useTasks, useWorkspaces, useCreateSession, useSelectWorkspace, useSelectSessionModel, useResolveApproval, useResolveQuestion, usePickWorkspaceDirectory, useSetSessionMode, useEndInterruptedRequest, useCancelTask, useCloseTaskReview } from '../api/queries'
 import { useSessionStream } from '../api/useSessionStream'
 import { useStreamTail } from '../stores/stream'
@@ -134,7 +134,10 @@ export function LiveApp() {
     try { localStorage.setItem('panel.open', next ? '1' : '0') } catch { /* 存不了就只是记不住 */ }
   }
   // 从对话流的改动条点进来时，指定面板要打开哪个文件的 diff。
-  const [panelFocus, setPanelFocus] = useState<{ sessionId: string | null; tab: 'changes' | 'files'; path: string } | null>(null)
+  // `scope` 只对 files 页有意义：`attachments` = 预览用户上传的附件（2026-10-30）。
+  const [panelFocus, setPanelFocus] = useState<
+    { sessionId: string | null; tab: 'changes' | 'files'; path: string; scope?: 'workspace' | 'attachments' } | null
+  >(null)
   // 换会话就收起右栏（2026-10-23 用户要求）：文件树、改动、侧聊全是"这个会话"的，
   // 留在屏幕上会让人以为看的是新会话的东西。
   useEffect(() => {
@@ -217,6 +220,8 @@ export function LiveApp() {
 
   // 稳定引用：`?? []` 每次渲染都会产生新数组，会让下面的 effect/memo 每次都重跑。
   const sessionList = useMemo(() => sessions.data ?? [], [sessions.data])
+
+
   // 侧聊（§21.7）：标题栏要显示它从哪开出来，父会话可能已被删——那就退回一个通用说法。
   const activeSummary = sessionList.find((item) => item.session_id === activeSessionId)
   const sideChatParentTitle = activeSummary?.parent_session_id === undefined
@@ -534,11 +539,27 @@ export function LiveApp() {
     return { id: saved.attachment_id, previewUrl: URL.createObjectURL(prepared.blob) }
   }
 
-  const send = (attachmentIds: readonly string[] = []): 'sent' | 'queued' | 'rejected' => {
-    // 只贴图不写字也是合法提交（2026-10-16）：`text` 与 `attachments` 至少有一个。
-    // `rejected` = **这次提交没有被接受**（没有发请求）。调用方据此保留待发图片，
+  /**
+   * 把一份**文档**交给服务端（2026-10-29）：multipart 上传，不压缩、不做本地预览。
+   *
+   * 文档不需要 `previewUrl`：它不进内容块，模型拿到的是磁盘上的绝对路径。
+   * 服务端按魔数判格式（文件名只用来区分旧版 doc/xls/ppt），拒绝理由是可执行的。
+   */
+  const attachDocument = async (file: File) => {
+    if (activeSessionId === null) throw new Error('还没有打开会话')
+    const saved = await uploadFile(activeSessionId, file)
+    return { id: saved.attachment_id, name: file.name, sizeBytes: saved.byte_count }
+  }
+
+  const send = (
+    attachmentIds: readonly string[] = [],
+    fileIds: readonly { id: string; name: string }[] = [],
+  ): 'sent' | 'queued' | 'rejected' | Promise<'sent' | 'rejected'> => {
+    // 只贴图/只带文件不写字也是合法提交（2026-10-16、2026-10-29）：三者至少有一个。
+    // `rejected` = **这次提交没有被接受**（没有发请求）。调用方据此保留待发附件，
     // 不能先清队列再问——2026-10-20 实测过"文字还在、图片没了"。
-    if (activeSessionId === null || (draft.trim() === '' && attachmentIds.length === 0)) return 'rejected'
+    if (activeSessionId === null
+      || (draft.trim() === '' && attachmentIds.length === 0 && fileIds.length === 0)) return 'rejected'
     // 引用拼进正文（2026-10-26）：它落在**当前这条用户消息**里，前面的历史前缀一字不变，
     // 因此不影响提示缓存的命中；代价是它此后成为历史的一部分、每轮都带着（见 quote.ts）。
     const text = composeQuotedMessage(quote, draft)
@@ -547,8 +568,8 @@ export function LiveApp() {
     if (busy) {
       // 待发队列（2026-10-28）：本轮还在跑时回车 → 入队，这一轮结束由 effect 自动发出。
       // **带图不入队**（P0）：图片引用与排队时序纠缠，值不当。
-      if (attachmentIds.length > 0) {
-        setQueueNotice('图片不能排队：请等这一轮结束后再发。')
+      if (attachmentIds.length > 0 || fileIds.length > 0) {
+        setQueueNotice('带附件的消息不能排队：请等这一轮结束后再发。')
         return 'rejected'
       }
       if (!useOutbox.getState().enqueue(activeSessionId, text)) {
@@ -567,19 +588,37 @@ export function LiveApp() {
     // 但也不该在成功后又发一遍——所以这里清掉，失败时用户可以重新输入。
     setDraft(activeSessionId, '')
     setQuote(null)
-    submit.mutate({ text, attachments: attachmentIds }, {
-      onSuccess: () => { setFollowup(null); setFocusTurn(null) },
-      onError: () => {
-        // 服务端可能先进入待审批，或另一页面抢先提交。只有用户尚未写新草稿时才恢复原文；
-        // 绝不拿旧请求覆盖用户在执行期间刚写的内容。
-        // 恢复的是**原草稿与原引用**，不是拼好的正文——否则引用块会被塞回输入框里。
-        if ((useUiStore.getState().drafts[activeSessionId] ?? '') === '') {
-          setDraft(activeSessionId, sentDraft)
-          setQuote(sentQuote)
-        }
-      },
+    const request = {
+      text,
+      attachments: attachmentIds,
+      // 文档引用（2026-10-29）：与图片分开交——后端把它们解析成绝对路径交给模型读。
+      ...(fileIds.length === 0 ? {} : { files: fileIds }),
+    }
+    const accepted = () => {
+      if (useUiStore.getState().activeSessionId === activeSessionId) {
+        setFollowup(null)
+        setFocusTurn(null)
+      }
+    }
+    const rejected = () => {
+      // 不覆盖用户执行期间新写的草稿，异步结果仍写回原会话。
+      if ((useUiStore.getState().drafts[activeSessionId] ?? '') === '') {
+        setDraft(activeSessionId, sentDraft)
+        if (useUiStore.getState().activeSessionId === activeSessionId) setQuote(sentQuote)
+      }
+    }
+    // 文字提交保留既有同步交互；带附件时等待服务端接受才清理附件草稿。
+    if (attachmentIds.length === 0 && fileIds.length === 0) {
+      submit.mutate(request, { onSuccess: accepted, onError: rejected })
+      return 'sent'
+    }
+    return submit.mutateAsync(request).then(() => {
+      accepted()
+      return 'sent' as const
+    }, () => {
+      rejected()
+      return 'rejected' as const
     })
-    return 'sent'
   }
 
   /**
@@ -699,6 +738,8 @@ export function LiveApp() {
   } : scenario
   const composer = <Composer
     mode={currentMode}
+    // `@` 引用（2026-10-30）按当前会话的工作区搜文件；没有工作区就不启用。
+    workspaceId={workspaceId ?? undefined}
     session={session ?? { title: '新会话', workspace: null, status: 'idle', modelLabel: '' }}
     plan={scenario.plan}
     meter={scenario.context}
@@ -740,6 +781,8 @@ export function LiveApp() {
       onClearQuote: () => setQuote(null),
       // 图片入口（2026-10-16）：粘贴与选图都走这一条（Composer 负责排队，LiveApp 只负责上传）。
       onAttachFile: attachFile,
+    // 文档走另一条上传路（2026-10-29）：multipart，没有本地预览。
+    onAttachDocument: attachDocument,
       onToggleModelMenu: () => {
         setModelError(null)
         setModelMenuOpen((open) => !open)
@@ -862,6 +905,22 @@ export function LiveApp() {
             await refreshCatalog()
           },
           restoreSession: async (id) => { await restoreSession(id); await refreshCatalog() },
+          // 导出会话（2026-10-30）：服务端回附件，浏览器直接落盘；这里只把 Promise 交回去，
+          // 失败信息由菜单自己显示，不再弹第二个错误条。
+          exportSession: (id, format) => requestExportSession(id, format),
+          // 彻底删除已归档会话（2026-10-29）：服务端只接受已归档的，未归档会回 422。
+          deleteSession: async (id) => {
+            await requestDeleteSession(id)
+            // 删掉的正好是当前打开的会话：立刻回到空白，别留一个指向不存在会话的面板。
+            if (id === useUiStore.getState().activeSessionId) {
+              const remaining = await listSessions()
+              queryClient.setQueryData(queryKeys.sessions(null), remaining)
+              const next = remaining.find((item) => item.is_active)
+              if (next !== undefined) openSelected(next)
+              else { openSession(null); setWorkspace(null) }
+            }
+            await refreshCatalog()
+          },
           archivedOpen, onToggleArchived: () => setArchivedOpen(!archivedOpen),
           archivedSessions: (archivedSessions.data ?? []).map((item) => ({ id: item.session_id, title: item.title })),
           archivedLoading: archivedSessions.isLoading,
@@ -922,6 +981,9 @@ export function LiveApp() {
             setWorkspaceActionError(null)
             void selectSession(id).then(async (selected) => {
               openSelected(selected)
+              // 已读（2026-10-30）：**先记已读，再刷新列表**。反过来会让刚打开的行
+              // 短暂地又闪一次未读。失败不打断切会话——未读点最多多留一会儿。
+              await markSessionRead(id).catch(() => {})
               await queryClient.invalidateQueries({ queryKey: ['sessions'] })
             }).catch((error: unknown) => setWorkspaceActionError(error instanceof ApiError
               ? error.message : '没能打开会话，请重试。'))
@@ -1037,7 +1099,7 @@ export function LiveApp() {
         </Notice> : null}
         {submit.isError ? (
           <Notice key={activeSessionId} label="提交错误提示" scope={submit.error} role="alert">
-            {submit.error instanceof ApiError && submit.error.code !== null && submit.error.code !== 'RECOVERY_REQUIRED'
+            {submit.error instanceof ApiError && (submit.error.code !== null || [400, 413, 422].includes(submit.error.status)) && submit.error.code !== 'RECOVERY_REQUIRED'
               ? `${submit.error.message}${submit.error.hint === null ? '' : ` ${submit.error.hint}`}`
               : '这次提交的执行结果尚不能确认。请先刷新会话核对状态；若可能涉及工具副作用，不要直接重复执行。'}
           </Notice>
@@ -1133,13 +1195,22 @@ export function LiveApp() {
             )}
             // 就地编辑（2026-10-21）：**不回填底部输入框**，直接以"上一轮之后"重新提交。
             // 返回 false = 这次提交没被接受（一轮在跑 / 待审批 / 正在提交），气泡留在编辑态。
-            onEditMessage={(parentTurnId, text, attachments) => {
+            // 点气泡里的文件块 → 右栏按**附件根**打开预览（2026-10-30）。附件不在工作区里，
+            // 混进工作区文件树既点不到也找不到。
+            onOpenAttachment={(attachmentId) => {
+              if (activeSessionId === null) return
+              setPanelFocus({ sessionId: activeSessionId, tab: 'files', path: attachmentId, scope: 'attachments' })
+              setPanelOpenPersisted(true)
+            }}
+            onEditMessage={(parentTurnId, text, attachments, files) => {
               if (activeSessionId === null) return false
               if (running || awaitingApproval || interrupted || submit.isPending || createSession.isPending || setSessionMode.isPending) return false
               setFollowup(null)
               submit.mutate({
                 text,
                 attachments,
+                // 原消息带的文档也沿用（2026-10-29）：编辑文字不该把文件弄丢。
+                ...(files === undefined || files.length === 0 ? {} : { files }),
                 // 行内编辑必须显式给这一轮的父：hook 级 context 里的 parent 是渲染期算的，
                 // 而编辑点是运行期才知道的。
                 context: {
@@ -1167,6 +1238,9 @@ export function LiveApp() {
           void queryClient.invalidateQueries({ queryKey: queryKeys.health })
           if (activeSessionId !== null) void queryClient.invalidateQueries({ queryKey: queryKeys.snapshot(activeSessionId) })
         }} /> : null}
+        {/* AI 生成内容声明（2026-10-30）：常驻内容区最底部，不进入对话流、不随消息滚动。
+            固定 24px 高、固定字号，切换"文字大小"时它不变。 */}
+        <footer className={styles.aiNotice}>内容由 AI 生成，仅供参考</footer>
       </main>
       {/* 面板自行处理退场，关闭后卸载内容。会话变化仍重建独立的页签状态。 */}
       <PanelShell

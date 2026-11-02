@@ -255,7 +255,11 @@
   max-width: 100%;
   font-size: var(--fs-chat);
   line-height: var(--lh-chat);
-  white-space: pre-wrap;
+  /* 不再用 `pre-wrap`（2026-10-30）：这个容器现在只装 Markdown **渲染后**的元素，而
+     `react-markdown` 会把 CommonMark 的软换行原样留在文本节点里（实测：同一段的
+     `p.textContent` 含 `"\n"`，且没有 `<br>`）。`pre-wrap` 会把这个字符显示成硬换行，
+     于是"模型在段内折的行"与"真正的分段"长得一模一样，段落层级就没了。
+     折叠成空格才是 Markdown 的语义。纯文本场景（用户自己的气泡）另有 `pre-wrap`。 */
   word-break: break-word;
 }
 
@@ -555,6 +559,66 @@
 
 /* 随消息发出的图片（2026-10-16）：刷新之后也要看得见"我发的图去哪了"。
    缩略图有上限高度，免得一张竖图把整屏占掉；点开原图交给浏览器（同一个 `<img>`）。 */
+/* 随消息发送的文档（2026-10-29）：与图片同样的间距，但它是标签不是可点开的图——
+   文件内容不在页面里，要看就打开右栏预览或让助手读。 */
+.userFiles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--law-space-sm);
+  margin: var(--law-space-sm) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.userFile {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  padding: 5px 10px;
+  border-radius: var(--law-radius-md, 10px);
+  border: 1px solid var(--law-border-l1);
+  background: var(--law-bg-layer-1);
+  /* 附件标签属于"内容"（用户要知道自己发的是哪份文件），跟随文字大小设置。 */
+  font-size: var(--law-text-xs);
+}
+
+/* 文件块本体是按钮（2026-10-30）：点开右栏预览。视觉上仍是那枚标签，
+   所以把按钮的外观全部去掉，只留手型与下划线反馈。 */
+.userFileButton {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.userFileButton:disabled {
+  cursor: default;
+}
+
+.userFileButton:not(:disabled):hover .userFileName {
+  text-decoration: underline;
+}
+
+.userFileName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--law-font-mono, ui-monospace, monospace);
+}
+
+.userFileSize {
+  flex: none;
+  opacity: 0.6;
+}
+
 .userImages {
   display: flex;
   flex-wrap: wrap;
@@ -632,5 +696,7 @@
 .response { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .responseHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 2px; }
 .responseBody { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
-.operationCount { flex: 0 0 auto; padding: 3px 7px; border-radius: 5px; background: var(--c-panel); color: var(--c-text-3); font-size: 10px; line-height: 16px; }
-@media (max-width: 720px) { .column { padding-inline: var(--workspace-gutter); } .operationCount { font-size: 9px; } }
+.operationCount { flex: 0 0 auto; padding: 3px 7px; border-radius: 5px; background: var(--c-panel); color: var(--c-text-3); font-size: var(--law-text-fixed-2xs); line-height: var(--law-leading-fixed-2xs); }
+/* 窄屏不再把它压到 9px（2026-10-30）：中文 9px 已经不可读，而它是"这一轮做了几次操作"的唯一
+   提示。宽度不够时宁可让标题换行。 */
+@media (max-width: 720px) { .column { padding-inline: var(--workspace-gutter); } }

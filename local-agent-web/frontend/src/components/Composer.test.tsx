@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { useAttachmentDrafts } from '../stores/attachments'
 import {
   approvalExpiredScenario,
   approvalScenario,
@@ -10,6 +11,8 @@ import {
 } from '../fixtures/scenarios'
 import type { ConversationScenario } from '../fixtures/types'
 import { Composer } from './Composer'
+
+beforeEach(() => useAttachmentDrafts.setState({ drafts: {} }))
 
 function renderComposer(scenario: ConversationScenario) {
   return render(
@@ -168,6 +171,76 @@ describe('Composer 追问引用（2026-10-26）', () => {
   it('renders no quote row when nothing is quoted', () => {
     renderQuoted(null)
     expect(screen.queryByRole('note', { name: '引用内容' })).not.toBeInTheDocument()
+  })
+})
+
+describe('Composer 文档（2026-10-29）', () => {
+  it('清空待发文档发生在发送瞬间，不等整轮跑完', async () => {
+    // 2026-10-30 实机反馈：附件在输入框上方一直挂着，直到整轮对话结束才消失，看起来像没发出去。
+    // 根因是 `onSend` 带附件时返回的 Promise 要等 `/messages` 跑完 + 快照重取才落地。
+    let resolveSend: ((status: 'sent') => void) | undefined
+    const onSend = vi.fn(() => new Promise<'sent'>((resolve) => { resolveSend = resolve }))
+    const onAttachDocument = vi.fn(async () => ({
+      id: '2026/10/29/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cccccccccccccccc.docx',
+      name: '报告.docx',
+      sizeBytes: 1234,
+    }))
+    const { container } = render(
+      <Composer
+        session={shellScenario.session}
+        plan={shellScenario.plan}
+        meter={shellScenario.context}
+        takeover={shellScenario.takeover}
+        modelMenu={shellScenario.modelMenu}
+        state={shellScenario.composer}
+        actions={{ draft: '', onDraftChange: () => {}, onSend, canSend: false, onAttachDocument }}
+      />,
+    )
+    const picker = container.querySelector('input[type="file"]') as HTMLInputElement
+    const file = new File([new Uint8Array([1, 2, 3])], '报告.docx', { type: 'application/octet-stream' })
+    // jsdom 里 `files` 是只读 getter，`fireEvent.change({ target: { files } })` 对它不生效。
+    Object.defineProperty(picker, 'files', { value: [file], configurable: true })
+    fireEvent.change(picker)
+    await waitFor(() => expect(onAttachDocument).toHaveBeenCalled())
+    // 文件名在 DOM 里被拆成主名 + 扩展名两段，所以用移除按钮的 aria-label 判断存在。
+    const attached = () => screen.queryByRole('button', { name: '移除附件 报告.docx' })
+    await waitFor(() => expect(attached()).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+
+    // **Promise 还没落地**，列表就该空了。
+    await waitFor(() => expect(attached()).not.toBeInTheDocument())
+    expect(onSend).toHaveBeenCalledTimes(1)
+    resolveSend?.('sent')
+  })
+
+  it('发送失败时把附件放回来，用户不必重新选', async () => {
+    const onSend = vi.fn(() => Promise.reject(new Error('offline')))
+    const onAttachDocument = vi.fn(async () => ({ id: 'doc-1', name: '报告.docx', sizeBytes: 10 }))
+    const { container } = render(
+      <Composer
+        session={shellScenario.session}
+        plan={shellScenario.plan}
+        meter={shellScenario.context}
+        takeover={shellScenario.takeover}
+        modelMenu={shellScenario.modelMenu}
+        state={shellScenario.composer}
+        actions={{ draft: '', onDraftChange: () => {}, onSend, canSend: false, onAttachDocument }}
+      />,
+    )
+    const picker = container.querySelector('input[type="file"]') as HTMLInputElement
+    Object.defineProperty(picker, 'files', {
+      value: [new File([new Uint8Array([1])], '报告.docx', { type: 'application/octet-stream' })],
+      configurable: true,
+    })
+    fireEvent.change(picker)
+    const attached = () => screen.queryByRole('button', { name: '移除附件 报告.docx' })
+    await waitFor(() => expect(attached()).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+
+    await waitFor(() => expect(attached()).toBeInTheDocument())
+    expect(screen.getByRole('alert')).toHaveTextContent('附件已保留')
   })
 })
 

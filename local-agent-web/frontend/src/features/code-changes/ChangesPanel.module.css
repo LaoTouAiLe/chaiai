@@ -44,6 +44,8 @@
   to { opacity: 1; }
 }
 
+.restoreInline { margin-bottom: var(--law-space-md); }
+
 .header {
   display: flex;
   flex: 0 0 auto;

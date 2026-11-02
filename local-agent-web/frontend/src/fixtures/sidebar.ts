@@ -13,6 +13,14 @@ export interface SidebarSessionFixture {
   stateLabel?: string
   timeLabel: string
   selected: boolean
+  /**
+   * 有没有"我离开之后新增的内容"（2026-10-30）。
+   *
+   * 由**服务端**算好下发（`sessions.last_read_at` 与 `updated_at` 比较），页面不自己
+   * 比时间——否则同一个规则要写两遍，而且"从没打开过不算未读"这条很容易写错。
+   * 可选：原型夹具省略即不显示未读。
+   */
+  unread?: boolean
 }
 
 export interface SidebarWorkspaceFixture {

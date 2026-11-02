@@ -178,13 +178,14 @@
   color: var(--law-diff-del-text);
 }
 
-/* 状态标签：超时与"后台运行中"是两件不同的事，颜色也不同（warn / info）。 */
+/* 状态标签：超时与"后台运行中"是两件不同的事，颜色也不同（warn / info）。
+   字号用**固定档**：它贴在折叠行右端，跟随"文字大小"放大会把行高顶破。 */
 .badge {
   flex: 0 0 auto;
   padding: 0 var(--law-space-sm);
   border-radius: var(--law-radius-pill);
-  font-size: 10px;
-  line-height: 16px;
+  font-size: var(--law-text-fixed-2xs);
+  line-height: var(--law-leading-fixed-2xs);
 }
 
 .badgeInfo {

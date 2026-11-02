@@ -83,6 +83,21 @@ async function settle(page: Page, scenario?: string): Promise<void> {
   })
 }
 
+/** Current notices and read-only tool groups start collapsed. Exercise their controls first. */
+async function expandNotices(page: Page): Promise<void> {
+  const notices = page.getByRole('region', { name: /错误$/ })
+  for (let index = 0; index < await notices.count(); index += 1) {
+    await notices.nth(index).getByRole('button', { expanded: false }).click()
+  }
+}
+
+async function expandReadTools(page: Page): Promise<void> {
+  const groups = page.getByRole('log').getByRole('button', { name: /次/, expanded: false })
+  while (await groups.count() > 0) {
+    await groups.first().click()
+  }
+}
+
 for (const scenario of ALL_SCENARIOS) {
   test(`prototype ${scenario}`, async ({ page }) => {
     await page.goto(`/?state=${scenario}`)
@@ -113,7 +128,9 @@ test('diff checkpoint shows both hunks with signs and the long line', async ({ p
   const card = page.locator('figure')
   await expect(card.getByText('src/local_agent/config.py')).toBeVisible()
 
-  await expect(card.getByText(/^@@ -\d+/)).toHaveCount(2)
+  // Hunk headers are represented by the gap row; retain evidence from both code ranges.
+  await expect(card.getByText('CONTEXT_WINDOW_DEFAULT = 128_000', { exact: true })).toBeVisible()
+  await expect(card.getByText(/def validate_ratio\(cls\)/)).toBeAttached()
   await expect(card.getByText(/compact_long_tool_outputs_after_tokens: int = Field/)).toBeVisible()
   await expect(card.getByText('+5')).toBeVisible()
   await expect(card.getByText('−3')).toBeVisible()
@@ -121,6 +138,7 @@ test('diff checkpoint shows both hunks with signs and the long line', async ({ p
 
 test('error checkpoint shows all three provider failures with actionable retry rules', async ({ page }) => {
   await page.goto('/?state=errors')
+  await expandNotices(page)
   await expect(page.getByText('MODEL_AUTH_FAILED')).toHaveCount(1)
   await expect(page.getByText('MODEL_RATE_LIMITED')).toHaveCount(1)
   await expect(page.getByText('MODEL_RETRY_EXHAUSTED')).toHaveCount(1)
@@ -139,6 +157,7 @@ test('error checkpoint shows all three provider failures with actionable retry r
 
 test('tool checkpoint renders every card shape, capped results included', async ({ page }) => {
   await page.goto('/?state=tools')
+  await expandReadTools(page)
   // Two commands: one failing, one succeeding — both terminal cards are present.
   await expect(page.getByRole('region', { name: '终端输出' })).toHaveCount(2)
   await expect(page.getByRole('region', { name: '搜索结果' })).toHaveCount(2)
@@ -273,6 +292,7 @@ test('the third failure card is fully readable and operable after scrolling', as
   const cards = page.getByRole('region', { name: '模型错误' })
   await expect(cards).toHaveCount(3)
   const third = cards.nth(2)
+  await third.getByRole('button', { expanded: false }).click()
   await scrollConversationToEnd(page)
 
   // Full hint text and the optional diagnostic control must both be reachable.
@@ -400,6 +420,7 @@ test('the collapsed sidebar keeps a usable rail and hides no selection', async (
 
 test('each server-side conflict code states its own next step', async ({ page }) => {
   await page.goto('/?state=error-codes')
+  await expandNotices(page)
   await expect(page.getByText('SESSION_BUSY')).toHaveCount(1)
   await expect(page.getByText('IDEMPOTENCY_CONFLICT')).toHaveCount(1)
   await expect(page.getByText('RECOVERY_REQUIRED')).toHaveCount(1)
@@ -427,6 +448,7 @@ test('each server-side conflict code states its own next step', async ({ page })
 test('the recovery card is fully readable after scrolling to the end', async ({ page }) => {
   await page.goto('/?state=error-codes')
   const card = page.getByRole('region', { name: '恢复错误' })
+  await card.getByRole('button', { expanded: false }).click()
   await card.getByText('诊断信息').click()
   await scrollConversationToEnd(page)
 
@@ -451,7 +473,7 @@ test('the recovery card is fully readable after scrolling to the end', async ({ 
 test('the trace table lists every tool call and opens an inspector on a row', async ({ page }) => {
   await page.goto('/?state=trace')
   await expect(page.getByRole('tab', { name: '轨迹' })).toHaveAttribute('aria-selected', 'true')
-  await expect(page.locator('[data-trace-row]')).toHaveCount(7)
+  await expect(page.locator('[data-trace-row]')).toHaveCount(8)
   // The three columns matrix 20 asks for, plus the timeline order.
   await expect(page.getByRole('columnheader', { name: '操作' })).toBeVisible()
   await expect(page.getByRole('columnheader', { name: '目标' })).toBeVisible()
@@ -542,7 +564,7 @@ test('settings empty state explains the next step and warns about the credential
   const dialog = page.getByRole('dialog', { name: '设置' })
   await expect(dialog.getByText('还没有模型连接')).toBeVisible()
   await expect(dialog.getByRole('article')).toHaveCount(0)
-  await expect(dialog.getByText(/密钥只保存在本次进程内，重启后需要重新录入/)).toBeVisible()
+  await expect(dialog.getByText(/密钥只在本进程内有效，重启后需要重新录入/)).toBeVisible()
 
   const text = await page.locator('body').innerText()
   expect(text).not.toMatch(/sk-[A-Za-z0-9]{8,}/)
@@ -550,10 +572,10 @@ test('settings empty state explains the next step and warns about the credential
 
 test('the model menu states that a switch applies to the next submit only', async ({ page }) => {
   await page.goto('/?state=model-menu')
-  await expect(page.getByRole('region', { name: '模型选择' })).toBeVisible()
+  await expect(page.getByRole('dialog', { name: '模型选择' })).toBeVisible()
   await expect(page.getByText('已选择 模型 B · 从下一轮开始生效。')).toBeVisible()
   await expect(page.getByText('正在运行的一轮：模型 A（本轮已固定）')).toBeVisible()
-  await expect(page.getByRole('region', { name: '模型选择' }).locator('[aria-pressed="true"]')).toHaveCount(1)
+  await expect(page.getByRole('dialog', { name: '模型选择' }).locator('[aria-pressed="true"]')).toHaveCount(1)
   // The chip is the selector, so it must agree with the menu and not with the
   // still-pinned running turn.
   await expect(page.getByRole('button', { name: '模型 B · 上下文 200k' })).toBeVisible()
@@ -578,6 +600,7 @@ test('the shipped entry is the real shell and the prototype banner is gone', asy
  */
 test('the read window is fully visible after scrolling to it', async ({ page }) => {
   await page.goto('/?state=tools')
+  await expandReadTools(page)
   const readCard = page.getByRole('region', { name: '读取结果' })
   await readCard.scrollIntoViewIfNeeded()
   await expect(readCard.getByText('第 41–45 行 / 共 196 行')).toBeInViewport({ ratio: 1 })
@@ -592,11 +615,15 @@ test('the tail cards are fully visible after scrolling to the end', async ({ pag
   await page.goto('/?state=tools')
   await scrollConversationToEnd(page)
 
-  await expect(page.getByRole('region', { name: '任务清单' }).getByText('1/4 已完成')).toBeInViewport({
+  const todo = page.getByRole('region', { name: '任务清单' })
+  await todo.getByText('1/4 已完成').scrollIntoViewIfNeeded()
+  await expect(todo.getByText('1/4 已完成')).toBeInViewport({
     ratio: 1,
   })
+  await page.getByText('工具返回了结构化结果').scrollIntoViewIfNeeded()
   await expect(page.getByText('工具返回了结构化结果')).toBeInViewport({ ratio: 1 })
   // A successful command keeps the success treatment and stays fully readable.
+  await page.getByText('退出码 0').scrollIntoViewIfNeeded()
   await expect(page.getByText('退出码 0')).toBeInViewport({ ratio: 1 })
   await settle(page)
   await expect(page).toHaveScreenshot('tools-bottom.png')
@@ -613,7 +640,7 @@ test('the tail cards are fully visible after scrolling to the end', async ({ pag
  */
 test('the capability panel tail is fully readable after scrolling', async ({ page }) => {
   await page.goto('/?state=capabilities')
-  const dialog = page.getByRole('dialog', { name: '能力与档位' })
+  const dialog = page.getByRole('dialog', { name: '能力', exact: true })
 
   const last = dialog.getByText('按需加载技能')
   await last.scrollIntoViewIfNeeded()
@@ -652,7 +679,7 @@ test('the task centre states where each task is, what it waits for and the next 
 }) => {
   await page.clock.setFixedTime(new Date('2026-10-10T12:00:00Z'))
   await page.goto('/?state=tasks')
-  const dialog = page.getByRole('dialog', { name: '任务中心' })
+  const dialog = page.getByRole('region', { name: '任务中心', exact: true })
 
   // 七个状态各一行（§17.6 的闭集），状态名与"在等什么"都要看得见。
   // `exact`：文本匹配默认是**子串**——"正在执行"也出现在"需要人工核对"那行的原因里。

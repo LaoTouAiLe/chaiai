@@ -34,6 +34,10 @@ export default defineConfig({
     '**/workflow-live.spec.ts',
     // §16.6 档位切换的真服务用例（与上面几条同因：它要真后端，默认套件只依赖 node）。
     '**/capabilities-live.spec.ts',
+    // 这些套件各自依赖隔离后端或预生成数据，由对应 config 单独执行。
+    '**/permissions-live.spec.ts',
+    '**/question-queue-live.spec.mjs',
+    '**/web-search-live.spec.ts',
   ],
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),

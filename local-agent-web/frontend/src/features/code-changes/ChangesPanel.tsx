@@ -8,6 +8,8 @@ import { useEffect, useMemo } from 'react'
 
 import { useSessionChangeDiff, useSessionChanges } from '../../api/queries'
 import { DiffCard } from '../tool/DiffCard'
+import { RestoreControl } from './RestoreControl'
+import type { RestoreAction } from './RestoreControl'
 import { toFileDiffView } from './adapters'
 import styles from './ChangesPanel.module.css'
 
@@ -130,6 +132,34 @@ function FileNav({
   )
 }
 
+/**
+ * 这个文件**最近一次**被改动发生在哪一轮（`turns` 按最新在前，见 `service.session_changes`）。
+ *
+ * 用来决定「撤销本轮改动」这一档是否可用：文件不在任何一轮里（例如只剩历史基线）时不该
+ * 给出这个选项——那会让用户以为能按轮撤，实际请求会落空。
+ */
+function useLatestRunId(sessionId: string | null, path: string | null): string | null {
+  const query = useSessionChanges(sessionId, sessionId !== null)
+  if (path === null) return null
+  for (const turn of query.data?.turns ?? []) {
+    if ((turn.files ?? []).some((file) => file.path === path)) return turn.run_id
+  }
+  return null
+}
+
+/** 当前右栏与旧抽屉共用的单文件还原入口。 */
+export function FileRestoreControl({ sessionId, path }: { sessionId: string; path: string }) {
+  const latestRun = useLatestRunId(sessionId, path)
+  const actions: RestoreAction[] = [{
+    label: '会话开始前', note: '这个文件退回本会话开始前，当前净变化会归零', scope: 'file', path,
+  }]
+  if (latestRun !== null) actions.push({
+    label: '最近修改轮开始前', note: '只撤最近一轮对这个文件的改动，前几轮的修改保留',
+    scope: 'turn', runId: latestRun, paths: [path],
+  })
+  return <div className={styles.restoreInline}><RestoreControl sessionId={sessionId} label="还原此文件" actions={actions} compact /></div>
+}
+
 export function ChangesPanel({ sessionId, path, onSelect, onClose }: ChangesPanelProps) {
   // Esc 关闭（2026-10-22）：面板改成覆盖式抽屉后，必须有一个不依赖鼠标的退出方式，
   // 否则用户只能去右上角找那个很小的 ×。
@@ -140,6 +170,28 @@ export function ChangesPanel({ sessionId, path, onSelect, onClose }: ChangesPane
     window.addEventListener('keydown', onKey)
     return () => { window.removeEventListener('keydown', onKey) }
   }, [onClose])
+
+  // 两个基准（2026-10-29 用户拍板，照 hermes「显式选基准」的做法）：
+  // 默认「会话开始前」——它与这一页显示的**净变化**是同一个口径，选它就意味着这段红绿全部归零；
+  // 「本轮开始前」只撤这一轮的改动，前几轮的修改保留，代价是 diff 会剩下一半。
+  const latestRun = useLatestRunId(sessionId, path)
+  const restoreActions: RestoreAction[] = path === null ? [] : [
+    {
+      label: '会话开始前',
+      note: '这个文件退回本会话开始前，右栏这段净变化会归零',
+      scope: 'file',
+      path,
+    },
+  ]
+  if (latestRun !== null && path !== null) {
+    restoreActions.push({
+      label: '本轮开始前',
+      note: '只撤本轮对这个文件的改动，前几轮的修改保留',
+      scope: 'turn',
+      runId: latestRun,
+      paths: [path],
+    })
+  }
 
   return (
     <>
@@ -155,6 +207,19 @@ export function ChangesPanel({ sessionId, path, onSelect, onClose }: ChangesPane
           </span>
           {sessionId === null ? null : (
             <FileNav sessionId={sessionId} path={path} onSelect={onSelect} />
+          )}
+          {/* 单文件还原（2026-10-29）：两个基准由用户选——「会话开始前」点完这里的红绿归零，
+              「本轮开始前」只撤这一轮。整轮的还原在对话流卡片上。
+              `key` 必须跟着 path 变：否则切换文件后上一个文件的确认状态与结果会留在原地
+              （还原 B 却显示 A 的结果）。 */}
+          {sessionId === null || path === null ? null : (
+            <RestoreControl
+              key={path}
+              sessionId={sessionId}
+              label="还原此文件"
+              actions={restoreActions}
+              compact
+            />
           )}
           <button type="button" className={styles.close} aria-label="关闭变更预览" onClick={onClose}>
             ×

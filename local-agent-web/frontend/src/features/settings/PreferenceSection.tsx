@@ -8,7 +8,7 @@ import { StorageLocationField } from './StorageLocationField'
 import { WebSearchKeyField } from './WebSearchKeyField'
 import styles from './PreferenceSection.module.css'
 
-export type PreferenceGroup = 'general' | 'storage' | 'execution' | 'agents' | 'retrieval' | 'web_access' | 'attachments' | 'memory' | 'medium_term' | 'curated' | 'compression' | 'embedding' | 'advanced'
+export type PreferenceGroup = 'general' | 'storage' | 'execution' | 'file_changes' | 'agents' | 'retrieval' | 'web_access' | 'attachments' | 'memory' | 'medium_term' | 'curated' | 'consolidation' | 'compression' | 'embedding' | 'advanced'
 // `type: 'path'`（2026-10-26）表示"这是一个本机目录"：输入框旁边带「选择…」，走原生目录选择器。
 // 让人手输绝对路径是不合理的——拼错一个字符只会得到"目录不存在"，而用户并不知道自己打错了哪里。
 export type Field = { key: string; label: string; note: string; min?: number; max?: number; step?: number | 'any'; type?: 'text' | 'path'; providers?: readonly string[]; required?: boolean; unlimited?: boolean; optional?: boolean; options?: readonly (readonly [string, string])[]; when?: readonly (readonly [string, string])[] }
@@ -31,6 +31,13 @@ export const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'shell_timeout_seconds', label: '命令超时（秒）', note: '留空表示默认不限时；命令仍可取消或单独指定超时。', min: 1, unlimited: true },
     { key: 'shell_max_output_chars', label: '命令输出上限（字符）', note: '限制保留的命令输出长度。', min: 1 },
     { key: 'safe_delete', label: '安全删除（移入系统回收站）', note: '删除文件时移进系统回收站（Windows 资源管理器里那个；macOS / Linux 也走各自的系统回收站），可以在那里「还原」到原位置，而不是立即抹掉。移不进回收站时会报错并保留文件，不会退化成直接删除。只对文件工具生效，终端里的删除命令不受它管辖。' },
+  ],
+  // 文件改动与还原（2026-10-29）：账本存"改前内容"的三项口径。
+  // 说明文字必须写"改完立即生效"——这一组与其它组不同（它们要等下一次新任务）。
+  file_changes: [
+    { key: 'max_baseline_kb', label: '单个文件的改前内容上限（KB）', note: '超过这个大小的文件不保存改前内容：改动照常显示，但不能还原。改完立即生效。', min: 64, max: 8192 },
+    { key: 'max_session_mb', label: '单个会话的存储上限（MB）', note: '按压缩后的大小计算。用满之后不再保存新的改前内容，已保存的仍可还原；页面会显示已用多少。改完立即生效。', min: 20, max: 2048 },
+    { key: 'keep_turns', label: '可还原的最近轮数', note: '更早的轮次只能查看改动、不能还原；0 表示不限制，只受上面的存储上限约束。改完立即生效。', min: 0, max: 200 },
   ],
   agents: [
     // 2026-10-26：这三项原来只在"高级配置"里只读。搬出来的锚点是"规则写了却没生效"——
@@ -91,6 +98,13 @@ export const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'memory_char_limit', label: '记忆预算（字符）', note: '每轮都占用的固定长度；按字符不按 token。改小不会删除已有内容，只影响之后能否再添加。', min: 1 },
     { key: 'user_char_limit', label: '画像预算（字符）', note: '同上，只管 USER.md。', min: 1 },
   ],
+  // 后台记忆巩固（2026-11-02）：**默认关**，因为它在后台调模型（花钱）。
+  // 文案必须把"只新增不改旧"和"没新碎片就不调用"说清，否则会被读成"一直在烧钱"或"会删我的记忆"。
+  consolidation: [
+    { key: 'enabled', label: '启用后台记忆巩固', note: '后台把最近的中期碎片交给模型判断，哪些值得固化成长期事实。会调用模型（消耗 token）；自上次以来没有新的碎片时不会调用。只新增，不合并、不停用、不删除已有记忆。需要先启用中期记忆。' },
+    { key: 'interval_hours', label: '整理间隔（小时）', note: '两次整理之间的最小间隔；实际还要看有没有新的碎片。', min: 1, max: 720 },
+    { key: 'max_promotions', label: '单次最多固化条数', note: '一次最多接受几条固化建议；超出部分丢弃并记入日志。', min: 1, max: 20 },
+  ],
   compression: [
     // 2026-10-26：这四项原来只在"高级配置"里只读展示。搬出来的理由是它们**能凭结果判断**——
     // 用户看到"答到一半被摘要了"就能想到调触发比例；而工具预算、摘要上限那些改错的症状是
@@ -111,7 +125,7 @@ export const FIELDS: Record<Exclude<PreferenceGroup, 'advanced'>, Field[]> = {
     { key: 'allow_plaintext_http', label: '允许非本机端点明文 HTTP', note: '只在你确认可信网络中的明文传输风险时勾选；HTTPS 与本机回环 HTTP 无需勾选。', providers: ['openai_compatible'] },
   ],
 }
-export const TITLES: Record<PreferenceGroup, string> = { general: '通用与外观', storage: '数据位置', execution: '任务执行', agents: '项目规则', retrieval: '任务前自动代码检索', web_access: '联网检索', attachments: '图片与附件', memory: '长期记忆', medium_term: '中期记忆', curated: '常驻记忆', compression: '上下文压缩', embedding: '向量库与 Embedding', advanced: '高级配置概览' }
+export const TITLES: Record<PreferenceGroup, string> = { general: '通用与外观', storage: '数据位置', execution: '任务执行', file_changes: '文件改动与还原', agents: '项目规则', retrieval: '任务前自动代码检索', web_access: '联网检索', attachments: '图片与附件', memory: '长期记忆', medium_term: '中期记忆', curated: '常驻记忆', consolidation: '记忆巩固', compression: '上下文压缩', embedding: '向量库与 Embedding', advanced: '高级配置概览' }
 
 /**
  * 设置页**逐分区渲染**的顺序（`advanced` 是只读概览，但同样由本组件渲染）。
@@ -123,8 +137,9 @@ export const TITLES: Record<PreferenceGroup, string> = { general: '通用与外�
  * 让这类"加了但没接上"直接变红。
  */
 export const PREFERENCE_SECTIONS = [
-  'general', 'storage', 'execution', 'agents', 'retrieval', 'web_access', 'attachments',
-  'memory', 'medium_term', 'curated', 'compression', 'embedding', 'advanced',
+  'general', 'storage', 'execution', 'file_changes', 'agents', 'retrieval', 'web_access',
+  'attachments', 'memory', 'medium_term', 'curated', 'consolidation', 'compression', 'embedding',
+  'advanced',
 ] as const satisfies readonly PreferenceGroup[]
 export const ADVANCED: Record<string, string> = {
   // 压缩与 AGENTS 的可改项已搬进各自分区（2026-10-26），这里只剩**内部预算**和"关掉就没有会话"

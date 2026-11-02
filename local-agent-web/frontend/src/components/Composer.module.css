@@ -1,6 +1,8 @@
 .dock {
   flex: 0 0 auto;
-  padding: 0 0 var(--law-space-2xl);
+  /* 2026-10-30：底部留白 20 → 6。页底已常驻「内容由 AI 生成」那行声明（它自带 4px 上内距），
+     再压 20px 就成了两段留白叠着，输入卡片悬在半空。 */
+  padding: 0 0 var(--law-space-sm);
 }
 
 .stack {
@@ -17,13 +19,74 @@
   display: flex;
   flex-direction: column;
   gap: var(--law-space-md);
-  /* 2026-10-21：整体放大一档（10px → 16px）。原来输入区只有约 94px 高，
-     一屏里显得"挤成一条"，与消息区的留白不成比例。 */
-  padding: var(--law-space-xl) var(--law-space-xl) var(--law-space-md);
+  /* 2026-10-30：卡片内距 16/16/8 → 8/12/6 → 4/6/2（两次实机反馈都嫌宽）。
+     这是输入区四周那圈留白（DevTools 里的绿色块），**只动这一个值**：
+     卡片外面的间距、输入框高度、字号行高全部保持原样。 */
+  padding: var(--sp-1) var(--law-space-sm) var(--law-space-xxs);
   border: 1px solid var(--law-border-l2);
   border-radius: var(--law-radius-2xl);
   background: var(--law-bg-layer-1);
   box-shadow: var(--law-shadow-lv2);
+  /* `@` 候选浮层以卡片为定位基准（2026-10-30）。 */
+  position: relative;
+}
+
+/* `@` 引用候选（2026-10-30）：贴在卡片上沿，最多 6 条、超出滚动。
+   浮在对话之上而不是把输入区顶下去——打字时布局跳动比看不全更烦。 */
+.mentionMenu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: var(--sp-1);
+  border: 1px solid var(--law-border-l2);
+  border-radius: var(--r-panel);
+  background: var(--c-raised);
+  box-shadow: var(--sh-overlay);
+}
+
+.mentionItem {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  width: 100%;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: none;
+  color: var(--c-text-1);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mentionItem:hover,
+.mentionActive {
+  background: var(--c-hover);
+}
+
+.mentionName {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--law-text-sm);
+}
+
+.mentionPath {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-3);
+  font-size: var(--law-text-xxs);
 }
 
 /* Running phase, shown above the input while a turn is in flight. */
@@ -80,7 +143,9 @@
   /* 24px = 一行；48px = 两行起步（2026-10-21）。输入框是这一页最常点的东西，
      一行的框会让人以为"只能写一句话"。 */
   min-height: 48px;
-  padding: var(--law-space-md) var(--law-space-lg) var(--law-space-md) var(--law-space-xl);
+  /* 左内距 16 → 8（2026-10-30）：输入文字离卡片左边线原本是 16（卡片自身）+ 16（这里）= 32px，
+     看着空。收到 8 后是 24px。**只动这一处**，卡片尺寸、上下留白都保持原样。 */
+  padding: var(--law-space-md) var(--law-space-lg) var(--law-space-md) var(--law-space-md);
   border: 0;
   background: transparent;
   font-size: var(--law-text-base);
@@ -335,12 +400,41 @@
   background: var(--law-bg-layer-1);
 }
 
+/* 文档附件（2026-10-29）：不是缩略图，宽度跟着文件名走（上限 220px）。
+   右内边距给绝对定位的移除按钮留位置，否则文件名会钻到 × 底下。 */
+.attachmentDoc {
+  width: auto;
+  max-width: min(340px, 100%);
+  min-width: 0;
+  height: 38px;
+  display: flex;
+  align-items: center;
+  padding: 0 38px 0 10px;
+}
+
+.attachmentFile {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--law-text-xs);
+  font-family: var(--law-font-mono, ui-monospace, monospace);
+}
+
 .attachmentImage {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
+
+.attachmentFile > svg { flex: 0 0 auto; margin-right: 6px; width: 14px; height: 14px; }
+.attachmentName { overflow: hidden; text-overflow: ellipsis; }
+.attachmentSize { flex: 0 0 auto; margin-left: 8px; color: var(--law-text-caption); }
+.attachmentDoc .attachmentRemove { width: 30px; height: 30px; top: 3px; right: 3px; }
+.uploadStatus { margin: 0; font-size: var(--law-text-xs); color: var(--law-text-secondary); overflow-wrap: anywhere; }
 
 .attachmentRemove {
   position: absolute;

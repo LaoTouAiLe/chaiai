@@ -9,7 +9,7 @@
   padding: 36px clamp(20px, 4vw, 64px);
   background: var(--c-canvas);
 }
-.eyebrow { display: block; margin-bottom: 8px; color: var(--law-text-tertiary); font-size: 12px; }
+.eyebrow { display: block; margin-bottom: 8px; color: var(--law-text-tertiary); font-size: var(--law-text-fixed-sm); }
 
 .head {
   display: flex;

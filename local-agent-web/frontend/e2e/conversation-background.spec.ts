@@ -81,10 +81,10 @@ test('后台地图追问在抽屉内完成，关闭保留草稿，分支切换�
   await drawer.getByPlaceholder('给智能体发消息').fill('地图关闭后草稿')
   // Escape 先关闭内层模型面板，不能把地图追问抽屉一起关掉。
   await drawer.getByRole('button', { name: '选择会话模型' }).click()
-  await drawer.getByRole('button', { name: '关闭模型选择' }).focus()
+  await page.getByRole('dialog', { name: '模型选择' }).getByRole('button', { name: '关闭模型选择' }).focus()
   await page.keyboard.press('Escape')
   await expect(drawer).toBeVisible()
-  await expect(drawer.getByRole('region', { name: '模型选择' })).toHaveCount(0)
+  await expect(page.getByRole('dialog', { name: '模型选择' })).toHaveCount(0)
   await expect(drawer.getByPlaceholder('给智能体发消息')).toHaveValue('地图关闭后草稿')
   await drawer.getByRole('button', { name: '关闭地图追问' }).click()
   await page.getByRole('tab', { name: '对话', exact: true }).click()

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { HealthDto, ModelConnectionDto, ModelConnectionInput, PermissionsDto } from './client'
 import {
   ApiError,
+  apiErrorFromResponse,
   createModelConnection,
   listModelConnections,
   newRequestId,
@@ -21,6 +22,14 @@ function jsonResponse(status: number, body: unknown): Response {
     headers: { 'content-type': 'application/json' },
   })
 }
+
+it('explains the document count limit for framework validation errors', async () => {
+  const error = await apiErrorFromResponse(jsonResponse(422, {
+    detail: [{ type: 'too_long', loc: ['body', 'files'], msg: 'List should have at most 5 items' }],
+  }))
+  expect(error.status).toBe(422)
+  expect(error.message).toContain('最多附带 5 份文档')
+})
 
 function connectionDto(overrides: Partial<ModelConnectionDto> = {}): ModelConnectionDto {
   return {

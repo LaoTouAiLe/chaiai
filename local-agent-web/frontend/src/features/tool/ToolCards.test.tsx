@@ -26,6 +26,11 @@ function rowOf(index = 0): ToolRowView {
 }
 
 describe('ToolCard', () => {
+  it('shows document extraction limitations and page continuation hints', () => {
+    render(<ToolCard card={{ ...cardOf('read'), note: '正文无法通过文本读取；传 start_page=6 继续读' }} />)
+    expect(screen.getByLabelText('读取说明')).toHaveTextContent('正文无法通过文本读取')
+    expect(screen.getByLabelText('读取说明')).toHaveTextContent('start_page=6')
+  })
   it('covers every card shape the conversation must render', () => {
     expect(cards().map((card) => card.kind)).toEqual([
       'terminal',

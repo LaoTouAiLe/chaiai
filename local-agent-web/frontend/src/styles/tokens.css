@@ -19,7 +19,11 @@
  */
 
 :root {
-  --law-font-scale: 1;
+  /* 字号档位（2026-10-30）：-1 / 0 / +1 = 小 / 标准 / 大。
+     所有随设置变的字号都写成 `calc(基准px + var(--law-font-step) * 步长px)`，
+     所以结果一定是整数 px，且行高、标题一起按步长走。`--law-font-scale`
+     （原来的 .9 / 1.125 乘法）已废弃，不再有任何地方引用。 */
+  --law-font-step: 0;
 
   /* ===== 1. 新体系：surface ============================================ */
   /* 三层中性底靠明度区分，不用边框制造层次。 */
@@ -82,8 +86,8 @@
   --lh-body: 20px;
   --fs-ui: 14px;
   --lh-ui: 20px;
-  --fs-chat: calc(15px * var(--law-font-scale));
-  --lh-chat: calc(26px * var(--law-font-scale));
+  --fs-chat: calc(15px + var(--law-font-step) * 2px);
+  --lh-chat: calc(26px + var(--law-font-step) * 3px);
   --fs-title: 16px;
   --lh-title: 24px;
   --fs-heading: 22px;
@@ -248,21 +252,40 @@
   --law-font-sans: var(--font-ui);
   --law-font-mono: var(--font-mono-code);
 
-  /* 字号与行高：V3 与对话流重构同批迁移 */
-  --law-text-xxs: calc(11px * var(--law-font-scale));
-  --law-leading-xxs: calc(14px * var(--law-font-scale));
-  --law-text-xs: calc(12px * var(--law-font-scale));
-  --law-leading-xs: calc(18px * var(--law-font-scale));
-  --law-text-sm: calc(13px * var(--law-font-scale));
-  --law-leading-sm: calc(20px * var(--law-font-scale));
-  --law-text-md: calc(14px * var(--law-font-scale));
-  --law-leading-md: calc(22px * var(--law-font-scale));
-  --law-text-base: calc(16px * var(--law-font-scale));
-  --law-leading-base: calc(24px * var(--law-font-scale));
-  --law-text-lg: calc(16px * var(--law-font-scale));
-  --law-leading-lg: calc(28px * var(--law-font-scale));
-  --law-text-xl: calc(20px * var(--law-font-scale));
-  --law-leading-xl: calc(28px * var(--law-font-scale));
+  /* 字号与行高：V3 与对话流重构同批迁移。
+     2026-10-30 起改为**整 px 步进**：`基准 + step × 步长`。原来按 `.9 / 1.125` 乘，
+     小档会把 15px 算成 13.5px、26px 行高算成 23.4px —— 半像素在 Windows 上会被取整到
+     更糊的一侧。步长取整后每档都是整数，且行高与字号同向加减，比例不会走样。 */
+  --law-text-xxs: calc(11px + var(--law-font-step) * 1px);
+  --law-leading-xxs: calc(14px + var(--law-font-step) * 1px);
+  --law-text-xs: calc(12px + var(--law-font-step) * 1px);
+  --law-leading-xs: calc(18px + var(--law-font-step) * 2px);
+  --law-text-sm: calc(13px + var(--law-font-step) * 1px);
+  --law-leading-sm: calc(20px + var(--law-font-step) * 2px);
+  --law-text-md: calc(14px + var(--law-font-step) * 1px);
+  --law-leading-md: calc(22px + var(--law-font-step) * 2px);
+  --law-text-base: calc(16px + var(--law-font-step) * 2px);
+  --law-leading-base: calc(24px + var(--law-font-step) * 2px);
+  --law-text-lg: calc(16px + var(--law-font-step) * 2px);
+  --law-leading-lg: calc(28px + var(--law-font-step) * 3px);
+  --law-text-xl: calc(20px + var(--law-font-step) * 2px);
+  --law-leading-xl: calc(28px + var(--law-font-step) * 3px);
+
+  /* 固定小字（2026-10-30）：**不**跟字号档位变（`--law-font-step` 对它无效）。
+     判定规则：承载"内容"的文字（正文、标题、会话名、错误提示、回答里的来源列表）用上面的
+     `--law-text-*` 跟随设置；徽标 / 计数 / 状态标签 / 带 letter-spacing 的小标题这类 chrome
+     保持固定——它们贴着图标或固定高度的盒子，跟着放大会挤出边界。
+     这与 dsh 同口径：它的 `--dsw-font-xxs-12` 是固定档，只有 `--dsh-content-font-size-*`
+     那两轴随设置变。四档数值与改动前的硬编码一一对应，所以默认态（scale=1）零视觉变化。 */
+  --law-text-fixed-3xs: 9px;
+  --law-leading-fixed-3xs: 12px;
+  --law-text-fixed-2xs: 10px;
+  --law-leading-fixed-2xs: 16px;
+  --law-text-fixed-xs: 11px;
+  --law-leading-fixed-xs: 14px;
+  --law-text-fixed-sm: 12px;
+  --law-leading-fixed-sm: 18px;
+
   --law-weight-regular: 400;
   --law-weight-medium: 500;
   --law-weight-semibold: 600;
@@ -316,8 +339,8 @@
   --workspace-gutter: clamp(16px, 2.3vw, 32px);
 }
 
-:root[data-font-size='small'] { --law-font-scale: .9; }
-:root[data-font-size='large'] { --law-font-scale: 1.125; }
+:root[data-font-size='small'] { --law-font-step: -1; }
+:root[data-font-size='large'] { --law-font-step: 1; }
 
 /**
  * 深色：**只覆盖 `--c-*`**。
@@ -343,7 +366,11 @@
 
   --c-text-1: #f1edf6;
   --c-text-2: #c6bdcf;
-  --c-text-3: #a69bb3;
+  /* 三级文字暗色下提亮一档（2026-10-30）：#a69bb3 在 #1d1b22 上只有 6.46:1，而 dsh 的暗色
+     三级是 8.54:1 —— 这是"暗色下层级更通透"的唯一一处真实差距。取 #b1a7bc（7.40:1）：
+     提亮约 15%，同时与二级（9.40:1）仍保持 1.27 倍差距，不至于把"次要"和"次级"混成一级。
+     **浅色不动**：那边的 #736c7e 是 4.95:1，已达 AA；dsh 浅色三级只有 3.71:1，不能照抄。 */
+  --c-text-3: #b1a7bc;
   --c-text-off: #737384;
   --c-text-inverse: #21172d;
 

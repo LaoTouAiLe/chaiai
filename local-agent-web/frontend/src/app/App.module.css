@@ -23,6 +23,20 @@
 
 
 
+/* AI 生成内容声明（2026-10-30）：常驻内容区最底部的一行小字。
+   刻意用**固定档**字号：它不承载信息，跟着"文字大小"放大会白占对话区高度。
+   不加分隔线、不用自己的底色——它就该像页脚注记，而不是一条横栏。 */
+.aiNotice {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--sp-1) 0;
+  color: var(--c-text-3);
+  font-size: var(--law-text-fixed-2xs);
+  line-height: var(--law-leading-fixed-2xs);
+  text-align: center;
+  user-select: none;
+}
+
 /* Transport-level notice from the event stream (`stream_overrun`, idle timeout,
    an unparsable frame). It states what happened instead of pretending the
    connection was healthy — T30. */
