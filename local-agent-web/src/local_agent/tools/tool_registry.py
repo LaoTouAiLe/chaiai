@@ -28,6 +28,7 @@ from local_agent.tools.mcp_tools import build_mcp_tool_search
 from local_agent.tools.memory_tools import build_memory_tools
 from local_agent.tools.plan_tools import build_plan_tools
 from local_agent.tools.search_tools import build_search_tools
+from local_agent.tools.session_tools import SessionSearchFn, build_session_tools
 from local_agent.tools.shell_tools import build_shell_tools
 from local_agent.tools.skill_tools import build_skill_tools
 from local_agent.tools.terminal_tools import build_terminal_tools
@@ -84,6 +85,10 @@ class ToolRegistry:
         #: 让"清单"与"取正文"看到同一份事实。
         disabled_skills: Iterable[str] = (),
         delegate: DelegateFn | None = None,
+        #: 历史会话检索入口（`session_search`，2026-11-02）。与 ``delegate`` 同一注入口径：
+        #: 工具执行节点拿不到会话索引，入口只能在装配时闭包进来。省略 = 这条运行路径没有索引
+        #: （CLI / 脚本 / 子 Agent），工具仍在注册表里，调用会得到明确的失败。
+        session_search: SessionSearchFn | None = None,
         #: **本轮已知的全部 MCP 工具**（来自已连接 server 的目录，架构 §6.13）。
         #: 名字必须以 ``mcp__`` 开头，且只能由装配层从目录构造——不接受任意工具混进来。
         mcp_tools: Sequence[BaseTool] = (),
@@ -145,7 +150,9 @@ class ToolRegistry:
                 *build_search_tools(policy),
                 *build_shell_tools(policy),
                 *build_terminal_tools(policy),
-                *build_browser_tools(policy),
+                # `vision_available` 决定 `browser(action="screenshot", vision=True)` 能不能真的把图
+                # 交给模型（2026-11-02）：没声明支持图像输入时它失败闭合，不截图。
+                *build_browser_tools(policy, vision_available=vision_available),
                 *build_host_tools(policy),
                 *build_web_tools(
                     web_access or WebAccessConfig(),
@@ -167,6 +174,8 @@ class ToolRegistry:
                 # 可得，所以这里把运行侧的执行入口闭包进来——工具执行节点只传调用参数（`_invoke_tool`），
                 # 拿不到 `RuntimeContext`，这是 A 方案的注入点。
                 *build_delegate_tools(delegate),
+                # 2026-11-02：检索历史会话。同样"总是构造"，可见性由 `session_history` 能力决定。
+                *build_session_tools(session_search),
                 # 检索工具**总是**被构造：``mcp`` 能力关掉时它不可见，但覆盖校验要求
                 # "能力表里登记的必须实现"（架构 §6.9），所以不能按开关决定造不造。
                 build_mcp_tool_search(

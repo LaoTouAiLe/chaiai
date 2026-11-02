@@ -26,7 +26,7 @@ from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from local_agent.app_paths import data_dir
-from local_agent.attachments import LoadedAttachment
+from local_agent.attachments import FileAttachment, LoadedAttachment
 from local_agent.cancellation import CancellationToken
 from local_agent.capabilities import enabled_capabilities, resolve_switches
 from local_agent.config import RunConfig, apply_capability_gates, redact_secrets
@@ -111,6 +111,7 @@ from local_agent.performance import timed_node
 from local_agent.security.path_guard import ExternalPathPolicy
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.mcp_tools import build_mcp_tools
+from local_agent.tools.session_tools import SessionSearchFn
 from local_agent.tools.tool_registry import ToolRegistry
 from local_agent.workflow_contracts import CODE_CHANGE, DELEGATED_RESEARCH, READONLY_RESEARCH
 
@@ -478,8 +479,14 @@ def build_runtime_context(
     code_change: Mapping[str, Any] | None = None,
     delegated_research: Mapping[str, Any] | None = None,
     child_index: Callable[[str, list[str]], None] | None = None,
+    #: 历史会话检索入口（`session_search`，2026-11-02）。与 ``delegate`` 同一套 A 方案：
+    #: 工具执行节点拿不到会话索引，入口只能在装配时闭包进注册表。省略 = 这条路径没有索引
+    #: （CLI / 脚本 / 子 Agent），工具调用会得到明确失败而不是空结果。
+    session_search: SessionSearchFn | None = None,
     #: 随消息提交的图片（2026-10-16）。默认空 ⇒ 不带图的调用点一处都不用改。
     user_attachments: Iterable[LoadedAttachment] = (),
+    #: 随消息提交的**文档**（2026-10-29）：默认空 ⇒ 不带文件的调用点一处都不用改。
+    user_files: Iterable[FileAttachment] = (),
     #: 附件存储（2026-10-20）：出站前把图片引用物化成 `data:` URL 时按会话读回字节。
     #: 不传表示没有附件后端（CLI/测试的轻量路径）：上传附件的引用读不到，会退化成占位文本。
     attachments: Any = None,
@@ -594,6 +601,8 @@ def build_runtime_context(
         vision_available=vision_available,
         # 注入的注册表（测试/脚本）自带它自己的委派入口或明确的失败，这里不覆盖。
         delegate=_delegate,
+        # 历史会话检索（2026-11-02）：调用点在应用层，那里才有会话索引。
+        session_search=session_search,
         mcp_tools=mcp_tools,
         mcp_direct=mcp_direct,
         mcp_search_provider=mcp_search_provider,
@@ -638,6 +647,7 @@ def build_runtime_context(
         delegated_research=delegated_research,
         child_index=child_index,
         user_attachments=tuple(user_attachments),
+        user_files=tuple(user_files),
         image_reader=_make_image_reader(policy, attachments, attachment_session),
         image_context_turns=image_context_turns,
     )

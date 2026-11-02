@@ -23,11 +23,11 @@ from local_agent.application.data_center_models import (
 )
 from local_agent.application.models import cache_hit_ratio
 from local_agent.model_settings.preferences import apply_runtime_preferences
-from local_agent.scope import MemoryScope, project_id_for, visible_scope_keys
+from local_agent.scope import MemoryScope, normalize_path, project_id_for, visible_scope_keys
 
 if TYPE_CHECKING:
     from local_agent.application.service import ApplicationService
-    from local_agent.persistence.session_store import Session
+    from local_agent.config import AppConfig
 
 MEMORY_SCAN_LIMIT = 10000
 SESSION_SCAN_LIMIT = 200
@@ -160,9 +160,51 @@ def memories(service: ApplicationService, *, workspace_id: str | None = None,
                and (status == "all" or row.status == status)
                and (not needle or needle in (row.title + "\n" + row.content).casefold())]
     entries.sort(key=lambda row: (row.updated_at or row.created_at or "", row.id), reverse=True)
+    notices: list[str] = []
+    if incomplete:
+        notices.append("读取未完整覆盖：部分库不可读，或单类记忆超过 10,000 条；数量与搜索仅覆盖已读记录。")
+    notices.extend(_maintenance_notices(service, config))
     return MemoryPageView(entries=entries[offset:offset + limit], resources=resources, counts=counts,
                           total=len(entries), offset=offset, limit=limit, incomplete=incomplete,
-                          notices=["读取未完整覆盖：部分库不可读，或单类记忆超过 10,000 条；数量与搜索仅覆盖已读记录。"] if incomplete else [])
+                          notices=notices)
+
+
+def _maintenance_notices(service: ApplicationService, config: AppConfig) -> list[str]:
+    """记忆维护任务的状态行（2026-11-02，架构 §10.3）。
+
+    **只报告，不触发**：打开记忆页不该顺手改库（那会让"看一眼"变成一次写操作）。
+    失败原因**不进页面**——异常文本里可能带绝对路径与库结构细节，页面只说明"已记入日志、
+    下一轮重试"，与"不向页面转发 SDK、路径或原始异常"的既有口径一致。
+    """
+    if not config.memory.long_term.enabled:
+        return []
+    maintenance = getattr(service, "memory_maintenance", None)
+    if maintenance is None:
+        # 没挂调度器（未走 lifespan 的调用方/测试）：不编一条"尚未运行"——那是另一个事实。
+        return []
+    status = maintenance.status()
+    if status is None:
+        return ["记忆维护尚未运行：服务启动约 1 分钟后开始，之后每 6 小时一次。本页只读，不会触发维护。"]
+    moment = status.finished_at.astimezone().strftime("%Y-%m-%d %H:%M")
+    if status.error:
+        return [f"记忆维护上次失败（{moment}）：原因已记入服务端日志，下一轮会自动重试。"]
+    report = status.report
+    if report is None:
+        return []
+    if report.total == 0:
+        return [f"记忆维护上次运行（{moment}）：本轮无需淘汰。"]
+    summary = (
+        f"记忆维护上次运行（{moment}）：显式过期 {report.expired_facts} 条、"
+        f"自动老化 {report.aged_facts} 条、中期清理 {report.deleted_medium} 条。"
+    )
+    notes = [summary]
+    consolidation = getattr(status, "consolidation", None)
+    if consolidation is not None:
+        notes.append(
+            f"记忆巩固：新增长期事实 {consolidation.promoted} 条"
+            f"（丢弃 {consolidation.skipped} 条，原因见服务端日志）。"
+        )
+    return notes
 
 
 def _sum(values: Iterable[int | None]) -> int | None:
@@ -187,30 +229,113 @@ def totals(entries: Sequence[UsageCallView]) -> UsageTotalsView:
 
 def usage(service: ApplicationService, *, workspace_id: str | None = None, model: str = "",
           since: datetime | None = None, until: datetime | None = None, offset: int = 0, limit: int = 30) -> UsagePageView:
+    """用量页（§15.6）：**以用量账为准**（v18），老会话读穿回填一次。
+
+    2026-11-02 之前这里只有一条路：逐会话反序列化 Checkpoint，从 State 里捡
+    `model_call_records`。那条路的上限是 200 会话 / 2,000 检查点，撞上就是"统计不完整"，
+    而且每次打开页面都要付一遍代价。现在记录在调用发生时（每轮 sync）就追加进
+    `model_call_usage`，统计是一句 SQL。
+
+    **老会话仍在**：升级前产生的调用只存在于 Checkpoint 里，账本里没有它们的行。所以对
+    "账本里没有任何记录的会话"保留一次扫描，并把扫到的记录写回账本（读穿）——下次打开就快。
+    这条兜底会把 `incomplete` 置真并给出提示，而不是让旧历史静默归零。
+    """
     root = service._path_for_workspace_id(workspace_id) if workspace_id else None
+    normalized = None if root is None else normalize_path(root)
     sessions = service._sqlite_access(lambda: service._sessions.list_sessions(workspace_root=root)
                                      + service._sessions.list_sessions(workspace_root=root, archived=True))
     sessions.sort(key=lambda session: (session.updated_at, session.created_at), reverse=True)
+    by_id = {session.session_id: session for session in sessions}
     incomplete = len(sessions) > SESSION_SCAN_LIMIT
-    collected: dict[tuple[str, str], UsageCallView] = {}
+    notices: list[str] = []
+
+    # 1) 账本（真源）。SQL 已经把工作区 / 时间窗 / 模型名筛过一遍，下面仍按同一口径过滤——
+    #    读穿来的记录走的是 Python 侧，两处必须用同一套判据，否则新旧数据会走出不同的结果。
+    stored = service._sqlite_access(lambda: service._sessions.usage_rows(
+        workspace_root=normalized, since=since, until=until, model=model))
+    collected: dict[str, tuple[str, str, Any]] = {
+        row.record.model_call_id: (row.session_id, row.workspace_root, row.record) for row in stored
+    }
+    known = service._sqlite_access(lambda: service._sessions.usage_sessions(workspace_root=normalized))
+
+    # 2) 读穿：升级前的老会话没有账本行。
+    scanned, missing, incomplete = _backfill_legacy(
+        service, sessions, known, collected, incomplete=incomplete)
+
+    # 3) 投影 + 过滤 + 排序（与 v17 之前完全一样的口径）。
+    needle = model.strip().casefold()
+    entries: list[UsageCallView] = []
+    for session_id, workspace_root, record in collected.values():
+        if needle and needle not in record.model_id.casefold():
+            continue
+        if since is not None and record.started_at < since:
+            continue
+        if until is not None and record.started_at >= until:
+            continue
+        call = proj.project_model_call(record)
+        for field in ("purpose", "provider", "model_id", "connection_id", "config_version"):
+            setattr(call, field, _text(service, getattr(call, field)))
+        known_session = by_id.get(session_id)
+        entries.append(UsageCallView(
+            session_id=session_id,
+            # 会话被删掉之后账本行仍在（它是"这台机器花过多少"，不随会话消失）：
+            # 标题退化成空串，页面按 `session_id` 展示。
+            session_title="" if known_session is None else _text(service, known_session.title),
+            workspace_id=service._ref_for(Path(workspace_root)).workspace_id,
+            call=call,
+        ))
+    entries.sort(key=lambda row: (row.call.started_at, row.call.model_call_id), reverse=True)
+
+    def buckets(key: Any) -> list[UsageBucketView]:
+        groups: dict[str, list[UsageCallView]] = defaultdict(list)
+        for row in entries:
+            groups[key(row)].append(row)
+        return [UsageBucketView(label=label, totals=totals(rows)) for label, rows in sorted(groups.items())]
+    if incomplete:
+        notices.append("统计未完整覆盖：部分检查点不可读，或达到 200 会话 / 2,000 检查点 / 100,000 次调用记录读取的上限。"
+                       "已读到的记录已写进用量账，下次打开会更快。")
+    if scanned:
+        notices.append(f"{scanned} 个升级前的会话没有用量账，已扫检查点回填；之后不再重复扫描。")
+    if missing:
+        notices.append(f"{missing} 个已查看会话没有可用调用记录，可能尚未提问或来自未记录用量的旧版本；不计为零消耗。")
+    return UsagePageView(totals=totals(entries), daily=buckets(lambda row: row.call.started_at.astimezone(timezone.utc).date().isoformat()),
+                         models=buckets(lambda row: row.call.model_id), purposes=buckets(lambda row: row.call.purpose),
+                         entries=entries[offset:offset + limit], total=len(entries), offset=offset, limit=limit,
+                         scanned_sessions=scanned, missing_record_sessions=missing,
+                         incomplete=incomplete, notices=notices, generated_at=datetime.now(timezone.utc))
+
+
+def _backfill_legacy(
+    service: ApplicationService,
+    sessions: Sequence[Any],
+    known: set[str],
+    collected: dict[str, tuple[str, str, Any]],
+    *,
+    incomplete: bool,
+) -> tuple[int, int, bool]:
+    """对"账本里没有记录的会话"扫一遍 Checkpoint，把结果补进账本（读穿，只做一次）。
+
+    为什么还需要这条路：升级前产生的调用只存在于 Checkpoint 里。没有它，升级后用量页会**静默归零**
+    ——比"慢"更糟。写失败不影响本次展示（展示用内存里这份），下次再看还有机会补上。
+    """
+    scanned = 0
     missing = 0
     reads = 0
-    scanned = 0
     inspected_calls = 0
-    notices: list[str] = []
-    for session in sessions[:SESSION_SCAN_LIMIT]:
+    for session in (item for item in sessions[:SESSION_SCAN_LIMIT] if item.session_id not in known):
         if reads >= CHECKPOINT_SCAN_LIMIT or inspected_calls >= CALL_SCAN_LIMIT:
             incomplete = True
             break
-        before = len(collected)
+        found: dict[str, Any] = {}
         scanned += 1
         try:
             # 累积记录沿路径继承，各分支末端的并集覆盖共享历史与分叉；不扫描每步快照。
             branches = service._sqlite_access(partial(service._conversations.branches, session.session_id))
             ids = {branch.checkpoint_id for branch in branches if branch.checkpoint_id is not None}
-            latest = service._view_of(service._graph.get_state({"configurable": {"thread_id": session.thread_id}}))
+            latest = service._view_of(service._graph.get_state(
+                {"configurable": {"thread_id": session.thread_id}}))
             reads += 1
-            inspected_calls += _collect_calls(service, session, latest.values, collected, CALL_SCAN_LIMIT - inspected_calls)
+            inspected_calls += _collect_records(latest.values, found, CALL_SCAN_LIMIT - inspected_calls)
             for checkpoint_id in sorted(ids):
                 if checkpoint_id == latest.checkpoint_id:
                     continue
@@ -222,42 +347,29 @@ def usage(service: ApplicationService, *, workspace_id: str | None = None, model
                 if view is None:
                     incomplete = True
                 else:
-                    inspected_calls += _collect_calls(service, session, view.values, collected, CALL_SCAN_LIMIT - inspected_calls)
+                    inspected_calls += _collect_records(view.values, found, CALL_SCAN_LIMIT - inspected_calls)
             if inspected_calls >= CALL_SCAN_LIMIT:
                 incomplete = True
         except Exception:  # noqa: BLE001 — 单个会话读取失败不能冒充零消耗
             incomplete = True
-        missing += len(collected) == before
-    needle = model.strip().casefold()
-    entries = [row for row in collected.values() if (not needle or needle in row.call.model_id.casefold())
-               and (since is None or row.call.started_at >= since) and (until is None or row.call.started_at < until)]
-    entries.sort(key=lambda row: (row.call.started_at, row.call.model_call_id), reverse=True)
-    def buckets(key: Any) -> list[UsageBucketView]:
-        groups: dict[str, list[UsageCallView]] = defaultdict(list)
-        for row in entries:
-            groups[key(row)].append(row)
-        return [UsageBucketView(label=label, totals=totals(rows)) for label, rows in sorted(groups.items())]
-    if incomplete:
-        notices.append("统计未完整覆盖：部分检查点不可读，或达到 200 会话 / 2,000 检查点 / 100,000 次调用记录读取的上限。")
-    if missing:
-        notices.append(f"{missing} 个已查看会话没有可用调用记录，可能尚未提问或来自未记录用量的旧版本；不计为零消耗。")
-    return UsagePageView(totals=totals(entries), daily=buckets(lambda row: row.call.started_at.astimezone(timezone.utc).date().isoformat()),
-                         models=buckets(lambda row: row.call.model_id), purposes=buckets(lambda row: row.call.purpose),
-                         entries=entries[offset:offset + limit], total=len(entries), offset=offset, limit=limit,
-                         scanned_sessions=scanned, missing_record_sessions=missing,
-                         incomplete=incomplete, notices=notices, generated_at=datetime.now(timezone.utc))
+        if not found:
+            missing += 1
+            continue
+        try:
+            service._sqlite_access(partial(
+                service._sessions.append_usage,
+                session.session_id, session.workspace_root, list(found.values()),
+            ))
+        except Exception:  # noqa: BLE001
+            incomplete = True
+        for key, record in found.items():
+            collected.setdefault(key, (session.session_id, session.workspace_root, record))
+    return scanned, missing, incomplete
 
 
-def _collect_calls(service: ApplicationService, session: Session, values: Any,
-                   collected: dict[tuple[str, str], UsageCallView], budget: int) -> int:
+def _collect_records(values: Any, collected: dict[str, Any], budget: int) -> int:
+    """从一个检查点的 State 里捡出调用记录（读穿用）。键是 ``model_call_id``，天然去重。"""
     records = values.get("model_call_records") or []
-    # 每个检查点只解析一次名称与工作区，避免逐调用读会话表；处理后立即释放快照。
-    title = _text(service, session.title)
-    workspace_id = service._ref_for(Path(session.workspace_root)).workspace_id
     for record in records[:budget]:
-        call = proj.project_model_call(record)
-        for field in ("purpose", "provider", "model_id", "connection_id", "config_version"):
-            setattr(call, field, _text(service, getattr(call, field)))
-        collected[(session.session_id, call.model_call_id)] = UsageCallView(
-            session_id=session.session_id, session_title=title, workspace_id=workspace_id, call=call)
+        collected.setdefault(str(getattr(record, "model_call_id", "")), record)
     return min(len(records), budget)

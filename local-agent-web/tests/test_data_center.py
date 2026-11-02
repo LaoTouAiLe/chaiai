@@ -8,9 +8,11 @@ from test_application import _harness, _session
 
 from local_agent.application import data_center
 from local_agent.application.data_center_models import UsageCallView
+from local_agent.application.maintenance import MaintenanceRun
 from local_agent.application.models import ModelCallRecordView
 from local_agent.config import AppConfig
 from local_agent.memory import long_term
+from local_agent.memory.forgetting import ForgetReport
 from local_agent.scope import project_id_for, scope_key_for
 
 
@@ -30,6 +32,65 @@ def test_empty_memory_browse_does_not_create_stores(tmp_path, model_factory, app
     assert {resource.state for resource in result.resources} == {"missing"}
     assert not (tmp_path / "long.sqlite").exists() and not (tmp_path / "vectors").exists()
     assert h.database.connection.total_changes == before and h.model.decision_calls == 0
+    h.database.connection.close()
+
+
+class _FakeMaintenance:
+    """只提供 ``status()``：记忆页只读它，不触发任何维护。"""
+
+    def __init__(self, run: MaintenanceRun | None) -> None:
+        self._run = run
+
+    def status(self) -> MaintenanceRun | None:
+        return self._run
+
+
+def _maintenance_run(*, report: ForgetReport | None = None, error: str | None = None) -> MaintenanceRun:
+    moment = datetime.now(timezone.utc)
+    return MaintenanceRun(started_at=moment, finished_at=moment, report=report, error=error)
+
+
+def test_memory_page_reports_maintenance_status(tmp_path, model_factory, app_config):
+    """维护状态进 ``notices``（2026-11-02）：前端无需改渲染，且打开页面**不触发**维护。"""
+    values = app_config.model_dump()
+    values["memory"]["long_term"].update(enabled=True, path=str(tmp_path / "long.sqlite"))
+    values["memory"]["medium_term"].update(enabled=False, path=str(tmp_path / "vectors"))
+    h = _harness(tmp_path, model_factory, AppConfig.model_validate(values), decision="chat")
+    _session(h)
+
+    # 1) 没挂调度器（未走 lifespan）：不编造"尚未运行"
+    assert not any("记忆维护" in note for note in h.service.get_memory_page().notices)
+
+    # 2) 挂了但还没跑过
+    h.service.memory_maintenance = _FakeMaintenance(None)
+    assert any("尚未运行" in note for note in h.service.get_memory_page().notices)
+
+    # 3) 跑过并淘汰了记录
+    h.service.memory_maintenance = _FakeMaintenance(
+        _maintenance_run(report=ForgetReport(expired_facts=1, aged_facts=2))
+    )
+    notes = h.service.get_memory_page().notices
+    assert any("显式过期 1 条" in note and "自动老化 2 条" in note for note in notes)
+    h.database.connection.close()
+
+
+def test_memory_page_does_not_leak_maintenance_error_text(
+    tmp_path, model_factory, app_config
+):
+    """失败原因只进日志：页面不能出现异常原文（可能带绝对路径与库结构）。"""
+    values = app_config.model_dump()
+    values["memory"]["long_term"].update(enabled=True, path=str(tmp_path / "long.sqlite"))
+    values["memory"]["medium_term"].update(enabled=False, path=str(tmp_path / "vectors"))
+    h = _harness(tmp_path, model_factory, AppConfig.model_validate(values), decision="chat")
+    _session(h)
+    h.service.memory_maintenance = _FakeMaintenance(
+        _maintenance_run(error="PermissionError: C:/secret/path/memories.sqlite")
+    )
+
+    notes = h.service.get_memory_page().notices
+
+    assert any("上次失败" in note for note in notes)
+    assert all("C:/secret" not in note for note in notes)
     h.database.connection.close()
 
 

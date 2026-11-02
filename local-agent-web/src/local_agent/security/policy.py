@@ -86,6 +86,10 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
     # 不改任何状态，所以与上面几项同级、不需要审批。注意它**不是**外部工具：外部工具名是
     # `mcp__<server>__<tool>`（双下划线），由下面的 `mcp__` 前缀分支处理（一律审批）。
     "mcp_tool_search",
+    # 2026-11-02：检索**本机历史会话**（`session_search`）——只查已落库的提问与回答，不发外部
+    # 请求、不改任何状态，与 `read_file` 同级、不需要人工审批。闸门是能力开关（默认关）：
+    # 它把别的会话的正文带进当前轮，属于"读的范围"而不是"写的能力"。
+    "session_search",
 )
 CONTROL_TOOLS: tuple[str, ...] = ("update_plan", "task_control", "ask_user")
 
@@ -211,6 +215,10 @@ class SecurityPolicy:
         #: 安全删除（2026-10-20）：开启时 `delete_file` 把目标**移进系统回收站**而不是抹掉。
         #: 策略层默认关（直接构造策略的测试/CLI 保持旧行为）；生产由 `from_config` 按配置传入。
         safe_delete: bool = False,
+        #: **命令只读**（2026-11-02）：文件工具按档位可写，但 ``run_shell`` 始终在**无写授权**的
+        #: 沙箱里跑。可写子 Agent 用它：子 Agent 改文件必须走文件工具，才能进父会话的变更账本
+        #: （可整轮还原）；任命令随意写盘就没有账、也没法还原。
+        shell_readonly: bool = False,
     ) -> None:
         self.workspace_root = workspace_root
         # 不同会话不共享终端或浏览器；CLI 未提供会话键时只在当前策略内复用。
@@ -231,6 +239,18 @@ class SecurityPolicy:
         #: 是常见空转，一次就是一次模型往返。策略每轮新建，所以天然只在轮内生效；文件一变 sha
         #: 就不同，不会命中。
         self.read_cache: dict[tuple, tuple[int, int, bool, int | None, int | None, int]] = {}
+        #: 命令只读（2026-11-02）：见构造函数同名参数。只影响 ``run_shell`` 的沙箱写授权，
+        #: 不影响文件工具——那条路要进变更账本。
+        self.shell_readonly = bool(shell_readonly)
+        #: 文档提取结果的轮内缓存（2026-10-29）：`(文件 sha, 页号) -> 提取文本`。
+        #: 为什么必须有：一份 295 页的 PDF 全量抽取要 14.79s（实测），有了按页惰性抽取后
+        #: 单页只要 0.046s，但同一页被重复读仍是浪费；docx/xlsx/pptx 用页号 0 存整篇。
+        #: 与 `read_cache` 同口径：策略每轮新建，文件一变 sha 就不同，不会命中旧内容。
+        self.extract_cache: dict[tuple[str, int], object] = {}
+        #: 文档读取的轮级去重（2026-10-29）：`(路径, sha, 页范围, start_char, max_chars)`。
+        #: 与 `read_cache` 同口径——同一轮里重复读同一段文档不再回传原文。为什么单独一张表：
+        #: `read_cache` 的值是"行区间/续读位置"六元组，而文档的续读单位是页，塞进去会串味。
+        self.document_read_cache: set[tuple] = set()
         #: 验证类命令的轮内结果缓存（2026-10-22）：同命令 + 文件未变 → 直接回上次结果。
         #: 只缓存"跑测试/类型检查"这类**无副作用**命令；key 带 ``file_change_version``，
         #: 一旦有写盘就整体失效（改了代码还拿旧测试结果，比不缓存更糟）。
@@ -322,6 +342,7 @@ class SecurityPolicy:
         external_policy: ExternalPathPolicy | None = None,
         cancellation: CancellationToken | None = None,
         allow_result_spill: bool = True,
+        shell_readonly: bool = False,
     ) -> SecurityPolicy:
         """按配置构造策略；密钥值从环境变量读取，仅用于输出脱敏。
 
@@ -361,6 +382,7 @@ class SecurityPolicy:
             allow_result_spill=allow_result_spill,
             # 安全删除来自配置（默认开）：删除进回收站，可从数据目录找回。
             safe_delete=app_config.security.safe_delete,
+            shell_readonly=shell_readonly,
         )
 
     # -------------------------------------------------------------- 写侧沙箱
@@ -430,8 +452,10 @@ class SecurityPolicy:
                 win_sandbox.grant_read(str(cwd))
             except (OSError, win_sandbox.SandboxUnavailable) as exc:
                 raise SecurityError(f"命令工作目录无法物化只读访问（{exc}）") from exc
-        if mode == "read-only":
+        if mode == "read-only" or self.shell_readonly:
             # LUA 令牌不能依赖 OWNER RIGHTS。只补普通用户读 ACE，不带入任何可写 SID。
+            # ``shell_readonly`` 也走这一支：档位允许写工作区，但**命令**不给写授权——
+            # 可写子 Agent 的改动必须经文件工具进变更账本，命令随意写盘就没有账可还原。
             roots = [self.workspace_root, *(Path(path) for path in self.external_policy.grants)]
             try:
                 for root in dict.fromkeys(roots):

@@ -46,6 +46,23 @@ def readonly_child_capabilities(parent: tuple[str, ...]) -> tuple[str, ...]:
         "files_read", "code_search", "web", "shell", "plan", "task_lifecycle",
     })
 
+
+def writable_child_capabilities(parent: tuple[str, ...]) -> tuple[str, ...]:
+    """子 Agent 的**第二档**（2026-11-02）：只读收窄 + 工作区写。
+
+    只在"父档位允许写工作区、且父自己绑了 ``files_write``"时使用（判定在
+    ``graph/delegated_workflow._prepare``，本函数只负责能力集合的收窄与顺序）。
+
+    **只加 ``files_write``，不加 ``shell`` 以外的任何东西**：``git_write`` / ``mcp`` /
+    ``page_control`` / ``session_history`` 都不进子 Agent——前者改仓库历史，中间两个是
+    第三方进程与外部页面，最后一个会把别的会话正文再套一层。子 Agent 也不继承父的写授权
+    目录：它的外部策略固定 ``workspace_only``（见 ``_child_context``）。
+
+    ``files_write`` 追加在末尾：前面的顺序不变，子提示的前缀因此只变尾巴。
+    """
+    base = readonly_child_capabilities(parent)
+    return (*base, "files_write") if "files_write" in parent else base
+
 #: 能力闭集 → 该能力的工具名（**顺序即绑定顺序**）。
 #:
 #: 新增工具时必须同时登记能力归属：漏登记会在构造注册表时失败（见
@@ -91,6 +108,14 @@ CAPABILITY_TOOLS: Mapping[str, tuple[str, ...]] = {
     # 外部 server 的工具名是运行期才知道的，它们经由 :data:`EXTERNAL_TOOL_PREFIX` 归到本能力，
     # 不进这张静态表（否则每次配置 server 都要改源码）。同样追加在末尾：前面的字节不变。
     "mcp": ("mcp_tool_search",),
+    # 2026-11-02：**检索历史会话**（工具名 `session_search`）。不并入 `files_read`/`code_search`：
+    # 它读的不是工作区文件，而是本机全部会话的问答正文（含归档、含其他工作区），语义与
+    # "读当前工作区的文件"不同；合族会让页面上的开关描述与实际读到的范围对不上。
+    # 与 `delegate` 同一口径：**不进任何内置档位声明**，出厂默认关——默认配置下的工具集
+    # 与系统前缀因此逐字不变（§16.1）。
+    # 键名特意**不等于**工具名：能力面板的文本里不得出现任何实现工具名（§16.6、§15.8），
+    # 这一条由 `tests/test_capabilities.py` 逐字守着。
+    "session_history": ("session_search",),
 }
 
 #: **会带进外部内容**的能力（架构 §6.10、§16.2、§16.3）。
@@ -151,6 +176,9 @@ CAPABILITY_DEFAULTS: Mapping[str, bool] = {
     "page_control": True,
     # MCP 默认**关**：连的是第三方进程，且配置里可能带凭据。"打开"应当是显式决定。
     "mcp": False,
+    # 检索历史会话默认**关**（2026-11-02）：它会把**别的会话**的正文带进这一轮的上下文，
+    # 范围比"读当前工作区"大；而且它是新增能力，默认关才能保证出厂前缀与缓存基线逐字不变。
+    "session_history": False,
 }
 
 #: **不可关闭**的能力（架构 §16.1）。两类理由必须分开说：
@@ -381,6 +409,9 @@ CAPABILITY_LABELS: Mapping[str, str] = {
     "terminal": "交互进程与后台服务",
     "page_control": "操作浏览器",
     "mcp": "MCP 外部工具",
+    # 措辞要点明"跨会话"：用户看到"检索历史"才明白这个开关打开的代价是"别的会话的正文
+    # 也会进上下文"。
+    "session_history": "检索历史会话",
 }
 
 #: 能力不可用的原因类型。**只有这三种**：DTO 直接复用它，页面因此不会遇到"没见过的原因"。
@@ -427,6 +458,8 @@ _DISABLED_DETAIL: Mapping[str, str] = {
     "（每个子任务会多花一次模型调用，所以默认关闭）。",
     "mcp": "MCP 外部工具开关关着：不连接任何 MCP Server，模型看不到也调不到外部工具"
     "（这些工具跑在本机的第三方进程里，且可能带凭据，所以默认关闭）。",
+    "session_history": "检索历史会话开关关着：模型只能看到当前会话，不能自己去翻"
+    "「上次那个方案」是哪一轮说的（打开后它会检索本机全部会话的提问与回答，含已归档）。",
 }
 
 #: 打开开关的下一步（给用户的可照做文本）。**必须说"不用重启"**：这正是本次改动的目的。

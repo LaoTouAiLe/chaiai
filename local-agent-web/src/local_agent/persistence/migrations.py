@@ -20,6 +20,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
+from local_agent.persistence import turn_index
+
 #: 聊天库（Checkpoint + 会话索引 + 请求台账 + 任务索引 + 文件变更账本）当前代码期望的结构版本
 #: （等于最后一个迁移的编号）。
 #: 11（2026-10-21）：文件变更账本与基线索引——页面要能回答"这次任务改了哪些文件、每个
@@ -28,7 +30,15 @@ from datetime import datetime, timezone
 #: **编号为什么是 14 而不是 13**：13 已经被侧聊那批列占用了。两批改动此前都写成 13，而迁移器按
 #: "编号 <= 已应用版本就跳过"推进（见 :func:`_apply`），于是新库只会跑前一条 —— `terminal_audit`
 #: 永远建不出来，全新安装启动即崩（`no such table: terminal_audit`，2026-10-23 在临时库上复现）。
-CHAT_SCHEMA_VERSION = 14
+#: 15（2026-10-29）：文件改动可还原。v11 的 baseline 是**会话级首份**，只能退回"会话开始前"；
+#: 要按轮还原就得每条 op 能指到"这一轮开始前"的内容，于是加 ``before_ref`` 与内容寻址 blob 表
+#: （同内容只存一份，见 `persistence/file_changes.py` 的 ``_store_blob``）。
+#: 17（2026-11-02）：会话轮次的全文检索索引（FTS5 虚拟表，见 `persistence/turn_index.py`）。
+#: **失败开放**：本机 SQLite 没编 FTS5 时只记版本、不建表，检索退回 LIKE——不能因为"索引不可用"
+#: 就让应用起不来（v14 那次 ``no such table`` 是同类教训）。
+#: 18（2026-11-02）：模型调用的用量账（追加型，见 `persistence/usage_store.py`）。此前数据中台
+#: 只能扫 Checkpoint 反推用量（200 会话 / 2,000 检查点上限），长历史下既慢又不准。
+CHAT_SCHEMA_VERSION = 18
 
 #: 长期记忆库当前代码期望的结构版本。
 LONG_TERM_SCHEMA_VERSION = 3
@@ -454,6 +464,99 @@ CREATE TABLE IF NOT EXISTS terminal_audit (
 );
 """
 
+#: v15（2026-10-29）：按轮还原所需的"改前内容"。
+#:
+#: ``before_ref`` 指向 ``<data_root>/file-changes/<会话>/blobs/`` 里的一份内容寻址副本，
+#: 语义是"**这一轮**第一次动这个文件之前的内容"（v11 的 ``file_change_baselines`` 是会话级首份，
+#: 只能退回会话开始前）。同轮内同路径只记一次，所以一轮里改四次也只有一条 op 带 ``before_ref``。
+#:
+#: ``before_reason`` 记录"这次为什么没有 before"（超限 / 二进制 / 配额用尽 / 已清理），
+#: 让页面能逐条说明，而不是笼统一句"不可还原"。
+#:
+#: ``file_change_blobs`` 是**账目**，不是内容：内容在文件系统里，这张表只用来算会话占用与做
+#: 孤儿清理（删 op 的引用后据此找出没人用的 blob）。不建引用计数表：判定"还有没有人用"直接
+#: 查 ``file_change_ops.before_ref``，少一套必须保持同步的计数。
+_CHAT_V15_BLOBS_SQL = """
+CREATE TABLE IF NOT EXISTS file_change_blobs (
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    sha256 TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (size_bytes >= 0),
+    stored_bytes INTEGER NOT NULL DEFAULT 0 CHECK (stored_bytes >= 0),
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, sha256)
+);
+"""
+
+_CHAT_V15_FILE_SNAPSHOTS_SQL = """
+ALTER TABLE file_change_ops ADD COLUMN before_ref TEXT;
+ALTER TABLE file_change_ops ADD COLUMN before_reason TEXT;
+""" + _CHAT_V15_BLOBS_SQL
+
+#: 16（2026-10-30）：会话**已读位置**。
+#:
+#: 为什么进库而不是留在前端 localStorage：已读状态和会话是同一个生命周期——删会话时
+#: 它必须跟着消失，否则浏览器里会留下一条永远没有任何东西能清理的记录；而"我在这个
+#: 会话里看到哪儿了"本来就是会话数据，不是界面偏好（侧栏折叠、面板宽度那种才是）。
+#: 顺带解决换浏览器/清缓存后未读全丢的问题。
+#:
+#: 只加一列：这是单用户单机应用（无鉴权、会话表也没有 user 维度），"谁读的"不需要
+#: 单独一维。将来真要多用户，这一列要挪进独立的 ``session_reads`` 表。
+_CHAT_V16_SESSION_READ_SQL = """
+ALTER TABLE sessions ADD COLUMN last_read_at TEXT;
+"""
+
+#: 17 的脚本标识（2026-11-02）。与 v4 的 ``_SETTINGS_V4_VISION_SQL`` 同理：这里必须是 Python，
+#: 不能是裸 SQL——"本机有没有 FTS5"是运行期事实，DDL 表达不了条件，而建表失败不能拖垮启动。
+_CHAT_V17_TURN_INDEX = "v17:session_turn_fts"
+
+#: 18（2026-11-02）：模型调用的**用量账**（追加型）。
+#:
+#: 为什么单开一张表而不继续从 Checkpoint 反推：Checkpoint 里的 `model_call_records` 是执行状态的
+#: 一部分，读它必须反序列化整份 State——数据中台为了算一次总账要扫最多 2,000 个检查点，长历史下
+#: 既慢又会触发上限而"统计不完整"。这张表是**投影**：每轮结束把这一轮的调用记录 `INSERT OR IGNORE`
+#: 进来（`model_call_id` 是主键，重放安全），之后所有统计走 SQL。
+#:
+#: 列与 :class:`~local_agent.llm.usage_recording.ModelCallRecord` 一一对应，外加 `session_id` /
+#: `workspace_root`（过滤用，不放进记录本身——记录是"一次调用"，不属于某个会话）。
+_CHAT_V18_USAGE_SQL = """
+CREATE TABLE IF NOT EXISTS model_call_usage (
+    model_call_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    workspace_root TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    connection_id TEXT NOT NULL,
+    config_version TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    endpoint_fingerprint TEXT NOT NULL,
+    retry_of TEXT,
+    started_at TEXT NOT NULL,
+    first_token_at TEXT,
+    finished_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    estimated_prompt_tokens INTEGER NOT NULL,
+    actual_uncached_input_tokens INTEGER,
+    actual_cache_read_tokens INTEGER,
+    actual_cache_write_tokens INTEGER,
+    actual_output_tokens INTEGER,
+    actual_reasoning_tokens INTEGER,
+    cache_metrics_reported INTEGER NOT NULL,
+    model_elapsed_ms INTEGER NOT NULL,
+    time_to_first_token_ms INTEGER,
+    context_used_tokens INTEGER NOT NULL,
+    context_window_tokens INTEGER NOT NULL,
+    tools_schema_fingerprint TEXT,
+    system_prompt_fingerprint TEXT,
+    history_prefix_fingerprint TEXT,
+    dynamic_context_fingerprint TEXT
+);
+CREATE INDEX IF NOT EXISTS model_call_usage_started
+    ON model_call_usage (started_at);
+CREATE INDEX IF NOT EXISTS model_call_usage_session
+    ON model_call_usage (session_id, started_at);
+"""
+
 _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (1, _SESSIONS_SQL),
     (2, _CHAT_V2_SQL),
@@ -513,6 +616,10 @@ _CHAT_MIGRATIONS: tuple[tuple[int, str], ...] = (
     (13, _CHAT_V13_SIDE_CHAT_SQL),
     # 14（不是 13）：13 上面那条已经用掉了，同号的第二条会被 `_apply` 跳过（见 CHAT_SCHEMA_VERSION 注释）。
     (14, _CHAT_V14_TERMINAL_SQL),
+    (15, _CHAT_V15_FILE_SNAPSHOTS_SQL),
+    (16, _CHAT_V16_SESSION_READ_SQL),
+    (17, _CHAT_V17_TURN_INDEX),
+    (18, _CHAT_V18_USAGE_SQL),
 )
 
 #: 长期库 v3（T52）：给 ``facts`` 与 ``task_conclusions`` 加 ``origin`` 列（架构 §10.3、§16.2）。
@@ -630,6 +737,18 @@ def _apply(
             _apply_terminal_audit_v14(connection, target)
             version = target
             continue
+        if script == _CHAT_V17_TURN_INDEX:
+            # 失败开放（2026-11-02）：不支持 FTS5 时只记版本、不建表，检索退回 LIKE。
+            _apply_turn_index_v17(connection, target)
+            version = target
+            continue
+        if script == _CHAT_V15_FILE_SNAPSHOTS_SQL:
+            # 幂等加列（2026-10-29）：`ALTER TABLE ADD COLUMN` 不幂等，理由同
+            # `_apply_vision_columns`——进程在登记版本号之前退出时，重跑会以
+            # `duplicate column name` 直接炸掉启动。
+            _apply_file_snapshots_v15(connection, target)
+            version = target
+            continue
         if script == _CHAT_V10_CHILDREN_SQL:
             connection.commit()
             try:
@@ -680,6 +799,64 @@ def _apply_terminal_audit_v14(connection: sqlite3.Connection, target: int) -> No
         raise
 
 
+def _apply_file_snapshots_v15(connection: sqlite3.Connection, target: int) -> None:
+    """v15：给 ``file_change_ops`` 加 ``before_ref`` / ``before_reason`` 并建 blob 账目表。
+
+    **幂等**：``ALTER TABLE ADD COLUMN`` 不幂等，而"进程在登记版本号之前退出"在这套迁移里
+    真的发生过（见 :func:`_apply_vision_columns` 的注释）。所以按列实际状态决定做不做，
+    表用 ``CREATE TABLE IF NOT EXISTS``。
+
+    ``file_change_ops`` 不存在时直接报错而不是顺手建表：那张表由 v11 建，缺它说明这份库
+    根本不是这条迁移链上下来的，继续加列只会把问题推到更难诊断的地方。
+    """
+    connection.commit()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(file_change_ops)")}
+        if not columns:
+            raise sqlite3.DatabaseError(
+                "file_change_ops 表不存在，未登记 v15；这份库不是从 v11 之后的版本升级来的"
+            )
+        if "before_ref" not in columns:
+            connection.execute("ALTER TABLE file_change_ops ADD COLUMN before_ref TEXT")
+        if "before_reason" not in columns:
+            connection.execute("ALTER TABLE file_change_ops ADD COLUMN before_reason TEXT")
+        connection.execute(_CHAT_V15_BLOBS_SQL)
+        connection.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", (target, _now())
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+
+
+def _apply_turn_index_v17(connection: sqlite3.Connection, target: int) -> None:
+    """v17：建 FTS5 索引表并把存量轮次回填进索引。
+
+    **失败开放**：本机 SQLite 没编 FTS5 时只登记版本号，不建表也不报错——
+    ``SessionStore.search_sessions`` 会按"表在不在"自动退回 LIKE。
+    反过来（建表失败就启动失败）会把一个**可选**的检索增强变成硬依赖，
+    那正是 v14 ``no such table: terminal_audit`` 那次事故的形态。
+
+    回填是"先清空再重建"：建表成功但登记版本前退出时，增量补写会留下永远缺前几行的库，
+    而且从版本号上看不出来。
+    """
+    connection.commit()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        if turn_index.fts5_supported(connection):
+            turn_index.create(connection)
+            turn_index.backfill(connection)
+        connection.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", (target, _now())
+        )
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+
+
 def _apply_sessions_v9(connection: sqlite3.Connection, script: str, target: int) -> None:
     """被引用父表重建：临时关外键，DDL/版本同事务，复核后恢复原设置。"""
     connection.commit()
@@ -721,6 +898,21 @@ def _ensure_sessions_columns(connection: sqlite3.Connection) -> None:
         )
 
 
+def _ensure_turn_index(connection: sqlite3.Connection, version: int) -> None:
+    """兜底：版本已是 v17、本机支持 FTS5、表却不在时补建并回填（2026-11-02）。
+
+    **为什么需要**：v17 在"没编 FTS5"的机器上只记版本、不建表（失败开放）。之后用户升级了
+    Python / SQLite，FTS5 就有了，但版本号已经等于 17，正常迁移不会再跑那条分支——检索会永远
+    停在 LIKE，而且没有任何信号。这里的判定与 ``_ensure_sessions_columns`` 同一思路：
+    按**实际结构**自愈，不只信版本号。
+    """
+    if version < 17 or turn_index.table_exists(connection) or not turn_index.fts5_supported(connection):
+        return
+    with connection:
+        turn_index.create(connection)
+        turn_index.backfill(connection)
+
+
 def apply_migrations(connection: sqlite3.Connection) -> int:
     """把**聊天库**结构升到当前版本，返回升级后的版本号。
 
@@ -736,6 +928,7 @@ def apply_migrations(connection: sqlite3.Connection) -> int:
     version = _apply(connection, _CHAT_MIGRATIONS)
     # 版本号可能是对的、列却不在（见 `_ensure_sessions_columns` 的说明），所以每次都要校验。
     _ensure_sessions_columns(connection)
+    _ensure_turn_index(connection, version)
     return version
 
 
