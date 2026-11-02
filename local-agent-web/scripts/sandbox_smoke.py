@@ -122,6 +122,8 @@ def main() -> int:
     from local_agent.security import posix_sandbox
 
     if posix_sandbox.available():
+        # 说清走的是哪条路：bwrap（换视图）与 landlock（只挡写）能力不同，报错时差很多。
+        print(f"  backend: {posix_sandbox.backend()}")
         problems = check_posix(root)
         if problems:
             for item in problems:

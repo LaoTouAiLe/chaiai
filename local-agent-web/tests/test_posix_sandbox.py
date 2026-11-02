@@ -77,10 +77,41 @@ def test_wrap_argv_is_explicit_about_unsupported_platforms(monkeypatch: pytest.M
         posix_sandbox.wrap_argv(["true"])
 
 
-def test_linux_requires_bwrap(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_linux_without_bwrap_falls_back_to_landlock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ubuntu 24.04 限制非特权 userns 时 bwrap 用不了——那时必须退到 landlock，而不是直接没有边界。"""
     monkeypatch.setattr(posix_sandbox.sys, "platform", "linux")
     monkeypatch.setattr(posix_sandbox.shutil, "which", lambda name: None)
+    monkeypatch.setattr(posix_sandbox.landlock, "available", lambda: True)
+
+    assert posix_sandbox.backend() == "landlock"
+    argv = posix_sandbox.wrap_argv(["true"], writable_roots=["/work"])
+    assert argv[:4] == [posix_sandbox.sys.executable, "-I", "-m", "local_agent.security.landlock_exec"]
+    assert argv[4:] == ["--writable", "/work", "--", "true"]
+
+
+def test_linux_with_bwrap_prefers_bwrap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """bwrap 能给"换了个文件系统视图"，比纯访问控制更接近隔离——有就优先用。"""
+    monkeypatch.setattr(posix_sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(posix_sandbox.shutil, "which", lambda name: "/usr/bin/bwrap")
+    monkeypatch.setattr(posix_sandbox.landlock, "available", lambda: True)
+
+    assert posix_sandbox.backend() == "bwrap"
+    assert posix_sandbox.wrap_argv(["true"])[0] == "/usr/bin/bwrap"
+
+
+def test_linux_without_either_says_what_to_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(posix_sandbox.sys, "platform", "linux")
+    monkeypatch.setattr(posix_sandbox.shutil, "which", lambda name: None)
+    monkeypatch.setattr(posix_sandbox.landlock, "available", lambda: False)
 
     reason = posix_sandbox.unavailable_reason()
-    assert reason is not None and "bwrap" in reason
+    assert reason is not None and "bubblewrap" in reason and "landlock" in reason
     assert posix_sandbox.available() is False
+
+
+def test_seatbelt_profile_allows_temp_paths() -> None:
+    """seatbelt 没有私有 tmpfs，不放行真实临时目录的话命令写临时文件会莫名失败。"""
+    profile = posix_sandbox.build_seatbelt_profile(["/work"])
+    import tempfile
+
+    assert tempfile.gettempdir() in profile or "/private/var" in profile or "(subpath \"/tmp\")" in profile

@@ -696,14 +696,27 @@ Checkpoint 继续按下文旧协议恢复。新循环以这里的职责为准：
 
 该文件后端采用可信进程内策略检查；Shell 使用同一 SecurityPolicy 选择平台各自的写侧沙箱。二者共用策略，执行机制不同：不新增 OS 读隔离，不防御宿主恶意进程在检查与系统调用之间替换路径；Shell 命令模式识别也不保证覆盖脚本内部的全部删除/覆盖。应用数据库、记忆存储及专用 Git 进程仍遵守各自的存储/审批规则，不冒充已被普通文件后端接管。
 
-**2026-11-02 修订：POSIX 写侧沙箱已有实现（未真机验证）**。`security/posix_sandbox.py` 负责 argv 拼装：
-Linux 用 bubblewrap（`--ro-bind / /` 铺只读全景 → 逐可写根 `--bind` 覆盖 → `--unshare-pid` +
-`--die-with-parent` + 私有 `--tmpfs /tmp`）；macOS 用 `sandbox-exec` 与"默认放行 → 全局禁写 →
-逐路径放行"的 seatbelt profile。可写根用**路径**表达（`SandboxRequest.writable_paths`），与 Windows 的
-SID + ACL 是同一语义的两种表达。三条明确边界：① 这层代码只在开发机上做过参数级单测，
-真机边界由 CI 的 `sandbox-smoke` job 在 ubuntu / macos 上用**真实写探针**验（根内可写、根外被拒）；
-② 没有 bwrap（或 Ubuntu 24.04 禁掉非特权 user namespace）时退回"照常跑 + 明说"，除非配置了
-`security.require_sandbox`；③ 该文件与 `win_sandbox` 不共享代码，只共享契约——两边都改才叫"支持了新平台"。
+**2026-11-02 修订：POSIX 写侧沙箱已有实现（未真机验证）**。三条路线，`security/posix_sandbox.py`
+负责选路与 argv 拼装：
+
+- **Linux + bubblewrap（首选）**：`--ro-bind / /` 铺只读全景 → 逐可写根 `--bind` 覆盖 →
+  `--unshare-pid` + `--die-with-parent` + 私有 `--tmpfs /tmp`。它对"文件系统长什么样"也有控制权，
+  最接近"换了个环境"。
+- **Linux + landlock（兜底）**：Ubuntu 24.04 起默认限制非特权 user namespace，bwrap 会以
+  "No permissions to create new namespace" 失败。`security/landlock.py` 用内核级路径访问控制
+  （5.13+）只限制**写位**（读与执行不登记，因此不受影响），不需要 namespace/root。局限必须说清：
+  它不能伪造挂载视图；低 ABI 上 `REFER`（跨目录 rename）与 `TRUNCATE` 未登记即不受限。
+  施加发生在 `security/landlock_exec.py`（`python -I -m … -- cmd`）里，因为 landlock 一旦
+  `restrict_self` 不可撤销、且必须在 exec 前完成——用 `preexec_fn` 会丢掉失败原因。
+- **macOS + seatbelt**：`sandbox-exec -p`，profile 由三块零件组合（`_MACOS_HEADER` /
+  `_MACOS_ALLOW_DEFAULT` / `_MACOS_DENY_WRITES` + 逐路径放行），并显式放行设备节点与**真实**
+  临时目录（`/var/folders/…` 与 `/private/var/folders/…` 都要，seatbelt 匹配 realpath）。
+
+可写根用**路径**表达（`SandboxRequest.writable_paths`），与 Windows 的 SID + ACL 是同一语义的两种表达。
+三条明确边界：① 这层代码只在开发机上做过参数级单测，真机边界由 CI 的 `sandbox-smoke` job 在
+ubuntu / macos 上用**真实写探针**验（根内可写、根外被拒），冒烟会打印实际走的是哪条路；
+② bwrap 与 landlock 都不可用时退回"照常跑 + 明说"，除非配置了 `security.require_sandbox`；
+③ 该文件与 `win_sandbox` 不共享代码，只共享契约——两边都改才叫"支持了新平台"。
 
 ### 6.1 `list_dir`
 
