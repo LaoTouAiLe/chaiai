@@ -22,6 +22,8 @@ function permissions(overrides: Partial<PermissionsDto> = {}): PermissionsDto {
     default_mode: 'workspace-write',
     grants: [],
     store_unavailable: false,
+    sandbox_available: true,
+    sandbox_note: null,
     ...overrides,
   }
 }

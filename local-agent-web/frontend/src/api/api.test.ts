@@ -100,6 +100,8 @@ function permissionsDto(overrides: Partial<PermissionsDto> = {}): PermissionsDto
     default_mode: 'workspace-write',
     grants: [],
     store_unavailable: false,
+    sandbox_available: true,
+    sandbox_note: null,
     ...overrides,
   }
 }
@@ -260,6 +262,8 @@ describe('view model adapters', () => {
       default_mode: 'workspace-write',
       grants: [{ path: 'D:/team/shared', access: 'read_write' }],
       store_unavailable: true,
+      sandbox_available: false,
+      sandbox_note: 'no boundary here',
     })
 
     expect(view).toEqual({
@@ -267,6 +271,9 @@ describe('view model adapters', () => {
       defaultMode: 'workspace-write',
       grants: [{ path: 'D:/team/shared', access: 'read_write' }],
       storeUnavailable: true,
+      // 没有 OS 级写边界时，说明必须原样带到页面上（2026-11-02）。
+      sandboxAvailable: false,
+      sandboxNote: 'no boundary here',
     })
   })
 

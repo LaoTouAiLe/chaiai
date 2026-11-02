@@ -154,6 +154,14 @@ export function PermissionSection({
             </p>
           ) : null}
 
+          {/* 没有 OS 级写边界时必须出现在这里（2026-11-02）。此前这句话只活在策略里，
+              用户在 macOS / Linux 上会以为「工作区可写」是内核强制的——实际命令内部可以写到任意地方。 */}
+          {permissions.sandboxNote === null ? null : (
+            <p className={styles.storeWarning} role="status">
+              {permissions.sandboxNote}
+            </p>
+          )}
+
           <div className={styles.modeGroup} role="radiogroup" aria-label="权限档位">
             {MODE_OPTIONS.map((option) => {
               const selected = permissions.mode === option.mode

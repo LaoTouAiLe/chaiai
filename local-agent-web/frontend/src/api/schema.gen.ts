@@ -4587,6 +4587,19 @@ export interface components {
              */
             mode: "read-only" | "workspace-write" | "danger-full-access";
             /**
+             * Sandbox Available
+             * @description 当前平台有没有 **OS 级写边界**（目前只有 Windows 实现）。
+             */
+            readonly sandbox_available: boolean;
+            /**
+             * Sandbox Note
+             * @description 没有边界时的说明（有边界时为 `None`）；与系统提示里那句**同一份文案**。
+             *
+             *     它必须出现在「设置 → 权限」里：用户在 macOS / Linux 上会以为"工作区可写"是内核强制的，
+             *     实际命令内部可以写到任意地方。
+             */
+            readonly sandbox_note: string | null;
+            /**
              * Store Unavailable
              * @default false
              */

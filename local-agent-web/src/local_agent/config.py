@@ -600,6 +600,11 @@ class SecurityConfig(_StrictModel):
     #: 而不是直接抹掉。默认**开**——"删错了还能找回"应当是不用特意去开的默认状态；
     #: 关掉则恢复旧的立即删除。作用范围只有文件工具，`run_shell` 里的删除命令不受它管辖。
     safe_delete: bool = True
+    #: **必须有 OS 级写边界**（2026-11-02）：开启后，若当前平台给不出内核级写边界（目前只有 Windows
+    #: 实现），`run_shell` 直接拒绝执行，而不是"照常跑 + 一句说明"。默认**关**——关着时命令照常跑，
+    #: 但边界说明会同时出现在系统提示与「设置 → 权限」里（不是静默 fail-open）。
+    #: 用它的场景：机器上要跑别人给的命令、或组织要求"没有内核边界就不许执行"。
+    require_sandbox: bool = False
 
 
 class RagConfig(_StrictModel):

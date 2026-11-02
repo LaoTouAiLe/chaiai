@@ -642,6 +642,10 @@ export interface PermissionsView {
   defaultMode: ExternalPathsMode
   grants: readonly ExternalPathGrantView[]
   storeUnavailable: boolean
+  /** 当前平台有没有 OS 级写边界（2026-11-02）。false 时下面那句 `sandboxNote` 必须显示出来。 */
+  sandboxAvailable: boolean
+  /** 没有边界时的说明；有边界时为 null。与系统提示里那句话同一份文案。 */
+  sandboxNote: string | null
 }
 
 /**

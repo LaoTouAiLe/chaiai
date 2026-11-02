@@ -93,6 +93,13 @@ def build_stable_system_prompt(*, mode: AgentMode, context: RuntimeContext) -> P
         render_curated_section(context.curated_snapshot) if context.curated_available else ""
     )
     curated_available = context.curated_available and "files_write" in set(context.agent_capabilities)
+    # 没有 OS 级写边界时必须**明说**（2026-11-02）：这句话此前只活在一个从未被调用的方法里，
+    # 于是"命令照常跑但没有内核强制边界"对模型完全不可见——它会把"策略不允许"与"系统拦住了"
+    # 当成同一件事。有边界时**一个字节都不加**，Windows 上的稳定前缀因此逐字不变。
+    boundary_note = (
+        None if context.security_policy is None else context.security_policy.sandbox_boundary_note()
+    )
+    boundary_text = "" if not boundary_note else f"## 执行边界\n\n{boundary_note}\n\n"
     # 段落顺序（相对顺序对缓存前缀有影响，改序等于让已缓存的前缀整段失效）：
     # 核心身份 → 源码调查 → 模式规则 → 工作区 → 项目规则 → 能力与边界 → 工具使用规范（仅 tool）
     # → 安全工作流 → 反思要求 → 输出要求 → 输出模板。
@@ -121,6 +128,7 @@ def build_stable_system_prompt(*, mode: AgentMode, context: RuntimeContext) -> P
         "\n"
         f"{curated_text}"
         f"{render_capability_rules(context.agent_capabilities)}"
+        f"{boundary_text}"
         # 工具规范只在 tool 模式拼接（chat 模式的说明会诱导它尝试调用）；两段的**内容按 Profile 裁剪**：
         # 提示里不得出现本档看不到的工具名（架构 §6.9）。
         f"{render_tool_usage_rules(context.agent_capabilities, curated_available=curated_available) if mode == 'tool' else ''}"

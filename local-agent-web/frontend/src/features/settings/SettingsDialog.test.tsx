@@ -21,6 +21,8 @@ function permissionsOf(overrides: Partial<PermissionsView> = {}): PermissionsVie
     defaultMode: 'workspace-write',
     grants: [],
     storeUnavailable: false,
+    sandboxAvailable: true,
+    sandboxNote: null,
     ...overrides,
   }
 }

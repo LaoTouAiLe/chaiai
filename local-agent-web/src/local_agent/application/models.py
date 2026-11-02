@@ -22,7 +22,14 @@ from datetime import datetime, timezone
 from typing import Annotated, Final, Literal, get_args
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    computed_field,
+    field_validator,
+    model_validator,
+)
 
 from local_agent.application.errors import ErrorView
 from local_agent.capabilities import CapabilityReason
@@ -30,6 +37,7 @@ from local_agent.capabilities import CapabilityReason
 # 只借**任务状态的类型别名**（叶子模块，与索引闭集同源）：契约模块不得依赖持久化层，见该模块
 # docstring 与 `tests/test_events.py::test_pure_contract_modules_do_not_import_runtime_layers`。
 from local_agent.job_state import JobState
+from local_agent.security.policy import sandbox_boundary_note
 
 #: 契约版本。任何破坏性改名都要提升它，并在 API 层显式声明。
 SCHEMA_VERSION: Final[int] = 1
@@ -228,6 +236,29 @@ class PermissionsView(_Dto):
     grants: list[ExternalPathGrantView] = Field(default_factory=list)
     #: 没有可用设置库时为真：这时改档位与加授权都存不下，界面必须如实说明。
     store_unavailable: bool = False
+
+    # ---- 平台事实：有没有 OS 级写边界（2026-11-02）----------------------------
+    #
+    # 为什么用**计算字段**而不是普通字段：这两个值只取决于平台，与设置库、与调用方都无关。
+    # 做成普通字段就得让每个构造点都记得填（`service.permissions()` 有两条分支，`service.py`
+    # 还有行数硬上限）；做成计算字段则"谁构造都对"，也不会出现"某个分支忘了填、页面凭空显示
+    # 有边界"这种最糟糕的错法。
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def sandbox_available(self) -> bool:
+        """当前平台有没有 **OS 级写边界**（目前只有 Windows 实现）。"""
+        return sandbox_boundary_note() is None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def sandbox_note(self) -> str | None:
+        """没有边界时的说明（有边界时为 `None`）；与系统提示里那句**同一份文案**。
+
+        它必须出现在「设置 → 权限」里：用户在 macOS / Linux 上会以为"工作区可写"是内核强制的，
+        实际命令内部可以写到任意地方。
+        """
+        return sandbox_boundary_note()
 
 
 # ---- 数据位置（2026-10-26）--------------------------------------------------

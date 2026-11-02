@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from local_agent.cancellation import CancellationToken
-from local_agent.security import win_sandbox
+from local_agent.security import posix_sandbox, win_sandbox
 from local_agent.security.process_command import windows_command_line
 from local_agent.security.process_output import read_available
 
@@ -121,6 +121,10 @@ class SandboxRequest:
     """
 
     writable_sids: tuple[str, ...] = ()
+    #: 可写根的**路径**（2026-11-02，POSIX 用）。Windows 靠 SID + ACL 表达边界，Linux/macOS 靠
+    #: bwrap 的 `--bind` 与 seatbelt 的 `(subpath …)`，两者要的是路径而不是 SID。
+    #: 空元组 = 一个可写根都没有（只读档），在 POSIX 上照样进沙箱——只挡写、不额外授权。
+    writable_paths: tuple[str, ...] = ()
     #: 追加给子进程的环境变量（`TMP`/`TEMP` 一类）：沙箱有自己的可写临时目录，命令要写临时文件就得
     #: 被指到那里。用元组而不是 dict——本类型是 frozen 的，元组能和它一起保持不可变。
     extra_env: tuple[tuple[str, str], ...] = ()
@@ -139,11 +143,17 @@ def sandboxed_argv(command: list[str], sandbox: SandboxRequest) -> list[str]:
     Raises:
         SandboxUnavailable: 当前平台没有实现或 Win32 库取不到——**fail-closed**，不静默裸跑。
     """
-    if not win_sandbox.is_supported():
-        raise win_sandbox.SandboxUnavailable(
-            "当前平台没有写侧沙箱实现（fail-closed：不允许静默裸跑）"
-        )
-    return win_sandbox.runner_argv(command, writable_sids=sandbox.writable_sids)
+    if win_sandbox.is_supported():
+        return win_sandbox.runner_argv(command, writable_sids=sandbox.writable_sids)
+    # POSIX（2026-11-02）：Linux 走 bwrap、macOS 走 seatbelt，可写根用路径表达。
+    # 两者都**没有在真机上验过**（见 `posix_sandbox` 模块说明），所以这条分支只在对应平台上生效，
+    # Windows 的既有路径不受影响。
+    if posix_sandbox.available():
+        return posix_sandbox.wrap_argv(command, writable_roots=sandbox.writable_paths)
+    raise win_sandbox.SandboxUnavailable(
+        "当前平台没有写侧沙箱实现（fail-closed：不允许静默裸跑）"
+        f"：{posix_sandbox.unavailable_reason()}"
+    )
 
 
 @dataclass

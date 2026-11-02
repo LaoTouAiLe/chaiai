@@ -57,6 +57,11 @@ jobs:
       - name: 跑全部后端用例
         run: python -m pytest -q
 
+      - name: 沙箱冒烟（真实机器上确认写边界物化出来了）
+        # 单测测的是"我们打算怎么做"，这一步测的是"这台机器的内核真的拦不拦"。
+        # 沙箱装错时前者往往是绿的，所以它必须是独立的一步（参照实现同样单开脚本）。
+        run: python scripts/sandbox_smoke.py
+
   frontend:
     name: frontend / typecheck + lint + build
     runs-on: ubuntu-latest
@@ -86,6 +91,70 @@ jobs:
 
       - name: 生产构建（确认产物能打出来）
         run: npm run build
+
+  sandbox-smoke:
+    name: sandbox / smoke (${{ matrix.os }})
+    # 三平台都跑：Windows 上验"受限令牌真的物化出写边界"，Linux/macOS 上目前如实 SKIP（尚未实现
+    # OS 级边界）。等 bwrap / seatbelt 落地后，这一步就是它们的回归闸门——不需要再改工作流。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: local-agent-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: local-agent-web/pyproject.toml
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: 装 bubblewrap（Linux 才有意义）
+        # 装上它冒烟才会走"真实写探针"而不是 SKIP——不装就等于这一步白跑。
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
+      - name: 冒烟
+        run: python scripts/sandbox_smoke.py
+
+  portability:
+    name: portability / pytest (${{ matrix.os }})
+    # **观察期**（2026-11-02 起）：Linux / macOS 的完整后端用例还没在 CI 里跑过，先收集信号，
+    # `continue-on-error` 让它红也不阻塞合并。等它连绿三轮，把这一行删掉即可变成必需闸门——
+    # 不要反过来做（先设必需再常年红，等于训练所有人忽略 CI）。
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      PYTHONIOENCODING: utf-8
+    defaults:
+      run:
+        working-directory: local-agent-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: local-agent-web/pyproject.toml
+      - name: 安装依赖（含 memory 可选组，与 Windows job 同口径）
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[memory]" pytest pytest-asyncio
+      - name: 跑后端用例（先看现状，不加 --maxfail）
+        run: python -m pytest -q
 
   secrets:
     name: secrets / gitleaks

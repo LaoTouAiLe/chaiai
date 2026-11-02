@@ -136,6 +136,10 @@ export function toPermissionsView(dto: PermissionsDto): PermissionsView {
       (grant): ExternalPathGrantView => ({ path: grant.path, access: grant.access }),
     ),
     storeUnavailable: dto.store_unavailable,
+    // 沙箱状态（2026-11-02）：缺省按"有边界"处理——旧后端不会发这三个字段，而把"未知"当成
+    // "没有边界"会在页面上凭空弹出一条警告。真正没有边界时后端一定会带上 `sandbox_note`。
+    sandboxAvailable: dto.sandbox_available ?? true,
+    sandboxNote: dto.sandbox_note ?? null,
   }
 }
 

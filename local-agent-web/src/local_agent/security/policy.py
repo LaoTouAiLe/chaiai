@@ -31,7 +31,7 @@ from local_agent.config import (
     redact_secrets,
 )
 from local_agent.exceptions import FileOperationError, SecurityError, WorkspaceBoundaryError
-from local_agent.security import win_sandbox
+from local_agent.security import posix_sandbox, win_sandbox
 from local_agent.security.command_registry import CommandRegistry
 from local_agent.security.diff_guard import count_changed_lines, edit_input_mode, parse_patch
 from local_agent.security.file_system import FileSystemSandbox
@@ -198,6 +198,24 @@ _HARDLINE_WORDS: tuple[str, ...] = (
 )
 
 
+#: 没有 OS 级写边界时要说的话（2026-11-02）。
+#:
+#: 这句话此前**只存在于一个从未被调用的方法里**（`SecurityPolicy.sandbox_boundary_note`），于是
+#: 非 Windows 上"命令照常跑、但没有内核强制边界"这件事是静默的——用户不知道，模型也不知道。现在改成
+#: 模块级常量：策略、权限视图、系统提示三处共用同一句，避免各写一遍后互相漂移。
+SANDBOX_BOUNDARY_NOTE = (
+    "当前平台没有 OS 级写边界（写侧沙箱目前只在 Windows 上实现）：路径工具受档位策略限制，"
+    "但命令内部的文件访问不由路径工具约束，**不是内核强制**。"
+    "要求必须在内核级边界内执行时，把 `security.require_sandbox` 设为 true——那样命令会被直接拒绝，"
+    "而不是在看起来有边界的情况下运行。"
+)
+
+
+def sandbox_boundary_note() -> str | None:
+    """这一轮"OS 级写边界到底有没有"；没有时返回给用户与模型看的说明。"""
+    return None if win_sandbox.is_supported() else SANDBOX_BOUNDARY_NOTE
+
+
 class SecurityPolicy:
     """工作区级的路径与工具策略。"""
 
@@ -219,6 +237,9 @@ class SecurityPolicy:
         #: 沙箱里跑。可写子 Agent 用它：子 Agent 改文件必须走文件工具，才能进父会话的变更账本
         #: （可整轮还原）；任命令随意写盘就没有账、也没法还原。
         shell_readonly: bool = False,
+        #: **必须有 OS 级写边界**（2026-11-02，``security.require_sandbox``）：为真且当前平台给不出
+        #: 边界时，``run_shell`` 直接拒绝执行，而不是"照常跑 + 一句说明"。默认 False 保持既有行为。
+        require_sandbox: bool = False,
     ) -> None:
         self.workspace_root = workspace_root
         # 不同会话不共享终端或浏览器；CLI 未提供会话键时只在当前策略内复用。
@@ -242,6 +263,8 @@ class SecurityPolicy:
         #: 命令只读（2026-11-02）：见构造函数同名参数。只影响 ``run_shell`` 的沙箱写授权，
         #: 不影响文件工具——那条路要进变更账本。
         self.shell_readonly = bool(shell_readonly)
+        #: 必须有 OS 级写边界（2026-11-02）：为真且平台给不出边界时拒绝执行命令。
+        self.require_sandbox = bool(require_sandbox)
         #: 文档提取结果的轮内缓存（2026-10-29）：`(文件 sha, 页号) -> 提取文本`。
         #: 为什么必须有：一份 295 页的 PDF 全量抽取要 14.79s（实测），有了按页惰性抽取后
         #: 单页只要 0.046s，但同一页被重复读仍是浪费；docx/xlsx/pptx 用页号 0 存整篇。
@@ -343,6 +366,7 @@ class SecurityPolicy:
         cancellation: CancellationToken | None = None,
         allow_result_spill: bool = True,
         shell_readonly: bool = False,
+        require_sandbox: bool | None = None,
     ) -> SecurityPolicy:
         """按配置构造策略；密钥值从环境变量读取，仅用于输出脱敏。
 
@@ -383,6 +407,9 @@ class SecurityPolicy:
             # 安全删除来自配置（默认开）：删除进回收站，可从数据目录找回。
             safe_delete=app_config.security.safe_delete,
             shell_readonly=shell_readonly,
+            # None = 跟随配置（生产路径都走这里）；显式传值只给测试与子策略用。
+            require_sandbox=(app_config.security.require_sandbox
+                             if require_sandbox is None else require_sandbox),
         )
 
     # -------------------------------------------------------------- 写侧沙箱
@@ -410,12 +437,7 @@ class SecurityPolicy:
         为什么需要它（2026-10-15 用户裁定）：非 Windows 上不再失败闭合，改为**照常跑**。静默跑
         掉就等于假装有边界——那是 dsh 移植笔记里点名的 fail-open 坑。所以改成"跑，但说清楚"。
         """
-        if win_sandbox.is_supported():
-            return None
-        return (
-            "当前平台没有 OS 级写边界（写侧沙箱只在 Windows 上实现）："
-            "路径工具受档位策略限制；命令内部的文件访问不能由路径工具约束，不是内核强制"
-        )
+        return sandbox_boundary_note()
 
     def shell_sandbox_request(self, *, escalate: bool = False, cwd: Path | None = None) -> SandboxRequest | None:
         """``run_shell`` 该不该在**写侧沙箱**里跑；不该就是 ``None``（默认行为）。
@@ -445,6 +467,26 @@ class SecurityPolicy:
             return None
         mode = self.external_policy.mode
         if not win_sandbox.is_supported():
+            # POSIX（2026-11-02）：Linux 用 bwrap、macOS 用 seatbelt。可写根用**路径**表达；
+            # 只读档与 `shell_readonly` 给空元组（照样进沙箱，只是没有任何可写根）。
+            # 说明：这条分支还没在真机上验过，见 `posix_sandbox` 的模块说明。
+            if posix_sandbox.available():
+                return SandboxRequest(
+                    writable_paths=(
+                        () if mode == "read-only" or self.shell_readonly
+                        else (str(self.workspace_root), *self._writable_grant_dirs())
+                    ),
+                    # 沙箱内 `/tmp` 是私有 tmpfs：把 `TMPDIR` 指过去，命令写临时文件才不会成片失败。
+                    extra_env=(("TMPDIR", "/tmp"),),
+                )
+            # **失败闭合的开关**（2026-11-02）：默认照常跑（那时边界说明会出现在系统提示与权限页），
+            # 但用户可以要求"没有内核级边界就别执行命令"。这条必须抛错而不是返回 None——返回 None
+            # 就等于"进沙箱"变成了"不进沙箱"，两者在调用点长得一样。
+            if self.require_sandbox:
+                raise SecurityError(
+                    "security.require_sandbox 已开启，但当前平台给不出 OS 级写边界"
+                    f"（{posix_sandbox.unavailable_reason()}）：已拒绝在无边界的情况下执行命令"
+                )
             return None
         if cwd is not None and not is_within(cwd, self.workspace_root):
             # 外部 cwd 免审批不等于可写；LUA 令牌需显式用户读 ACE 才能读取管理员所有的目录。

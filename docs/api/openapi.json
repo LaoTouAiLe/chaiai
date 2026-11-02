@@ -6253,6 +6253,25 @@
             "title": "Mode",
             "type": "string"
           },
+          "sandbox_available": {
+            "description": "当前平台有没有 **OS 级写边界**（目前只有 Windows 实现）。",
+            "readOnly": true,
+            "title": "Sandbox Available",
+            "type": "boolean"
+          },
+          "sandbox_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "没有边界时的说明（有边界时为 `None`）；与系统提示里那句**同一份文案**。\n\n它必须出现在「设置 → 权限」里：用户在 macOS / Linux 上会以为\"工作区可写\"是内核强制的，\n实际命令内部可以写到任意地方。",
+            "readOnly": true,
+            "title": "Sandbox Note"
+          },
           "store_unavailable": {
             "default": false,
             "title": "Store Unavailable",
@@ -6261,7 +6280,9 @@
         },
         "required": [
           "mode",
-          "default_mode"
+          "default_mode",
+          "sandbox_available",
+          "sandbox_note"
         ],
         "title": "PermissionsView",
         "type": "object"

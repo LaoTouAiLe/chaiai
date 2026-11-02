@@ -694,7 +694,16 @@ Checkpoint 继续按下文旧协议恢复。新循环以这里的职责为准：
 
 2026-10-15 文件工具收口：`SecurityPolicy.files`（`security/file_system.py`）承载读取、目录枚举、搜索内容读取、新建、原子替换与删除。工具层负责参数、文本变换和展示，后端在实际 I/O 前重新检查同一份请求策略；替换发布前复核目标身份、批准和编辑版本。递归删除先检查全部子目标，包含受保护/敏感目标或重定向链接时整次拒绝。显式搜索落盘受档位和专有结果目录约束，只读档不能借 save_full 写入；清理仅限该结果目录中的受管文件。
 
-该文件后端采用可信进程内策略检查；Shell 使用同一 SecurityPolicy 选择 Windows 原生写侧沙箱。二者共用策略，执行机制不同：不新增 OS 读隔离，不防御宿主恶意进程在检查与系统调用之间替换路径；Shell 命令模式识别也不保证覆盖脚本内部的全部删除/覆盖。应用数据库、记忆存储及专用 Git 进程仍遵守各自的存储/审批规则，不冒充已被普通文件后端接管。本批不新增 Linux 沙箱实现。
+该文件后端采用可信进程内策略检查；Shell 使用同一 SecurityPolicy 选择平台各自的写侧沙箱。二者共用策略，执行机制不同：不新增 OS 读隔离，不防御宿主恶意进程在检查与系统调用之间替换路径；Shell 命令模式识别也不保证覆盖脚本内部的全部删除/覆盖。应用数据库、记忆存储及专用 Git 进程仍遵守各自的存储/审批规则，不冒充已被普通文件后端接管。
+
+**2026-11-02 修订：POSIX 写侧沙箱已有实现（未真机验证）**。`security/posix_sandbox.py` 负责 argv 拼装：
+Linux 用 bubblewrap（`--ro-bind / /` 铺只读全景 → 逐可写根 `--bind` 覆盖 → `--unshare-pid` +
+`--die-with-parent` + 私有 `--tmpfs /tmp`）；macOS 用 `sandbox-exec` 与"默认放行 → 全局禁写 →
+逐路径放行"的 seatbelt profile。可写根用**路径**表达（`SandboxRequest.writable_paths`），与 Windows 的
+SID + ACL 是同一语义的两种表达。三条明确边界：① 这层代码只在开发机上做过参数级单测，
+真机边界由 CI 的 `sandbox-smoke` job 在 ubuntu / macos 上用**真实写探针**验（根内可写、根外被拒）；
+② 没有 bwrap（或 Ubuntu 24.04 禁掉非特权 user namespace）时退回"照常跑 + 明说"，除非配置了
+`security.require_sandbox`；③ 该文件与 `win_sandbox` 不共享代码，只共享契约——两边都改才叫"支持了新平台"。
 
 ### 6.1 `list_dir`
 
@@ -3589,6 +3598,13 @@ T64 的两道题、种子、任务指纹、机械校验器与原基线源码保�
 - **边界与界面同步说明**：读和网络不隔离；Everyone/登录 SID 的已有写权限、硬链接及并发宿主改名仍有边界。
   不把普通 NTFS ACL 机制表述为完整的路径隔离；目录扫描成本随目录数量增长。runner 用 `python -I -m` 忽略
   cwd/PYTHONPATH 的同名包。
+- **2026-11-02 补记（非 Windows 的 fail-open 不再静默）**：写侧沙箱目前只有 Windows 实现
+  （`win_sandbox.is_supported()` 为假时 `shell_sandbox_request()` 返回 `None`）。此前这条降级只有一句
+  从未被调用的说明（`sandbox_boundary_note`），于是"命令照常跑、但没有内核强制边界"对用户和模型都是
+  静默的。现在同一份文案出现在三处：`build_stable_system_prompt` 的「执行边界」段（**有边界时零字节，
+  Windows 前缀逐字不变**）、`PermissionsView` 的计算字段（设置 → 权限）、以及 `run_shell` 的拒绝理由。
+  另加 `security.require_sandbox`（默认 `false`）：为真且平台给不出边界时**拒绝执行命令**，而不是
+  在看起来有边界的情况下运行——需要"没有内核边界就不许跑命令"的场景用它，而不是指望默认值。
 - **`KILL_ON_JOB_CLOSE` 的定位不变**：它只是"runner 退出时收走整棵树"的**清理兜底**（codex 同款用法），
   **不是**终止手段——"被杀进程的 `exit_code` 读出来是 0"这一条仍然成立，本节上文结论不改。增量 4 的用例用
   **PID + 正对照**证明了兜底确实生效（runner 持着 Job 句柄时孙进程活着，runner 退出后它消失）。
