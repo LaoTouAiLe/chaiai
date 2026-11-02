@@ -2868,6 +2868,11 @@ export interface components {
          *     实际花费要看用量区；要做"每路实际用量"必须先把子任务的模型调用记录保留子标识（§18.7 的未做项）。
          */
         DelegationChildView: {
+            /**
+             * Changed Files
+             * @default 0
+             */
+            changed_files: number;
             /** Error */
             error?: string | null;
             /**

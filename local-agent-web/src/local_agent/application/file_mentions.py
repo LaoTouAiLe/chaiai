@@ -29,8 +29,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from local_agent.context.token_budget import estimate_tokens
 from local_agent.cancellation import CancellationToken
+from local_agent.context.token_budget import estimate_tokens
 from local_agent.security.path_guard import is_sensitive_path
 from local_agent.security.process_guard import ProcessCancelledError, ProcessRegistry
 

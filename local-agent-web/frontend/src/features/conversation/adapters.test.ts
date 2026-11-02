@@ -134,11 +134,11 @@ describe('mapTool', () => {
         children: [
           {
             scope: 'docs', status: 'completed', tool_calls: 4, model_calls: 1,
-            evidence_count: 6, error: null,
+            evidence_count: 6, changed_files: 2, error: null,
           },
           {
             scope: 'src', status: 'failed', tool_calls: 0, model_calls: 1,
-            evidence_count: 0, error: '子任务超时',
+            evidence_count: 0, changed_files: 0, error: '子任务超时',
           },
         ],
         truncated: false,
@@ -149,7 +149,7 @@ describe('mapTool', () => {
       kind: 'delegation',
       // 下划线 → 驼峰只在映射层发生一次；计数原样搬运，缺项按 0（契约的默认读法）。
       children: [
-        { scope: 'docs', status: 'completed', toolCalls: 4, evidenceCount: 6, error: null },
+        { scope: 'docs', status: 'completed', toolCalls: 4, evidenceCount: 6, changedFiles: 2, error: null },
         { scope: 'src', status: 'failed', toolCalls: 0, evidenceCount: 0, error: '子任务超时' },
       ],
       report: '已核对的子任务原文：\n# 取消（docs/cancel.md:1）',

@@ -1318,7 +1318,7 @@ def test_delegation_outcome_lists_each_child_with_its_counts() -> None:
                 "children": [
                     {
                         "scope": "docs", "status": "completed", "tool_calls": 4, "model_calls": 1,
-                        "evidence_count": 6, "error": None,
+                        "evidence_count": 6, "changed_files": 2, "error": None,
                     },
                     {
                         "scope": "src", "status": "failed", "tool_calls": 0, "model_calls": 1,
@@ -1338,6 +1338,9 @@ def test_delegation_outcome_lists_each_child_with_its_counts() -> None:
     ]
     assert tool.outcome.children[0].tool_calls == 4
     assert tool.outcome.children[0].evidence_count == 6
+    # 写成功的次数必须上页面（2026-11-02）：模型看得到、人看不到的数字等于没有监督。
+    assert tool.outcome.children[0].changed_files == 2
+    assert tool.outcome.children[1].changed_files == 0
     assert tool.outcome.children[1].error == "子任务超时"
     # **预留 token 不进这个 DTO**（2026-10-13 裁定）：它是切出来的上限、每路几乎一样，
     # 摆在对话卡里会被读成"这一路花了多少"。这条断言就是那道边界。

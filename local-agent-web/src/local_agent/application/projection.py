@@ -983,6 +983,7 @@ def _tool_outcome(
                     tool_calls=_int_of(item.get("tool_calls")) or 0,
                     model_calls=_int_of(item.get("model_calls")) or 0,
                     evidence_count=_int_of(item.get("evidence_count")) or 0,
+                    changed_files=_int_of(item.get("changed_files")) or 0,
                     error=child_error or None,
                 )
             )

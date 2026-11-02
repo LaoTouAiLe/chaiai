@@ -168,6 +168,8 @@ export interface DelegationChildView {
   toolCalls: number
   modelCalls: number
   evidenceCount: number
+  /** 这一路写成功的文件操作数（2026-11-02）：>0 就说明磁盘已被改动。 */
+  changedFiles: number
   error: string | null
 }
 

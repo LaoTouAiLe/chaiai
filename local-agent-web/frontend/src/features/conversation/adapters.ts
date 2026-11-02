@@ -238,6 +238,7 @@ function outcomeCard(tool: ToolUse, outcome: ToolOutcome): ToolCardView {
           toolCalls: child.tool_calls ?? 0,
           modelCalls: child.model_calls ?? 0,
           evidenceCount: child.evidence_count ?? 0,
+          changedFiles: child.changed_files ?? 0,
           error: child.error ?? null,
         })),
         report: outcome.text ?? '',

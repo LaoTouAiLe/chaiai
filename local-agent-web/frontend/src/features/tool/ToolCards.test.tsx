@@ -61,7 +61,7 @@ describe('ToolCard', () => {
     expect(screen.getByText('委派只读调查')).toBeInTheDocument()
     expect(screen.getByText('1/2 个子任务已完成')).toBeInTheDocument()
     expect(screen.getByText('docs')).toBeInTheDocument()
-    expect(screen.getByText('已完成 · 证据 6 · 工具 4 次')).toBeInTheDocument()
+    expect(screen.getByText('已完成 · 证据 6 · 工具 4 次 · 改动 1 次')).toBeInTheDocument()
     // 未完成的那一路必须说明原因：只显示"未完成"用户没法判断要不要重派。
     expect(screen.getByText('未完成 · 子任务超时')).toBeInTheDocument()
     // **不摆"预留 token"**（2026-10-13 裁定）：那是切出来的上限、每路几乎一样，摆在这里会被读成

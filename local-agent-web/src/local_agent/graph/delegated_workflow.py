@@ -361,7 +361,15 @@ def _run_child(parent: RuntimeContext, item: _PreparedChild) -> _ChildResult:
                        "tool_calls": len(state.get("tool_events", [])),
                        "model_calls": int(state.get("loop_count", 0))})
         if state.get("task_status") != "completed":
-            raise ValueError("子任务尚未完成、请求额外权限或达到配置资源额度")
+            # **把子任务自己的失败原因带出去**（2026-11-02）。此前这里是一句固定文案
+            # （"子任务尚未完成、请求额外权限或达到配置资源额度"），而真实原因被丢掉了：
+            # 实测两次都被它领着去查权限和预算，实际原因分别是"档位只读，写被拒"与子图自身报错。
+            # 子状态里有 `final_response`（含模型或工具给出的原因）与 `errors`，优先取前者。
+            detail = str(state.get("final_response") or "").strip()
+            if not detail:
+                errors = cast(Sequence[Any], state.get("errors") or [])
+                detail = str(errors[-1]) if errors else ""
+            raise ValueError(detail[:300] or "子任务未在额度内完成（子图没有留下原因）")
         report.update({"status": "completed", "answer": str(state.get("model_final_response") or "")})
         state["workflow"] = {"name": "autonomous_research", "run_id": item.child_id,
                              "phase": "completed", "references": []}  # type: ignore[typeddict-item]

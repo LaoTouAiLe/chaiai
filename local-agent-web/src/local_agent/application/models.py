@@ -711,6 +711,11 @@ class DelegationChildView(_Dto):
     tool_calls: int = Field(default=0, ge=0)
     model_calls: int = Field(default=0, ge=0)
     evidence_count: int = Field(default=0, ge=0)
+    #: 这一路**写成功的文件操作数**（2026-11-02 第二档）。只读子任务恒为 0。
+    #:
+    #: 必须出现在页面上，不能只留在工具结果的 JSON 里：它存在的意义是让父 Agent 无法在子 Agent 真改了
+    #: 文件之后声称"我只做了调查"，而模型看得到、人看不到的数字等于没有监督。
+    changed_files: int = Field(default=0, ge=0)
     #: 未完成时的原因（已脱敏、已有界）；完成时为 `None`。
     error: str | None = None
 

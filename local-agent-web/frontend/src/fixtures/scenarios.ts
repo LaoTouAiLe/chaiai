@@ -633,6 +633,7 @@ export const toolsScenario: ConversationScenario = {
               toolCalls: 4,
               modelCalls: 1,
               evidenceCount: 6,
+              changedFiles: 1,
               error: null,
             },
             {
@@ -641,6 +642,7 @@ export const toolsScenario: ConversationScenario = {
               toolCalls: 0,
               modelCalls: 1,
               evidenceCount: 0,
+              changedFiles: 0,
               error: '子任务超时',
             },
           ],

@@ -320,9 +320,12 @@ function DelegationCard({ card }: { card: Extract<ToolCardView, { kind: 'delegat
             <span className={styles.delegationScope}>{child.scope}</span>
             <span className={styles.delegationMeta}>
               {child.status === 'completed'
-                // 只给用户能据以判断的三项（证据、工具次数、状态）。**不写"预留 token"**：那是切出来的
+                // 只给用户能据以判断的几项（证据、工具次数、写盘次数、状态）。**不写"预留 token"**：那是切出来的
                 // 上限、每路几乎一样，摆在这里会被读成"这一路花了多少"（2026-10-13 裁定）。
-                ? `已完成 · 证据 ${String(child.evidenceCount)} · 工具 ${String(child.toolCalls)} 次`
+                // 「改动 N 次」只在真写过时出现（2026-11-02）：子 Agent 改了文件却只显示"已完成"，
+                // 用户就无从判断磁盘动过没有——那也是父 Agent 最容易顺势谎称"只做了调查"的地方。
+                ? `已完成 · 证据 ${String(child.evidenceCount)} · 工具 ${String(child.toolCalls)} 次${
+                  child.changedFiles > 0 ? ` · 改动 ${String(child.changedFiles)} 次` : ''}`
                 : `未完成 · ${child.error ?? '原因未记录'}`}
             </span>
           </li>

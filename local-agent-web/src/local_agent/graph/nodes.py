@@ -19,7 +19,7 @@ import json
 import logging
 from collections.abc import Sequence
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 from langchain_core.messages import (
@@ -540,6 +540,48 @@ def retrieve_code_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> A
     return update
 
 
+#: 摘要失败时的总尝试次数（含首次）。**只在真的抛异常时才用得上第二次**：
+#: 正常路径不产生任何额外模型调用。为什么值得重试一次：摘要失败时本轮按裁剪后的窗口继续，
+#: 落在被摘要区间里的旧事实就此丢失（基准实测：默认策略下丢 44/96 条）。一次瞬时失败
+#: （限流、超时、上游 5xx）不该直接换成永久的信息损失。
+_SUMMARY_ATTEMPTS = 2
+#: 摘要失败事件的消息前缀：既用于本轮去重（工具循环里每步都会进这个节点），
+#: 也是投影层认这条告警的锚点。
+_SUMMARY_FAILED_MARKER = "会话摘要生成失败"
+
+
+def _summarize_with_retry(
+    adapter: Any,
+    *,
+    messages: Sequence[Any],
+    previous_summary: str | None,
+    max_chars: int,
+    cancelled: bool,
+) -> tuple[str, str | None]:
+    """带一次重试的摘要生成：返回 ``(摘要, 失败原因)``，成功时失败原因为 ``None``。
+
+    取消之后**不重试**：那会让"用户已经按了停止"变成又一轮模型调用。失败原因只保留前 200
+    字符——它会被写进面向用户的错误事件，完整异常可能带路径或上游载荷。
+    """
+    reason: str | None = None
+    for attempt in range(1, _SUMMARY_ATTEMPTS + 1):
+        try:
+            summary = summarize_conversation(
+                adapter,
+                messages=list(messages),
+                previous_summary=previous_summary,
+                max_chars=max_chars,
+            )
+            return summary, None
+        except Exception as exc:  # noqa: BLE001 —— 摘要失败不能拖垮本轮，重试一次后记事件
+            reason = str(exc)[:200] or type(exc).__name__
+            if cancelled:
+                break
+            if attempt < _SUMMARY_ATTEMPTS:
+                continue
+    return "", reason
+
+
 def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
     """上下文预算与摘要压缩（架构 §10.1、§10.5）。
 
@@ -561,8 +603,12 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
     - 压到极限后仍超预算：同样记一条可见告警（同一轮最多一条），本轮按已压缩的上下文继续；
       不额外丢弃消息——压缩运行在"生成回答之前"，窗口最后一轮就是**当前问题**，丢弃它等于
       丢掉用户诉求，且超预算通常由固定系统前缀/摘要长度决定，丢历史也救不回来；
-    - 摘要生成失败：**只记 ErrorEvent**，不更新 ``conversation_summary`` / ``context_version``
-      / ``compression_count``，本轮继续用裁剪后的窗口；
+    - 摘要生成失败（2026-11-02 修订）：先**重试一次**（只在真的抛异常时才多花一次调用），
+      仍失败则记一条**本轮去重**的 ErrorEvent 并继续用裁剪后的窗口——不更新
+      ``conversation_summary`` / ``context_version`` / ``compression_count``。
+      为什么不再"静默只记一条"：失败时落在被摘要区间里的旧事实会直接掉出模型可见范围，
+      基准实测默认策略下一次失败丢 44/96 条；这条事件是用户唯一能看到的信号，且必须说明
+      "已重试几次 + 本轮没有摘要保住那段历史"；
     - 窗口按完整轮次裁剪（见 :mod:`local_agent.memory.short_term`），不切开工具调用对；
       保留轮数按 ``retain_ratio`` 与窗口联动，窗口小时自动收紧，避免保留下限大于窗口导致压不动。
     """
@@ -733,35 +779,48 @@ def compression_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Age
     # 保护项不能挤掉证据后仍推进覆盖；1 字符摘要会永久移走模型可见的调查结论。
     if protected and body_limit < 128:
         return {**update, **_compression_over_budget_update(state)}
-    try:
-        if not window.tool_result_overrides:
-            notify_compression(progress)
-        summary = summarize_conversation(
-            context.model_adapter,
-            # 摘要输入也要**投影**：否则被纠正的那句"我记住了"会进摘要，再经 conversation_summary
-            # 影响之后每一轮的 Prompt（复审实证）。Checkpoint 里的原文不受影响——投影只作用于
-            # 这次调用的入参。
-            messages=project_messages(older, state.get("reply_overrides") or {}),
-            previous_summary=state.get("conversation_summary"),
-            max_chars=body_limit,
+    if not window.tool_result_overrides:
+        notify_compression(progress)
+    token = getattr(context, "cancellation", None)
+    summary, failure = _summarize_with_retry(
+        context.model_adapter,
+        # 摘要输入也要**投影**：否则被纠正的那句"我记住了"会进摘要，再经 conversation_summary
+        # 影响之后每一轮的 Prompt（复审实证）。Checkpoint 里的原文不受影响——投影只作用于
+        # 这次调用的入参。
+        messages=project_messages(older, state.get("reply_overrides") or {}),
+        previous_summary=state.get("conversation_summary"),
+        max_chars=body_limit,
+        cancelled=bool(token is not None and getattr(token, "cancelled", False)),
+    )
+    if failure is not None:
+        # 失败**必须留痕且可去重**：工具循环每步都会进这个节点，重复追加同一句会让轨迹页被刷屏；
+        # 而完全静默又会让"压了等于没压"无从察觉（用户看不到旧事实已经掉了）。
+        already = any(
+            str(event.get("message", "")).startswith(_SUMMARY_FAILED_MARKER)
+            for event in state.get("error_events", [])
         )
-        summary = protected + summary
-    except Exception as exc:  # noqa: BLE001 —— 摘要失败不能拖垮本轮，记 ErrorEvent 后继续
         return {
             **update,
             **compression_result("failed"),
-            "error_events": merge_appended(
-                state.get("error_events", []),
-                [
-                    _error(
-                        state,
-                        stage=COMPRESSION_NODE,
-                        message=f"会话摘要生成失败，本轮不更新摘要：{exc}",
-                    )
-                ],
-                error_event_key,
-            ),
+            **({} if already else {
+                "error_events": merge_appended(
+                    state.get("error_events", []),
+                    [
+                        _error(
+                            state,
+                            stage=COMPRESSION_NODE,
+                            message=(
+                                f"{_SUMMARY_FAILED_MARKER}（已尝试 {_SUMMARY_ATTEMPTS} 次）："
+                                f"本轮不更新摘要，被覆盖区间里的旧消息不会被摘要保住；"
+                                f"下一轮会再试。原因：{failure}"
+                            ),
+                        )
+                    ],
+                    error_event_key,
+                )
+            }),
         }
+    summary = protected + summary
 
     # 摘要成功：被覆盖的旧消息不再进窗口，按新边界与新摘要重算预算
     new_covered = covered + len(older)

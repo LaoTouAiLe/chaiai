@@ -1,8 +1,8 @@
 """假模型验收服务必须使用独立数据根，不能继承开发机的数据位置。"""
-from pathlib import Path
 import os
 import runpy
 import sys
+from pathlib import Path
 
 import pytest
 

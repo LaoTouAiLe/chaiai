@@ -557,6 +557,11 @@ def capability_status(
                 available=True,
                 reason=REASON_AVAILABLE,
                 detail="当前可用。",
+                # 委派额外说明一句**依赖关系**（2026-11-02）：子 Agent 能不能改文件跟随权限档位。
+                # 实测：开关开着、档位是"只读"时子任务写文件会被拒，页面上却只显示"可用"，
+                # 用户会当成功能坏了。这里不改判定（那本来就是对的），只把前提摆出来。
+                hint=("子 Agent 能否修改文件跟随当前权限档位：只读档下它也只能读。"
+                      if capability == "delegate" else None),
             )
         )
     return tuple(rows)

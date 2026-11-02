@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import closing
 from datetime import datetime, timezone
 from functools import partial
@@ -61,6 +61,29 @@ def _status(status: str, expires: Any) -> str:
     return status
 
 
+#: 实体身份改成作用域键之后（2026-11-02），新实体的 `name` 就是 16 位十六进制哈希。
+#: 记忆页原来直接显示 `name`，于是新记录显示成 `8f3a1c9e04b7d2af · test_runner`，而同一页里的旧记录
+#: 仍是 `user` / `local`——两种命名混在一张表里，人看着像坏了。召回不受影响（按 `scope_key` 列过滤），
+#: 所以这里只修**展示**：哈希名换成"作用域标签 + 前 6 位"，非哈希名（旧数据、人起的名）原样保留。
+_SCOPE_LABELS: Mapping[str, str] = {
+    "project": "项目",
+    "user": "用户",
+    "workspace": "工作区",
+    "long_term": "长期",
+    "global": "全局",
+}
+
+
+def _is_scope_key_like(name: str) -> bool:
+    return len(name) == 16 and all(char in "0123456789abcdef" for char in name)
+
+
+def _entity_label(name: str, scope: str) -> str:
+    if not _is_scope_key_like(name):
+        return name
+    return f"{_SCOPE_LABELS.get(scope, '实体')} {name[:6]}"
+
+
 def _long_records(service: ApplicationService, path: Path, scopes: Sequence[tuple[MemoryScope, str]]) -> tuple[list[MemoryEntryView], bool]:
     # mode=ro 不创建文件、不迁移，不复用会写库的 open_store。
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=3)) as connection:
@@ -79,7 +102,8 @@ def _long_records(service: ApplicationService, path: Path, scopes: Sequence[tupl
             f"FROM task_conclusions WHERE project_scope IN ({','.join('?' for _ in projects)}) "
             "ORDER BY updated_at DESC,id DESC LIMIT ?", [*projects, MEMORY_SCAN_LIMIT + 1],
         ).fetchall() if projects else []
-    entries = [_entry(service, id=row["id"], kind="fact", title=f'{row["name"]} · {row["key"]}',
+    entries = [_entry(service, id=row["id"], kind="fact",
+                      title=f'{_entity_label(row["name"], row["scope"])} · {row["key"]}',
                       content=row["value_json"], scope=row["scope"],
                       status=_status(row["status"], row["expires_at"]), source=row["source"],
                       created_at=row["created_at"], updated_at=row["updated_at"], expires_at=row["expires_at"],

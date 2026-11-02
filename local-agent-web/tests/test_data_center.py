@@ -188,6 +188,22 @@ def _call(call_id: str, uncached: int | None, cache: int | None, output: int | N
         actual_uncached_input_tokens=uncached, actual_cache_read_tokens=cache, actual_output_tokens=output))
 
 
+def test_entity_label_keeps_readable_names_and_clarifies_scope_keys():
+    """实体身份改成作用域键后（2026-11-02），记忆页要还能读。
+
+    新写入实体的 `name` 就是 16 位哈希；页面若原样显示，同一张表里会混着 `user` 与 `8f3a1c9e…`。
+    这里只修展示：哈希名换成「作用域标签 + 前 6 位」，旧的人可读名字一律不动（不能把历史记录改名）。
+    """
+    assert data_center._entity_label("8f3a1c9e04b7d2af", "project") == "项目 8f3a1c"
+    assert data_center._entity_label("8f3a1c9e04b7d2af", "user") == "用户 8f3a1c"
+    # 旧数据与手写名字保持原样。
+    assert data_center._entity_label("user", "project") == "user"
+    assert data_center._entity_label("local-agent-web", "project") == "local-agent-web"
+    # 只有"16 位且全是十六进制"才算作用域键：15 位或带大写都不认，避免误伤真名字。
+    assert data_center._entity_label("8f3a1c9e04b7d2a", "project") == "8f3a1c9e04b7d2a"
+    assert data_center._entity_label("8F3A1C9E04B7D2AF", "project") == "8F3A1C9E04B7D2AF"
+
+
 def test_usage_weighted_totals_unknown_and_failed_retry_records():
     rows = [_call("1", 100, 900, 20), _call("2", 90, 10, 0, "error")]
     total = data_center.totals(rows)

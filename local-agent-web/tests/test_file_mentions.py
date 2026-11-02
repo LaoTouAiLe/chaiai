@@ -14,9 +14,8 @@ from types import SimpleNamespace
 import pytest
 
 from local_agent.application import file_mentions
-from local_agent.config import AppConfig
 from local_agent.cancellation import CancellationToken
-
+from local_agent.config import AppConfig
 
 # --------------------------------------------------------------------- 解析
 
