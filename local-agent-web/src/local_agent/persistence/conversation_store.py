@@ -6,6 +6,8 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from local_agent.persistence import turn_index
+
 
 @dataclass(frozen=True)
 class Branch:
@@ -113,6 +115,14 @@ class ConversationStore:
                  turn.question, turn.answer_text, turn.state, turn.submitted_at,
                  turn.checkpoint_id, turn.ordinal),
             )
+        # 全文检索索引与轮次表同事务更新（2026-11-02）：先提交索引再提交轮次会出现
+        # "搜得到但取不到正文"，反过来是"正文在、搜不到"。两者必须一起落。
+        # 索引表不存在（本机没编 FTS5）时它是空操作，检索退回 LIKE。
+        turn_index.sync_session(
+            self._connection,
+            session_id,
+            [(turn.turn_id, turn.question, turn.answer_text) for turn in turns],
+        )
 
     def fork(self, session_id: str, branch_id: str, parent: ConversationTurn) -> None:
         with self._connection:

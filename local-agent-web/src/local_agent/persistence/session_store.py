@@ -22,12 +22,15 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from local_agent.exceptions import SessionStoreError
+from local_agent.persistence import turn_index, usage_store
 from local_agent.persistence.conversation_store import ConversationStore
 
 #: ``project_id`` / ``normalize_path`` 等稳定标识在 :mod:`local_agent.scope` 统一实现：
@@ -52,9 +55,23 @@ _COLUMNS = (
     "session_id, thread_id, title, workspace_root, project_id, "
     "created_at, updated_at, last_checkpoint_id, status, mode, archived, kind, "
     # 侧边会话（§21.7，2026-10-23）：两列都可空，普通会话恒为 NULL。
-    "parent_session_id, origin_turn_id"
+    "parent_session_id, origin_turn_id, "
+    # 已读位置（2026-10-30）：用户最后一次打开并看到这条会话的时间。
+    # 可空 = 从没打开过（这种会话不算"未读"，否则第一次开应用满屏都是未读）。
+    "last_read_at"
 )
-_PLACEHOLDERS = ", ".join("?" * 14)
+_PLACEHOLDERS = ", ".join("?" * 15)
+
+#: 列表/搜索用的列清单：会话字段 + **该会话最后一轮对话的提交时间**（2026-10-30）。
+#:
+#: 为什么不能用 `sessions.updated_at` 判未读：实测它只在建会话时写一次，`touch()` 虽然
+#: 存在却**没有任何调用方**（全仓搜索为空）。拿它比"我上次看到的时刻"，结果永远是已读。
+#: `conversation_turns.submitted_at` 才是每轮真正会动的那个时间。
+_SELECT_COLUMNS = (
+    f"{_COLUMNS}, "
+    "(SELECT MAX(t.submitted_at) FROM conversation_turns t"
+    " WHERE t.session_id = s.session_id) AS last_turn_at"
+)
 
 
 @dataclass(frozen=True)
@@ -81,6 +98,25 @@ class Session:
     parent_session_id: str | None = None
     #: 从父会话的哪一轮开出；`parent_session_id` 为空时它也为空。
     origin_turn_id: str | None = None
+    #: 用户最后一次打开这条会话的时间（2026-10-30，与 ``updated_at`` 同一个格式）。
+    #: ``None`` = 从没打开过：这种会话不算"未读"（否则第一次开应用满屏都是未读）。
+    last_read_at: str | None = None
+    #: 这个会话**最后一轮对话**的提交时间（只有列表/搜索查询会填）。
+    #:
+    #: 未读判据用它而不是 ``updated_at``：后者只在建会话时写一次（`touch()` 其实是死代码），
+    #: 拿它比等于永远已读。为空（还没聊过 / 老库）时退回 ``updated_at``。
+    last_turn_at: str | None = None
+
+    @property
+    def unread(self) -> bool:
+        """有没有"我离开之后新增的内容"。
+
+        从没打开过的会话返回 ``False``——"没看过"和"看过了但又有新的"是两件事，
+        前者不需要提醒（用户还没建立对它的预期）。
+        """
+        if self.last_read_at is None:
+            return False
+        return (self.last_turn_at or self.updated_at) > self.last_read_at
 
     @property
     def is_active(self) -> bool:
@@ -129,6 +165,9 @@ def _row_to_session(row: tuple[object, ...]) -> Session:
         kind=str(row[11]),
         parent_session_id=str(row[12]) if row[12] is not None else None,
         origin_turn_id=str(row[13]) if row[13] is not None else None,
+        last_read_at=str(row[14]) if row[14] is not None else None,
+        # 第 16 列只有列表/搜索那条查询会带（见 `_SELECT_COLUMNS`）。
+        last_turn_at=str(row[15]) if len(row) > 15 and row[15] is not None else None,
     )
 
 
@@ -170,14 +209,16 @@ class SessionStore:
         side_chat_filter = " AND parent_session_id IS NULL"
         if workspace_root is None:
             rows = self._connection.execute(
-                f"SELECT {_COLUMNS} FROM sessions WHERE archived = ?{side_chat_filter} "
-                "ORDER BY updated_at DESC, created_at DESC",
+                f"SELECT {_SELECT_COLUMNS} FROM sessions s"
+                f" WHERE s.archived = ?{side_chat_filter} "
+                "ORDER BY s.updated_at DESC, s.created_at DESC",
                 (int(archived),),
             ).fetchall()
         else:
             rows = self._connection.execute(
-                f"SELECT {_COLUMNS} FROM sessions WHERE workspace_root = ? AND archived = ?"
-                f"{side_chat_filter} ORDER BY updated_at DESC, created_at DESC",
+                f"SELECT {_SELECT_COLUMNS} FROM sessions s"
+                f" WHERE s.workspace_root = ? AND s.archived = ?"
+                f"{side_chat_filter} ORDER BY s.updated_at DESC, s.created_at DESC",
                 (normalize_path(workspace_root), int(archived)),
             ).fetchall()
         return [_row_to_session(row) for row in rows]
@@ -185,16 +226,88 @@ class SessionStore:
     def search_sessions(
         self, query: str, *, limit: int = 20, archived: bool = False
     ) -> list[Session]:
-        """按**标题或用户提问**搜索会话（§15.11.2，2026-10-22）。
+        """按**标题、用户提问或回答正文**搜索会话（§15.11.2，2026-10-22；2026-11-02 扩到全文）。
 
-        只匹配 `question`，不碰助手回答：回答是长文本，`LIKE` 扫全表会随历史线性变慢，
-        而用户找会话时记得的通常是"我问过什么"。
+        历史口径只匹配 `question`，理由是"回答是长文本，LIKE 扫全表会随历史线性变慢"。
+        那条理由没错，但它把"我记得它答过什么"挡在门外——而这正是跨会话最常找的东西。
+        回答正文现在走 FTS5 索引（`persistence/turn_index.py`），代价不再随历史线性增长。
+
+        **索引不可用时退回旧口径**（标题 + 提问 LIKE）：本机 SQLite 没编 FTS5 时索引表不存在，
+        这里按"表在不在"决定走哪条路，而不是让整条搜索报错。
+
+        排序口径**不变**：仍按 `updated_at` 倒序，不按相关度。侧栏是"最近用过的会话"，
+        换成相关度会让搜一次之后整体顺序跳变，用户会以为会话被挪走了。
 
         `%` 与 `_` 按字面处理（用户输入不当作通配符），否则一次输入 `%` 就会把全部会话捞出来。
         """
         needle = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        hit_ids = turn_index.matched_session_ids(self._connection, query)
+        if not hit_ids:
+            return self._like_search(needle, limit=limit, archived=archived)
+        # 命中会话可能很多：`MAX_HITS` 已经把 id 数压到 SQL 参数上限以内。
+        placeholders = ",".join("?" * len(hit_ids))
         rows = self._connection.execute(
-            f"SELECT {_COLUMNS} FROM sessions s "
+            f"SELECT {_SELECT_COLUMNS} FROM sessions s "
+            f"WHERE s.archived = ? AND (s.session_id IN ({placeholders})"
+            " OR s.title LIKE ? ESCAPE '\\') "
+            "ORDER BY s.updated_at DESC, s.created_at DESC LIMIT ?",
+            (int(archived), *hit_ids, needle, limit),
+        ).fetchall()
+        return [_row_to_session(row) for row in rows]
+
+    # ------------------------------------------------------------ 用量账（v18）
+
+    def append_usage(
+        self, session_id: str, workspace_root: str, records: Sequence[Any]
+    ) -> int:
+        """把一批模型调用记录写进用量账（``INSERT OR IGNORE``，重放安全）。
+
+        与轮次表同一条连接、同一个事务边界：调用方都在 ``_sqlite_access`` 里调它，
+        避免两条连接在同一个库上互相加锁。
+        """
+        return usage_store.append_calls(
+            self._connection,
+            session_id=session_id,
+            workspace_root=workspace_root,
+            records=records,
+        )
+
+    def usage_rows(
+        self,
+        *,
+        workspace_root: str | None = None,
+        since: Any = None,
+        until: Any = None,
+        model: str = "",
+    ) -> list[usage_store.UsageRow]:
+        """按工作区 / 时间窗 / 模型名取用量账（数据中台用）。"""
+        return usage_store.rows(
+            self._connection,
+            workspace_root=workspace_root,
+            since=since,
+            until=until,
+            model=model,
+        )
+
+    def usage_sessions(self, *, workspace_root: str | None = None) -> set[str]:
+        """账本里已有记录的会话 id（判断哪些老会话还需要读穿回填）。"""
+        return usage_store.sessions_with_rows(self._connection, workspace_root=workspace_root)
+
+    def search_turn_details(
+        self, query: str, *, limit: int = 5
+    ) -> list[turn_index.TurnDetail]:
+        """按相关度返回命中的**轮次明细**（`session_search` 工具用，2026-11-02）。
+
+        与 :meth:`search_sessions` 的差别是粒度与取舍：那个给页面列表用，只要会话；
+        这个给模型用，要"哪个会话的哪一轮、原文是什么"，并且**包含已归档会话**——
+        归档只是离开侧栏视线，旧结论往往就在里面。
+        """
+        return turn_index.search_details(self._connection, query, limit=limit)
+
+    def _like_search(self, needle: str, *, limit: int, archived: bool) -> list[Session]:
+        """旧的纯 LIKE 口径：标题 + 用户提问。只在全文索引不可用时使用（见 :meth:`search_sessions`）。"""
+        rows = self._connection.execute(
+            f"SELECT {_SELECT_COLUMNS} FROM sessions s "
             "WHERE s.archived = ? AND (s.title LIKE ? ESCAPE '\\' OR EXISTS ("
             "SELECT 1 FROM conversation_turns t WHERE t.session_id = s.session_id "
             "AND t.question LIKE ? ESCAPE '\\')) "
@@ -404,6 +517,9 @@ class SessionStore:
                     record.kind,
                     record.parent_session_id,
                     record.origin_turn_id,
+                    # 新会话的已读位置是 NULL（2026-10-30）：NULL 表示"从没打开过"，
+                    # 不算未读。用户切到它时前端会打一次 `mark_read`。
+                    record.last_read_at,
                 ),
             )
         return record
@@ -484,6 +600,76 @@ class SessionStore:
                         (remaining[0].session_id,),
                     )
         return self._require(session_id)
+
+    def mark_read(self, session_id: str) -> str:
+        """记下"用户看到了这里"（2026-10-30），返回写入的时间。
+
+        为什么用**服务端时钟的"此刻"**而不是这条会话的 ``updated_at``：两者比较时
+        必须同源，``updated_at`` 也是服务端写的；写"此刻"语义更准——"我看到的是
+        这一刻之前的所有内容"，之后再有更新自然就算未读。
+
+        为什么由服务端写而不是让前端报一个时间：本机时钟可能不准，一旦客户端时间
+        偏快，写进来的值会永远大于后续的 ``updated_at``，未读提示就再也不出现了。
+        """
+        self._require(session_id)
+        moment = _now()
+        with self._connection:
+            self._connection.execute(
+                "UPDATE sessions SET last_read_at = ? WHERE session_id = ?",
+                (moment, session_id),
+            )
+        return moment
+
+    def delete_session(self, session_id: str) -> None:
+        self.delete_sessions((session_id,))
+
+    def delete_sessions(self, session_ids: tuple[str, ...]) -> None:
+        """在一个事务中删除指定父子会话在**本库**里的全部行。
+
+        为什么一个事务、逐表显式删：这些表都带 ``REFERENCES sessions(session_id)``，
+        但连接上**没有**开 ``PRAGMA foreign_keys``（只有迁移里临时开关），删主表不会
+        级联。分几次删一旦中途失败，就会留下一批指向不存在会话的孤儿行——它们在页面上
+        表现为"查不到的幽灵数据"，比多删一层难收拾得多。
+
+        Checkpoint、附件目录、变更基线目录**不在这里**：它们分别归 `SqliteSaver`、
+        `AttachmentStore` 与 `FileChangeLedger`，由应用层按顺序调用。
+
+        会话级的模型选择（`model_selection`）也不在这里：那张表在**设置库**（另一个
+        连接），不在聊天库里。留下的一行孤儿选择不会被任何读路径看到——选择器只对现存
+        会话读取它，删掉的会话不会再出现。
+        """
+        for session_id in session_ids:
+            self._require(session_id)
+        with self._connection:
+            for session_id in session_ids:
+                self._delete_session_rows(session_id)
+
+    def _delete_session_rows(self, session_id: str) -> None:
+        # 全文索引先清：它没有外键，删掉 conversation_turns 之后就没有任何东西能定位到它的行了。
+        turn_index.delete_session(self._connection, session_id)
+        # 子表先行：`job_children` 经 job_id 间接引用，不能按 session_id 删。
+        self._connection.execute(
+            "DELETE FROM job_children WHERE parent_job_id IN "
+            "(SELECT job_id FROM jobs WHERE session_id = ?)",
+            (session_id,),
+        )
+        # 表名是写死的常量元组，不是拼进来的输入。
+        for table in (
+            "jobs",
+            "conversation_turns",
+            "conversation_branches",
+            "file_change_ops",
+            "file_change_baselines",
+            "file_change_blobs",
+            "request_ledger",
+        ):
+            self._connection.execute(
+                f"DELETE FROM {table} WHERE session_id = ?",
+                (session_id,),
+            )
+        self._connection.execute(
+            "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+        )
 
     def touch(
         self,
