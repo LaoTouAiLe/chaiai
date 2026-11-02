@@ -874,6 +874,21 @@
         "title": "AttachmentsPreferences",
         "type": "object"
       },
+      "Body_upload_file_api_sessions__session_id__files_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "description": "pdf / docx / xlsx / pptx；旧版 doc/xls/ppt 也可以",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_file_api_sessions__session_id__files_post",
+        "type": "object"
+      },
       "BrowserCommand": {
         "additionalProperties": false,
         "properties": {
@@ -1641,6 +1656,33 @@
           "state"
         ],
         "title": "CompressionView",
+        "type": "object"
+      },
+      "ConsolidationPreferences": {
+        "additionalProperties": false,
+        "description": "后台记忆巩固（2026-11-02，架构 §10.4）。\n\n**默认关闭**：它会在后台**调一次模型**，是会花钱的动作。三条说明写在这里，页面的 note 只是转述：\n\n- 前提是中期记忆已启用——没有碎片就没有可整理的东西；\n- 只**新增**长期事实：不合并、不停用、不删除已有记忆；\n- 自上次以来没有更新的碎片时**不调用模型**，所以\"开着\"不等于\"每次都花钱\"。",
+        "properties": {
+          "enabled": {
+            "default": false,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "interval_hours": {
+            "default": 24,
+            "maximum": 720.0,
+            "minimum": 1.0,
+            "title": "Interval Hours",
+            "type": "integer"
+          },
+          "max_promotions": {
+            "default": 5,
+            "maximum": 20.0,
+            "minimum": 1.0,
+            "title": "Max Promotions",
+            "type": "integer"
+          }
+        },
+        "title": "ConsolidationPreferences",
         "type": "object"
       },
       "ContextMeterView": {
@@ -2831,6 +2873,25 @@
         "title": "ExternalPathGrantView",
         "type": "object"
       },
+      "FailedFileView": {
+        "description": "尝试还原但失败了；与 ``skipped`` 严格分开：一个是没做，一个是做了没成。",
+        "properties": {
+          "error": {
+            "title": "Error",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "error"
+        ],
+        "title": "FailedFileView",
+        "type": "object"
+      },
       "FileChangeDiffView": {
         "description": "整文件 diff：``baseline``（首次改动前原文）对 ``当前磁盘内容``。\n\n与工具卡片里的 :class:`FileDiffView` 结构一致，但**覆盖整个文件**，不是单次调用的片段。",
         "properties": {
@@ -2968,6 +3029,37 @@
           "has_baseline"
         ],
         "title": "FileChangeSummaryView",
+        "type": "object"
+      },
+      "FileChangesPreferences": {
+        "additionalProperties": false,
+        "description": "文件改动账本的存储口径（2026-10-29）：设置页「文件改动与还原」。\n\n三项都**保存后立即生效**（下一次写盘就按新值走），与其它分组\"下一次新任务生效\"不同：\n它们约束的是账本本身，不是某一轮任务的输入。页面说明文字必须照这个口径写，否则用户会\n以为要等下一轮。\n\n单位是 KB / MB（与 ``config.file_changes`` 同一套），存进文件系统前再换算成字节。",
+        "properties": {
+          "keep_turns": {
+            "maximum": 200.0,
+            "minimum": 0.0,
+            "title": "Keep Turns",
+            "type": "integer"
+          },
+          "max_baseline_kb": {
+            "maximum": 8192.0,
+            "minimum": 64.0,
+            "title": "Max Baseline Kb",
+            "type": "integer"
+          },
+          "max_session_mb": {
+            "maximum": 2048.0,
+            "minimum": 20.0,
+            "title": "Max Session Mb",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_baseline_kb",
+          "max_session_mb",
+          "keep_turns"
+        ],
+        "title": "FileChangesPreferences",
         "type": "object"
       },
       "FileDiffHunkView": {
@@ -3696,7 +3788,7 @@
       },
       "McpServerCreateRequest": {
         "additionalProperties": false,
-        "description": "新增一台 MCP Server（只支持 stdio）。\n\n``env`` 允许传——否则需要凭据的 server（cookie / token）根本配不出来。但它**只写不回读**：\n响应里的 `McpView` 没有任何 env 字段，日志也不记（与模型连接密钥同一条口径）。",
+        "description": "新增一台 MCP Server（``stdio`` 或 ``http``，2026-11-02）。\n\n``env`` / ``headers`` 允许传——否则需要凭据的 server（cookie / token）根本配不出来。\n但它们**只写不回读**：响应里只有键名，日志与错误文案里也会抹掉值（与模型连接密钥同一条口径）。\n\n两个必填字段按 ``type`` 二选一（``command`` 或 ``url``），由服务层用同一个模型校验——\n这里不重复写规则，避免\"接口说可以、落盘被拒\"。",
         "properties": {
           "args": {
             "items": {
@@ -3706,9 +3798,16 @@
             "type": "array"
           },
           "command": {
-            "minLength": 1,
-            "title": "Command",
-            "type": "string"
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command"
           },
           "env": {
             "additionalProperties": {
@@ -3717,15 +3816,42 @@
             "title": "Env",
             "type": "object"
           },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
           "name": {
             "minLength": 1,
             "title": "Name",
             "type": "string"
+          },
+          "type": {
+            "default": "stdio",
+            "enum": [
+              "stdio",
+              "http"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
           }
         },
         "required": [
-          "name",
-          "command"
+          "name"
         ],
         "title": "McpServerCreateRequest",
         "type": "object"
@@ -3779,7 +3905,7 @@
       },
       "McpServerSpecRequest": {
         "additionalProperties": false,
-        "description": "替换连接方式；省略字段保持原值，env 按键合并且不回读。",
+        "description": "替换连接方式；省略字段保持原值，env / headers 按键合并且不回读。\n\n``type`` 与已有值不同时，服务层会**丢掉旧传输那组字段**再应用本次改动\n（stdio 的 command/args 与 http 的 url/headers 互斥）。",
         "properties": {
           "args": {
             "anyOf": [
@@ -3814,19 +3940,60 @@
             "title": "Env",
             "type": "object"
           },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Headers",
+            "type": "object"
+          },
           "remove_env": {
             "items": {
               "type": "string"
             },
             "title": "Remove Env",
             "type": "array"
+          },
+          "remove_headers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Remove Headers",
+            "type": "array"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "stdio",
+                  "http"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Type"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
           }
         },
         "title": "McpServerSpecRequest",
         "type": "object"
       },
       "McpServerView": {
-        "description": "一台 MCP Server 的状态与工具清单（**不含任何凭据**）。",
+        "description": "一台 MCP Server 的状态与工具清单（**不含任何凭据**）。\n\n两种连接方式共用这一个视图：``stdio`` 用 ``command`` + ``args``，``http`` 用 ``url``。\n``env_keys`` / ``header_keys`` 只回**键名**——值与模型连接密钥同一条口径：只写不回读。",
         "properties": {
           "args": {
             "items": {
@@ -3895,6 +4062,13 @@
             ],
             "title": "Failure Message"
           },
+          "header_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Header Keys",
+            "type": "array"
+          },
           "name": {
             "minLength": 1,
             "title": "Name",
@@ -3923,6 +4097,26 @@
             },
             "title": "Tools",
             "type": "array"
+          },
+          "transport": {
+            "default": "stdio",
+            "enum": [
+              "stdio",
+              "http"
+            ],
+            "title": "Transport",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
           }
         },
         "required": [
@@ -6338,6 +6532,16 @@
               }
             ]
           },
+          "consolidation": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConsolidationPreferences"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "curated": {
             "anyOf": [
               {
@@ -6360,6 +6564,16 @@
           },
           "execution": {
             "$ref": "#/components/schemas/ExecutionPreferences"
+          },
+          "file_changes": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FileChangesPreferences"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "general": {
             "$ref": "#/components/schemas/GeneralPreferences"
@@ -6973,6 +7187,171 @@
           "outcome"
         ],
         "title": "ResolveTaskReviewRequest",
+        "type": "object"
+      },
+      "RestoreChangesRequest": {
+        "additionalProperties": false,
+        "description": "把文件改动退回某个时间点。\n\n这里只校验**形状**：``scope=file`` 要 ``path``，``scope=turn`` 要 ``run_id``。至于\n\"这一轮到底有没有改动可还原\"\"账本有没有接线\"，属于业务不成立，由服务返回带错误码的信封\n（``CHANGES_RESTORE_UNAVAILABLE``）——那时用户需要的是原因和下一步，不是\"字段不合法\"。",
+        "properties": {
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "paths": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "maxItems": 500,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paths"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "scope": {
+            "enum": [
+              "file",
+              "turn"
+            ],
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "title": "RestoreChangesRequest",
+        "type": "object"
+      },
+      "RestoreResultView": {
+        "description": "一次还原的结果（2026-10-29）。\n\n带 ``changes`` 是**刻意的**：项目里\"服务端返回完整视图、前端直接换缓存\"是统一做法\n（见 `useSetCapabilities`），否则前端要自己推算哪些轮次还剩什么，就成了第二套真相。",
+        "properties": {
+          "changes": {
+            "$ref": "#/components/schemas/SessionChangesView"
+          },
+          "failed": {
+            "items": {
+              "$ref": "#/components/schemas/FailedFileView"
+            },
+            "title": "Failed",
+            "type": "array"
+          },
+          "restored": {
+            "items": {
+              "$ref": "#/components/schemas/RestoredFileView"
+            },
+            "title": "Restored",
+            "type": "array"
+          },
+          "run_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Run Id"
+          },
+          "scope": {
+            "enum": [
+              "file",
+              "turn"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/SkippedFileView"
+            },
+            "title": "Skipped",
+            "type": "array"
+          }
+        },
+        "required": [
+          "scope",
+          "restored",
+          "skipped",
+          "failed",
+          "changes"
+        ],
+        "title": "RestoreResultView",
+        "type": "object"
+      },
+      "RestoredFileView": {
+        "description": "还原时真正处理过的一个文件（2026-10-29）。\n\n``action`` 四态必须分清：``written`` 覆盖写回、``rebuilt`` 文件原本被删因此按改前内容\n重建、``removed`` 删除本次新建文件、``unchanged`` 状态本来就一致（没写盘）。把 ``unchanged`` 说成\"已还原\"是在谎报\n做过的事。",
+        "properties": {
+          "action": {
+            "enum": [
+              "written",
+              "rebuilt",
+              "removed",
+              "unchanged"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "basis": {
+            "enum": [
+              "turn",
+              "session"
+            ],
+            "title": "Basis",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "undo_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Undo Ref"
+          }
+        },
+        "required": [
+          "path",
+          "action",
+          "basis"
+        ],
+        "title": "RestoredFileView",
         "type": "object"
       },
       "RetrievalPreferences": {
@@ -7735,6 +8114,11 @@
             "title": "Title",
             "type": "string"
           },
+          "unread": {
+            "default": false,
+            "title": "Unread",
+            "type": "boolean"
+          },
           "updated_at": {
             "format": "date-time",
             "title": "Updated At",
@@ -7955,6 +8339,25 @@
           }
         },
         "title": "SkillsView",
+        "type": "object"
+      },
+      "SkippedFileView": {
+        "description": "没动、并且说明为什么没动（冲突 / 无改前内容 / 已清理）。",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "reason"
+        ],
+        "title": "SkippedFileView",
         "type": "object"
       },
       "StepCompletedEvent": {
@@ -8255,6 +8658,14 @@
             ],
             "title": "Expected Snapshot Id"
           },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/SubmittedFileRef"
+            },
+            "maxItems": 5,
+            "title": "Files",
+            "type": "array"
+          },
           "parent_turn_id": {
             "anyOf": [
               {
@@ -8308,6 +8719,29 @@
           "client_request_id"
         ],
         "title": "SubmitMessageRequest",
+        "type": "object"
+      },
+      "SubmittedFileRef": {
+        "additionalProperties": false,
+        "description": "随消息提交的一份文档引用（2026-10-29）。\n\n`name` 是**用户上传时的文件名**，只用于展示（气泡与出站提示）；服务端会净化它\n（去路径段、去控制字符、限长），为空时回退到落盘名。落盘名永远是内容哈希，\n不能由客户端指定——那是路径穿越与覆盖写入的入口。",
+        "properties": {
+          "id": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "default": "",
+            "maxLength": 300,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "SubmittedFileRef",
         "type": "object"
       },
       "TaskCancelledEvent": {
@@ -10235,6 +10669,33 @@
         "title": "UsageTotalsView",
         "type": "object"
       },
+      "UserFileView": {
+        "description": "一条用户消息带的一份文档（2026-10-29）：页面画附件块用。\n\n**不含磁盘路径**：路径只写给出站提示给模型，页面没有理由拿到它（与图片只回引用\n同一条门槛）。`name` 是落盘后的文件名（内容哈希），不是用户的原文件名——原文件名\n早在上传时就被丢弃，因为它是不可信输入。",
+        "properties": {
+          "attachment_id": {
+            "minLength": 1,
+            "title": "Attachment Id",
+            "type": "string"
+          },
+          "name": {
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "size_bytes": {
+            "minimum": 0.0,
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "name",
+          "size_bytes"
+        ],
+        "title": "UserFileView",
+        "type": "object"
+      },
       "UserMessageView": {
         "properties": {
           "attachments": {
@@ -10255,6 +10716,13 @@
               }
             ],
             "title": "Created At"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/UserFileView"
+            },
+            "title": "Files",
+            "type": "array"
           },
           "kind": {
             "const": "user",
@@ -11921,7 +12389,7 @@
     },
     "/api/mcp/servers": {
       "post": {
-        "description": "把一台只走 stdio 的 server 写进 ``mcp.json``（已存在的同名会被拒）。\n\n`env` 里的凭据**只写不回读**：响应与日志都没有它们。写完立即重载连接管理器。",
+        "description": "把一台 server 写进 ``mcp.json``（已存在的同名会被拒）；两种连接方式各自校验字段。\n`stdio` 给 ``command``/``args``/``env``，``http`` 给 ``url``/``headers``；\n`env`/`headers` 的凭据只写不回读（响应只有键名）。写完立即重载连接管理器。",
         "operationId": "add_mcp_server_api_mcp_servers_post",
         "requestBody": {
           "content": {
@@ -12786,7 +13254,7 @@
     },
     "/api/sessions": {
       "get": {
-        "description": "`workspace_id` 缺省表示列出全部会话。\n\n`q` 非空时改为搜索（§15.11.2）：匹配标题与用户提问，按最近活动倒序。\n**不传 `q` 时行为与响应和旧实现完全一致**，`limit` 也只在搜索分支生效。",
+        "description": "`workspace_id` 缺省表示列出全部会话。\n\n`q` 非空时改为搜索（§15.11.2）：匹配标题、用户提问与回答正文，按最近活动倒序。\n**不传 `q` 时行为与响应和旧实现完全一致**，`limit` 也只在搜索分支生效。",
         "operationId": "list_sessions_api_sessions_get",
         "parameters": [
           {
@@ -12931,6 +13399,47 @@
       }
     },
     "/api/sessions/{session_id}": {
+      "delete": {
+        "description": "彻底删除一个**已归档**的会话（2026-10-29）：消息、Checkpoint、任务记录、\n请求台账、变更基线、上传的附件一并清掉。\n\n为什么只允许删已归档的：删除不可撤销，而\"归档\"已经提供了离开视线的手段。\n允许直接删一个正在用的会话，是把最贵的误触放在最顺手的位置上。",
+        "operationId": "delete_session_api_sessions__session_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "删除一个已归档的会话"
+      },
       "get": {
         "description": "只读快照；刷新与重连都以它为准（§15.3）。",
         "operationId": "get_session_api_sessions__session_id__get",
@@ -13607,6 +14116,76 @@
         "summary": "单个文件的整文件 diff"
       }
     },
+    "/api/sessions/{session_id}/changes/restore": {
+      "post": {
+        "description": "还原文件改动（2026-10-29）。\n\n**不回退对话**：本轮的消息与 Checkpoint 原样保留，只动磁盘上的文件。这是刻意的\n边界——回退对话会连带影响后续引用，而用户点的是\"把这个文件改回去\"。\n\n``scope=file`` 退到**会话开始前**（与右栏 diff 同口径），``scope=turn`` 退到\n**本轮开始前**。返回刷新后的改动总览，页面直接换缓存。",
+        "operationId": "restore_session_changes_api_sessions__session_id__changes_restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreChangesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResultView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话不存在"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "把文件改动退回某个时间点"
+      }
+    },
     "/api/sessions/{session_id}/commands/{command_id}/detach": {
       "post": {
         "description": "只发\"转后台\"信号，不结束进程（2026-10-21）。\n\n返回 ``{\"detached\": false}`` 表示这条命令已经不在等（跑完了、或 id 对不上）——\n页面据此说\"这条命令已经结束\"，而不是假装它还在后台。",
@@ -13787,6 +14366,128 @@
           }
         },
         "summary": "会话事件流（SSE）"
+      }
+    },
+    "/api/sessions/{session_id}/export": {
+      "get": {
+        "description": "把一个会话导出成人读的 Markdown 或机读的 JSON（2026-10-30）。\n\n为什么要 `attachment`：浏览器要替用户填好\"另存为\"的文件名，内联打开还得多一步复制。\n文件名用 RFC 5987（`filename*`）编码——会话标题几乎一定含中文，朴素的 `filename=`\n在部分浏览器会变成乱码或整条被丢弃。",
+        "operationId": "export_session_api_sessions__session_id__export_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "format",
+            "required": false,
+            "schema": {
+              "default": "markdown",
+              "enum": [
+                "markdown",
+                "json"
+              ],
+              "title": "Format",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "导出会话"
+      }
+    },
+    "/api/sessions/{session_id}/files": {
+      "post": {
+        "description": "存一份用户上传的文档，返回**引用**（2026-10-29）。\n\n为什么这个端点用 multipart、图片那个用 base64 JSON：图片上限 2 MB，base64 的 33%\n开销无所谓；文档动辄几十 MB，膨胀与内存峰值都不划算，而 multipart 是流式的。\n**格式仍由服务端按魔数判定**，文件名里的扩展名只用来区分旧版 doc / xls / ppt。",
+        "operationId": "upload_file_api_sessions__session_id__files_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_file_api_sessions__session_id__files_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "上传一份文档（multipart）"
       }
     },
     "/api/sessions/{session_id}/messages": {
@@ -14105,6 +14806,49 @@
           }
         },
         "summary": "提交提问答复"
+      }
+    },
+    "/api/sessions/{session_id}/read": {
+      "post": {
+        "description": "记下\"用户看到了这里\"（2026-10-30），用于侧栏的未读标记。\n\n为什么是独立的 POST 而不是在 GET 列表时顺手写：列表会被轮询、被预取、被别的\n标签页拉一次——那种\"已读\"是假的，用户会永远收不到提醒。",
+        "operationId": "mark_session_read_api_sessions__session_id__read_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "会话或工作区不存在"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "把会话标记为已读"
       }
     },
     "/api/sessions/{session_id}/recovery": {

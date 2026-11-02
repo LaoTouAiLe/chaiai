@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 import socket
@@ -37,6 +38,7 @@ from local_agent.api.security import LocalBoundaryMiddleware, _authority
 from local_agent.api.sse import event_stream
 from local_agent.application.errors import (
     APPROVAL_EXPIRED,
+    CHANGES_RESTORE_UNAVAILABLE,
     DIRECTORY_PICKER_UNAVAILABLE,
     IDEMPOTENCY_CONFLICT,
     MODEL_SETTINGS_INVALID,
@@ -309,6 +311,10 @@ def test_preferences_schema_endpoint_lists_the_editable_fields(
         # curated（常驻记忆，2026-10-27）与 medium_term 同组：两者都是"往 Prompt 里放什么"的选择。
         "execution", "agents", "retrieval", "memory", "medium_term", "curated", "compression",
         "embedding", "web_access", "attachments",
+        # 后台记忆巩固（2026-11-02）：会调模型，所以默认关且必须能被页面关掉。
+        "consolidation",
+        # 文件改动账本的存储口径（2026-10-29）。
+        "file_changes",
     }
     provider = next(item for item in groups["web_access"]["fields"] if item["key"] == "provider")
     assert provider["kind"] == "choice"
@@ -316,6 +322,88 @@ def test_preferences_schema_endpoint_lists_the_editable_fields(
     # "留空表示不限"由 `nullable` 表达，而不是给一个哨兵默认值：后者会被当成真实数值。
     loops = next(item for item in groups["execution"]["fields"] if item["key"] == "max_tool_loops")
     assert loops["nullable"] is True and loops["minimum_exclusive"] is True
+
+
+def test_restore_requires_the_field_that_matches_the_scope(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    """形状校验：两档各自必填什么。业务不成立走 409（带错误码），不混成 422。"""
+    client, _runtime = api
+    session_id = _create_session(client)
+    url = f"/api/sessions/{session_id}/changes/restore"
+
+    assert client.post(url, json={"scope": "file"}).status_code == 422
+    assert client.post(url, json={"scope": "turn"}).status_code == 422
+
+
+def test_restore_without_any_change_is_a_conflict_not_a_crash(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    """这一轮没有改动可还原：409 + 明确错误码，绝不是一个 500。"""
+    client, _runtime = api
+    session_id = _create_session(client)
+    response = client.post(
+        f"/api/sessions/{session_id}/changes/restore", json={"scope": "turn", "run_id": "nope"}
+    )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == CHANGES_RESTORE_UNAVAILABLE
+    # 信封里要说清"文件没被改动"，否则用户不知道要不要检查磁盘。
+    assert "没有被改动" in response.json()["error"]["message"]
+
+
+def test_restore_is_refused_while_the_session_is_running(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    """这一轮还在跑时不能还原：工具正在写盘，改回去会和随后的记账对不上。"""
+    client, runtime = api
+    session_id = _create_session(client)
+    lock = runtime.service._lock_for(session_id)
+    assert lock.acquire(blocking=False)
+    try:
+        response = client.post(
+            f"/api/sessions/{session_id}/changes/restore",
+            json={"scope": "turn", "run_id": "r1"},
+        )
+    finally:
+        lock.release()
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == SESSION_BUSY
+
+
+def test_restore_endpoint_writes_the_file_back(api: tuple[TestClient, ApiRuntime]) -> None:
+    """端到端：账本里有改前内容 → POST 还原 → 磁盘真的变回去，并返回刷新后的总览。"""
+    import hashlib
+
+    client, runtime = api
+    session_id = _create_session(client)
+    session = runtime.database.sessions.get(session_id)
+    workspace = Path(session.workspace_root)
+    target = workspace / "a.txt"
+    # 用 bytes 而不是 write_text：文本模式在 Windows 上会把 \n 翻成 \r\n，
+    # 于是"记账时的 hash"与"磁盘上的内容"对不上，冲突判定会误判成"用户手改过"。
+    target.write_bytes(b"before\n")
+
+    ledger = runtime.service._change_ledger(session)
+    ledger.bind_run("r1")
+    ledger.capture(target)
+    target.write_bytes(b"after\n")
+    ledger.record(
+        tool="write_file", resolved=target, kind="modify",
+        after_sha256=hashlib.sha256(b"after\n").hexdigest(),
+    )
+
+    response = client.post(
+        f"/api/sessions/{session_id}/changes/restore", json={"scope": "turn", "run_id": "r1"}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert [(item["path"], item["action"], item["basis"]) for item in body["restored"]] == [
+        ("a.txt", "written", "turn")
+    ]
+    assert body["skipped"] == [] and body["failed"] == []
+    assert target.read_bytes() == b"before\n"
+    # 返回的视图就是刷新后的总览：前端直接换缓存，不用自己推算。
+    assert body["changes"]["turns"][0]["run_id"] == "r1"
 
 
 def test_web_search_preferences_and_credential_are_settings_backed(
@@ -2332,6 +2420,44 @@ def test_attachment_upload_round_trips_and_rejects_bad_input(
     ).status_code == 404
 
 
+def test_export_session_downloads_markdown_and_json(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    """导出会话（2026-10-30）：两种形态都能下载，文件名按 RFC 5987 编码。
+
+    空会话也要能导——用户可能只是想留一份"我这会儿问过什么"。
+    """
+    from urllib.parse import unquote
+
+    client, _runtime = api
+    session = client.post("/api/sessions", json={"workspace_id": None}).json()["session_id"]
+
+    markdown = client.get(f"/api/sessions/{session}/export", params={"format": "markdown"})
+    assert markdown.status_code == 200
+    assert markdown.headers["content-type"].startswith("text/markdown")
+    disposition = markdown.headers["content-disposition"]
+    assert disposition.startswith("attachment; filename*=UTF-8''")
+    assert unquote(disposition.split("''", 1)[1]).endswith(".md")
+    assert "还没有问答" in markdown.text
+
+    payload = client.get(f"/api/sessions/{session}/export", params={"format": "json"})
+    assert payload.status_code == 200
+    assert payload.headers["content-type"].startswith("application/json")
+    body = payload.json()
+    assert body["schema_version"] == 1
+    assert body["session"]["session_id"] == session
+    assert body["turns"] == []
+
+    # 归档保留数据；两种导出都应继续可用，不要求先取消归档。
+    assert client.post(f"/api/sessions/{session}/archive").status_code == 200
+    for shape in ("markdown", "json"):
+        archived = client.get(f"/api/sessions/{session}/export", params={"format": shape})
+        assert archived.status_code == 200
+
+    # 不存在的会话：404，而不是导出一份空文件。
+    assert client.get("/api/sessions/nope/export").status_code == 404
+
+
 def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> None:
     client, _runtime = api
     response = client.get("/api/openapi.json")
@@ -2362,6 +2488,9 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         # 2026-10-16：聊天里上传图片（base64 进、字节出；媒体类型由服务端按魔数判定）。
         # 取回内容走**查询参数**（引用是相对路径，含 `/`，不能当路径参数）。
         "/api/sessions/{session_id}/attachments",
+        # 2026-10-29：聊天里上传**文档**。用 multipart 而不是 base64——文档几十 MB，
+        # 33% 的膨胀与整包进内存都不划算；图片那条路（上面）保持不变。
+        "/api/sessions/{session_id}/files",
         # 2026-10-20：对象存储（S3 兼容）的凭据与"测试上传"。密钥只写不回读。
         "/api/attachments/oss/credential",
         "/api/attachments/oss/test",
@@ -2371,6 +2500,8 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/sessions/{session_id}/commands/{command_id}/detach",
         "/api/sessions/{session_id}/changes",
         "/api/sessions/{session_id}/changes/diff",
+        # 2026-10-29：把文件改动退回某个时间点（单文件 / 整轮，不回退对话）。
+        "/api/sessions/{session_id}/changes/restore",
         # v0.6 T62：任务中心（只读索引，不读会话 Checkpoint，§17.6）
         "/api/tasks",
         # 需要人工核对的任务：终局由人来写（不自动重跑）。
@@ -2390,6 +2521,10 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/browsers/requests/{request_id}",
         "/api/sessions/{session_id}/archive",
         "/api/sessions/{session_id}/restore",
+        # 已读位置（2026-10-30）：侧栏未读小点靠它清掉。
+        "/api/sessions/{session_id}/read",
+        # 2026-10-30：导出会话（markdown 给人看 / json 给程序用，以附件形式下载）。
+        "/api/sessions/{session_id}/export",
         "/api/sessions/{session_id}/events",
         "/api/sessions/{session_id}/messages",
         "/api/sessions/{session_id}/conversation-map",
@@ -3660,6 +3795,190 @@ def test_mcp_startup_manager_uses_the_shared_lock(app_config, tmp_path, model_fa
         assert runtime.mcp_manager.states() == {}
     finally:
         runtime.close()
+
+
+def _unread_of(client: TestClient, session_id: str) -> bool:
+    rows = client.get("/api/sessions").json()
+    row = next(item for item in rows if item["session_id"] == session_id)
+    return bool(row["unread"])
+
+
+def test_mark_read_clears_unread_and_new_activity_sets_it_again(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    """已读位置进库（2026-10-30）：标记后变已读，再有新活动又变未读。
+
+    换浏览器、清缓存都不该丢掉这个状态——这正是它离开 localStorage 的原因。
+    """
+    client, _runtime = api
+    sid = _create_session(client)
+    _submit(client, sid, "你好", "read-1")
+
+    # 从没打开过的会话**不算**未读："没看过"和"看过但又有新的"是两件事，
+    # 混成一种的话第一次开应用整屏都是未读。
+    assert _unread_of(client, sid) is False
+
+    assert client.post(f"/api/sessions/{sid}/read").status_code == 204
+    assert _unread_of(client, sid) is False
+
+    _submit(client, sid, "再说一句", "read-2")
+
+    assert _unread_of(client, sid) is True
+
+
+def test_mark_read_on_unknown_session_is_404(api: tuple[TestClient, ApiRuntime]) -> None:
+    client, _runtime = api
+
+    assert client.post("/api/sessions/0123456789abcdef0123456789abcdef/read").status_code == 404
+
+
+def test_delete_session_requires_archived(api: tuple[TestClient, ApiRuntime]) -> None:
+    """未归档的会话删不掉（2026-10-29）：删除不可撤销，归档才是"离开视线"的那一步。"""
+    client, _runtime = api
+    sid = _create_session(client)
+
+    response = client.delete(f"/api/sessions/{sid}")
+
+    assert response.status_code == 422
+    assert "已归档" in response.json()["detail"]
+    # 会话必须还在：拒绝删除不能顺手改状态。
+    assert client.get(f"/api/sessions/{sid}").status_code == 200
+
+
+def test_delete_archived_session_removes_messages_and_attachments(
+    api: tuple[TestClient, ApiRuntime], tmp_path: Path,
+) -> None:
+    """归档后才可删；删完会话、消息、附件**文件**一起消失。"""
+    client, _runtime = api
+    sid = _create_session(client)
+    _submit(client, sid, "你好", "delete-1")
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+    uploaded = client.post(
+        f"/api/sessions/{sid}/attachments",
+        json={"data_base64": base64.b64encode(png).decode("ascii")},
+    )
+    assert uploaded.status_code == 200, uploaded.text
+    attachment_id = uploaded.json()["attachment_id"]
+    # 直接看磁盘：HTTP 层在会话不存在时会先 404，掩盖"文件其实还在"这件事。
+    stored = attachment_id.rsplit("/", 1)[-1]
+    assert list(tmp_path.rglob(stored)), "上传后磁盘上应当有这份附件"
+
+    assert client.post(f"/api/sessions/{sid}/archive").status_code == 200
+    removed = client.delete(f"/api/sessions/{sid}")
+
+    assert removed.status_code == 204, removed.text
+    # 会话与快照都读不到了（404，而不是"存在但空"）。
+    assert client.get(f"/api/sessions/{sid}").status_code == 404
+    # 附件引用同样失效，且磁盘上那份文件确实被删掉了。
+    assert client.get(
+        f"/api/sessions/{sid}/attachments", params={"attachment_id": attachment_id}
+    ).status_code == 404
+    assert not list(tmp_path.rglob(stored)), "删除会话后附件文件不能留在磁盘上"
+    # 归档列表里不再出现它。
+    archived = client.get("/api/sessions", params={"archived": True}).json()
+    assert all(item["session_id"] != sid for item in archived)
+
+
+def test_delete_archived_session_leaves_others_alone(
+    api: tuple[TestClient, ApiRuntime],
+) -> None:
+    """删一个会话不能动到别的会话的数据。"""
+    client, _runtime = api
+    keep = _create_session(client, title="留着")
+    doomed = _create_session(client, title="要删的")
+    _submit(client, keep, "这条要留着", "keep-1")
+    _submit(client, doomed, "这条要删掉", "delete-2")
+
+    client.post(f"/api/sessions/{doomed}/archive")
+    assert client.delete(f"/api/sessions/{doomed}").status_code == 204
+
+    survivor = client.get(f"/api/sessions/{keep}")
+    assert survivor.status_code == 200
+    texts = [item.get("text") for item in survivor.json()["messages"] if item["kind"] == "user"]
+    assert "这条要留着" in texts
+
+
+@pytest.mark.parametrize("stage", ["attachments", "baselines", "checkpoint", "database"])
+def test_delete_failure_keeps_parent_and_child_retryable(
+    api: tuple[TestClient, ApiRuntime], monkeypatch: pytest.MonkeyPatch, stage: str,
+) -> None:
+    """部分磁盘/检查点清理和父子库行删除失败后，原删除入口仍能继续完成。"""
+    import sqlite3
+
+    from local_agent.persistence.file_changes import FileChangeLedger
+
+    client, runtime = api
+    sid = _create_session(client)
+    _submit(client, sid, "parent", "delete-retry-parent")
+    child = runtime.database.sessions.create(parent_session_id=sid, activate=False)
+    _submit(client, child.session_id, "child", "delete-retry-child")
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+    attachment_paths = []
+    for ident in (sid, child.session_id):
+        uploaded = client.post(
+            f"/api/sessions/{ident}/attachments",
+            json={"data_base64": base64.b64encode(png).decode("ascii")},
+        )
+        assert uploaded.status_code == 200
+        attachment_paths.append(runtime.service._attachments.resolve_path(
+            ident, uploaded.json()["attachment_id"]
+        ))
+    assert client.post(f"/api/sessions/{sid}/archive").status_code == 200
+
+    with monkeypatch.context() as injected:
+        if stage == "attachments":
+            store_type = type(runtime.service._attachments)
+            original = store_type.delete_session
+
+            def fail_child(store, session_id):
+                if session_id == child.session_id:
+                    raise PermissionError("injected attachment lock")
+                return original(store, session_id)
+
+            injected.setattr(store_type, "delete_session", fail_child)
+            expected = PermissionError
+        elif stage == "baselines":
+            def fail_baseline(ledger):
+                raise PermissionError("injected baseline lock")
+
+            injected.setattr(FileChangeLedger, "delete_session", fail_baseline)
+            expected = PermissionError
+        elif stage == "checkpoint":
+            saver_type = type(runtime.database.checkpointer)
+            delete_thread = saver_type.delete_thread
+
+            def fail_checkpoint(saver, thread_id):
+                if thread_id == child.thread_id:
+                    raise OSError("injected checkpoint failure")
+                return delete_thread(saver, thread_id)
+
+            injected.setattr(saver_type, "delete_thread", fail_checkpoint)
+            expected = OSError
+        else:
+            runtime.database.connection.execute(
+                "CREATE TEMP TRIGGER fail_child_delete BEFORE DELETE ON sessions "
+                f"WHEN OLD.session_id = '{child.session_id}' "
+                "BEGIN SELECT RAISE(ABORT, 'injected database failure'); END"
+            )
+            expected = sqlite3.IntegrityError
+
+        try:
+            with pytest.raises(expected):
+                client.delete(f"/api/sessions/{sid}")
+        finally:
+            if stage == "database":
+                runtime.database.connection.execute("DROP TRIGGER fail_child_delete")
+
+    # 父子索引必须一起保留；即使 checkpoint 已删除，也不能失去重试定位信息。
+    rows = runtime.database.connection.execute(
+        "SELECT session_id FROM sessions WHERE session_id IN (?, ?)", (sid, child.session_id)
+    ).fetchall()
+    assert {row[0] for row in rows} == {sid, child.session_id}
+    assert client.delete(f"/api/sessions/{sid}").status_code == 204
+    assert not any(path.exists() for path in attachment_paths)
+    assert runtime.database.connection.execute(
+        "SELECT COUNT(*) FROM sessions WHERE session_id IN (?, ?)", (sid, child.session_id)
+    ).fetchone()[0] == 0
 
 
 def test_mcp_concurrent_config_writes_do_not_lose_other_servers(api):

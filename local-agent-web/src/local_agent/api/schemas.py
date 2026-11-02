@@ -27,6 +27,9 @@ from local_agent.workflow_contracts import WorkflowRequest
 TITLE_MAX_CHARS = 1000
 REQUEST_ID_MAX_CHARS = 128
 MESSAGE_MAX_CHARS = 100_000
+#: 一条消息最多带几份文档（2026-10-29）。图片数量不设配额，文档设一个：
+#: 每一份都是一次解析 + 一段提示，塞十几个只会稀释上下文。
+MAX_FILES_PER_MESSAGE = 5
 PATH_MAX_CHARS = 4096
 REASON_MAX_CHARS = 2000
 #: 提问答复的长度上限（与拒绝理由同值，2026-10-28）；超出部分由请求校验挡掉，不让它进 State。
@@ -98,6 +101,18 @@ class CancelTaskRequest(_Request):
     reason: str = Field(default="", max_length=200)
 
 
+class SubmittedFileRef(_Request):
+    """随消息提交的一份文档引用（2026-10-29）。
+
+    `name` 是**用户上传时的文件名**，只用于展示（气泡与出站提示）；服务端会净化它
+    （去路径段、去控制字符、限长），为空时回退到落盘名。落盘名永远是内容哈希，
+    不能由客户端指定——那是路径穿越与覆盖写入的入口。
+    """
+
+    id: str = Field(min_length=1, max_length=300)
+    name: str = Field(default="", max_length=300)
+
+
 class SubmitMessageRequest(_Request):
     """提交消息。`client_request_id` 是幂等键（§6.1），由前端生成并复用。"""
 
@@ -109,6 +124,10 @@ class SubmitMessageRequest(_Request):
     attachments: list[str] = Field(
         default_factory=list, max_length=MAX_ATTACHMENTS_PER_MESSAGE
     )
+    #: 随这条消息一起交给模型的**文档**（2026-10-29）：同样是引用，不是字节。
+    #: 与图片分成两个字段而不是混在一个列表里，因为下游处理完全不同——图片要被物化成
+    #: `data:` URL 进内容块，文档只把绝对路径写进提示、由模型自己 `read_file` 读。
+    files: list[SubmittedFileRef] = Field(default_factory=list, max_length=MAX_FILES_PER_MESSAGE)
     workflow: WorkflowRequest | None = None
     parent_turn_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)
     expected_branch_id: str | None = Field(default=None, min_length=1, max_length=REQUEST_ID_MAX_CHARS)
@@ -121,8 +140,8 @@ class SubmitMessageRequest(_Request):
         `text` 因此允许为空：只贴一张图、一个字不打也是合法提问（"看看这是什么"）。但不能两者都空：
         那样提交的是一条**什么都不含**的消息，模型没有可回应的内容，用户也看不出自己漏了什么。
         """
-        if not self.text.strip() and not self.attachments:
-            msg = "text 与 attachments 至少要有一个"
+        if not self.text.strip() and not self.attachments and not self.files:
+            msg = "text、attachments 与 files 至少要有一个"
             raise ValueError(msg)
         return self
 
@@ -441,6 +460,34 @@ class CapabilitiesRequest(_Request):
     changes: dict[str, bool] = Field(min_length=1)
 
 
+# ---- 文件改动还原（2026-10-29）---------------------------------------------
+
+
+class RestoreChangesRequest(_Request):
+    """把文件改动退回某个时间点。
+
+    这里只校验**形状**：``scope=file`` 要 ``path``，``scope=turn`` 要 ``run_id``。至于
+    "这一轮到底有没有改动可还原""账本有没有接线"，属于业务不成立，由服务返回带错误码的信封
+    （``CHANGES_RESTORE_UNAVAILABLE``）——那时用户需要的是原因和下一步，不是"字段不合法"。
+    """
+
+    scope: Literal["file", "turn"]
+    path: str | None = Field(default=None, max_length=PATH_MAX_CHARS)
+    run_id: str | None = Field(default=None, max_length=REQUEST_ID_MAX_CHARS)
+    #: 整轮里只还原这部分文件；``None`` = 该轮全部。
+    paths: list[str] | None = Field(default=None, max_length=500)
+    #: 文件在 AI 写完之后被人改过时，是否仍然覆盖。默认不覆盖（保留了别处的手工修改）。
+    force: bool = False
+
+    @model_validator(mode="after")
+    def _required_by_scope(self) -> RestoreChangesRequest:
+        if self.scope == "file" and not (self.path or "").strip():
+            raise ValueError("还原单个文件需要提供 path")
+        if self.scope == "turn" and not (self.run_id or "").strip():
+            raise ValueError("还原本轮需要提供 run_id")
+        return self
+
+
 # ---- MCP（2026-10-20；契约 §6.13）------------------------------------------
 
 
@@ -457,25 +504,39 @@ class McpServerRequest(_Request):
 
 
 class McpServerCreateRequest(_Request):
-    """新增一台 MCP Server（只支持 stdio）。
+    """新增一台 MCP Server（``stdio`` 或 ``http``，2026-11-02）。
 
-    ``env`` 允许传——否则需要凭据的 server（cookie / token）根本配不出来。但它**只写不回读**：
-    响应里的 `McpView` 没有任何 env 字段，日志也不记（与模型连接密钥同一条口径）。
+    ``env`` / ``headers`` 允许传——否则需要凭据的 server（cookie / token）根本配不出来。
+    但它们**只写不回读**：响应里只有键名，日志与错误文案里也会抹掉值（与模型连接密钥同一条口径）。
+
+    两个必填字段按 ``type`` 二选一（``command`` 或 ``url``），由服务层用同一个模型校验——
+    这里不重复写规则，避免"接口说可以、落盘被拒"。
     """
 
     name: str = Field(min_length=1)
-    command: str = Field(min_length=1)
+    type: Literal["stdio", "http"] = "stdio"
+    command: str | None = Field(default=None, min_length=1)
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
+    url: str | None = Field(default=None, min_length=1)
+    headers: dict[str, str] = Field(default_factory=dict)
 
 
 class McpServerSpecRequest(_Request):
-    """替换连接方式；省略字段保持原值，env 按键合并且不回读。"""
+    """替换连接方式；省略字段保持原值，env / headers 按键合并且不回读。
 
+    ``type`` 与已有值不同时，服务层会**丢掉旧传输那组字段**再应用本次改动
+    （stdio 的 command/args 与 http 的 url/headers 互斥）。
+    """
+
+    type: Literal["stdio", "http"] | None = None
     command: str | None = Field(default=None, min_length=1)
     args: list[str] | None = None
     env: dict[str, str] = Field(default_factory=dict)
     remove_env: list[str] = Field(default_factory=list)
+    url: str | None = Field(default=None, min_length=1)
+    headers: dict[str, str] = Field(default_factory=dict)
+    remove_headers: list[str] = Field(default_factory=list)
 
 
 # ---- 技能（技能管理页，2026-10-16；§16.5）----------------------------------

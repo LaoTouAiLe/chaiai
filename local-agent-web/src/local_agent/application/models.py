@@ -393,12 +393,22 @@ class McpToolView(_Dto):
 
 
 class McpServerView(_Dto):
-    """一台 MCP Server 的状态与工具清单（**不含任何凭据**）。"""
+    """一台 MCP Server 的状态与工具清单（**不含任何凭据**）。
+
+    两种连接方式共用这一个视图：``stdio`` 用 ``command`` + ``args``，``http`` 用 ``url``。
+    ``env_keys`` / ``header_keys`` 只回**键名**——值与模型连接密钥同一条口径：只写不回读。
+    """
 
     name: str = Field(min_length=1)
+    #: ``stdio`` 或 ``http``（2026-11-02）。页面据此决定显示命令还是地址。
+    transport: Literal["stdio", "http"] = "stdio"
     env_keys: list[str] = Field(default_factory=list)
     command: str = ""
     args: list[str] = Field(default_factory=list)
+    #: 远程端点；``stdio`` 恒为 ``None``。
+    url: str | None = None
+    #: HTTP 头的键名（值不回读）。
+    header_keys: list[str] = Field(default_factory=list)
     enabled_tools: list[str] | None = None
     disabled_tools: list[str] = Field(default_factory=list)
     enabled: bool = False
@@ -627,6 +637,54 @@ class FileChangeDiffView(_Dto):
     unavailable_reason: str | None = None
     before_sha256: str | None = None
     after_sha256: str | None = None
+
+
+class RestoredFileView(_Dto):
+    """还原时真正处理过的一个文件（2026-10-29）。
+
+    ``action`` 四态必须分清：``written`` 覆盖写回、``rebuilt`` 文件原本被删因此按改前内容
+    重建、``removed`` 删除本次新建文件、``unchanged`` 状态本来就一致（没写盘）。把 ``unchanged`` 说成"已还原"是在谎报
+    做过的事。
+    """
+
+    path: str
+    #: removed：基准不存在，删除本次新建文件；空文件基准仍按 written/rebuilt 处理。
+    action: Literal["written", "rebuilt", "removed", "unchanged"]
+    #: 基准：``turn`` = 本轮开始前；``session`` = 会话开始前（v15 之前的轮次只能降级到这里）。
+    basis: Literal["turn", "session"]
+    #: 覆盖前把当时的内容留了一份（内容寻址引用）；「仍然覆盖」这类操作之后可人工找回。
+    undo_ref: str | None = None
+
+
+class SkippedFileView(_Dto):
+    """没动、并且说明为什么没动（冲突 / 无改前内容 / 已清理）。"""
+
+    path: str
+    reason: str
+
+
+class FailedFileView(_Dto):
+    """尝试还原但失败了；与 ``skipped`` 严格分开：一个是没做，一个是做了没成。"""
+
+    path: str
+    error: str
+
+
+class RestoreResultView(_Dto):
+    """一次还原的结果（2026-10-29）。
+
+    带 ``changes`` 是**刻意的**：项目里"服务端返回完整视图、前端直接换缓存"是统一做法
+    （见 `useSetCapabilities`），否则前端要自己推算哪些轮次还剩什么，就成了第二套真相。
+    """
+
+    scope: Literal["file", "turn"]
+    run_id: str | None = None
+    #: 三个分区**永远存在**（可能是空列表）。不给默认值是有意的：契约里一旦变成可选，
+    #: 前端每个入口都得判空，而这些结果本来就是"必然有、可能为空"。
+    restored: list[RestoredFileView]
+    skipped: list[SkippedFileView]
+    failed: list[FailedFileView]
+    changes: SessionChangesView
 
 
 class SearchMatchView(_Dto):
@@ -882,6 +940,19 @@ class MemoryUseView(_Dto):
 # ---- 消息 ------------------------------------------------------------------
 
 
+class UserFileView(_Dto):
+    """一条用户消息带的一份文档（2026-10-29）：页面画附件块用。
+
+    **不含磁盘路径**：路径只写给出站提示给模型，页面没有理由拿到它（与图片只回引用
+    同一条门槛）。`name` 是落盘后的文件名（内容哈希），不是用户的原文件名——原文件名
+    早在上传时就被丢弃，因为它是不可信输入。
+    """
+
+    attachment_id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    size_bytes: int = Field(ge=0)
+
+
 class UserMessageView(_Dto):
     kind: Literal["user"] = "user"
     message_id: str = Field(min_length=1)
@@ -891,6 +962,9 @@ class UserMessageView(_Dto):
     #: 只回引用——不回字节、不回磁盘路径（与 `AttachmentView` 同一条门槛）。
     #: 空列表 = 这条消息没有图（也兼容所有旧 Checkpoint：那时没有 `user_attachment_refs`）。
     attachments: list[str] = Field(default_factory=list)
+    #: 这条消息带的**文档**（2026-10-29）。空列表 = 没带文件（也兼容所有旧 Checkpoint：
+    #: 那时没有 `user_file_refs`）。
+    files: list[UserFileView] = Field(default_factory=list)
     #: **可空**：Checkpoint 里的 LangChain 消息不携带时间戳，投影层不伪造时间（T28 实测）。
     #: 用量记录落地后（§15.6 的 `model_call_records`）可由调用记录补齐。
     created_at: datetime | None = None
@@ -1354,6 +1428,12 @@ class SessionSummaryView(_Dto):
     #: 是否是"当前打开的会话"（`sessions.status='active'` 全库唯一）。
     is_active: bool = False
     archived: bool = False
+    #: 有没有"我离开之后新增的内容"（2026-10-30）。
+    #:
+    #: 由服务端算好再下发，而不是把 `last_read_at` 交给页面自己比：规则只有一处实现，
+    #: 而且"从没打开过的会话不算未读"这条容易被前端写成 `updated_at > (read ?? '')`
+    #: ——那样第一次开应用时整屏都是未读。
+    unread: bool = False
     #: 侧边会话（§21.7）：从哪个会话开出；普通会话为 `None`。
     parent_session_id: str | None = None
     created_at: datetime

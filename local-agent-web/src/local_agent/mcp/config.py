@@ -1,7 +1,7 @@
 """``mcp.json`` 的解析与校验（架构 §6.13）。
 
-**格式与 CodeBuddy 一致**（顶层 ``mcpServers``，每项 ``type``/``command``/``args``/``env``），
-这样用户已有的配置可以整份粘过来，不改一字。与 CodeBuddy 的两处差异都是**加法**：
+**格式与 CodeBuddy 一致**（顶层 ``mcpServers``，每项 ``type`` + ``command``/``args``/``env`` 或
+``url``/``headers``），这样用户已有的配置可以整份粘过来，不改一字。与 CodeBuddy 的两处差异都是**加法**：
 
 - ``enabled_tools`` / ``disabled_tools``：每 server 的工具白/黑名单（照 Codex 的形状）。
 - **没有** ``enabled`` 字段：server 的开关是**用户状态**，存设置库，不写在这份文件里。
@@ -22,6 +22,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -38,19 +39,43 @@ _SERVER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 #: 环境变量名的合法形式（``npx`` 之类子进程的 ``env`` 键）。
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-#: 本版支持的传输。HTTP/SSE 只占位在错误文案里，不实现。
-SUPPORTED_TRANSPORTS: tuple[str, ...] = ("stdio",)
+#: 本版支持的传输。
+#:
+#: 2026-11-02 加 ``http``（MCP 的 Streamable HTTP）：远程 MCP server 只能这样接，
+#: ``stdio`` 那条路要求用户在本机装好运行时并让 server 作为子进程跑起来。
+#: **SSE 那条旧传输不做**：它已被 Streamable HTTP 取代，两套都留等于永远要维护两套断线语义。
+SUPPORTED_TRANSPORTS: tuple[str, ...] = ("stdio", "http")
+
+#: 允许明文 HTTP 的主机名（回环）。与模型连接的判定同一条口径：明文只允许本机回环，
+#: 别处一律要求 https——远程 MCP 的请求体里通常带工具参数，明文等于把它们公开在网线上。
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+#: HTTP 头名的合法形式（RFC 7230 的 token）。
+_HEADER_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,63}$")
 
 
 class McpServerSpec(BaseModel):
-    """一个 MCP Server 的**连接方式**（不含开关；开关在设置库）。"""
+    """一个 MCP Server 的**连接方式**（不含开关；开关在设置库）。
+
+    两种传输共用一张模型，字段按 ``type`` 分开校验（见 :meth:`_transport_contract`）：
+
+    - ``stdio``：``command`` 必填，``args`` / ``env`` 可选；
+    - ``http``：``url`` 必填，``headers`` 可选（这里通常放 token）。
+
+    **不用联合类型**：``command`` / ``url`` 在装配层与页面上都要读，拆成两个模型会让每一处
+    都得先判断类型；而"哪个字段该有"本就是一条可校验的契约，写在模型里比散在调用点更可靠。
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    type: Literal["stdio"] = "stdio"
-    command: str = Field(min_length=1)
+    type: Literal["stdio", "http"] = "stdio"
+    command: str | None = None
     args: tuple[str, ...] = ()
     env: dict[str, str] = Field(default_factory=dict)
+    #: 远程 server 的端点（``https://`` 或回环上的 ``http://``）。
+    url: str | None = None
+    #: 随每次请求发出的 HTTP 头。**值可能是凭据**：视图只回读键名，日志与错误文案里要脱敏。
+    headers: dict[str, str] = Field(default_factory=dict)
     #: 显式白名单：设了就只有这些工具会出现（照 Codex ``enabled_tools``）。
     enabled_tools: tuple[str, ...] | None = None
     #: 黑名单：在白名单**之后**生效，即"先白后黑"。
@@ -58,11 +83,71 @@ class McpServerSpec(BaseModel):
 
     @field_validator("command")
     @classmethod
-    def _command_is_not_blank(cls, value: str) -> str:
+    def _command_is_not_blank(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
         text = value.strip()
         if not text:
             raise ValueError("command 不能是空白字符串")
         return text
+
+    @field_validator("url")
+    @classmethod
+    def _url_is_usable(cls, value: str | None) -> str | None:
+        """只做**机械可判**的检查：协议、主机、凭据、端口。
+
+        这里不联网、不解析 DNS——"这个地址现在通不通"不是配置校验该回答的问题，
+        它由连接阶段以 ``kind`` 报出来（``KIND_HANDSHAKE_FAILED`` 等）。
+        """
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            raise ValueError("url 不能是空白字符串")
+        parsed = urlparse(text)
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError(f"url 必须以 http:// 或 https:// 开头（当前是 {parsed.scheme or '空'}）")
+        if not parsed.hostname:
+            raise ValueError("url 里没有主机名")
+        if parsed.username or parsed.password:
+            # 凭据写在 URL 里会随日志/错误文案一起外泄，而且多数 server 也不看它。
+            raise ValueError("不要把凭据写在 url 里：请改用 headers（例如 Authorization）")
+        if parsed.scheme == "http" and parsed.hostname.lower() not in _LOOPBACK_HOSTS:
+            raise ValueError(
+                f"{parsed.hostname} 不是本机回环地址：远程 server 必须用 https，"
+                "明文 http 只允许 localhost / 127.0.0.1"
+            )
+        return text
+
+    @field_validator("headers")
+    @classmethod
+    def _headers_are_valid(cls, value: dict[str, str]) -> dict[str, str]:
+        for name, item in value.items():
+            if not _HEADER_NAME_PATTERN.match(name):
+                raise ValueError(f"请求头名 {name!r} 不合法（只允许字母、数字与连字符）")
+            if "\n" in item or "\r" in item:
+                # 头注入：值里带换行等于让用户往请求里塞新头。
+                raise ValueError(f"请求头 {name!r} 的值里不能有换行")
+        return value
+
+    @model_validator(mode="after")
+    def _transport_contract(self) -> McpServerSpec:
+        """每种传输只接受自己那组字段：混着写多半是从别处粘贴过来的配置。"""
+        if self.type == "stdio":
+            if not self.command:
+                raise ValueError("stdio 传输必须给 command")
+            if self.url:
+                raise ValueError("stdio 传输不接受 url（远程 server 请把 type 设为 http）")
+            if self.headers:
+                raise ValueError("stdio 传输不接受 headers（凭据请写进 env）")
+        else:
+            if not self.url:
+                raise ValueError("http 传输必须给 url")
+            if self.command:
+                raise ValueError("http 传输不接受 command（它是要本机启动的子进程）")
+            if self.args or self.env:
+                raise ValueError("http 传输不接受 args / env（那是子进程的参数与环境）")
+        return self
 
     @field_validator("args")
     @classmethod
@@ -221,10 +306,11 @@ def load_mcp_servers(
 
         transport = body.get("type", "stdio")
         if transport not in SUPPORTED_TRANSPORTS:
-            # 专门文案：复制别人的 HTTP 配置是常见情况，报"字段不合法"帮不上忙。
+            # 专门文案：从别处粘贴配置时，"类型不认识"比"字段不合法"有用得多。
             raise ConfigError(
-                f"{display} 的 mcpServers.{name}.type={transport!r}：本版只支持 stdio，"
-                "HTTP/SSE 传输尚未实现"
+                f"{display} 的 mcpServers.{name}.type={transport!r}："
+                f"本版只支持 {' / '.join(SUPPORTED_TRANSPORTS)}"
+                "（旧的 sse 传输已由 http 取代，请改成 type: http 并填 url）"
             )
 
         try:
@@ -255,12 +341,22 @@ def check_server_name(name: str) -> str:
 
 
 def spec_to_body(spec: McpServerSpec) -> dict[str, Any]:
-    """一台 server → 写回文件的结构（**空字段不输出**，往返后逐字相等）。"""
-    body: dict[str, Any] = {"type": spec.type, "command": spec.command}
-    if spec.args:
-        body["args"] = list(spec.args)
-    if spec.env:
-        body["env"] = dict(spec.env)
+    """一台 server → 写回文件的结构（**空字段不输出**，往返后逐字相等）。
+
+    两种传输各写各的字段：把 ``url`` 写进 stdio 项会让下一次解析直接报错（那是设计如此），
+    所以这里不能"全字段尝试输出"。
+    """
+    body: dict[str, Any] = {"type": spec.type}
+    if spec.type == "http":
+        body["url"] = spec.url
+        if spec.headers:
+            body["headers"] = dict(spec.headers)
+    else:
+        body["command"] = spec.command
+        if spec.args:
+            body["args"] = list(spec.args)
+        if spec.env:
+            body["env"] = dict(spec.env)
     if spec.enabled_tools is not None:
         body["enabled_tools"] = list(spec.enabled_tools)
     if spec.disabled_tools:

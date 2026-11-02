@@ -429,9 +429,9 @@ export interface paths {
         put?: never;
         /**
          * 新增一台 MCP Server
-         * @description 把一台只走 stdio 的 server 写进 ``mcp.json``（已存在的同名会被拒）。
-         *
-         *     `env` 里的凭据**只写不回读**：响应与日志都没有它们。写完立即重载连接管理器。
+         * @description 把一台 server 写进 ``mcp.json``（已存在的同名会被拒）；两种连接方式各自校验字段。
+         *     `stdio` 给 ``command``/``args``/``env``，``http`` 给 ``url``/``headers``；
+         *     `env`/`headers` 的凭据只写不回读（响应只有键名）。写完立即重载连接管理器。
          */
         post: operations["add_mcp_server_api_mcp_servers_post"];
         delete?: never;
@@ -713,7 +713,7 @@ export interface paths {
          * 会话列表或搜索
          * @description `workspace_id` 缺省表示列出全部会话。
          *
-         *     `q` 非空时改为搜索（§15.11.2）：匹配标题与用户提问，按最近活动倒序。
+         *     `q` 非空时改为搜索（§15.11.2）：匹配标题、用户提问与回答正文，按最近活动倒序。
          *     **不传 `q` 时行为与响应和旧实现完全一致**，`limit` 也只在搜索分支生效。
          */
         get: operations["list_sessions_api_sessions_get"];
@@ -743,7 +743,15 @@ export interface paths {
         get: operations["get_session_api_sessions__session_id__get"];
         put?: never;
         post?: never;
-        delete?: never;
+        /**
+         * 删除一个已归档的会话
+         * @description 彻底删除一个**已归档**的会话（2026-10-29）：消息、Checkpoint、任务记录、
+         *     请求台账、变更基线、上传的附件一并清掉。
+         *
+         *     为什么只允许删已归档的：删除不可撤销，而"归档"已经提供了离开视线的手段。
+         *     允许直接删一个正在用的会话，是把最贵的误触放在最顺手的位置上。
+         */
+        delete: operations["delete_session_api_sessions__session_id__delete"];
         options?: never;
         head?: never;
         /** Rename Session */
@@ -912,6 +920,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/changes/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 把文件改动退回某个时间点
+         * @description 还原文件改动（2026-10-29）。
+         *
+         *     **不回退对话**：本轮的消息与 Checkpoint 原样保留，只动磁盘上的文件。这是刻意的
+         *     边界——回退对话会连带影响后续引用，而用户点的是"把这个文件改回去"。
+         *
+         *     ``scope=file`` 退到**会话开始前**（与右栏 diff 同口径），``scope=turn`` 退到
+         *     **本轮开始前**。返回刷新后的改动总览，页面直接换缓存。
+         */
+        post: operations["restore_session_changes_api_sessions__session_id__changes_restore_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/commands/{command_id}/detach": {
         parameters: {
             query?: never;
@@ -963,6 +997,54 @@ export interface paths {
         get: operations["session_events_api_sessions__session_id__events_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 导出会话
+         * @description 把一个会话导出成人读的 Markdown 或机读的 JSON（2026-10-30）。
+         *
+         *     为什么要 `attachment`：浏览器要替用户填好"另存为"的文件名，内联打开还得多一步复制。
+         *     文件名用 RFC 5987（`filename*`）编码——会话标题几乎一定含中文，朴素的 `filename=`
+         *     在部分浏览器会变成乱码或整条被丢弃。
+         */
+        get: operations["export_session_api_sessions__session_id__export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/files": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 上传一份文档（multipart）
+         * @description 存一份用户上传的文档，返回**引用**（2026-10-29）。
+         *
+         *     为什么这个端点用 multipart、图片那个用 base64 JSON：图片上限 2 MB，base64 的 33%
+         *     开销无所谓；文档动辄几十 MB，膨胀与内存峰值都不划算，而 multipart 是流式的。
+         *     **格式仍由服务端按魔数判定**，文件名里的扩展名只用来区分旧版 doc / xls / ppt。
+         */
+        post: operations["upload_file_api_sessions__session_id__files_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1063,6 +1145,29 @@ export interface paths {
          * @description 回答或跳过一个挂起的提问：空答复按跳过处理（失败闭合）。
          */
         post: operations["resolve_question_api_sessions__session_id__questions__question_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 把会话标记为已读
+         * @description 记下"用户看到了这里"（2026-10-30），用于侧栏的未读标记。
+         *
+         *     为什么是独立的 POST 而不是在 GET 列表时顺手写：列表会被轮询、被预取、被别的
+         *     标签页拉一次——那种"已读"是假的，用户会永远收不到提醒。
+         */
+        post: operations["mark_session_read_api_sessions__session_id__read_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2025,6 +2130,14 @@ export interface components {
              */
             oss_region: string;
         };
+        /** Body_upload_file_api_sessions__session_id__files_post */
+        Body_upload_file_api_sessions__session_id__files_post: {
+            /**
+             * File
+             * @description pdf / docx / xlsx / pptx；旧版 doc/xls/ppt 也可以
+             */
+            file: string;
+        };
         /** BrowserCommand */
         BrowserCommand: {
             /**
@@ -2466,6 +2579,33 @@ export interface components {
              * @enum {string}
              */
             state: "running" | "completed" | "failed";
+        };
+        /**
+         * ConsolidationPreferences
+         * @description 后台记忆巩固（2026-11-02，架构 §10.4）。
+         *
+         *     **默认关闭**：它会在后台**调一次模型**，是会花钱的动作。三条说明写在这里，页面的 note 只是转述：
+         *
+         *     - 前提是中期记忆已启用——没有碎片就没有可整理的东西；
+         *     - 只**新增**长期事实：不合并、不停用、不删除已有记忆；
+         *     - 自上次以来没有更新的碎片时**不调用模型**，所以"开着"不等于"每次都花钱"。
+         */
+        ConsolidationPreferences: {
+            /**
+             * Enabled
+             * @default false
+             */
+            enabled: boolean;
+            /**
+             * Interval Hours
+             * @default 24
+             */
+            interval_hours: number;
+            /**
+             * Max Promotions
+             * @default 5
+             */
+            max_promotions: number;
         };
         /**
          * ContextMeterView
@@ -2915,6 +3055,16 @@ export interface components {
             updated_at?: string | null;
         };
         /**
+         * FailedFileView
+         * @description 尝试还原但失败了；与 ``skipped`` 严格分开：一个是没做，一个是做了没成。
+         */
+        FailedFileView: {
+            /** Error */
+            error: string;
+            /** Path */
+            path: string;
+        };
+        /**
          * FileChangeDiffView
          * @description 整文件 diff：``baseline``（首次改动前原文）对 ``当前磁盘内容``。
          *
@@ -2970,6 +3120,24 @@ export interface components {
             path: string;
             /** Unavailable Reason */
             unavailable_reason?: string | null;
+        };
+        /**
+         * FileChangesPreferences
+         * @description 文件改动账本的存储口径（2026-10-29）：设置页「文件改动与还原」。
+         *
+         *     三项都**保存后立即生效**（下一次写盘就按新值走），与其它分组"下一次新任务生效"不同：
+         *     它们约束的是账本本身，不是某一轮任务的输入。页面说明文字必须照这个口径写，否则用户会
+         *     以为要等下一轮。
+         *
+         *     单位是 KB / MB（与 ``config.file_changes`` 同一套），存进文件系统前再换算成字节。
+         */
+        FileChangesPreferences: {
+            /** Keep Turns */
+            keep_turns: number;
+            /** Max Baseline Kb */
+            max_baseline_kb: number;
+            /** Max Session Mb */
+            max_session_mb: number;
         };
         /**
          * FileDiffHunkView
@@ -3332,22 +3500,37 @@ export interface components {
         };
         /**
          * McpServerCreateRequest
-         * @description 新增一台 MCP Server（只支持 stdio）。
+         * @description 新增一台 MCP Server（``stdio`` 或 ``http``，2026-11-02）。
          *
-         *     ``env`` 允许传——否则需要凭据的 server（cookie / token）根本配不出来。但它**只写不回读**：
-         *     响应里的 `McpView` 没有任何 env 字段，日志也不记（与模型连接密钥同一条口径）。
+         *     ``env`` / ``headers`` 允许传——否则需要凭据的 server（cookie / token）根本配不出来。
+         *     但它们**只写不回读**：响应里只有键名，日志与错误文案里也会抹掉值（与模型连接密钥同一条口径）。
+         *
+         *     两个必填字段按 ``type`` 二选一（``command`` 或 ``url``），由服务层用同一个模型校验——
+         *     这里不重复写规则，避免"接口说可以、落盘被拒"。
          */
         McpServerCreateRequest: {
             /** Args */
             args?: string[];
             /** Command */
-            command: string;
+            command?: string | null;
             /** Env */
             env?: {
                 [key: string]: string;
             };
+            /** Headers */
+            headers?: {
+                [key: string]: string;
+            };
             /** Name */
             name: string;
+            /**
+             * Type
+             * @default stdio
+             * @enum {string}
+             */
+            type: "stdio" | "http";
+            /** Url */
+            url?: string | null;
         };
         /**
          * McpServerRequest
@@ -3366,7 +3549,10 @@ export interface components {
         };
         /**
          * McpServerSpecRequest
-         * @description 替换连接方式；省略字段保持原值，env 按键合并且不回读。
+         * @description 替换连接方式；省略字段保持原值，env / headers 按键合并且不回读。
+         *
+         *     ``type`` 与已有值不同时，服务层会**丢掉旧传输那组字段**再应用本次改动
+         *     （stdio 的 command/args 与 http 的 url/headers 互斥）。
          */
         McpServerSpecRequest: {
             /** Args */
@@ -3377,12 +3563,25 @@ export interface components {
             env?: {
                 [key: string]: string;
             };
+            /** Headers */
+            headers?: {
+                [key: string]: string;
+            };
             /** Remove Env */
             remove_env?: string[];
+            /** Remove Headers */
+            remove_headers?: string[];
+            /** Type */
+            type?: ("stdio" | "http") | null;
+            /** Url */
+            url?: string | null;
         };
         /**
          * McpServerView
          * @description 一台 MCP Server 的状态与工具清单（**不含任何凭据**）。
+         *
+         *     两种连接方式共用这一个视图：``stdio`` 用 ``command`` + ``args``，``http`` 用 ``url``。
+         *     ``env_keys`` / ``header_keys`` 只回**键名**——值与模型连接密钥同一条口径：只写不回读。
          */
         McpServerView: {
             /** Args */
@@ -3407,6 +3606,8 @@ export interface components {
             failure_kind?: string | null;
             /** Failure Message */
             failure_message?: string | null;
+            /** Header Keys */
+            header_keys?: string[];
             /** Name */
             name: string;
             /**
@@ -3422,6 +3623,14 @@ export interface components {
             tool_count: number;
             /** Tools */
             tools?: components["schemas"]["McpToolView"][];
+            /**
+             * Transport
+             * @default stdio
+             * @enum {string}
+             */
+            transport: "stdio" | "http";
+            /** Url */
+            url?: string | null;
         };
         /**
          * McpSummaryView
@@ -4505,9 +4714,11 @@ export interface components {
             agents?: components["schemas"]["AgentsPreferences"] | null;
             attachments?: components["schemas"]["AttachmentsPreferences"] | null;
             compression?: components["schemas"]["CompressionPreferences"] | null;
+            consolidation?: components["schemas"]["ConsolidationPreferences"] | null;
             curated?: components["schemas"]["CuratedMemoryPreferences"] | null;
             embedding?: components["schemas"]["EmbeddingPreferences"] | null;
             execution: components["schemas"]["ExecutionPreferences"];
+            file_changes?: components["schemas"]["FileChangesPreferences"] | null;
             general?: components["schemas"]["GeneralPreferences"];
             medium_term?: components["schemas"]["MediumTermPreferences"] | null;
             memory: components["schemas"]["LongTermPreferences"];
@@ -4780,6 +4991,79 @@ export interface components {
              * @enum {string}
              */
             outcome: "completed" | "cancelled";
+        };
+        /**
+         * RestoreChangesRequest
+         * @description 把文件改动退回某个时间点。
+         *
+         *     这里只校验**形状**：``scope=file`` 要 ``path``，``scope=turn`` 要 ``run_id``。至于
+         *     "这一轮到底有没有改动可还原""账本有没有接线"，属于业务不成立，由服务返回带错误码的信封
+         *     （``CHANGES_RESTORE_UNAVAILABLE``）——那时用户需要的是原因和下一步，不是"字段不合法"。
+         */
+        RestoreChangesRequest: {
+            /**
+             * Force
+             * @default false
+             */
+            force: boolean;
+            /** Path */
+            path?: string | null;
+            /** Paths */
+            paths?: string[] | null;
+            /** Run Id */
+            run_id?: string | null;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "file" | "turn";
+        };
+        /**
+         * RestoreResultView
+         * @description 一次还原的结果（2026-10-29）。
+         *
+         *     带 ``changes`` 是**刻意的**：项目里"服务端返回完整视图、前端直接换缓存"是统一做法
+         *     （见 `useSetCapabilities`），否则前端要自己推算哪些轮次还剩什么，就成了第二套真相。
+         */
+        RestoreResultView: {
+            changes: components["schemas"]["SessionChangesView"];
+            /** Failed */
+            failed: components["schemas"]["FailedFileView"][];
+            /** Restored */
+            restored: components["schemas"]["RestoredFileView"][];
+            /** Run Id */
+            run_id?: string | null;
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "file" | "turn";
+            /** Skipped */
+            skipped: components["schemas"]["SkippedFileView"][];
+        };
+        /**
+         * RestoredFileView
+         * @description 还原时真正处理过的一个文件（2026-10-29）。
+         *
+         *     ``action`` 四态必须分清：``written`` 覆盖写回、``rebuilt`` 文件原本被删因此按改前内容
+         *     重建、``removed`` 删除本次新建文件、``unchanged`` 状态本来就一致（没写盘）。把 ``unchanged`` 说成"已还原"是在谎报
+         *     做过的事。
+         */
+        RestoredFileView: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "written" | "rebuilt" | "removed" | "unchanged";
+            /**
+             * Basis
+             * @enum {string}
+             */
+            basis: "turn" | "session";
+            /** Path */
+            path: string;
+            /** Undo Ref */
+            undo_ref?: string | null;
         };
         /** RetrievalPreferences */
         RetrievalPreferences: {
@@ -5093,6 +5377,11 @@ export interface components {
             /** Title */
             title: string;
             /**
+             * Unread
+             * @default false
+             */
+            unread: boolean;
+            /**
              * Updated At
              * Format: date-time
              */
@@ -5226,6 +5515,16 @@ export interface components {
              * @default false
              */
             store_unavailable: boolean;
+        };
+        /**
+         * SkippedFileView
+         * @description 没动、并且说明为什么没动（冲突 / 无改前内容 / 已清理）。
+         */
+        SkippedFileView: {
+            /** Path */
+            path: string;
+            /** Reason */
+            reason: string;
         };
         /** StepCompletedEvent */
         StepCompletedEvent: {
@@ -5362,6 +5661,8 @@ export interface components {
             expected_branch_id?: string | null;
             /** Expected Snapshot Id */
             expected_snapshot_id?: string | null;
+            /** Files */
+            files?: components["schemas"]["SubmittedFileRef"][];
             /** Parent Turn Id */
             parent_turn_id?: string | null;
             /**
@@ -5371,6 +5672,23 @@ export interface components {
             text: string;
             /** Workflow */
             workflow?: (components["schemas"]["ReadonlyWorkflowRequest"] | components["schemas"]["CodeWorkflowRequest"] | components["schemas"]["DelegatedWorkflowRequest"]) | null;
+        };
+        /**
+         * SubmittedFileRef
+         * @description 随消息提交的一份文档引用（2026-10-29）。
+         *
+         *     `name` 是**用户上传时的文件名**，只用于展示（气泡与出站提示）；服务端会净化它
+         *     （去路径段、去控制字符、限长），为空时回退到落盘名。落盘名永远是内容哈希，
+         *     不能由客户端指定——那是路径穿越与覆盖写入的入口。
+         */
+        SubmittedFileRef: {
+            /** Id */
+            id: string;
+            /**
+             * Name
+             * @default
+             */
+            name: string;
         };
         /**
          * TaskCancelledEvent
@@ -6130,12 +6448,30 @@ export interface components {
             /** Uncached Input Tokens */
             uncached_input_tokens?: number | null;
         };
+        /**
+         * UserFileView
+         * @description 一条用户消息带的一份文档（2026-10-29）：页面画附件块用。
+         *
+         *     **不含磁盘路径**：路径只写给出站提示给模型，页面没有理由拿到它（与图片只回引用
+         *     同一条门槛）。`name` 是落盘后的文件名（内容哈希），不是用户的原文件名——原文件名
+         *     早在上传时就被丢弃，因为它是不可信输入。
+         */
+        UserFileView: {
+            /** Attachment Id */
+            attachment_id: string;
+            /** Name */
+            name: string;
+            /** Size Bytes */
+            size_bytes: number;
+        };
         /** UserMessageView */
         UserMessageView: {
             /** Attachments */
             attachments?: string[];
             /** Created At */
             created_at?: string | null;
+            /** Files */
+            files?: components["schemas"]["UserFileView"][];
             /**
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
@@ -8000,6 +8336,44 @@ export interface operations {
             };
         };
     };
+    delete_session_api_sessions__session_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     rename_session_api_sessions__session_id__patch: {
         parameters: {
             query?: never;
@@ -8463,6 +8837,59 @@ export interface operations {
             };
         };
     };
+    restore_session_changes_api_sessions__session_id__changes_restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RestoreChangesRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RestoreResultView"];
+                };
+            };
+            /** @description 会话不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     detach_command_api_sessions__session_id__commands__command_id__detach_post: {
         parameters: {
             query?: never;
@@ -8578,6 +9005,92 @@ export interface operations {
                 };
             };
             /** @description 会话不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_session_api_sessions__session_id__export_get: {
+        parameters: {
+            query?: {
+                format?: "markdown" | "json";
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_file_api_sessions__session_id__files_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_file_api_sessions__session_id__files_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachmentView"];
+                };
+            };
+            /** @description 会话或工作区不存在 */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -8814,6 +9327,44 @@ export interface operations {
             };
             /** @description 忙碌 / 幂等冲突 / 需要人工核对 / 审批已失效 */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mark_session_read_api_sessions__session_id__read_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description 会话或工作区不存在 */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

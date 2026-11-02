@@ -25,13 +25,15 @@ import json
 import os
 import shutil
 import threading
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, TextIO
 
 import anyio
 from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
+from mcp.client.streamable_http import create_mcp_http_client, streamable_http_client
 from mcp.shared.exceptions import MCPError
 
 from local_agent.mcp.config import McpServerSpec
@@ -289,24 +291,48 @@ class ServerWorker:
     def _describe(self, exc: BaseException, *, ready: bool) -> McpFailure:
         failure = _describe_failure(exc, name=self._name, ready=ready)
         message = failure.message
-        for secret in self._spec.env.values():
+        # 凭据会出现在两种地方：stdio 的 env、http 的 headers。两边都要抹掉——
+        # 异常文本里带出一个 Bearer token，等于把它写进了页面和日志。
+        for secret in (*self._spec.env.values(), *self._spec.headers.values()):
             if secret:
                 message = message.replace(secret, "[已隐藏]")
+        if self._spec.type == "http" and failure.kind == KIND_HANDSHAKE_FAILED:
+            # 远程 server 的握手失败基本只有三类：地址打不通、TLS/证书有问题、端点不是 MCP。
+            # 把端点带进消息，用户才知道自己配的那个 URL 到底有没有被用上。
+            message = f"{message}（端点 {self._spec.url}：确认它可达、证书有效、且是 MCP 的 Streamable HTTP 端点）"
         return McpFailure(failure.kind, message)
 
     def _server_parameters(self) -> StdioServerParameters:
         # ``npx`` 在 Windows 上是 ``npx.cmd``：先按 PATH 解析成绝对路径，找不到就原样交给
         # SDK，让它以"命令不存在"的形式失败（那是准确的事实，不该在这里编一个路径）。
-        resolved = shutil.which(self._spec.command) or self._spec.command
+        command = self._spec.command or ""
+        resolved = shutil.which(command) or command
         env = dict(self._spec.env) or None
         return StdioServerParameters(
             command=resolved, args=list(self._spec.args), env=env
         )
 
+    @asynccontextmanager
+    async def _transport(self, errlog: TextIO) -> AsyncIterator[Any]:
+        """按 ``type`` 建立读写两条流。
+
+        **两种传输只在这一处分叉**：握手、``tools/list``、调用、超时与失败归类全部共用。
+        各自维护一套会导致"stdio 能连、http 行为不一样"这类只在用户机器上显形的不一致。
+        """
+        if self._spec.type == "http":
+            # 头（通常含 token）只进内存里的 HTTP 客户端，不进日志、不进 DTO。
+            async with (
+                create_mcp_http_client(headers=dict(self._spec.headers) or None) as client,
+                streamable_http_client(self._spec.url or "", http_client=client) as streams,
+            ):
+                yield streams
+            return
+        async with stdio_client(self._server_parameters(), errlog=errlog) as streams:
+            yield streams
+
     async def _serve(self, errlog: TextIO) -> None:
         self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue()
-        params = self._server_parameters()
         with anyio.CancelScope() as scope:
             self._cancel_scope = scope
             if self._closing.is_set():
@@ -314,7 +340,8 @@ class ServerWorker:
             # 第三方 stderr 可能包含凭据；不直接打印到宿主日志。
             try:
                 async with (
-                    stdio_client(params, errlog=errlog) as (read_stream, write_stream),
+                    # 传输在这里分叉（stdio 子进程 / 远程 HTTP），其余全部共用。
+                    self._transport(errlog) as (read_stream, write_stream),
                     ClientSession(read_stream, write_stream) as session,
                 ):
                     async def initialize() -> None:

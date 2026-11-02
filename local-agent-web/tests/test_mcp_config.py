@@ -4,7 +4,8 @@
 
 1. **CodeBuddy 原样格式能被接受**——"现有配置整份粘过来"是这次接入的主要动机。
 2. 错误**指到具体 server 与字段**，不只回一句"配置不合法"。
-3. 不支持的传输（http/sse）有专门文案，而不是一句通用字段错误。
+3. 不支持的传输（``sse``）有专门文案，而不是一句通用字段错误；``http`` 自 2026-11-02 起**支持**，
+   两种传输各自的字段互斥由模型契约守住。
 4. 解析阶段**没有任何副作用**（本模块不 import 进程相关的东西，这里用行为断言兜住）。
 """
 
@@ -106,19 +107,86 @@ def test_server_name_must_be_safe_for_tool_names(tmp_path: Path) -> None:
     assert "mcp__<server>__<tool>" in str(excinfo.value)
 
 
-def test_http_transport_has_its_own_message(tmp_path: Path) -> None:
-    """粘贴别家的 HTTP 配置是常见情况：要直接告诉用户"本版不支持"，而不是报字段类型错。"""
+def test_sse_transport_has_its_own_message(tmp_path: Path) -> None:
+    """旧 ``sse`` 配置仍然常见：要直接说"已由 http 取代"，而不是报字段类型错。"""
     path = _write(
         tmp_path,
-        {"mcpServers": {"remote": {"type": "http", "url": "https://example.com/mcp"}}},
+        {"mcpServers": {"remote": {"type": "sse", "url": "https://example.com/mcp"}}},
     )
 
     with pytest.raises(ConfigError) as excinfo:
         load_mcp_servers(path)
 
     message = str(excinfo.value)
-    assert "本版只支持 stdio" in message
-    assert "HTTP/SSE" in message
+    assert "stdio / http" in message
+    assert "http 取代" in message
+
+
+def test_http_server_is_accepted(tmp_path: Path) -> None:
+    """远程 server 只走 http（2026-11-02）：url + headers，不启动任何本机进程。"""
+    path = _write(
+        tmp_path,
+        {
+            "mcpServers": {
+                "remote": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": {"Authorization": "Bearer placeholder"},
+                }
+            }
+        },
+    )
+
+    spec = load_mcp_servers(path).mcp_servers["remote"]
+
+    assert spec.type == "http"
+    assert spec.url == "https://example.com/mcp"
+    assert spec.command is None
+    assert spec.headers == {"Authorization": "Bearer placeholder"}
+
+
+@pytest.mark.parametrize(
+    "body, fragment",
+    [
+        # 明文 http 只允许回环：远程明文等于把工具参数公开在网线上。
+        ({"type": "http", "url": "http://example.com/mcp"}, "必须用 https"),
+        # 凭据写在 URL 里会随日志与错误文案外泄。
+        ({"type": "http", "url": "https://u:p@example.com/mcp"}, "不要把凭据写在 url 里"),
+        # 两种传输的字段混着写，多半是从别处粘过来的配置。
+        ({"type": "http", "url": "https://example.com/mcp", "command": "npx"}, "不接受 command"),
+        ({"type": "http", "url": "https://example.com/mcp", "env": {"A": "b"}}, "args / env"),
+        ({"type": "stdio", "command": "npx", "url": "https://example.com/mcp"}, "不接受 url"),
+        ({"type": "stdio", "command": "npx", "headers": {"A": "b"}}, "不接受 headers"),
+        # 头注入：值里带换行等于往请求里塞新头。
+        (
+            {"type": "http", "url": "https://example.com/mcp", "headers": {"A": "x\ny"}},
+            "不能有换行",
+        ),
+    ],
+)
+def test_http_spec_contract_is_enforced(
+    tmp_path: Path, body: dict[str, object], fragment: str
+) -> None:
+    path = _write(tmp_path, {"mcpServers": {"s": body}})
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_mcp_servers(path)
+
+    assert fragment in str(excinfo.value)
+
+
+def test_http_spec_round_trips(tmp_path: Path) -> None:
+    """写回文件时只写该传输的字段；读回来逐字相等，且不多出 command。"""
+    path = _write(
+        tmp_path,
+        {"mcpServers": {"remote": {"type": "http", "url": "https://example.com/mcp"}}},
+    )
+    config = load_mcp_servers(path)
+
+    save_mcp_servers(path, config)
+
+    assert load_mcp_servers(path) == config
+    assert "command" not in json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["remote"]
 
 
 def test_blank_command_is_rejected(tmp_path: Path) -> None:

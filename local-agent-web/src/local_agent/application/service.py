@@ -48,7 +48,18 @@ from pydantic import TypeAdapter
 
 from local_agent import config as config_module
 from local_agent.application import artifacts as artifacts_module
-from local_agent.application import conversation, data_center, side_chat, workspace_view
+from local_agent.application import (
+    conversation,
+    data_center,
+    document_attachments,
+    file_change_views,
+    file_mentions,
+    history_search,
+    mcp_admin,
+    session_export,
+    side_chat,
+    workspace_view,
+)
 from local_agent.application import cron as cron_module
 from local_agent.application import errors as app_errors
 from local_agent.application import events as app_events
@@ -87,17 +98,12 @@ from local_agent.application.models import (
     ExternalPathGrantView,
     ExternalPathsMode,
     FileChangeDiffView,
-    FileChangeSummaryView,
-    FileDiffHunkView,
-    FileDiffLineView,
     KeyStatus,
-    McpServerView,
-    McpSummaryView,
-    McpToolView,
     McpView,
     ModelConnectionView,
     ModelSelectionView,
     PermissionsView,
+    RestoreResultView,
     SessionChangesView,
     SessionSnapshot,
     SessionSummaryView,
@@ -107,8 +113,6 @@ from local_agent.application.models import (
     StorageView,
     TaskCenterView,
     TaskView,
-    TurnChangesView,
-    UnrecordedChangeView,
     WebSearchKeyView,
     WorkspaceRef,
 )
@@ -126,7 +130,11 @@ from local_agent.application.resolution import (
 from local_agent.application.resolution import status_from_snapshot as _status_from_snapshot
 from local_agent.application.tool_stream import ToolStream
 from local_agent.application.workspace_models import GitDiffView, GitStatusView, WorkspaceFilesView
-from local_agent.attachments import AttachmentStore, LoadedAttachment
+from local_agent.attachments import (
+    AttachmentStore,
+    FileAttachment,
+    LoadedAttachment,
+)
 from local_agent.cancellation import DEFAULT_CANCEL_REASON, CancellationToken
 from local_agent.capabilities import (
     capability_status,
@@ -135,7 +143,7 @@ from local_agent.capabilities import (
     unknown_switch_names,
 )
 from local_agent.config import (
-    ConfigError,
+    AppConfig,
     LlmConfig,
     RunConfig,
     WorkflowsConfig,
@@ -159,7 +167,6 @@ from local_agent.llm.models import ModelCapabilities
 from local_agent.llm.stream_context import use_sink
 from local_agent.llm.usage_recording import ModelCallRecorder, endpoint_fingerprint
 from local_agent.mcp.binding import McpBinding
-from local_agent.mcp.state import ServerState
 from local_agent.message_flags import DEFAULT_IMAGE_CONTEXT_TURNS
 from local_agent.model_settings import (
     PLACEHOLDER_API_KEY,
@@ -223,7 +230,6 @@ from local_agent.persistence.session_store import (
 )
 from local_agent.scope import SCOPE_WORKSPACE, scope_key_for
 from local_agent.security.path_guard import ExternalPathPolicy, protected_target_reason
-from local_agent.tools import git_tools
 from local_agent.tools.git_tools import git_availability
 from local_agent.tools.progress import use_tool_listener
 from local_agent.workflow_contracts import WorkflowRequest
@@ -279,6 +285,9 @@ class _RunEnv:
     #: 挂在环境上而不是塞进 payload——payload 会成为初始 State 并写进 Checkpoint，
     #: 图像字节没有理由在里面存第二份（第一份已经在用户消息的内容块里）。
     attachments: tuple[LoadedAttachment, ...] = ()
+    #: 这次运行要交给模型的**文档**（2026-10-29）：只有本机绝对路径，没有字节。
+    #: 模型用 `read_file` 读（提取在 `tools/document_extract`），服务端不替它解析。
+    files: tuple[FileAttachment, ...] = ()
 
 
 class EventSubscription:
@@ -714,6 +723,12 @@ class ApplicationService:
         self._cron = CronStore(sessions._connection)
         #: 调度线程由 app 启动时挂上（见 `api/app.py` 的 lifespan）；未启动时为 ``None``。
         self.cron_scheduler: Any = None
+        #: 记忆维护线程同样由 lifespan 挂上（2026-11-02）：记忆页只读它的 ``status()``，
+        #: 不因为"打开页面"而触发一次维护。未挂载时页面不显示这一行。
+        self.memory_maintenance: Any = None
+        #: 上一次巩固看到的最新碎片时间（2026-11-02）：没有更新的碎片就不再花一次模型调用。
+        #: 只在进程内，重启后第一轮会多跑一次——那一次是必要的"补课"，不是浪费。
+        self._last_consolidated_at: str | None = None
         self._user_terminals: Any = None
         self._ledger = ledger
         self._secrets = tuple(secrets)
@@ -1040,6 +1055,125 @@ class ApplicationService:
                            workspace_id: str | None = None) -> GitDiffView:
         return workspace_view.git_diff(self, path=path, workspace_id=workspace_id)
 
+    # ---- 记忆维护（2026-11-02，架构 §10.3）--------------------------------
+    @property
+    def app_config(self) -> AppConfig:
+        """启动时的配置快照（只读）。运行期被设置库覆盖过的值，见各自的消费点。"""
+        return self._app_config
+
+    def memory_maintenance_config(self) -> AppConfig:
+        """记忆维护任务用的配置：**应用了设置库偏好**的那一份（与召回/写入同源）。
+
+        为什么不能直接用启动配置：``long_term.aging_enabled`` / ``forget_after_days`` 在设置页
+        可改，偏好存在设置库里（``apply_runtime_preferences``）。后台若用启动值，用户关掉老化
+        之后它仍按旧值淘汰记忆——那是"设置写了不生效"。
+        设置库不可用（未装配、读失败、偏好不合法）时回退启动配置：维护是兜底，不该因此停摆。
+        """
+        store = self._preferences
+        if store is None:
+            return self._app_config
+        try:
+            saved = self._sqlite_access(store.read)
+        except Exception:
+            _LOGGER.exception("读取记忆偏好失败：本轮维护按启动配置执行")
+            return self._app_config
+        if saved is None:
+            return self._app_config
+        _, values = saved
+        try:
+            return apply_runtime_preferences(
+                self._app_config, complete_preferences(values, self._app_config)
+            )
+        except Exception:
+            _LOGGER.exception("记忆偏好无法应用：本轮维护按启动配置执行")
+            return self._app_config
+
+    def memory_consolidation_model(self) -> Any:
+        """后台巩固用的模型：**默认连接**。没有连接或取不到时返回 ``None``（本轮跳过，不是失败）。"""
+        store = self._connections
+        if store is None:
+            return None
+        try:
+            selection = self._sqlite_access(store.default_selection)
+            if selection is None:
+                return None
+            connection = self._sqlite_access(partial(store.get, selection.connection_id))
+            if connection is None:
+                return None
+            return self._build_model(connection.to_llm_config(), self._api_key_for(connection))
+        except Exception:
+            _LOGGER.exception("取后台巩固用的模型失败：本轮跳过")
+            return None
+
+    def consolidate_memories(self) -> Any:
+        """后台记忆巩固：把最近的中期碎片固化成长期事实，返回报告（跳过时 ``None``）。
+
+        **只新增**长期事实：不合并、不停用、不删除（边界见 ``memory/consolidation.py``）。
+        三个前置条件任一不满足就跳过，且**不调模型**：开关关闭、中期记忆关闭、自上次以来没有
+        比它更新的碎片。最后一条是成本闸门——间隔本身也在控制频率，但"没新东西"时连一次
+        模型调用都不该发。
+        """
+        from local_agent.memory import consolidation as consolidation_module
+        from local_agent.memory import long_term
+        from local_agent.scope import project_id_for, visible_scope_keys
+
+        config = self.memory_maintenance_config()
+        settings = config.memory.consolidation
+        if not settings.enabled or not config.memory.medium_term.enabled:
+            return None
+        root = self._workspace_root
+        scopes = visible_scope_keys(
+            user_id=None, project_id=project_id_for(root), workspace_root=root
+        )
+        try:
+            fragments = consolidation_module.read_fragments(
+                Path(config.memory.medium_term.path),
+                config.memory.medium_term.collection,
+                scopes,
+                limit=settings.max_medium_records,
+            )
+        except Exception:
+            _LOGGER.exception("读取中期碎片失败：本轮不做巩固")
+            return None
+        if not fragments:
+            return consolidation_module.ConsolidationReport(considered=0)
+
+        newest = fragments[0].created_at
+        previous, self._last_consolidated_at = self._last_consolidated_at, newest
+        if previous is not None and newest <= previous:
+            return None
+
+        model = self.memory_consolidation_model()
+        if model is None:
+            return None
+        moment = datetime.now(timezone.utc)
+        store = None
+        try:
+            store = long_term.open_store(Path(config.memory.long_term.path))
+            known = [
+                {"subject": entity.name, "key": fact.key, "value": fact.value_json}
+                for entity, fact in store.active_facts_with_entities(scopes, now=moment)
+            ][: settings.max_long_facts]
+            plan = consolidation_module.decide_promotions(
+                model, fragments=fragments, known_facts=known
+            )
+            return consolidation_module.apply_promotions(
+                plan,
+                fragments=fragments,
+                long_store=store,
+                now=moment,
+                max_promotions=settings.max_promotions,
+            )
+        except Exception:
+            _LOGGER.exception("记忆巩固失败：本轮不写入任何长期事实")
+            return None
+        finally:
+            if store is not None:
+                try:
+                    store.close()
+                except Exception:
+                    _LOGGER.exception("关闭长期记忆库失败（巩固路径）")
+
     # ---- 定时任务（§21.5，2026-10-22 J2）--------------------------------
     def get_cron_jobs(self) -> CronJobsView:
         running = bool(getattr(self.cron_scheduler, "running", False))
@@ -1201,7 +1335,7 @@ class ApplicationService:
         给了 `workspace_id` 就只看该工作区（§6.1 的 `list_sessions(workspace_id)`）：HTTP 层
         只拿得到不含路径的稳定标识，路径解析留在服务里。
 
-        `query` 非空时改为**搜索**（§15.11.2）：跨全部会话匹配标题与用户提问，按最近活动排序；
+        `query` 非空时改为**搜索**（§15.11.2）：跨全部会话匹配标题、用户提问与回答正文，按最近活动排序；
         `limit` 只在该分支生效（缺省 20）。给了 `workspace_id` 时在搜索后再按工作区过滤。
         """
         root = self._root_of(workspace_root, workspace_id)
@@ -1434,6 +1568,9 @@ class ApplicationService:
             return None
         return prefix
 
+    def _turn_context_prefix(self, session: Session, text: str, config: config_module.AppConfig) -> str | None:
+        return file_mentions.context_prefix(self, session, text, config)
+
     def select_workspace(self, workspace_root: Path, *, title: str | None = None) -> SessionSummaryView:
         """切换工作区：该工作区已有会话就切过去，否则新建一个。
 
@@ -1526,6 +1663,78 @@ class ApplicationService:
             session = self._sqlite_access(partial(self._sessions.set_archived, session_id, False))
         return self._summary(session)
 
+    def mark_session_read(self, session_id: str) -> None:
+        """记下"用户看到了这条会话的这里"（2026-10-30）。
+
+        只由**用户真的切到这条会话**触发。不能在列会话时顺手写：列表会被轮询、
+        会被预取、会被别的标签页拉一次，那样的"已读"是假的，用户会永远收不到提醒。
+        """
+        session = self._session_or_raise(session_id, allow_archived=True)
+        self._sqlite_access(partial(self._sessions.mark_read, session.session_id))
+
+    def delete_session(self, session_id: str) -> None:
+        """彻底删除一个**已归档**的会话及其全部数据（2026-10-29）。
+
+        三条边界：
+        - **只删已归档**：未归档必须先归档。删除不可撤销，"随手删掉正在用的会话"是
+          这个操作最贵的误触，归档那一步既是缓冲也是明确表态。
+        - **忙时拒绝**：与归档/恢复共用 `_catalog_session_guard`——正在跑或等审批的会话
+          删不掉，否则会留下一条永远收不了口的"执行中"台账行。
+        - **磁盘 → checkpoint → 库行**：清理完成前保留全部父子会话及任务记录，失败后可
+          重新定位目标继续删除；最后在同一事务中删除父子会话库行。
+
+        Raises:
+            LookupError: 会话不存在。
+            ValueError: 会话未归档。
+            ApplicationError: 会话正在执行（`session_busy`）。
+        """
+        with self._catalog_lock, ExitStack() as stack:
+            session = self._session_or_raise(session_id, allow_archived=True)
+            if not session.archived:
+                raise ValueError("只有已归档的会话可以删除：请先归档，再删除。")
+            stack.enter_context(self._catalog_session_guard(
+                session_id, allow_archived=True, allow_missing_checkpoint=True
+            ))
+            # 侧聊只有一层（`side_chat.py` 不允许侧聊再开侧聊），一并删掉：留着它们
+            # 会永远丢上下文（父会话已不存在），而归档列表之外再没有入口能删它们。
+            children = self._sqlite_access(partial(self._sessions.side_chats, session_id))
+            for child in sorted(children, key=lambda item: item.session_id):
+                stack.enter_context(
+                    self._catalog_session_guard(
+                        child.session_id, allow_archived=True, allow_missing_checkpoint=True
+                    )
+                )
+            targets = [session, *children]
+            # 委派子代理跑在 `{run_id}:child:N` 这条**独立 thread** 上（`delegated_workflow.py`），
+            # 它不挂在会话上，只能从任务记录里反推；漏了就是一堆永远没人读的 checkpoint BLOB。
+            child_threads: list[str] = []
+            if self._jobs is not None:
+                for target in targets:
+                    for job in self._jobs.list_for_session(target.session_id):
+                        if job.run_id:
+                            child_threads.extend(
+                                f"{job.run_id}:child:{index}" for index in (1, 2, 3)
+                            )
+            # 幂等清理：目录不存在即完成。任一步失败都保留所有会话索引供重试。
+            for target in targets:
+                if self._attachments is not None:
+                    self._attachments.delete_session(target.session_id)
+                ledger = self._change_ledger(target)
+                if ledger is None and self._file_changes is not None:
+                    raise RuntimeError("变更账本不可用，未能完成会话删除，请重试。")
+                if ledger is not None:
+                    ledger.delete_session()
+            saver = getattr(self._graph, "checkpointer", None)
+            deleter = getattr(saver, "delete_thread", None)
+            if callable(deleter):
+                for thread_id in [*(item.thread_id for item in targets), *child_threads]:
+                    # **不要**包进 `_sqlite_access`：`delete_thread` 自己会拿 checkpointer
+                    # 那把**不可重入**的锁（与业务表共用），再套一层会直接死锁。
+                    deleter(thread_id)
+            self._sqlite_access(partial(
+                self._sessions.delete_sessions, tuple(target.session_id for target in targets)
+            ))
+
     def rename_workspace(self, workspace_id: str, title: str) -> WorkspaceRef:
         with self._catalog_lock:
             root = self._path_for_workspace_id(workspace_id)
@@ -1542,15 +1751,23 @@ class ApplicationService:
             self._sqlite_access(partial(self._sessions.remove_workspace, root))
 
     @contextmanager
-    def _catalog_session_guard(self, session_id: str) -> Iterator[None]:
+    def _catalog_session_guard(
+        self, session_id: str, *, allow_archived: bool = False,
+        allow_missing_checkpoint: bool = False,
+    ) -> Iterator[None]:
+        """目录类操作的互斥门：拿不到执行锁、或这一轮还在跑，就当场拒绝。
+
+        ``allow_archived``（2026-10-29）：删除会话的操作对象**必然是归档会话**，
+        而这条守卫默认只认未归档的——不放开参数，删除会在守卫里被误判成 404。
+        """
         lock = self._lock_for(session_id)
         if not lock.acquire(blocking=False):
             raise app_errors.session_busy(
                 session_id=session_id, request_id="catalog-update", occurred_at=_now()
             )
         try:
-            session = self._session_or_raise(session_id)
-            view = self._read(session)
+            session = self._session_or_raise(session_id, allow_archived=allow_archived)
+            view = self._read(session, allow_missing_checkpoint=allow_missing_checkpoint)
             if view.has_live_interrupt or self._snapshot(session, view).session_state == "running":
                 raise app_errors.session_busy(
                     session_id=session_id, request_id="catalog-update", occurred_at=_now()
@@ -1901,263 +2118,40 @@ class ApplicationService:
     # ---- MCP 外部工具（2026-10-20；契约 §6.13）--------------------------------
 
     def mcp_view(self) -> McpView:
-        """配置始终可管理；总开关仅控制连接与模型可见性。"""
-        from local_agent.config import ConfigError
-        from local_agent.mcp.config import McpServersFile, load_mcp_servers
+        """配置始终可管理；总开关仅控制连接与模型可见性（实现见 `application/mcp_admin.py`）。"""
+        from local_agent.application import mcp_admin
 
-        with self._mcp_config_lock:
-            enabled = bool(self.capability_switches().get("mcp"))
-            path = self._mcp_config_path
-            config_error = None
-            specs = McpServersFile()
-            if path is not None:
-                try:
-                    specs = load_mcp_servers(path)
-                except ConfigError as exc:
-                    config_error = str(exc)
-            manager = self._ensure_mcp_manager()
-            snapshot = None if manager is None else manager.snapshot()
-            states = self._mcp_states()
-            rows_by_server: dict[str, list[Any]] = {}
-            if snapshot is None and path is not None:
-                from local_agent.mcp.cache import CatalogCache
-                from local_agent.mcp.catalog import ExposureRow, ToolExposure
-                cache = CatalogCache(self._mcp_catalog_path())
-                for name, spec in specs.mcp_servers.items():
-                    cached = cache.load(name, spec)
-                    if cached is not None:
-                        rows_by_server[name] = [ExposureRow(entry, ToolExposure.HIDDEN, "server_disabled")
-                                                for entry in cached.tools]
-            views = {} if snapshot is None else {item.name: item for item in snapshot.servers}
-            for row in (() if snapshot is None else snapshot.rows):
-                rows_by_server.setdefault(row.entry.server, []).append(row)
-            servers = []
-            for name, spec in specs.mcp_servers.items():
-                state = states.get(name, ServerState(
-                    enabled_tools=spec.enabled_tools, disabled_tools=spec.disabled_tools))
-                view = views.get(name)
-                rows = rows_by_server.get(name, [])
-                servers.append(McpServerView(
-                    name=name, command=spec.command, args=list(spec.args),
-                    env_keys=list(spec.env), enabled=state.enabled,
-                    enabled_tools=None if state.enabled_tools is None else list(state.enabled_tools),
-                    disabled_tools=list(state.disabled_tools),
-                    status=("disabled" if not enabled or view is None else view.status),
-                    tool_count=len(rows),
-                    tools=[McpToolView(
-                        name=row.entry.canonical_name, tool=row.entry.name,
-                        description=row.entry.description, exposure=row.exposure.value,
-                        reason=row.reason, disabled=row.entry.name in state.disabled_tools,
-                    ) for row in rows],
-                    failure_kind=None if view is None else view.failure_kind,
-                    failure_message=None if view is None else view.failure_message,
-                ))
-            return McpView(
-                enabled=enabled, config_path=None if path is None else path.as_posix(),
-                config_error=config_error, store_unavailable=self._mcp is None,
-                servers=servers, summary=McpSummaryView(
-                    configured=len(servers), enabled=sum(item.enabled for item in servers),
-                    connected=sum(item.status == "connected" for item in servers),
-                    failed=sum(item.status == "failed" for item in servers),
-                    tools=sum(item.tool_count for item in servers),
-                    direct=sum(tool.exposure == "direct" for item in servers for tool in item.tools),
-                    deferred=sum(tool.exposure == "deferred" for item in servers for tool in item.tools),
-                ),
-            )
-
-    def set_mcp_server(self, name: str, changes: Mapping[str, Any]) -> McpView:
-        from pydantic import ValidationError
-
-        from local_agent.mcp.config import McpServerSpec, load_mcp_servers
-
-        with self._mcp_config_lock:
-            store = self._require_mcp_store()
-            path = self._require_mcp_path()
-            try:
-                specs = load_mcp_servers(path)
-                spec = specs.mcp_servers.get(name)
-                if spec is None:
-                    raise ValueError(f"mcp.json 里没有名为 {name} 的 server")
-                current = self._mcp_states().get(name, ServerState(
-                    enabled_tools=spec.enabled_tools, disabled_tools=spec.disabled_tools))
-                if "enabled" in changes and not isinstance(changes["enabled"], bool):
-                    raise ValueError("enabled 必须是布尔值")
-                if "disabled_tools" in changes and changes["disabled_tools"] is None:
-                    raise ValueError("disabled_tools 必须是工具名数组")
-                lists = McpServerSpec.model_validate({
-                    "command": "validation-only",
-                    "enabled_tools": changes.get("enabled_tools", current.enabled_tools),
-                    "disabled_tools": changes.get("disabled_tools", current.disabled_tools),
-                })
-            except ValidationError as exc:
-                raise app_errors.model_settings_invalid(
-                    detail="工具名单不合法：" + "; ".join(e["msg"] for e in exc.errors()),
-                    occurred_at=_now()) from exc
-            except (ValueError, ConfigError) as exc:
-                raise app_errors.model_settings_invalid(detail=str(exc), occurred_at=_now()) from exc
-            self._sqlite_access(partial(store.put, name, ServerState(
-                enabled=changes.get("enabled", current.enabled),
-                enabled_tools=lists.enabled_tools, disabled_tools=lists.disabled_tools)))
-            if self._mcp_manager is not None:
-                self._mcp_manager.warm()
-        return self.mcp_view()
-
-    def _require_mcp_path(self) -> Path:
-        if self._mcp_config_path is None:
-            raise app_errors.model_settings_invalid(
-                detail="当前运行没有 MCP 配置路径（未接线）。", occurred_at=_now())
-        return self._mcp_config_path
-
-    def reload_mcp(self) -> McpView:
-        from local_agent.mcp.config import load_mcp_servers
-
-        with self._mcp_config_lock:
-            try:
-                servers = load_mcp_servers(self._require_mcp_path())
-            except ConfigError as exc:
-                raise app_errors.model_settings_invalid(detail=str(exc), occurred_at=_now()) from exc
-            if self._mcp is not None:
-                for name in self._mcp_states():
-                    if name not in servers.mcp_servers:
-                        self._sqlite_access(partial(self._mcp.forget, name))
-            manager = self._ensure_mcp_manager()
-            if manager is not None:
-                manager.replace_servers(servers, refresh=True)
-        return self.mcp_view()
+        return mcp_admin.view(self)
 
     def add_mcp_server(self, payload: Mapping[str, Any]) -> McpView:
-        return self._change_mcp_spec(str(payload.get("name") or "").strip(), payload, action="add")
+        from local_agent.application import mcp_admin
+
+        return mcp_admin.add(self, payload)
 
     def edit_mcp_server(self, name: str, payload: Mapping[str, Any]) -> McpView:
-        return self._change_mcp_spec(name, payload, action="edit")
+        from local_agent.application import mcp_admin
+
+        return mcp_admin.edit(self, name, payload)
 
     def delete_mcp_server(self, name: str) -> McpView:
-        return self._change_mcp_spec(name, {}, action="delete")
+        from local_agent.application import mcp_admin
 
-    def _change_mcp_spec(self, name: str, payload: Mapping[str, Any], *, action: str) -> McpView:
-        from pydantic import ValidationError
+        return mcp_admin.delete(self, name)
 
-        from local_agent.mcp.cache import CatalogCache
-        from local_agent.mcp.config import (
-            McpServersFile,
-            McpServerSpec,
-            check_server_name,
-            load_mcp_servers,
-            save_mcp_servers,
-            spec_to_body,
-        )
+    def set_mcp_server(self, name: str, changes: Mapping[str, Any]) -> McpView:
+        from local_agent.application import mcp_admin
 
-        with self._mcp_config_lock:
-            store = self._require_mcp_store()
-            path = self._require_mcp_path()
-            try:
-                check_server_name(name)
-                current = load_mcp_servers(path)
-                bodies = {key: spec_to_body(value) for key, value in current.mcp_servers.items()}
-                if action == "add":
-                    if name in bodies:
-                        raise ValueError(f"已经存在名为 {name} 的 server")
-                    body = {key: payload[key] for key in ("command", "args", "env") if key in payload}
-                else:
-                    if name not in bodies:
-                        raise ValueError(f"mcp.json 里没有名为 {name} 的 server")
-                    body = dict(bodies[name])
-                    if action == "edit":
-                        for key in ("command", "args"):
-                            if key in payload:
-                                if payload[key] is None:
-                                    raise ValueError(f"{key} 不能为 null")
-                                body[key] = payload[key]
-                        env = dict(body.get("env", {}))
-                        env.update(payload.get("env") or {})
-                        for key in payload.get("remove_env", ()):
-                            env.pop(key, None)
-                        body["env"] = env
-                if action == "delete":
-                    del bodies[name]
-                else:
-                    bodies[name] = spec_to_body(McpServerSpec.model_validate(body))
-                merged = McpServersFile.model_validate({"mcpServers": bodies})
-                save_mcp_servers(path, merged)
-            except ValidationError as exc:
-                # str(ValidationError) 会附带 input_value，其中可能是整个 env。
-                detail = "；".join(".".join(map(str, e["loc"])) + "：字段不合法"
-                                  for e in exc.errors())
-                raise app_errors.model_settings_invalid(detail=detail, occurred_at=_now()) from exc
-            except (ValueError, ConfigError) as exc:
-                raise app_errors.model_settings_invalid(detail=str(exc), occurred_at=_now()) from exc
-            except OSError as exc:
-                raise app_errors.model_settings_invalid(
-                    detail=f"写入 {path.name} 失败：{exc.strerror}", occurred_at=_now()) from exc
-            if action in ("delete", "add"):
-                self._sqlite_access(partial(store.forget, name))
-            elif action == "edit":
-                old_spec = current.mcp_servers[name]
-                new_spec = merged.mcp_servers[name]
-                # 只有换了**程序**（command / args）才需要重新表态：旧信任不能直接执行
-                # 一条新命令。**env-only 的改动不重置**——最常见的就是轮换 cookie，而每次
-                # MCP 调用本来都要弹审批卡，关掉开关换不来额外安全性，只会让用户改完还得
-                # 手动打开一次。
-                if (old_spec.command, tuple(old_spec.args)) != (
-                    new_spec.command,
-                    tuple(new_spec.args),
-                ):
-                    state = self._mcp_states().get(
-                        name,
-                        ServerState(
-                            enabled_tools=old_spec.enabled_tools,
-                            disabled_tools=old_spec.disabled_tools,
-                        ),
-                    )
-                    self._sqlite_access(
-                        partial(
-                            store.put,
-                            name,
-                            ServerState(
-                                enabled=False,
-                                enabled_tools=state.enabled_tools,
-                                disabled_tools=state.disabled_tools,
-                            ),
-                        )
-                    )
-            if action == "delete":
-                CatalogCache(self._mcp_catalog_path()).forget(name)
-            manager = self._ensure_mcp_manager()
-            if manager is not None:
-                manager.replace_servers(merged)
-        return self.mcp_view()
+        return mcp_admin.set_server(self, name, changes)
+
+    def reload_mcp(self) -> McpView:
+        from local_agent.application import mcp_admin
+
+        return mcp_admin.reload(self)
 
     def close_mcp(self) -> None:
-        with self._mcp_config_lock:
-            manager = self._mcp_manager
-            self._mcp_manager = None
-            if manager is not None:
-                manager.close()
+        from local_agent.application import mcp_admin
 
-    def _mcp_known_servers(self) -> tuple[str, ...]:
-        """``mcp.json`` 里声明的 server 名（读不到就是空）。"""
-        from local_agent.config import ConfigError
-        from local_agent.mcp.config import load_mcp_servers
-
-        path = self._mcp_config_path
-        if path is None:
-            return ()
-        try:
-            return load_mcp_servers(path).names()
-        except ConfigError:
-            return ()
-
-    def _require_mcp_store(self) -> McpServerStore:
-        if self._mcp is None:
-            raise app_errors.settings_store_unavailable(
-                detail="设置库没有打开", occurred_at=_now()
-            )
-        return self._mcp
-
-    # ---- 联网检索的服务凭据（Tavily / DeepSeek）------------------------------
-    # 数值型偏好（条数上限、域名策略…）走 `RuntimePreferences.web_access`；这里只管**密钥**一件事。
-    # 密钥与模型连接同一条口径（§6.8）：只进设置库或进程内存，读取接口只报"有没有"。
-    # 2026-10-26：两个 API 后端各占一条密钥，页面按当前选中的后端读写对应那条——换后端不覆盖另一个。
+        mcp_admin.close(self)
 
     def _search_env_name(self, provider: config_module.ApiSearchProvider) -> str:
         """旧环境变量路径的变量名：两个 API 后端各有自己的名字，不共用一条。"""
@@ -2525,64 +2519,6 @@ class ApplicationService:
             return frozenset()
         return self._sqlite_access(store.disabled)
 
-    def _mcp_catalog_path(self) -> Path:
-        """MCP 工具目录缓存的位置（2026-10-26）。
-
-        与 ``mcp.json`` 刻意分开：配置是**用户手写的文件**，跟 ``config.yaml`` 同目录；而这份缓存
-        是应用自己产生的状态（可删、可重建、会随 server 变化而失效），跟数据根走。
-
-        之前三处各写一次 ``path.parent / "data" / "mcp_catalog.sqlite"``，且它隐含"mcp.json 与
-        ``data/`` 同目录"这个巧合——两处任一搬家，缓存就会静默落到别处。
-        """
-        from local_agent import app_paths
-
-        return app_paths.data_root_of(self._app_config) / "mcp_catalog.sqlite"
-
-    def _ensure_mcp_manager(self) -> Any:
-        """按需建连接管理器：**开关打开的那一刻**才付建连与导入 SDK 的代价。
-
-        为什么必须懒建：``mcp`` 是能力开关里的一项，用户点开之后"保存即生效、作用于下一轮"是既有
-        承诺。若管理器只在进程启动时按当时的开关决定，点开开关就得重启——那是"看起来改了、实际
-        没生效"，正是能力面板要消灭的那类问题。
-
-        代价只在第一次发生；之后 ``_mcp_manager`` 一直复用，进程退出时由容器关掉。
-        """
-        if not self.capability_switches().get("mcp"):
-            return None
-        if self._mcp_manager is not None:
-            return self._mcp_manager
-        path = self._mcp_config_path
-        if path is None:
-            return None
-        from local_agent.config import ConfigError
-        from local_agent.mcp.config import load_mcp_servers
-        from local_agent.mcp.manager import McpManager
-
-        with self._mcp_config_lock:
-            if self._mcp_manager is not None:
-                return self._mcp_manager
-            try:
-                servers = load_mcp_servers(path)
-            except ConfigError:
-                # 配置坏了就不建：错误由 `mcp_view().config_error` 展示给人看。
-                return None
-            manager = McpManager(
-                servers,
-                config=self._app_config.mcp,
-                state_provider=self._mcp_states,
-                cache_path=self._mcp_catalog_path(),
-            )
-            manager.start()
-            self._mcp_manager = manager
-            return manager
-
-    def _mcp_states(self) -> Mapping[str, ServerState]:
-        """每台 MCP Server 的开关与工具名单；没有设置库时返回空（= 全部按关）。"""
-        store = self._mcp
-        if store is None:
-            return {}
-        return self._sqlite_access(store.states)
-
     def _mcp_binding(self, session: Session) -> McpBinding | None:
         """本轮装配用的 MCP 账单。
 
@@ -2592,7 +2528,7 @@ class ApplicationService:
         ``discovered`` 从 Checkpoint 读：它是**会话级**事实（搜过的工具持续可用），而本轮提交在
         装配时还没有新状态。
         """
-        manager = self._ensure_mcp_manager()
+        manager = mcp_admin.ensure_manager(self)
         if manager is None:
             return None
         try:
@@ -2603,7 +2539,7 @@ class ApplicationService:
         except Exception:  # noqa: BLE001 — 读不到历史不该让这一轮起不来
             discovered = ()
         return McpBinding(
-            manager=manager, states=self._mcp_states(), discovered=discovered
+            manager=manager, states=mcp_admin.states(self), discovered=discovered
         )
 
     def _image_context_turns(self) -> int:
@@ -2786,6 +2722,11 @@ class ApplicationService:
             "url": getattr(saved, "url", None),
         }
 
+    def save_document_attachment(
+        self, session_id: str, data: bytes, *, filename: str = ""
+    ) -> dict[str, Any]:
+        return document_attachments.save_document_attachment(self, session_id, data, filename=filename)
+
     def read_attachment(self, session_id: str, attachment_id: str) -> tuple[bytes, str] | str:
         """读回一张已上传的图片（给页面显示缩略图用）。
 
@@ -2920,8 +2861,14 @@ class ApplicationService:
             )
         return replace(env, attachments=tuple(loaded))
 
+    def _load_file_attachments(
+        self, session: Session, env: _RunEnv, refs: Sequence[tuple[str, str]]
+    ) -> _RunEnv:
+        return document_attachments.load_file_attachments(self, session, env, refs)
+
     def submit_message(self, session_id: str, text: str, client_request_id: str, *,
                        attachments: Sequence[str] = (),
+                       files: Sequence[tuple[str, str]] = (),
                        workflow: WorkflowRequest | Mapping[str, Any] | None = None,
                        parent_turn_id: str | None = None,
                        expected_branch_id: str | None = None,
@@ -2929,7 +2876,12 @@ class ApplicationService:
         """提交一条用户消息。"""
         # 附件引用**必须进摘要**（2026-10-16）：否则"同一段文字、换一张图再发"会被判成同一次请求，
         # 幂等键把第二次提交直接当成重放，图就永远发不出去。
-        digest = _digest(OPERATION_SUBMIT, session_id, text, *attachments)
+        # 文档引用也要进幂等指纹（2026-10-29）：同样一句话配不同的文件是两个请求。
+        # 逐项拼成字符串：`_digest` 收的是字符串，直接塞元组会让指纹不可复现。
+        digest = _digest(
+            OPERATION_SUBMIT, session_id, text, *attachments,
+            "files", *(f"{item[0]}|{item[1]}" for item in files),
+        )
         selected = (None if workflow is None else
                     TypeAdapter(WorkflowRequest).validate_python(workflow).model_dump(mode="json"))
         if selected is not None:
@@ -2976,11 +2928,10 @@ class ApplicationService:
             parents.append(conversation.submission_parent(
                 self, session, parent_turn_id, expected_branch_id))
             # 附件在**预检**里读：连接不支持图片输入时，这里就把这次提交拦下（不留一条"执行中"台账）。
-            prepared.append(
-                self._load_attachments(
-                    session, self._run_env(session, self._resolve_binding(session)), attachments
-                )
-            )
+            # 文档不读字节（2026-10-29）：只解析成绝对路径，交给模型自己 read_file。
+            run_env = self._run_env(session, self._resolve_binding(session))
+            run_env = self._load_attachments(session, run_env, attachments)
+            prepared.append(self._load_file_attachments(session, run_env, files))
             # 预检失败不得清掉上一轮的取消意图。
             self._reset_cancellation(session_id)
 
@@ -2994,8 +2945,9 @@ class ApplicationService:
             conversation.start_path(self, session, parents[0])
             payload: dict[str, Any] = {
                 "user_input": text,
-                # 侧聊首轮的上下文（§21.7）：只进模型侧，不进 question、不进气泡。
-                "context_prefix": self._side_chat_context(session),
+                # 只进模型侧、不进 question、不进气泡的两段上下文：
+                # 侧聊首轮（§21.7）与用户 `@` 点名的文件（2026-10-30）。
+                "context_prefix": self._turn_context_prefix(session, text, env.app_config),
                 "thread_id": session.thread_id,
                 "session_id": session.session_id,
                 "session_mode": session.mode,
@@ -3528,7 +3480,7 @@ class ApplicationService:
 
     # ---- 内部：读取与投影 ----------------------------------------------------
 
-    def _read(self, session: Session) -> _ThreadView:
+    def _read(self, session: Session, *, allow_missing_checkpoint: bool = False) -> _ThreadView:
         with self._locks_guard:
             sink = self._streams.get(session.session_id)
         if sink is not None and sink._run_id is not None:
@@ -3539,8 +3491,12 @@ class ApplicationService:
         if branch is not None and branch.checkpoint_id is not None:
             view = self._read_checkpoint(session, branch.checkpoint_id)
             if view is None:
-                raise conversation.conflict(session.session_id, "当前分支检查点无法恢复。")
-            return view
+                # 删除重试时，前一次可能已删掉部分 checkpoint，索引尚保留。
+                # 普通读取仍报告损坏；只有删除守卫允许继续检查线程最新状态。
+                if not allow_missing_checkpoint:
+                    raise conversation.conflict(session.session_id, "当前分支检查点无法恢复。")
+            else:
+                return view
         return self._checkpoint_view({"configurable": {"thread_id": session.thread_id}})
 
     def _checkpoint_view(self, config: RunnableConfig) -> _ThreadView:
@@ -3587,6 +3543,9 @@ class ApplicationService:
 
     def get_conversation_map(self, session_id: str, query: str = "") -> ConversationMapView:
         return conversation.map_view(self, self._session_or_raise(session_id), query)
+
+    def export_session(self, session_id: str, fmt: str = "markdown") -> tuple[str, str, str]:
+        return session_export.export_session(self, session_id, fmt)
 
     def get_turn_snapshot(self, session_id: str, turn_id: str, *,
                           include_ancestors: bool = False) -> SessionSnapshot:
@@ -3695,189 +3654,33 @@ class ApplicationService:
             return False
         return bool(policy.commands.detach(command_id))
 
+    # ---- 文件变更账本（实现搬到 ``application/file_change_views.py``，2026-10-30）----
+    # 为什么搬：这一组逻辑把本文件撑过了规模棘轮登记的豁免值，而棘轮不允许把豁免调大
+    # （``scripts/check_size.py:274``）。搬出去的是"账本 → HTTP 视图"的组装与调度，
+    # 账本读写、diff、落盘仍在 ``persistence/``。下面只留薄委托，公开 API 不变。
+
     def session_changes(self, session_id: str) -> SessionChangesView:
-        """会话内的文件变更总览（2026-10-21）。
-
-        按 ``run_id`` 分组、最新的轮次在前：用户问的是"这一次到底改了哪些文件"，
-        而不是"整个会话历史上所有文件"。同一文件在一轮里被改多次时，组内只出现一行、
-        行数是累计值——一个文件改四次属于正常，不该出四行。
-        """
-        empty = SessionChangesView(
-            session_id=session_id, turns=[], total_files=0, additions=0, deletions=0
-        )
-        session = self._session_or_raise(session_id)
-        ledger = self._change_ledger(session)
-        if ledger is None:
-            return empty
-
-        ops = ledger.ops()
-        if not ops:
-            return empty
-        summaries = {item.path: item for item in ledger.summary()}
-        grouped: dict[str | None, list[Any]] = {}
-        for op in ops:
-            grouped.setdefault(op.run_id, []).append(op)
-
-        turns: list[TurnChangesView] = []
-        for run_id, run_ops in grouped.items():
-            merged: dict[str, FileChangeSummaryView] = {}
-            for op in run_ops:
-                info = summaries.get(op.path)
-                previous = merged.get(op.path)
-                # 无文本基线的删除不计行数：那个数字来自当时按文本读原文，二进制/超大文件会被
-                # 算成上万行（实测一张 27 MB 的图片显示"删除 26903 行"），比不显示更糟。
-                counted = not (
-                    op.kind == "delete" and info is not None and not info.has_baseline
-                )
-                merged[op.path] = FileChangeSummaryView(
-                    path=op.path,
-                    kind=op.kind,
-                    additions=op.additions + (previous.additions if previous else 0),
-                    deletions=(op.deletions if counted else 0)
-                    + (previous.deletions if previous else 0),
-                    edits=(previous.edits if previous else 0) + 1,
-                    last_at=op.created_at,
-                    has_baseline=bool(info is not None and info.has_baseline),
-                    unavailable_reason=None if info is None else info.unavailable_reason,
-                )
-            turns.append(TurnChangesView(
-                run_id=run_id,
-                started_at=min(op.created_at for op in run_ops),
-                files=list(merged.values()),
-            ))
-        turns.reverse()
-        return SessionChangesView(
-            session_id=session_id,
-            turns=turns,
-            total_files=len(summaries),
-            additions=sum(item.additions for item in summaries.values()),
-            # 与上面的逐轮口径一致：无文本基线的删除不把行数算进总计。
-            deletions=sum(
-                item.deletions
-                for item in summaries.values()
-                if not (item.kind == "delete" and not item.has_baseline)
-            ),
-            # 账本之外的写入（命令/代码），单列出来——不并进账本，也不假装有基线。
-            unrecorded=self._unrecorded_changes(session, ops),
-            unrecorded_note=(
-                None
-                if self._worktree_baselines.get(session_id) is not None
-                else "本轮没有记录工作区基线（非 git 工作区或本轮未接线），无法发现命令/代码写入"
-            ),
-        )
+        return file_change_views.session_changes(self, session_id)
 
     def session_change_diff(self, session_id: str, path: str) -> FileChangeDiffView:
-        """某个文件的**整文件** diff：首次改动前原文 vs 当前磁盘内容。"""
-        session = self._session_or_raise(session_id)
-        ledger = self._change_ledger(session)
-        if ledger is None:
-            return FileChangeDiffView(
-                path=path, additions=0, deletions=0, hunks=[], has_baseline=False,
-                unavailable_reason="变更账本未接线：这次运行没有记录改前内容",
-            )
-        result = ledger.diff(path)
-        return FileChangeDiffView(
-            path=result.path,
-            additions=result.additions,
-            deletions=result.deletions,
-            hunks=[
-                FileDiffHunkView(
-                    header=hunk.header,
-                    lines=[
-                        FileDiffLineView(
-                            kind=line.kind, old_line=line.old_line,
-                            new_line=line.new_line, text=line.text,
-                        )
-                        for line in hunk.lines
-                    ],
-                )
-                for hunk in result.hunks
-            ],
-            truncated=result.truncated,
-            has_baseline=result.has_baseline,
-            unavailable_reason=result.unavailable_reason,
-            before_sha256=result.before_sha256,
-            after_sha256=result.after_sha256,
+        return file_change_views.session_change_diff(self, session_id, path)
+
+    def restore_session_changes(
+        self, session_id: str, *, scope: Literal["file", "turn"],
+        path: str | None = None, run_id: str | None = None,
+        paths: Sequence[str] | None = None, force: bool = False,
+    ) -> RestoreResultView:
+        return file_change_views.restore_session_changes(
+            self, session_id, scope=scope, path=path, run_id=run_id, paths=paths, force=force
         )
 
     def _change_ledger(self, session: Session) -> Any:
         """按会话取一个账本；未接线或创建失败都返回 ``None``（调用方按空结果处理）。"""
-        factory = self._file_changes
-        if factory is None:
-            return None
-        try:
-            return factory(
-                session_id=session.session_id, workspace_root=Path(session.workspace_root)
-            )
-        except Exception:
-            _LOGGER.exception("变更账本未能创建：会话 %s", session.session_id)
-            return None
+        return file_change_views.change_ledger(self, session)
 
     def _attach_file_changes(self, session: Session, context: Any) -> Any:
-        """把本轮的变更账本挂到策略上（2026-10-21）。
-
-        为什么挂在策略上：文件写入有三条独立路径（替换 / 新建 / 删除），它们唯一的共同点是
-        都持有本轮策略。挂在这里不必给三个工具再加参数，也不会漏掉其中一条。
-        """
-        policy = getattr(context, "security_policy", None)
-        if policy is None:
-            return None
-        # 轮初工作区快照（2026-10-22）：轮末凭它发现"账本没记、但文件确实变了"的路径。
-        # 不能直接拿 git status 当本轮改动——工作区本来就有大量未提交改动。
-        self._worktree_baselines[session.session_id] = self._snapshot_worktree(policy)
-        ledger = self._change_ledger(session)
-        if ledger is None:
-            return None
-        policy.file_change_recorder = ledger
-        return ledger
-
-    def _snapshot_worktree(self, policy: Any) -> dict[str, int]:
-        """当前 git 工作区的 ``(工作区相对路径 -> mtime_ns)``；不是 git 仓库时返回空。
-
-        用 mtime 而不是内容 hash：这一步每轮跑两次，扫工作区全部改动文件算 hash 太贵；
-        同一轮里"改了又改回"本来也无法从快照看出来，mtime 足够回答"它被动过没有"。
-        """
-        try:
-            status = git_tools.status(policy)
-        except Exception:  # noqa: BLE001 - git 不可用/不是仓库都只是"没有快照"，不能挡住这一轮
-            return {}
-        root = Path(policy.workspace_root)
-        repo_root = Path(status.repo_root) if status.repo_root else root
-        snapshot: dict[str, int] = {}
-        for entry in status.entries:
-            try:
-                relative = (repo_root / entry.path).relative_to(root).as_posix()
-            except ValueError:
-                continue
-            try:
-                snapshot[relative] = (root / relative).stat().st_mtime_ns
-            except OSError:
-                snapshot[relative] = 0
-        return snapshot
-
-    def _unrecorded_changes(
-        self, session: Session, ops: list[Any]
-    ) -> list[UnrecordedChangeView]:
-        """账本之外、本轮被命令/代码动过的文件（2026-10-22）。
-
-        口径：**当前 git 工作区** 与 **本轮开始时** 的快照比，排除账本已经记过的路径。
-        为什么不把它们并进账本：它们没有"改前原文"，塞进去会让面板假装自己有基线；
-        用户需要知道的是"还有这些文件被动过"，而不是一个看起来完整的假象。
-        """
-        policy = self._active_policies.get(session.session_id)
-        baseline = self._worktree_baselines.get(session.session_id)
-        if policy is None or baseline is None:
-            return []
-        current = self._snapshot_worktree(policy)
-        recorded = {op.path for op in ops}
-        changes: list[UnrecordedChangeView] = []
-        for path, mtime in sorted(current.items()):
-            if path in recorded:
-                continue
-            if baseline.get(path) == mtime:
-                continue
-            changes.append(UnrecordedChangeView(path=path, status="modified"))
-        return changes
+        """把本轮的变更账本挂到策略上（实现见 ``file_change_views.attach``）。"""
+        return file_change_views.attach(self, session, context)
 
     def _context(self, session: Session, env: _RunEnv, *,
                  workflow_request: Any = None, workflow_limits: Any = None) -> Any:
@@ -3924,6 +3727,9 @@ class ApplicationService:
             cancellation=self._token_for(session.session_id),
             child_index=(None if self._jobs is None else
                          partial(self._jobs.index_children, session.session_id)),
+            # 历史会话检索（2026-11-02）：入口闭包在这里，因为会话索引归应用层持有；
+            # 工具执行节点拿不到它（见 `tools/session_tools.py` 的注释）。
+            session_search=partial(history_search.hits, self),
             readonly_research=choices.get("readonly_research"),
             code_change=choices.get("code_change"),
             delegated_research=choices.get("delegated_research"),
@@ -3931,6 +3737,9 @@ class ApplicationService:
             # 从 `env` 取而不是多一个参数：附件本来就是这个**运行环境**的一部分（`_load_attachments`
             # 在预检里读好挂上去的），调用点因此一处都不用改。
             user_attachments=env.attachments,
+            # 随消息提交的文档（2026-10-29）：入口节点把它们写成一条「可读文件」提示，
+            # 模型自己 read_file 读——不进内容块（端点不保证支持文档输入）。
+            user_files=env.files,
             # 附件存储（2026-10-20）：出站前把引用物化成 data URL 时按会话读回字节。
             # 不传也没有附件：那时上传附件的引用读不到，会退化成占位文本。
             attachments=self._attachments,
@@ -4361,6 +4170,8 @@ class ApplicationService:
             mode="chat" if session.mode == "chat" else "agent",
             is_active=(session.status == "active"),
             archived=session.archived,
+            # 未读（2026-10-30）：规则在存储层的 `Session.unread` 里，只有一处实现。
+            unread=session.unread,
             parent_session_id=session.parent_session_id,
             created_at=_as_dt(session.created_at),
             updated_at=_as_dt(session.updated_at),

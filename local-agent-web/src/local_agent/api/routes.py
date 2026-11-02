@@ -16,9 +16,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Final, Literal, cast
+from typing import Annotated, Any, Final, Literal, cast
+from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response
+from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import RedirectResponse
 
 from local_agent import directory_picker
@@ -49,6 +50,7 @@ from local_agent.api.schemas import (
     RecoveryRequest,
     RenameRequest,
     ResolveTaskReviewRequest,
+    RestoreChangesRequest,
     SelectDefaultConnectionRequest,
     SelectionExpectation,
     SelectSessionModelRequest,
@@ -87,6 +89,7 @@ from local_agent.application.models import (
     ModelConnectionView,
     PermissionsView,
     PreferencesSchemaView,
+    RestoreResultView,
     SessionChangesView,
     SessionSnapshot,
     SessionSummaryView,
@@ -140,6 +143,9 @@ _STATUS_BY_CODE: Final[dict[str, int]] = {
     app_errors.DIRECTORY_PICKER_UNAVAILABLE: 503,
     # 请求本身成立，但当前形态（绿色包 / 源码）没有可卸载的安装：是状态不允许，不是服务故障。
     app_errors.UNINSTALL_UNAVAILABLE: 409,
+    # 这一轮没有改动可还原 / 账本未接线 / 改前内容已超出保留范围：都是"当前状态不允许"。
+    # 部分文件还原失败**不走这里**——那是正常结果，按 `RestoreResultView.failed` 如实返回 200。
+    app_errors.CHANGES_RESTORE_UNAVAILABLE: 409,
 }
 
 #: 默认状态码：不在表里就是**未预期**，不假装知道它该怎么重试。
@@ -273,6 +279,168 @@ def _register_question_routes(router: APIRouter, service: Any) -> None:
         )
 
 
+def _register_cron_routes(router: APIRouter, service: Any) -> None:
+    """注册定时任务端点（§21.5，2026-10-22 J2）。
+
+    单独一个注册函数而不是塞进 ``build_router``：那个函数已经贴着规模棘轮的上限（行数与圈复杂度），
+    2026-10-30 把这一组整段搬出来——与 :func:`_register_question_routes` 同一做法。
+    """
+
+    @router.get("/cron/jobs", response_model=CronJobsView, summary="定时任务列表")
+    def list_cron_jobs() -> CronJobsView:
+        """`scheduler_running=false` 表示调度线程没起来——页面上要点明"不会触发"。"""
+        return service.get_cron_jobs()
+
+    @router.post("/cron/jobs", response_model=CronJobView, status_code=201, summary="新建定时任务")
+    def create_cron_job(payload: CronJobCreateRequest) -> CronJobView:
+        try:
+            return service.create_cron_job(
+                name=payload.name, prompt=payload.prompt, schedule=payload.schedule,
+                workspace_id=payload.workspace_id, mode=payload.mode,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.patch("/cron/jobs/{job_id}", response_model=CronJobView, summary="修改定时任务")
+    def update_cron_job(job_id: str, payload: CronJobUpdateRequest) -> CronJobView:
+        try:
+            return service.update_cron_job(
+                job_id, name=payload.name, prompt=payload.prompt, schedule=payload.schedule,
+                mode=payload.mode, enabled=payload.enabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @router.delete("/cron/jobs/{job_id}", status_code=204, summary="删除定时任务")
+    def delete_cron_job(job_id: str) -> Response:
+        try:
+            service.delete_cron_job(job_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(status_code=204)
+
+    @router.post("/cron/jobs/{job_id}/run", response_model=CronRunView, summary="立即触发一次")
+    def run_cron_job(job_id: str) -> CronRunView:
+        """不等排期地跑一次；**排期本身不动**。上一次没跑完时返回 409。"""
+        try:
+            return service.run_cron_job_now(job_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @router.get("/cron/jobs/{job_id}/runs", response_model=CronRunsPageView, summary="运行记录")
+    def list_cron_runs(job_id: str,
+                       offset: int = Query(default=0, ge=0, le=100000),
+                       limit: int = Query(default=20, ge=1, le=100)) -> CronRunsPageView:
+        try:
+            return service.get_cron_runs(job_id, offset=offset, limit=limit)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _register_changes_routes(router: APIRouter, service: Any) -> None:
+    """注册会话文件变更端点（2026-10-21 起，2026-10-29 加还原）。
+
+    同样是为了不让 ``build_router`` 继续变长：这一组三个端点只回答"改了哪些文件、
+    某个文件变成什么样、退回去"。
+    """
+
+    @router.get(
+        "/sessions/{session_id}/changes",
+        response_model=SessionChangesView,
+        responses=_NOT_FOUND,
+        summary="会话内文件变更总览",
+    )
+    def session_changes(session_id: str) -> SessionChangesView:
+        """按轮分组的"改了哪些文件、各改了几行"（2026-10-21）。
+
+        数据来自变更账本（写盘时记账 + 首次改动前留基线），**不是**从工具消息里的事件拼出来的：
+        一个文件被 edit 四次时，事件里只有四段互不相干的片段。
+        """
+        return service.session_changes(session_id)
+
+    @router.get(
+        "/sessions/{session_id}/changes/diff",
+        response_model=FileChangeDiffView,
+        responses=_NOT_FOUND,
+        summary="单个文件的整文件 diff",
+    )
+    def session_change_diff(
+        session_id: str, path: str = Query(..., max_length=PATH_MAX_CHARS)
+    ) -> FileChangeDiffView:
+        """``baseline``（首次改动前原文）对当前磁盘内容，覆盖整个文件。"""
+        return service.session_change_diff(session_id, path)
+
+    @router.post(
+        "/sessions/{session_id}/changes/restore",
+        response_model=RestoreResultView,
+        responses=_STATE_CONFLICT,
+        summary="把文件改动退回某个时间点",
+    )
+    def restore_session_changes(
+        session_id: str, payload: RestoreChangesRequest
+    ) -> RestoreResultView:
+        """还原文件改动（2026-10-29）。
+
+        **不回退对话**：本轮的消息与 Checkpoint 原样保留，只动磁盘上的文件。这是刻意的
+        边界——回退对话会连带影响后续引用，而用户点的是"把这个文件改回去"。
+
+        ``scope=file`` 退到**会话开始前**（与右栏 diff 同口径），``scope=turn`` 退到
+        **本轮开始前**。返回刷新后的改动总览，页面直接换缓存。
+        """
+        return service.restore_session_changes(
+            session_id,
+            scope=payload.scope,
+            path=payload.path,
+            run_id=payload.run_id,
+            paths=payload.paths,
+            force=payload.force,
+        )
+
+
+def _register_document_routes(router: APIRouter, service: Any) -> None:
+    """注册文档上传端点，保持主路由装配函数的规模。"""
+    @router.post("/sessions/{session_id}/files", response_model=AttachmentView,
+                 summary="上传一份文档（multipart）", responses=_NOT_FOUND)
+    async def upload_file(
+        session_id: str,
+        file: Annotated[UploadFile, File(description="pdf / docx / xlsx / pptx；旧版 doc/xls/ppt 也可以")],
+    ) -> AttachmentView:
+        """存一份用户上传的文档，返回**引用**（2026-10-29）。
+
+        为什么这个端点用 multipart、图片那个用 base64 JSON：图片上限 2 MB，base64 的 33%
+        开销无所谓；文档动辄几十 MB，膨胀与内存峰值都不划算，而 multipart 是流式的。
+        **格式仍由服务端按魔数判定**，文件名里的扩展名只用来区分旧版 doc / xls / ppt。
+        """
+        from local_agent.attachments import MAX_UPLOAD_DOCUMENT_BYTES
+
+        limit = MAX_UPLOAD_DOCUMENT_BYTES
+        if file.size is not None and file.size > limit:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"文档太大（{file.size // 1024 // 1024} MB > 上限 {limit // 1024 // 1024} MB）："
+                    "请先拆分或压缩后再传。"
+                ),
+            )
+        try:
+            data = await file.read(limit + 1)
+            if len(data) > limit:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"文档超过大小上限（{limit // 1024 // 1024} MB）。",
+                )
+            saved = service.save_document_attachment(
+                session_id, data, filename=file.filename or ""
+            )
+        except AttachmentError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return AttachmentView(**saved)
+
+
 def build_router(runtime: ApiRuntime) -> APIRouter:
     """构造业务路由（不含 SSE 与静态托管）。"""
     router = APIRouter(prefix="/api")
@@ -397,60 +565,8 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    # ---- 定时任务（§21.5，2026-10-22 J2）--------------------------------
-    @router.get("/cron/jobs", response_model=CronJobsView, summary="定时任务列表")
-    def list_cron_jobs() -> CronJobsView:
-        """`scheduler_running=false` 表示调度线程没起来——页面上要点明"不会触发"。"""
-        return service.get_cron_jobs()
-
-    @router.post("/cron/jobs", response_model=CronJobView, status_code=201, summary="新建定时任务")
-    def create_cron_job(payload: CronJobCreateRequest) -> CronJobView:
-        try:
-            return service.create_cron_job(
-                name=payload.name, prompt=payload.prompt, schedule=payload.schedule,
-                workspace_id=payload.workspace_id, mode=payload.mode,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    @router.patch("/cron/jobs/{job_id}", response_model=CronJobView, summary="修改定时任务")
-    def update_cron_job(job_id: str, payload: CronJobUpdateRequest) -> CronJobView:
-        try:
-            return service.update_cron_job(
-                job_id, name=payload.name, prompt=payload.prompt, schedule=payload.schedule,
-                mode=payload.mode, enabled=payload.enabled,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-        except LookupError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @router.delete("/cron/jobs/{job_id}", status_code=204, summary="删除定时任务")
-    def delete_cron_job(job_id: str) -> Response:
-        try:
-            service.delete_cron_job(job_id)
-        except LookupError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return Response(status_code=204)
-
-    @router.post("/cron/jobs/{job_id}/run", response_model=CronRunView, summary="立即触发一次")
-    def run_cron_job(job_id: str) -> CronRunView:
-        """不等排期地跑一次；**排期本身不动**。上一次没跑完时返回 409。"""
-        try:
-            return service.run_cron_job_now(job_id)
-        except LookupError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-
-    @router.get("/cron/jobs/{job_id}/runs", response_model=CronRunsPageView, summary="运行记录")
-    def list_cron_runs(job_id: str,
-                       offset: int = Query(default=0, ge=0, le=100000),
-                       limit: int = Query(default=20, ge=1, le=100)) -> CronRunsPageView:
-        try:
-            return service.get_cron_runs(job_id, offset=offset, limit=limit)
-        except LookupError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    # ---- 定时任务（§21.5，2026-10-22 J2；2026-10-30 搬进独立注册函数）--------
+    _register_cron_routes(router, service)
 
     @router.post("/sessions/{session_id}/attachments", response_model=AttachmentView,
                  summary="上传一张图片（base64）", responses=_NOT_FOUND)
@@ -466,6 +582,8 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         except AttachmentError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return AttachmentView(**saved)
+
+    _register_document_routes(router, service)
 
     @router.get("/sessions/{session_id}/attachments", summary="取回一张已上传的图片",
                 responses=_NOT_FOUND)
@@ -587,7 +705,7 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     ) -> list[SessionSummaryView]:
         """`workspace_id` 缺省表示列出全部会话。
 
-        `q` 非空时改为搜索（§15.11.2）：匹配标题与用户提问，按最近活动倒序。
+        `q` 非空时改为搜索（§15.11.2）：匹配标题、用户提问与回答正文，按最近活动倒序。
         **不传 `q` 时行为与响应和旧实现完全一致**，`limit` 也只在搜索分支生效。
         """
         return service.list_sessions(workspace_id=workspace_id, archived=archived,
@@ -630,6 +748,37 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     @router.post("/sessions/{session_id}/archive", response_model=SessionSummaryView, responses=_STATE_CONFLICT)
     def archive_session(session_id: str) -> SessionSummaryView:
         return service.archive_session(session_id)
+
+    @router.post("/sessions/{session_id}/read", status_code=204, responses=_NOT_FOUND,
+                 summary="把会话标记为已读")
+    def mark_session_read(session_id: str) -> Response:
+        """记下"用户看到了这里"（2026-10-30），用于侧栏的未读标记。
+
+        为什么是独立的 POST 而不是在 GET 列表时顺手写：列表会被轮询、被预取、被别的
+        标签页拉一次——那种"已读"是假的，用户会永远收不到提醒。
+        """
+        try:
+            service.mark_session_read(session_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return Response(status_code=204)
+
+    @router.delete("/sessions/{session_id}", status_code=204, responses=_NOT_FOUND,
+                   summary="删除一个已归档的会话")
+    def delete_session(session_id: str) -> Response:
+        """彻底删除一个**已归档**的会话（2026-10-29）：消息、Checkpoint、任务记录、
+        请求台账、变更基线、上传的附件一并清掉。
+
+        为什么只允许删已归档的：删除不可撤销，而"归档"已经提供了离开视线的手段。
+        允许直接删一个正在用的会话，是把最贵的误触放在最顺手的位置上。
+        """
+        try:
+            service.delete_session(session_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return Response(status_code=204)
 
     # ---- 任务中心（T62；§17.6）--------------------------------------------------
 
@@ -691,31 +840,8 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         """只读快照；刷新与重连都以它为准（§15.3）。"""
         return service.get_session_snapshot(session_id)
 
-    @router.get(
-        "/sessions/{session_id}/changes",
-        response_model=SessionChangesView,
-        responses=_NOT_FOUND,
-        summary="会话内文件变更总览",
-    )
-    def session_changes(session_id: str) -> SessionChangesView:
-        """按轮分组的"改了哪些文件、各改了几行"（2026-10-21）。
-
-        数据来自变更账本（写盘时记账 + 首次改动前留基线），**不是**从工具消息里的事件拼出来的：
-        一个文件被 edit 四次时，事件里只有四段互不相干的片段。
-        """
-        return service.session_changes(session_id)
-
-    @router.get(
-        "/sessions/{session_id}/changes/diff",
-        response_model=FileChangeDiffView,
-        responses=_NOT_FOUND,
-        summary="单个文件的整文件 diff",
-    )
-    def session_change_diff(
-        session_id: str, path: str = Query(..., max_length=PATH_MAX_CHARS)
-    ) -> FileChangeDiffView:
-        """``baseline``（首次改动前原文）对当前磁盘内容，覆盖整个文件。"""
-        return service.session_change_diff(session_id, path)
+    # ---- 会话文件变更（2026-10-21；2026-10-30 搬进独立注册函数）--------------
+    _register_changes_routes(router, service)
 
     @router.post(
         "/sessions/{session_id}/messages",
@@ -725,18 +851,45 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     )
     def submit_message(session_id: str, payload: SubmitMessageRequest) -> CommandResultView:
         """同步跑完这一轮，返回**稳定的命令结果引用**：结局不依赖 SSE（§15.3）。"""
-        return service.submit_message(session_id, payload.text, payload.client_request_id,
-                                      workflow=payload.workflow,
-                                      # 随消息交给模型的图片引用（2026-10-16）：默认空 ⇒ 不带图的老路径不变。
-                                      attachments=payload.attachments,
-                                      parent_turn_id=payload.parent_turn_id,
-                                      expected_branch_id=payload.expected_branch_id,
-                                      expected_snapshot_id=payload.expected_snapshot_id)
+        try:
+            return service.submit_message(session_id, payload.text, payload.client_request_id,
+                                          workflow=payload.workflow,
+                                          # 随消息交给模型的图片引用（2026-10-16）：默认空 ⇒ 不带图的老路径不变。
+                                          attachments=payload.attachments,
+                                          # 文档引用（2026-10-29）：只解析成本机路径，交给模型自己读。
+                                          # 名字一并带上——它只用于展示，服务端会先净化。
+                                          files=[(item.id, item.name) for item in payload.files],
+                                          parent_turn_id=payload.parent_turn_id,
+                                          expected_branch_id=payload.expected_branch_id,
+                                          expected_snapshot_id=payload.expected_snapshot_id)
+        except AttachmentError as exc:
+            # 引用不存在 / 不属于本会话 / 形状不合法（2026-10-29 复审补上）。
+            # 此前这条路径会直接冒到 500——图片引用也有同一个缺口，这次一并收口：
+            # 这是**输入不合法**，不是服务故障，422 才能让调用方区分该重试还是该改参数。
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @router.get("/sessions/{session_id}/conversation-map", response_model=ConversationMapView,
                 responses=_STATE_CONFLICT, summary="会话地图")
     def conversation_map(session_id: str, query: str = Query(default="", max_length=500)) -> ConversationMapView:
         return service.get_conversation_map(session_id, query)
+
+    @router.get("/sessions/{session_id}/export", responses=_NOT_FOUND, summary="导出会话")
+    def export_session(
+        session_id: str,
+        fmt: Literal["markdown", "json"] = Query(default="markdown", alias="format"),
+    ) -> Response:
+        """把一个会话导出成人读的 Markdown 或机读的 JSON（2026-10-30）。
+
+        为什么要 `attachment`：浏览器要替用户填好"另存为"的文件名，内联打开还得多一步复制。
+        文件名用 RFC 5987（`filename*`）编码——会话标题几乎一定含中文，朴素的 `filename=`
+        在部分浏览器会变成乱码或整条被丢弃。
+        """
+        content, filename, media_type = service.export_session(session_id, fmt)
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"content-disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+        )
 
     @router.get("/sessions/{session_id}/turns/{turn_id}", response_model=SessionSnapshot,
                 responses=_STATE_CONFLICT, summary="单轮问答与执行详情")
@@ -970,9 +1123,9 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         summary="新增一台 MCP Server",
     )
     def add_mcp_server(payload: McpServerCreateRequest) -> McpView:
-        """把一台只走 stdio 的 server 写进 ``mcp.json``（已存在的同名会被拒）。
-
-        `env` 里的凭据**只写不回读**：响应与日志都没有它们。写完立即重载连接管理器。
+        """把一台 server 写进 ``mcp.json``（已存在的同名会被拒）；两种连接方式各自校验字段。
+        `stdio` 给 ``command``/``args``/``env``，``http`` 给 ``url``/``headers``；
+        `env`/`headers` 的凭据只写不回读（响应只有键名）。写完立即重载连接管理器。
         """
         return service.add_mcp_server(payload.model_dump())
 

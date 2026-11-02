@@ -109,7 +109,12 @@ export async function apiErrorFromResponse(response: Response): Promise<ApiError
     })
   }
 
-  const detail = isRecord(parsed) && typeof parsed.detail === 'string' ? parsed.detail : null
+  const validation = isRecord(parsed) && Array.isArray(parsed.detail) ? parsed.detail : []
+  const fileLimit = validation.some(item => isRecord(item) && item.type === 'too_long'
+    && Array.isArray(item.loc) && item.loc.includes('files'))
+  const detail = isRecord(parsed) && typeof parsed.detail === 'string' ? parsed.detail
+    : fileLimit ? '每条消息最多附带 5 份文档，请移除多余文件后重试。'
+      : response.status === 422 ? '提交内容未通过校验，请检查文字和附件后重试。' : null
   return new ApiError({
     status: response.status,
     code: null,
@@ -123,7 +128,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     headers: {
       // 只在带正文时声明 JSON：GET 带 content-type 是没必要的噪声。
-      ...(init?.body === undefined ? {} : { 'content-type': 'application/json' }),
+      // **FormData 例外**（2026-10-29）：multipart 的 boundary 必须由浏览器生成，
+      // 手写 content-type 会把 boundary 抹掉，服务端直接解析失败。
+      ...(init?.body === undefined || init.body instanceof FormData
+        ? {}
+        : { 'content-type': 'application/json' }),
       ...(init?.headers ?? {}),
     },
   })
@@ -216,6 +225,28 @@ export function getSessionChangeDiff(
   )
 }
 
+/**
+ * 把文件改动退回某个时间点（2026-10-29）。
+ *
+ * **不回退对话**：本轮的消息与 Checkpoint 原样保留，只动磁盘文件。`scope=file` 退回会话开始前，
+ * `scope=turn` 退回本轮开始前；`force` 才覆盖"AI 写完之后被人改过"的文件。
+ */
+export function restoreSessionChanges(
+  sessionId: string,
+  payload: {
+    scope: 'file' | 'turn'
+    path?: string
+    run_id?: string
+    paths?: string[]
+    force?: boolean
+  },
+): Promise<Schemas['RestoreResultView']> {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}/changes/restore`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 export function listWorkspaces(): Promise<Schemas['WorkspaceRef'][]> {
   return request('/api/workspaces')
 }
@@ -282,6 +313,55 @@ export function restoreSession(id: string): Promise<Schemas['SessionSummaryView'
   return request(`/api/sessions/${encodeURIComponent(id)}/restore`, { method: 'POST' })
 }
 
+/**
+ * 彻底删除一个**已归档**的会话（2026-10-29）：消息、Checkpoint、任务记录、上传的附件
+ * 一起清掉，不可撤销。
+ *
+ * 服务端对未归档的会话回 422——归档是"离开视线"，删除是"不要了"，两步分开是为了让
+ * 后者永远不是一次误触。
+ */
+export function deleteSession(id: string): Promise<void> {
+  return request(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+/**
+ * 导出一个会话（2026-10-30）：`markdown` 给人看，`json` 给程序用。
+ *
+ * 这里不走 `request()`：那个函数一律按 JSON 解析响应，而导出的正文是文件。
+ * 服务端用 `content-disposition: attachment; filename*=UTF-8''…` 给出文件名——
+ * 中文标题必须按 RFC 5987 解，朴素的 `filename=` 会出乱码。
+ */
+export async function exportSession(id: string, format: 'markdown' | 'json'): Promise<void> {
+  const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/export?format=${format}`)
+  if (!response.ok) throw await apiErrorFromResponse(response)
+  const blob = await response.blob()
+  const disposition = response.headers.get('content-disposition') ?? ''
+  const encoded = /filename\*=UTF-8''([^;]+)/i.exec(disposition)?.[1]
+  const filename = encoded === undefined
+    ? `会话.${format === 'markdown' ? 'md' : 'json'}`
+    : decodeURIComponent(encoded)
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  link.rel = 'noopener'
+  document.body.append(link)
+  link.click()
+  link.remove()
+  // 立刻回收会让部分浏览器拿到空文件，退到下一个宏任务再释放。
+  setTimeout(() => { URL.revokeObjectURL(url) }, 0)
+}
+
+/**
+ * 把会话标记为已读（2026-10-30）：侧栏的未读小点靠它消失。
+ *
+ * **只由"用户切到这条会话"触发**。不要在列表刷新时顺手调——轮询、预取、别的标签页
+ * 都会拉列表，那样打出来的"已读"是假的，用户永远看不到提醒。
+ */
+export function markSessionRead(id: string): Promise<void> {
+  return request(`/api/sessions/${encodeURIComponent(id)}/read`, { method: 'POST' })
+}
+
 export function renameWorkspace(id: string, title: string): Promise<Schemas['WorkspaceRef']> {
   return request(`/api/workspaces/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ title }) })
 }
@@ -316,7 +396,7 @@ export function submitMessage(
 }
 
 export type SubmissionContext = Pick<components['schemas']['SubmitMessageRequest'],
-  'parent_turn_id' | 'expected_branch_id' | 'expected_snapshot_id' | 'workflow' | 'attachments'>
+  'parent_turn_id' | 'expected_branch_id' | 'expected_snapshot_id' | 'workflow' | 'attachments' | 'files'>
 
 /**
  * 上传一张图片（2026-10-16），返回它的**引用**。
@@ -342,6 +422,24 @@ export function uploadAttachment(
   return request(`/api/sessions/${encodeURIComponent(sessionId)}/attachments`, {
     method: 'POST',
     body: JSON.stringify({ data_base64: dataBase64 }),
+  })
+}
+
+/**
+ * 上传一份**文档**（2026-10-29）：走 multipart，不是 base64。
+ *
+ * 为什么两条路上传方式不同：图片上限 2 MB，base64 的 33% 开销无所谓；文档动辄几十 MB，
+ * 膨胀和内存峰值都不划算，而 multipart 是流式的。
+ *
+ * 文件名只用于区分旧版 `.doc/.xls/.ppt`（它们的文件头完全相同）；真正的格式仍由
+ * 服务端按魔数判定——该文档**不需要**任何预览地址，模型拿到的是它在磁盘上的绝对路径。
+ */
+export function uploadFile(sessionId: string, file: File): Promise<Schemas['AttachmentView']> {
+  const form = new FormData()
+  form.append('file', file, file.name)
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}/files`, {
+    method: 'POST',
+    body: form,
   })
 }
 
@@ -588,17 +686,27 @@ export function reloadMcp(): Promise<McpDto> {
   return request<McpDto>('/api/mcp/reload', { method: 'POST' })
 }
 
+/**
+ * 新增一台 MCP Server 的入参（2026-11-02 起两种传输二选一）。
+ *
+ * `stdio` 用 `command` + `args` + `env`；`http` 用 `url` + `headers`。
+ * 两组混着传会被服务端的模型校验拒掉（那是刻意的，见 `mcp/config.py` 的传输契约）。
+ */
 export type McpServerCreateInput = {
   name: string
-  command: string
-  args: string[]
-  env: Record<string, string>
+  type?: 'stdio' | 'http'
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  remove_headers?: string[]
 }
 
 /**
- * 新增一台 stdio server：写进 `mcp.json` 并立即重载（同名会被 422 拒绝）。
+ * 新增一台 MCP Server：写进 `mcp.json` 并立即重载（同名会被 422 拒绝）。
  *
- * `env` 里的凭据**只写不回读**：响应里没有任何 env 字段。
+ * `env` / `headers` 里的凭据**只写不回读**：响应里只回键名。
  */
 export function addMcpServer(input: McpServerCreateInput): Promise<McpDto> {
   return request<McpDto>('/api/mcp/servers', {

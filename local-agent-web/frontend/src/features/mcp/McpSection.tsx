@@ -43,6 +43,27 @@ function parseEnv(text: string): Record<string, string> {
   return result
 }
 
+/**
+ * 请求头文本 → 键值表（2026-11-02，远程 MCP）。
+ *
+ * 用 `KEY: VALUE` 而不是 `KEY=VALUE`：这是 HTTP 头的通行写法，用户复制 `Authorization: Bearer …`
+ * 进来不用改。值不做格式校验——token 什么形状都有；只挡换行（那等于往请求里塞新头）。
+ */
+function parseHeaders(text: string): Record<string, string> {
+  const result: Record<string, string> = Object.create(null) as Record<string, string>
+  for (const line of text.split(/\r?\n/)) {
+    if (!line.trim()) continue
+    const index = line.indexOf(':')
+    const key = line.slice(0, index).trim()
+    if (index < 1 || !/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(key)) {
+      throw new Error('请求头每行填写 KEY: VALUE，键只允许字母、数字与连字符')
+    }
+    if (Object.hasOwn(result, key)) throw new Error(`请求头 ${key} 重复`)
+    result[key] = line.slice(index + 1).trim()
+  }
+  return result
+}
+
 function ServerCard({ server, unavailable, onEdit }: {
   server: McpServerDto; unavailable: boolean; onEdit: (server: McpServerDto) => void
 }) {
@@ -94,8 +115,12 @@ function ServerCard({ server, unavailable, onEdit }: {
           {server.enabled ? '已启用' : '已关闭'}
         </label>
       </div>
-      <code className={styles.command}>{JSON.stringify([server.command, ...(server.args ?? [])])}</code>
-      <p className={styles.note}>启用会在本机执行上面的第三方命令；仅启用你信任的 Server。</p>
+      <code className={styles.command}>{server.transport === 'http'
+        ? (server.url ?? '')
+        : JSON.stringify([server.command, ...(server.args ?? [])])}</code>
+      <p className={styles.note}>{server.transport === 'http'
+        ? '启用后会连接上面的远程端点：工具参数与结果都会经过它。'
+        : '启用会在本机执行上面的第三方命令；仅启用你信任的 Server。'}</p>
       <div className={styles.headerActions}>
         <button type="button" className={styles.ghost} disabled={busy} onClick={() => onEdit(server)} aria-label={`编辑 ${server.name}`}>编辑</button>
         <button type="button" className={styles.ghost} disabled={busy} onClick={openLists} aria-label={`${server.name} 工具名单`}>工具名单</button>
@@ -149,10 +174,14 @@ export function McpSection() {
   const [formOpen, setFormOpen] = useState(false)
   const [editing, setEditing] = useState<McpServerDto | null>(null)
   const [draftName, setDraftName] = useState('')
+  const [draftTransport, setDraftTransport] = useState<'stdio' | 'http'>('stdio')
   const [draftCommand, setDraftCommand] = useState('npx')
   const [draftArgs, setDraftArgs] = useState('[]')
   const [draftEnv, setDraftEnv] = useState('')
   const [removeEnv, setRemoveEnv] = useState<string[]>([])
+  const [draftUrl, setDraftUrl] = useState('')
+  const [draftHeaders, setDraftHeaders] = useState('')
+  const [removeHeaders, setRemoveHeaders] = useState<string[]>([])
   const [formError, setFormError] = useState('')
   const view = query.data
   const failure = reload.error ?? capabilities.error ?? query.error
@@ -160,20 +189,36 @@ export function McpSection() {
   const busy = add.isPending || edit.isPending
   const resetForm = () => {
     add.reset(); edit.reset(); setFormError(''); setDraftEnv(''); setRemoveEnv([])
+    setDraftHeaders(''); setRemoveHeaders([])
   }
   const openAdd = () => {
-    resetForm(); setEditing(null); setDraftName(''); setDraftCommand('npx'); setDraftArgs('[]'); setFormOpen(true)
+    resetForm(); setEditing(null); setDraftName(''); setDraftTransport('stdio')
+    setDraftCommand('npx'); setDraftArgs('[]'); setDraftUrl(''); setFormOpen(true)
   }
   const openEdit = (server: McpServerDto) => {
-    resetForm(); setEditing(server); setDraftName(server.name); setDraftCommand(server.command ?? '')
+    resetForm(); setEditing(server); setDraftName(server.name)
+    setDraftTransport(server.transport === 'http' ? 'http' : 'stdio')
+    setDraftCommand(server.command ?? ''); setDraftUrl(server.url ?? '')
     setDraftArgs(JSON.stringify(server.args ?? [])); setFormOpen(true)
   }
   const closeForm = () => { setFormOpen(false); resetForm(); setEditing(null) }
   const submit = () => {
     try {
-      const changes = { command: draftCommand.trim(), args: parseArgs(draftArgs), env: parseEnv(draftEnv) }
+      // 只提交当前传输那组字段：把 url 跟着 stdio 一起发过去会被模型层直接拒（那是设计如此）。
+      const changes: Record<string, unknown> = draftTransport === 'http'
+        ? {
+            url: draftUrl.trim(), headers: parseHeaders(draftHeaders),
+            ...(editing ? { remove_headers: removeHeaders } : {}),
+          }
+        : {
+            command: draftCommand.trim(), args: parseArgs(draftArgs), env: parseEnv(draftEnv),
+            ...(editing ? { remove_env: removeEnv } : {}),
+          }
+      // `type` 只在"要切传输"或"本身就是 http"时带上：stdio 是默认值，多带一个同义字段
+      // 只会让请求体与既有测试/日志都变脏。
+      if (draftTransport === 'http' || editing?.transport === 'http') changes.type = draftTransport
       setFormError('')
-      if (editing) edit.mutate({ name: editing.name, changes: { ...changes, remove_env: removeEnv } }, { onSuccess: closeForm })
+      if (editing) edit.mutate({ name: editing.name, changes }, { onSuccess: closeForm })
       else add.mutate({ name: draftName.trim(), ...changes }, { onSuccess: closeForm })
     } catch (error) { setFormError(error instanceof Error ? error.message : '表单格式不合法') }
   }
@@ -205,15 +250,27 @@ export function McpSection() {
       {formOpen ? <EditorDialog title={editing ? '编辑 MCP Server' : '添加 MCP Server'} onClose={closeForm} dismissible={!busy}>
       <form className={styles.form} onSubmit={event => { event.preventDefault(); submit() }}>
         <label className={styles.field}>名称<input aria-label="名称" value={draftName} disabled={Boolean(editing) || busy} onChange={event => setDraftName(event.target.value)} placeholder="只允许字母、数字、下划线、连字符" /></label>
-        <label className={styles.field}>命令<input aria-label="命令" value={draftCommand} disabled={busy} onChange={event => setDraftCommand(event.target.value)} placeholder="npx" /></label>
-        <label className={styles.field}>参数（JSON 数组，含空格的参数保留在同一项）<textarea aria-label="参数" value={draftArgs} disabled={busy} onChange={event => setDraftArgs(event.target.value)} rows={2} placeholder='["-y", "mcp-demo"]' /></label>
-        <label className={styles.field}>环境变量{editing ? '（留空保留原值，填写同名键更新）' : ''}<textarea aria-label="环境变量" value={draftEnv} disabled={busy} onChange={event => setDraftEnv(event.target.value)} rows={3} placeholder="每行一个 KEY=VALUE" autoComplete="off" /></label>
-        {editing && (editing.env_keys ?? []).length > 0 ? <fieldset className={styles.envKeys}><legend>已保存的环境变量（勾选要删除的键）</legend>
-          {(editing.env_keys ?? []).map(key => <label key={key} className={styles.toggle}><input type="checkbox" checked={removeEnv.includes(key)} aria-label={`删除环境变量 ${key}`} onChange={event => setRemoveEnv(keys => event.target.checked ? [...keys, key] : keys.filter(item => item !== key))} />{key}</label>)}
-        </fieldset> : null}
-        <p className={styles.note}>环境变量凭据以明文写进 <code>{view.config_path ?? 'mcp.json'}</code>，页面不回显值。{editing ? '修改连接方式后 Server 会关闭，请核对命令后重新启用。' : '新增 Server 默认关闭。'}</p>
+        <label className={styles.field}>连接方式<select aria-label="连接方式" value={draftTransport} disabled={busy} onChange={event => setDraftTransport(event.target.value === 'http' ? 'http' : 'stdio')}>
+          <option value="stdio">本机进程（stdio）</option>
+          <option value="http">远程端点（http）</option>
+        </select></label>
+        {draftTransport === 'http' ? <>
+          <label className={styles.field}>地址<input aria-label="地址" value={draftUrl} disabled={busy} onChange={event => setDraftUrl(event.target.value)} placeholder="https://example.com/mcp" /></label>
+          <label className={styles.field}>请求头{editing ? '（留空保留原值，填写同名键更新）' : ''}<textarea aria-label="请求头" value={draftHeaders} disabled={busy} onChange={event => setDraftHeaders(event.target.value)} rows={3} placeholder="Authorization: Bearer …" autoComplete="off" /></label>
+          {editing && (editing.header_keys ?? []).length > 0 ? <fieldset className={styles.envKeys}><legend>已保存的请求头（勾选要删除的键）</legend>
+            {(editing.header_keys ?? []).map(key => <label key={key} className={styles.toggle}><input type="checkbox" checked={removeHeaders.includes(key)} aria-label={`删除请求头 ${key}`} onChange={event => setRemoveHeaders(keys => event.target.checked ? [...keys, key] : keys.filter(item => item !== key))} />{key}</label>)}
+          </fieldset> : null}
+        </> : <>
+          <label className={styles.field}>命令<input aria-label="命令" value={draftCommand} disabled={busy} onChange={event => setDraftCommand(event.target.value)} placeholder="npx" /></label>
+          <label className={styles.field}>参数（JSON 数组，含空格的参数保留在同一项）<textarea aria-label="参数" value={draftArgs} disabled={busy} onChange={event => setDraftArgs(event.target.value)} rows={2} placeholder='["-y", "mcp-demo"]' /></label>
+          <label className={styles.field}>环境变量{editing ? '（留空保留原值，填写同名键更新）' : ''}<textarea aria-label="环境变量" value={draftEnv} disabled={busy} onChange={event => setDraftEnv(event.target.value)} rows={3} placeholder="每行一个 KEY=VALUE" autoComplete="off" /></label>
+          {editing && (editing.env_keys ?? []).length > 0 ? <fieldset className={styles.envKeys}><legend>已保存的环境变量（勾选要删除的键）</legend>
+            {(editing.env_keys ?? []).map(key => <label key={key} className={styles.toggle}><input type="checkbox" checked={removeEnv.includes(key)} aria-label={`删除环境变量 ${key}`} onChange={event => setRemoveEnv(keys => event.target.checked ? [...keys, key] : keys.filter(item => item !== key))} />{key}</label>)}
+          </fieldset> : null}
+        </>}
+        <p className={styles.note}>凭据（环境变量 / 请求头）以明文写进 <code>{view.config_path ?? 'mcp.json'}</code>，页面不回显值。{editing ? '修改连接方式或端点后 Server 会关闭，请核对后重新启用。' : '新增 Server 默认关闭。'}</p>
         {formFailure ? <p className={styles.error} role="alert">{formFailure}</p> : null}
-        <div className={styles.formActions}><button type="button" className={styles.ghost} disabled={busy} onClick={closeForm}>取消</button><button type="submit" className={styles.primary} disabled={busy || unavailable || !draftName.trim() || !draftCommand.trim()}>保存</button></div>
+        <div className={styles.formActions}><button type="button" className={styles.ghost} disabled={busy} onClick={closeForm}>取消</button><button type="submit" className={styles.primary} disabled={busy || unavailable || !draftName.trim() || (draftTransport === 'http' ? !draftUrl.trim() : !draftCommand.trim())}>保存</button></div>
       </form></EditorDialog> : null}
       {(view.servers ?? []).length === 0 ? <p className={styles.empty}>还没有配置任何 MCP Server。用上面的「添加 Server」，或把 <code>mcpServers</code> 写进 <code>{view.config_path ?? 'mcp.json'}</code> 后点「重读配置」。</p>
         : <ul className={styles.list}>{(view.servers ?? []).map(server => <ServerCard key={server.name} server={server} unavailable={unavailable} onEdit={openEdit} />)}</ul>}
