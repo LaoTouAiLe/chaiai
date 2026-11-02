@@ -12,16 +12,22 @@ v0.7 把三类确定性工作流做成了输入区的参数表单（用户手填
 
 ## 边界（契约里写死的，不是这里的自由发挥）
 
-- **子 Agent 只能是只读的**：能力固定为父有效能力与 ``files_read`` / ``code_search`` 的交集
-  （:func:`~local_agent.capabilities.readonly_child_capabilities`），子策略在工作区内的 scope 目录上
-  重建，外部路径固定 deny、不继承父审批、不允许 grep/glob 落盘。**没有写入、命令、联网与再次委派**，
-  委派深度固定 1。
+- **子 Agent 的能力分两档**（2026-11-02）：只读档 = 父有效能力与 ``files_read`` / ``code_search``
+  的交集；**第二档**在"父档位允许写工作区且父自己绑了 ``files_write``"时再追加 ``files_write``
+  （:func:`~local_agent.capabilities.writable_child_capabilities`）。两档都子策略重建、外部策略固定
+  ``workspace_only``（不继承父的写授权目录）、不允许落盘、不继承父审批、**不能删文件、不能 Git
+  提交、不能再次委派**，深度固定 1。
 - **子 Agent 不读父消息、记忆、审批与运行快照**，也不写记忆；它只拿到显式问题与检索计划 Schema。
-- **每个子任务一次模型调用**（生成严格 JSON 检索计划）+ 一次只读子图（0 次模型调用）；上限与并发来自
-  ``workflows`` 段（``max_children`` / ``max_concurrency`` / ``child_timeout_seconds`` 与各项额度）。
+- **写入必须记进父会话那本账**：子策略的 ``file_change_recorder`` 直接用父的，
+  所以「文件改动」面板能看到、整轮还原也覆盖得到；一批里只要有一路能写就**强制串行**
+  （几路同时改同一棵树，谁最后写谁赢，改前内容还会互相污染）。
+- **每个子任务一次计划模型调用 + 一次子图**；自主要派（§18.7）走的是**完整工具循环**，
+  步数与工具调用受 ``workflows`` 段份额约束（``max_children`` / ``max_concurrency`` /
+  ``child_timeout_seconds`` 与各项额度）。
 - **失败不重试**：哪一路失败就如实说哪一路、为什么；父报告只给**核对过**的原文与行号。
 - **审计不丢**：子任务的工具事件与模型调用记录由运行侧收集，节点收尾时并回父轮次（§18.7），
-  所以轨迹页与用量页都看得到这次委派花了什么。
+  所以轨迹页与用量页都看得到这次委派花了什么。子报告另带 ``changed_files``（写成功的操作数），
+  父据此不能一边让子 Agent 改文件、一边回答"我只做了调查"。
 
 本模块只负责"工具外形 + 参数校验 + 结果形状"；真正的执行是
 :func:`~local_agent.graph.delegated_workflow.run_delegation`——与显式子图**共用同一套**
@@ -46,10 +52,13 @@ from pydantic import BaseModel, Field, ValidationError
 DelegateFn = Callable[[Sequence[Mapping[str, str]], int], str]
 
 DOC = (
-    "把一段**只读调查**派给隔离子 Agent 并行去查，只拿回核对过的原文（路径 + 行号 + 原文）。"
-    "适合：需要同时铺开看多个目录/多个问题，或者检索过程很长、不想占满你自己的上下文。"
-    "不适合：你自己一次 read_file / grep 就能答完的问题（每个子任务会多花一次模型调用，不要滥用）；"
-    "子Agent可以联网和运行只读命令，但不能写文件、修改代码、Git提交或再次委派。"
+    "把一段独立任务派给隔离子 Agent 去查（或改），只拿回核对过的结果与计数。"
+    "适合：需要同时铺开看多个目录/多个问题，或者过程很长、不想占满你自己的上下文。"
+    "不适合：你自己一次 read_file / grep 就能答完的问题（每个子任务会多花模型调用，不要滥用）。"
+    "子 Agent 的可写权限**跟随当前权限档位**：只读档下它也只能读；工作区可写档下它能在 `scope` "
+    "目录里改文件（改动会进「文件改动」面板、可整轮还原），但**不能删除文件、不能 Git 提交、"
+    "不能再次委派**。结果里的 `changed_files` 是这一路写成功的次数——它大于 0 就说明磁盘已被改动，"
+    "回答时不要声称只做了调查。"
     "每个子任务给出工作区内的相对 `scope` 目录（`.` 表示工作区根）与一个明确的问题。"
 )
 
@@ -88,6 +97,9 @@ class ChildOutcome(BaseModel):
     tool_calls: int = 0
     model_calls: int = 0
     evidence_count: int = 0
+    #: 这一路**写了几次文件**（2026-11-02 第二档）。只读子任务恒为 0。
+    #: 放在这里只为一件事：父不能一边让子 Agent 改了文件、一边回答"我只做了调查"。
+    changed_files: int = 0
     error: str | None = None
 
 

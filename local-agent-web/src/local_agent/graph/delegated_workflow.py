@@ -20,7 +20,10 @@ from langgraph.runtime import Runtime
 from pydantic import ValidationError
 
 from local_agent.cancellation import CancellationToken
-from local_agent.capabilities import readonly_child_capabilities
+from local_agent.capabilities import (
+    readonly_child_capabilities,
+    writable_child_capabilities,
+)
 from local_agent.config import WorkflowsConfig
 from local_agent.exceptions import SecurityError
 from local_agent.graph.state import AgentState, EvidenceReference, ReflectionResult, RuntimeContext
@@ -30,7 +33,7 @@ from local_agent.llm.usage_recording import (
     use_model_recorder,
 )
 from local_agent.llm.workflow_model import single_attempt_model
-from local_agent.security.path_guard import ExternalPathPolicy
+from local_agent.security.path_guard import ExternalPathPolicy, ExternalPathsMode
 from local_agent.security.policy import SecurityPolicy
 from local_agent.tools.delegate_tools import ChildOutcome, DelegatedResearchResult
 from local_agent.tools.tool_registry import ToolRegistry
@@ -81,6 +84,9 @@ class _PreparedChild:
     output_bound: int
     limits: WorkflowsConfig
     autonomous: bool = False
+    #: 这一路能否**写工作区文件**（2026-11-02 第二档）。由父档位 + 父能力共同决定，
+    #: 冻结进 `child_specs`：恢复时必须按冻结值执行，不能按"当前配置"重新解释。
+    writable: bool = False
 
 
 @dataclass
@@ -132,6 +138,28 @@ def _blank(state: AgentState) -> DelegatedWorkflowState:
             "request": {}, "child_specs": []}
 
 
+#: 计入"子 Agent 改了文件"的工具名。只读子任务里这三个永远不会出现（判定层也拒）。
+_WRITE_TOOL_NAMES = frozenset({"write_file", "edit_file", "delete_file"})
+#: 代表"这一步真的做成了"的事件状态。``ok`` 是子图工具事件的取值，``completed`` 是任务步的取值；
+#: 两个都要认——只认一个会让计数恒为 0，而那正是"父以为没改"的错误来源。
+_OK_STATUSES = frozenset({"ok", "completed"})
+
+
+def _changed_files(state: Mapping[str, Any]) -> int:
+    """子 Agent 实际写成功的文件操作数（同一文件多次写按操作数计，不是文件数）。
+
+    为什么要有这个数：父 Agent 只看得到报告正文，看不到子任务的对话。子 Agent 改了文件
+    而父回答"我只做了调查"是这类功能最容易产生的欺骗性结论；这个计数进工具结果后，
+    父在下结论前就能看到"这一路改了 N 处"。
+    """
+    return sum(
+        1
+        for event in (state.get("tool_events") or [])
+        if getattr(event, "tool_name", "") in _WRITE_TOOL_NAMES
+        and getattr(event, "status", "") in _OK_STATUSES
+    )
+
+
 def _fail(data: DelegatedWorkflowState, reason: str, limit: int = 20000) -> AgentState:
     reason = reason[:512]
     text = f"委派调查未完成：{reason}"[:limit]
@@ -175,6 +203,15 @@ def _prepare(
     if policy is None:
         raise ValueError("缺少父安全策略")
     prepared = []
+    #: 第二档（2026-11-02）：**自主子 Agent** 才谈得上可写，且要三个条件同时成立——
+    #: 走的是完整工具循环（有 planner/reflection，改文件才有意义）、父档位允许写工作区、
+    #: 父自己绑了写能力。显式图入口那条旧只读协议不在此列：它是固定的检索+整理流程。
+    autonomous_child = state.get("agent_loop_version") == 1
+    writable = (
+        autonomous_child
+        and "files_write" in context.agent_capabilities
+        and policy.external_policy.allows_workspace_write()
+    )
     for index, task in enumerate(request.tasks, 1):
         root = policy.resolve_path(task.scope)
         if not root.is_relative_to(context.workspace_root.resolve()) or not root.is_dir():
@@ -184,7 +221,8 @@ def _prepare(
         if input_bound + output_bound > min(shares["max_model_tokens"], llm.context_window_tokens):
             raise ValueError("模型 Token 预留超过父总预算份额或连接窗口")
         prepared.append(_PreparedChild(task, root, f"{state['run_id']}:child:{index}",
-                                       input_bound, output_bound, child_limits, state.get("agent_loop_version") == 1))
+                                       input_bound, output_bound, child_limits,
+                                       state.get("agent_loop_version") == 1, writable))
     return prepared
 
 
@@ -208,17 +246,37 @@ def _child_context(parent: RuntimeContext, item: _PreparedChild, token: Cancella
     config.memory.curated = config.memory.curated.model_copy(
         update={"enabled": False, "user_profile_enabled": False}
     )
-    # 只读档本身允许外部读取；委派另以内部 workspace_only 约束指定 scope，不继承父授权。
+    # 外部策略：**最高只到 workspace-write**，且固定 `workspace_only`——子 Agent 永远拿不到
+    # 工作区外的写（父若在 danger-full-access，也不会把那份放宽带下来），也不继承父的授权目录。
+    # 只读档下这里仍是 read-only，写类工具在判定层直接拒绝（不是"等审批"）。
+    mode: ExternalPathsMode = "workspace-write" if item.writable else "read-only"
     policy = SecurityPolicy.from_config(config, workspace_root=item.root,
-        external_policy=ExternalPathPolicy(mode="read-only", workspace_only=True),
-        cancellation=token, allow_result_spill=False)
+        external_policy=ExternalPathPolicy(mode=mode, workspace_only=True),
+        cancellation=token, allow_result_spill=False,
+        # **命令只读**（2026-11-02）：可写子任务的改动必须走文件工具，那条路会记进父会话的变更账本
+        # （可整轮还原）。若 `run_shell` 也能写盘，子 Agent 就有了一条没有账、也没法还原的写通道。
+        shell_readonly=True)
+    if item.writable:
+        # **写必须记进父会话那一本账**（2026-11-02）：不接线的话子 Agent 改的文件在
+        # 「文件改动」面板里不存在，整轮还原也不会覆盖它们——用户会以为没改过。
+        policy.file_change_recorder = parent.security_policy.file_change_recorder
     registry = ToolRegistry.build(
         policy, web_access=config.web_access, git=config.git, skills=config.skills,
         curated=config.memory.curated,
     )
+    capabilities = (
+        (writable_child_capabilities(parent.agent_capabilities) if item.writable
+         else readonly_child_capabilities(parent.agent_capabilities))
+        if item.autonomous else
+        tuple(cap for cap in parent.agent_capabilities if cap in {"files_read", "code_search"})
+    )
+    if item.writable:
+        # `delete_file` / `download_file` 从**绑定层**摘掉，而不是靠判定层拒绝：
+        # 前者是 ALWAYS_APPROVAL，子图没有审批节点，撞上它整路子任务会静默结束；
+        # 后者要联网下载，子任务没有这个必要，也没人盯着它的落盘目标。
+        registry.unavailable_tools = registry.unavailable_tools | {"delete_file", "download_file"}
     return replace(parent, app_config=config, workspace_root=item.root, current_cwd=item.root,
-                   agent_capabilities=(readonly_child_capabilities(parent.agent_capabilities) if item.autonomous else
-                       tuple(cap for cap in parent.agent_capabilities if cap in {"files_read", "code_search"})),
+                   agent_capabilities=capabilities,
                    agents_context=None, curated_snapshot={}, curated_available=False,
                    user_id=None, request_id=item.child_id,
                    security_policy=policy, tool_registry=registry, usage_recorder=None,
@@ -315,6 +373,8 @@ def _run_child(parent: RuntimeContext, item: _PreparedChild) -> _ChildResult:
         report["steps"] = int(state.get("loop_count", report["steps"]))
         report["tool_calls"] = len(state.get("tool_events", []))
         report["model_calls"] = int(state.get("loop_count", report["model_calls"]))
+        # 子 Agent 改了什么必须回得去：父只拿到报告正文，不能让它"一边改文件一边说只做了调查"。
+        report["changed_files"] = _changed_files(state)
     return _ChildResult(report, state, recorder.finished_records() if recorder is not None else [])
 
 
@@ -468,7 +528,7 @@ def prepare_delegation(
     data["request"] = request.model_dump()
     data["child_specs"] = [{"task": item.task.model_dump(), "root": str(item.root), "child_id": item.child_id,
         "input_bound": item.input_bound, "output_bound": item.output_bound, "limits": item.limits.model_dump(),
-        "autonomous": item.autonomous}
+        "autonomous": item.autonomous, "writable": item.writable}
         for item in prepared]
     return {"workflow": data, "task_status": "running"}
 
@@ -479,8 +539,11 @@ def reserve(state: AgentState, runtime: Runtime[RuntimeContext]) -> AgentState:
 
 
 def _from_spec(spec: dict[str, Any]) -> _PreparedChild:
+    # `writable` 缺省按 **False**（失败闭合）：升级前冻结的检查点没有这一项，恢复时按只读执行，
+    # 绝不因为"现在的配置允许写"就把一条旧子任务升级成写任务。
     return _PreparedChild(ChildResearchTask.model_validate(spec["task"]), Path(spec["root"]), spec["child_id"],
-                          spec["input_bound"], spec["output_bound"], WorkflowsConfig.model_validate(spec["limits"]), bool(spec.get("autonomous")))
+                          spec["input_bound"], spec["output_bound"], WorkflowsConfig.model_validate(spec["limits"]),
+                          bool(spec.get("autonomous")), bool(spec.get("writable")))
 
 
 def dispatch(state: AgentState, runtime: Runtime[RuntimeContext], *, checkpointer: BaseCheckpointSaver | None = None) -> AgentState:
@@ -531,7 +594,17 @@ def dispatch_delegation(
                 if values.get("child_id") != item.child_id or values.get("status") != "finished":
                     raise ValueError("子检查点无法证明完整结果，请人工核对，未重跑")
     # 新线程不继承父图内部执行配置；独立子 thread 与同 saver 的串行写锁配合。
-    with ThreadPoolExecutor(max_workers=request.concurrency, thread_name_prefix="readonly-child") as executor:
+    # **只有"可写且目录重叠"的批次才降级为串行**（2026-11-02）：子 Agent 的写被限制在各自
+    # scope 目录内，目录互不包含时并发没有共享写点；一旦相同或嵌套，几路就会互相覆盖，
+    # 而且"改前内容"会互相污染——那种失败看起来像模型改错了，实际是并发。
+    writable_roots = [item.root for item in prepared if item.writable]
+    overlapping = len(set(writable_roots)) != len(writable_roots) or any(
+        left != right and (left in right.parents or right in left.parents)
+        for index, left in enumerate(writable_roots)
+        for right in writable_roots[index + 1:]
+    )
+    workers = 1 if overlapping else request.concurrency
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="readonly-child") as executor:
         results = list(executor.map(lambda item: _durable_child(context, item, checkpointer), prepared))
     for item, result in zip(prepared, results, strict=True):
         if result.report["status"] != "completed":
@@ -690,6 +763,7 @@ def make_delegation_runner(context: RuntimeContext) -> Callable[[Sequence[Mappin
                 tool_calls=int(child.get("tool_calls") or 0),
                 model_calls=int(child.get("model_calls") or 0),
                 evidence_count=len(child.get("references") or []),
+                changed_files=int(child.get("changed_files") or 0),
                 error=child.get("error"),
             )
             for child in data.get("children") or []

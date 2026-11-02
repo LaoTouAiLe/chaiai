@@ -207,6 +207,9 @@ class ChildResearchReport(TypedDict):
     model_tokens_reserved: int
     references: list[WorkflowReference]
     error: str | None
+    #: 子 Agent 实际写成功的文件操作数（2026-11-02 第二档）。只读子任务恒为 0。
+    #: 存在它进工具结果，是为了让父 Agent 不能一边让子 Agent 改了文件、一边回答"只做了调查"。
+    changed_files: NotRequired[int]
 
 
 class DelegatedWorkflowState(TypedDict):
