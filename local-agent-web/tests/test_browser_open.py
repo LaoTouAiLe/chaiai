@@ -78,7 +78,7 @@ def test_entry_point_opens_the_browser_unless_disabled(
     assert (
         api_main.main(["--config", str(tmp_path / "missing.yaml"), "--env", str(tmp_path / ".env")]) == 0
     )
-    assert called == [("http://127.0.0.1:8000", "127.0.0.1", 8000)]
+    assert called == [("http://127.0.0.1:8731", "127.0.0.1", 8731)]
 
     called.clear()
     assert (
@@ -122,7 +122,7 @@ def test_frozen_entry_opens_the_desktop_window(
 
     assert api_main.main([]) == 0
 
-    assert windows == [("127.0.0.1", 8000)]
+    assert windows == [("127.0.0.1", 8731)]
     assert browsers == []
     # 2026-10-26 起库直接落在数据根下，不再多一层 `data/`。
     assert (tmp_path / "chaiai" / "checkpoints.sqlite").is_file()
@@ -146,4 +146,4 @@ def test_frozen_entry_falls_back_to_the_browser_without_window_support(
 
     assert api_main.main([]) == 0
 
-    assert browsers == ["http://127.0.0.1:8000"]
+    assert browsers == ["http://127.0.0.1:8731"]

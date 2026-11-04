@@ -13,6 +13,17 @@ body,
   margin: 0;
 }
 
+/* 手机键盘（2026-11-03）：在 iOS 上 `height: 100%` 锚的是**最大视口**，键盘弹出时布局不缩，
+   底部输入框被键盘盖住；`dvh` 跟可视视口走，键盘弹出时自动收。
+   用 @supports 包着，不支持的浏览器仍走上面那条。 */
+@supports (height: 100dvh) {
+  html,
+  body,
+  #root {
+    height: 100dvh;
+  }
+}
+
 body {
   background: var(--law-bg-base);
   color: var(--law-text-primary);
@@ -21,11 +32,14 @@ body {
   line-height: var(--law-leading-base);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* 手机上整页被"橡皮筋"拖动时，固定外壳会露出一片空白，看起来像界面错位。 */
+  overscroll-behavior: none;
 }
 
 button {
   font: inherit;
   color: inherit;
+  transition: background-color var(--dur-hover-out) var(--ease-out), color var(--dur-hover-out) var(--ease-out), box-shadow var(--dur-hover-out) var(--ease-out);
   background: none;
   border: 0;
   padding: 0;
@@ -40,6 +54,7 @@ input,
 textarea {
   font: inherit;
   color: inherit;
+  caret-color: var(--c-accent);
 }
 
 h1,

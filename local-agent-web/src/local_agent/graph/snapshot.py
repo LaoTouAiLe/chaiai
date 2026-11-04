@@ -157,6 +157,11 @@ def _decision_budget_messages(state: AgentState, context: RuntimeContext) -> lis
             f"【执行反馈】同一操作已连续失败{retries}次。请根据错误判断是否换方法、补充检查或需要用户输入。"
             "这是反馈，不会阻止继续执行；需要输入时用task_control说明。"
         )
+    # 验证提醒（2026-11-04）：与上面的执行反馈同一通道——只进本次请求，不写 messages、
+    # 不占轮次、不进页面历史，所以它消失之后前缀与历史仍能按原样重建。
+    nudge = str(state.get("verification_nudge") or "").strip()
+    if nudge:
+        text = f"{text}\n\n{nudge}" if text else nudge
     return [SystemMessage(content=text)] if text else []
 
 

@@ -654,6 +654,12 @@ class AgentConfig(_StrictModel):
     max_retries_per_step: int = Field(default=2, ge=0)
     #: 旧配置兼容字段；自主循环由主模型决定结束，不执行程序完成度校验。
     require_evidence_for_completion: bool = False
+    #: 改完代码却没跑通任何验证就想收尾时，推一次**提醒**（2026-11-04，照 hermes 的 verify-on-stop）。
+    #:
+    #: **默认关闭**：每次提醒会多花一轮模型调用，而"要不要验证"多数时候模型自己判断得出来。
+    #: 打开后是提醒、不是拦截——不判失败、不换掉回答、最多 2 次，且只对代码文件触发
+    #: （改 README 这类文档不会要求跑测试）。实现见 :mod:`local_agent.graph.verification_stop`。
+    verify_on_stop: bool = False
 
 
 class WebConfig(_StrictModel):
@@ -664,7 +670,7 @@ class WebConfig(_StrictModel):
     """
 
     host: str = "127.0.0.1"
-    port: int = Field(default=8000, ge=1, le=65535)
+    port: int = Field(default=8731, ge=1, le=65535)
     #: 允许的 `Host` 头（防 DNS rebinding）。默认只有回环的三种写法。
     allowed_hosts: list[str] = Field(default_factory=lambda: ["127.0.0.1", "localhost", "[::1]"])
     #: 开发期允许的跨源来源；生产同源（FastAPI 托管前端产物），因此默认只有 Vite dev server。
@@ -710,6 +716,135 @@ def is_loopback_host(host: str) -> bool:
     if text in {"localhost", "::1"}:
         return True
     return text == "127.0.0.1" or text.startswith("127.")
+
+
+#: 首批支持的移动通道（架构 §24；2026-11-03）。加通道时**只追加**，不改已有名字：
+#: `cpolar` / `frp` 留在后置清单里，等前三条跑通再说。
+SUPPORTED_MOBILE_CHANNELS: tuple[str, ...] = ("lan", "tailscale", "cloudflared")
+
+
+class MobileChannelConfig(_StrictModel):
+    """一个移动接入通道（架构 §24）。
+
+    **通道只负责"把网关暴露到某个网络面"，不参与认证**：认证在网关内，与走哪条通道无关。
+    每个通道独立开关、独立配对、独立设备授权——局域网授权不等于远程授权，混成一个总开关
+    是经典误授。
+
+    校验分两级：``type`` 拼错在任何状态下都拒绝（结构错误，早发现）；``hostname`` 这类
+    **完整性**要求只在 ``enabled: true`` 时校验——否则示例配置里那些关着的通道会让人根本
+    加载不了配置。
+    """
+
+    #: 通道类型，取值见 :data:`SUPPORTED_MOBILE_CHANNELS`。
+    type: str
+    enabled: bool = False
+    #: 仅 ``cloudflared`` 使用：``named`` 固定域名 | ``quick`` 随机临时域名（**不支持 SSE**）。
+    mode: Literal["named", "quick"] = "named"
+    #: 仅 ``tailscale`` 使用：``serve`` 只有 tailnet 内可达 | ``funnel`` 公网可达（靠配对码挡）。
+    #:
+    #: ``funnel`` 的取舍：手机不用装 Tailscale App，但那个地址在公网上是活的——安全全压在配对码
+    #: 与设备 Token 上。`serve` 更安全，代价是手机也得登录同一个 tailnet。
+    expose: Literal["serve", "funnel"] = "serve"
+    #: 仅 ``tailscale`` 使用：对外 HTTPS 端口。Tailscale 只放行 443 / 8443 / 10000 三个值
+    #: （这是它的策略，不是我们的限制），443 被占用时换后两个。
+    https_port: int = 443
+
+    @field_validator("https_port")
+    @classmethod
+    def _tailscale_port_is_allowed(cls, value: int) -> int:
+        if value not in {443, 8443, 10000}:
+            raise ValueError(
+                f"https_port={value} 不可用：Tailscale 只放行 443 / 8443 / 10000（硬件策略，不是本项目限制）"
+            )
+        return value
+    #: 仅 ``cloudflared`` 的 ``named`` 模式使用：对外域名。
+    hostname: str = ""
+    #: 仅 ``lan`` 使用：局域网监听端口。它是**第二个监听**（同一个网关应用、不同端口），
+    #: 所以必须与 ``mobile.gateway_port`` 不同——相同会在启动时撞端口而不是"看起来没生效"。
+    port: int = Field(default=8743, ge=1, le=65535)
+    #: 仅 ``lan`` 使用：是否用 HTTPS。**默认 false**。
+    #:
+    #: 自签证书的代价是手机每台/每次清缓存后都要点一次"仍要继续访问"，而局域网本来就是
+    #: "这台机器信任的网络"；换明文 http 换来的是"打开就能用"。代价必须说清：**同一网段里的
+    #: 其他人可以在链路上看到你与这个 Agent 的全部通信内容**。可信网络之外（咖啡厅 Wi-Fi）
+    #: 请打开它，或者改用 tailscale 通道——那条永远是 https 且不暴露给同网段的其他人。
+    tls: bool = False
+
+    @field_validator("type")
+    @classmethod
+    def _type_is_supported(cls, value: str) -> str:
+        text = value.strip()
+        if text not in SUPPORTED_MOBILE_CHANNELS:
+            raise ValueError(
+                f"type={text!r} 不受支持：本版只支持 {' / '.join(SUPPORTED_MOBILE_CHANNELS)}"
+                "（cpolar / frp 仍在后置清单里，写了不会被静默忽略）"
+            )
+        return text
+
+    @field_validator("hostname")
+    @classmethod
+    def _hostname_is_bare(cls, value: str) -> str:
+        text = value.strip()
+        if "://" in text or "/" in text:
+            raise ValueError("hostname 只写域名（例如 agent.example.com），不要带协议或路径")
+        return text
+
+    @model_validator(mode="after")
+    def _fields_match_type(self) -> MobileChannelConfig:
+        if self.hostname and self.type != "cloudflared":
+            raise ValueError(f"hostname 只用于 cloudflared 通道（当前 type={self.type}）")
+        if self.enabled and self.type == "cloudflared" and self.mode == "named" and not self.hostname:
+            raise ValueError(
+                "cloudflared 的 named 模式必须给 hostname；"
+                "只想临时试一下就把 mode 设为 quick（随机域名，流式会退化）"
+            )
+        return self
+
+
+class MobileConfig(_StrictModel):
+    """移动访问与多通道（架构 §24；2026-11-03 用户确认）。
+
+    ``enabled`` **不是能力开关**：它决定"是否启动第二个进程"。``false`` 时不起进程、不占端口、
+    不写任何文件，与这一节不存在时逐字节一致。
+    """
+
+    enabled: bool = False
+    #: 网关自己的监听面。**固定回环**：对外的暴露交给通道，不靠改监听地址。
+    gateway_host: str = "127.0.0.1"
+    gateway_port: int = Field(default=8732, ge=1, le=65535)
+    #: 短期配对码有效期（秒）。超时重生成，重新生成即作废旧码。
+    pairing_ttl_seconds: int = Field(default=300, gt=0)
+    #: 通道列表；顺序只决定状态页的展示顺序，不代表优先级或尝试顺序。
+    channels: list[MobileChannelConfig] = Field(default_factory=list)
+    #: 是否转发终端的 WebSocket（§23）。默认开：远程执行 terminal 与远程执行 HTTP 接口是同一级别的
+    #: 权限（都能完全控制这台机器），单独关它不会更安全。留这个开关是为了**排查**：WS 在某些隧道下
+    #: 表现异常时，可以关掉它让页面其余部分先可用，而不是整条通道下线。
+    ws_enabled: bool = True
+
+    @field_validator("gateway_host")
+    @classmethod
+    def _gateway_is_loopback(cls, value: str) -> str:
+        text = value.strip()
+        if not is_loopback_host(text):
+            raise ValueError(
+                f"gateway_host={text!r} 不是回环地址：网关只监听本机，"
+                "对外的暴露由 mobile.channels 负责（改这里等于绕开通道）"
+            )
+        return text
+
+    @model_validator(mode="after")
+    def _channels_are_unique(self) -> MobileConfig:
+        seen: set[str] = set()
+        for channel in self.channels:
+            if channel.type in seen:
+                raise ValueError(f"通道 {channel.type!r} 出现了两次：同类通道的授权语义不明确")
+            seen.add(channel.type)
+            if channel.type == "lan" and channel.port == self.gateway_port:
+                raise ValueError(
+                    f"lan 通道端口与 mobile.gateway_port 相同（都是 {channel.port}）："
+                    "它们是同一进程的两个监听，端口不能撞"
+                )
+        return self
 
 
 class ModelSettingsConfig(_StrictModel):
@@ -1080,6 +1215,8 @@ class AppConfig(_StrictModel):
     rag: RagConfig = Field(default_factory=RagConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     web: WebConfig = Field(default_factory=WebConfig)
+    #: 移动访问与多通道（2026-11-03，§24）。默认关闭：不起第二个进程、不占端口。
+    mobile: MobileConfig = Field(default_factory=MobileConfig)
     model_settings: ModelSettingsConfig = Field(default_factory=ModelSettingsConfig)
     profiles: ProfilesConfig = Field(default_factory=ProfilesConfig)
     web_access: WebAccessConfig = Field(default_factory=WebAccessConfig)
@@ -1158,6 +1295,20 @@ class AppConfig(_StrictModel):
             raise ValueError(
                 "memory.medium_term.enabled 为 true 时需要 embedding.enabled 也为 true"
                 "（中期记忆必须显式配置 embedding provider）"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _mobile_gateway_port_differs_from_web(self) -> AppConfig:
+        """网关与主服务不能撞端口（架构 §24）。
+
+        撞了的表现是网关反代到自己：请求在两层之间来回，最终超时——看起来像"页面打不开"，
+        而不是"配置写错了"。在加载阶段就失败闭合，比让人去翻日志便宜得多。
+        """
+        if self.mobile.enabled and self.mobile.gateway_port == self.web.port:
+            raise ValueError(
+                f"mobile.gateway_port 与 web.port 相同（都是 {self.web.port}）："
+                "网关会反代到自己，请给网关换一个端口"
             )
         return self
 

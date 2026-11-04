@@ -19,6 +19,8 @@
   outline: 2px solid var(--law-state-info);
   outline-offset: 2px;
 }
+.compact .readout { display: none; }
+.compact .trigger { width: 28px; height: 28px; }
 
 /* Hover popover (matrix 22). No gap from the trigger, so hover is continuous;
    `focus-within` gives the keyboard the same content. */
@@ -30,7 +32,7 @@
   bottom: 100%;
   z-index: 2;
   visibility: hidden;
-  width: min(340px, calc(100vw - 24px));
+  width: min(340px, calc(100cqw - 24px), calc(100vw - 24px));
   padding: var(--law-space-md) var(--law-space-lg);
   border: 1px solid var(--law-border-l2);
   border-radius: var(--law-radius-lg);

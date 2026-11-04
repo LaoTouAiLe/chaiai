@@ -90,6 +90,14 @@ READ_ONLY_TOOLS: tuple[str, ...] = (
     # 请求、不改任何状态，与 `read_file` 同级、不需要人工审批。闸门是能力开关（默认关）：
     # 它把别的会话的正文带进当前轮，属于"读的范围"而不是"写的能力"。
     "session_search",
+    # 2026-11-04：看屏幕（`screenshot`）——截当前前台窗口交给模型看，不写工作区、不改状态
+    # （图片落在系统临时目录并滚动淘汰），所以与 `view_image` 同级、不需要人工审批。
+    # 它**不是**"读文件"：拍的是用户此刻的桌面，隐私面比读一个已知路径大，因此闸门是独立的
+    # 能力开关（`screen_read`，默认关），而不是审批卡。
+    "screenshot",
+    # 2026-11-04：读界面控件树（`read_ui`）——只枚举控件属性，不点击、不聚焦、不发输入，
+    # 与 `screenshot` 同一档、不需要审批。两者共用 `screen_read` 开关。
+    "read_ui",
 )
 CONTROL_TOOLS: tuple[str, ...] = ("update_plan", "task_control", "ask_user")
 
@@ -117,6 +125,24 @@ INTERACTIVE_TOOLS: tuple[str, ...] = (
     "start_shell", "read_shell", "write_shell", "stop_shell", "list_shell_sessions", "browser",
 )
 
+#: 模拟输入类工具（2026-11-04，架构 §18.10）：点击、输入文本、按组合键。
+#:
+#: **它们不是"写文件"，而是对任意前台程序施加副作用**，所以既不能进只读组，也不能像
+#: `start_shell` 那样在沙箱内免审——沙箱对鼠标键盘没有任何约束力。
+#: 授权粒度是**本轮一次**：第一次动作走审批，批准后本轮同类动作不再逐个询问
+#: （2026-11-04 用户裁定），换窗口或换轮次都要重新授权。
+SCREEN_INPUT_TOOLS: tuple[str, ...] = (
+    "click_screen", "click_element", "type_text", "press_keys",
+)
+
+#: 切前台（`focus_window`，2026-11-04）：单独一组，因为它的授权语义与上面三个**不同**。
+#:
+#: 抢焦点会打断用户正在做的事（打了一半的字、开着的菜单），所以它**每次都要批**，
+#: 不并进"本轮屏幕操作一次授权"。2026-11-04 用户裁定："把指定窗口切到前台，用户审批"。
+#: 必要性来自实测：后台进程调 `SetForegroundWindow` 会被前台锁忽略，没有这一步聚焦，
+#: "只作用于前台窗口"的点击几乎永远被拒。
+SCREEN_FOCUS_TOOLS: tuple[str, ...] = ("focus_window",)
+
 #: 本版本已实现、可绑定给模型的全部工具。
 KNOWN_TOOLS: tuple[str, ...] = (
     READ_ONLY_TOOLS
@@ -127,6 +153,8 @@ KNOWN_TOOLS: tuple[str, ...] = (
     + GIT_WRITE_TOOLS
     + MEMORY_TOOLS
     + INTERACTIVE_TOOLS
+    + SCREEN_INPUT_TOOLS
+    + SCREEN_FOCUS_TOOLS
 )
 
 
@@ -306,6 +334,9 @@ class SecurityPolicy:
         self._edited_paths: set[str] = set()
         #: 本轮是否已经为"大范围编辑"批准过一次：批准后本轮内后续文件不再逐个问（2026-10-15）。
         self._large_edit_approved = False
+        #: 本轮是否已经为"模拟点击/输入"批准过一次（2026-11-04，架构 §18.10）。
+        #: 与上一行同一口径：策略每轮重建，所以"本轮"是天然作用域，不需要另开状态通道。
+        self._screen_approved = False
         #: 当前实例是否已物化过写授权（根上一条可继承 ACE，系统传播到整棵子树）。
         self._sandbox_materialized = False
         #: 文件变更账本（2026-10-21）：由应用层每轮注入，``None`` = 不记账（CLI / 测试）。
@@ -739,6 +770,68 @@ class SecurityPolicy:
                 return SafetyDecision(False, False, str(exc))
         return SafetyDecision(True, False, "当前会话的交互操作，文件输出仍按目录授权检查")
 
+    def _classify_screen_input(self, tool_name: str) -> SafetyDecision:
+        """模拟点击/键盘的判定（架构 §18.10）。
+
+        授权粒度是**本轮一次**：第一次动作弹一次卡，之后本轮内同类动作直接放行。这不是"记住批准"——
+        策略实例随轮次重建，换一轮又要重新授权。动作本身的边界（前台窗口、坐标范围、修饰键收尾）
+        由工具层守，不靠审批兜。
+        """
+        if not self.external_policy.allows_workspace_write():
+            return SafetyDecision(
+                allowed=False,
+                requires_approval=False,
+                reason="模拟点击与键盘输入需要工作区可写档位（它会改动别的程序的状态）",
+            )
+        if self._screen_approved:
+            return SafetyDecision(
+                allowed=True,
+                requires_approval=False,
+                reason="本轮已批准过屏幕操作",
+            )
+        return SafetyDecision(
+            allowed=False,
+            requires_approval=True,
+            reason=(
+                f"{tool_name} 会模拟真实鼠标键盘，作用在**当前前台窗口**上："
+                "需要一次人工批准。批准后本轮内同类动作不再逐个询问，"
+                "换窗口或换一轮都要重新批准。"
+            ),
+        )
+
+    def note_screen_action_approved(self) -> None:
+        """记下"本轮屏幕操作已获批准"：后续同类动作不再逐个弹卡（在批准后真正执行完时调用）。"""
+        self._screen_approved = True
+
+    def forget_screen_approval(self) -> None:
+        """撤销本轮的屏幕操作授权。
+
+        前台窗口换了就必须撤销（架构 §18.10）：授权对象是"那个窗口"，不是"这台机器"。
+        撤销后下一次动作重新走审批，用户看到的是新窗口的标题。
+        """
+        self._screen_approved = False
+
+    def _classify_focus_window(self) -> SafetyDecision:
+        """切前台的判定：**每次都要批**（不并进本轮屏幕操作授权）。
+
+        理由不是"多一道保险"，而是它改的是**用户此刻的焦点**：可能正打着字、开着菜单。
+        这一下打断是真实成本，所以不该被前一次"允许点击"顺带放行。
+        """
+        if not self.external_policy.allows_workspace_write():
+            return SafetyDecision(
+                allowed=False,
+                requires_approval=False,
+                reason="切换前台窗口需要工作区可写档位",
+            )
+        return SafetyDecision(
+            allowed=False,
+            requires_approval=True,
+            reason=(
+                "要把一个窗口切到前台，这会打断你当前正在做的事（正在输入、打开的菜单）："
+                "每次聚焦都需要一次人工批准。"
+            ),
+        )
+
     def classify_tool(
         self, tool_name: str, arguments: Mapping[str, Any] | None = None
     ) -> SafetyDecision:
@@ -762,6 +855,10 @@ class SecurityPolicy:
             return SafetyDecision(allowed=True, requires_approval=False, reason=reason)
         if tool_name in INTERACTIVE_TOOLS:
             return self._classify_interactive(tool_name, args)
+        if tool_name in SCREEN_INPUT_TOOLS:
+            return self._classify_screen_input(tool_name)
+        if tool_name in SCREEN_FOCUS_TOOLS:
+            return self._classify_focus_window()
         if tool_name in READ_ONLY_TOOLS:
             if tool_name in {"grep", "glob"} and args.get("save_full"):
                 try:

@@ -1,4 +1,6 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import type { ReactElement, ReactNode } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { fireEvent, render as baseRender, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import {
   emptySessionScenario,
@@ -10,6 +12,20 @@ import {
   toolsScenario,
 } from '../../fixtures/scenarios'
 import { Conversation } from './Conversation'
+
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+/**
+ * 会话里可能渲染委派卡，而它会轮询实时进度（2026-11-04）。
+ * 覆盖 `render` 统一提供 QueryClient，而不是逐个用例改。
+ */
+function render(ui: ReactElement) {
+  return baseRender(ui, {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  })
+}
 
 /** Mirrors the component's display rule: `k` only above one thousand. */
 function formatTokens(value: number): string {
@@ -212,6 +228,112 @@ describe('Conversation 图片（2026-10-16）', () => {
 })
 
 describe('Conversation', () => {
+  it('folds completed successful work, keeps the final answer visible, and shows one reply time', () => {
+    const tool = shellScenario.messages.find((row): row is Extract<typeof row, { kind: 'tool' }> => row.kind === 'tool')!
+    render(<Conversation scenario={{ ...shellScenario, stats: null, messages: [
+      { kind: 'user', id: 'u', text: '检查项目', at: '' },
+      { kind: 'assistant', id: 'a', text: '先检查文件', at: '09:10' },
+      { ...tool, id: 't', tool: { ...tool.tool, status: 'succeeded' } },
+      { kind: 'assistant', id: 'b', text: '这是最终结论', at: '09:11' },
+    ] }} />)
+    const process = screen.getByRole('button', { name: /处理过程/ })
+    expect(process).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByText('先检查文件')).not.toBeVisible()
+    expect(screen.getByText('这是最终结论')).toBeVisible()
+    expect(screen.getAllByLabelText('回复时间')).toHaveLength(1)
+    expect(screen.getByLabelText('回复时间')).toHaveTextContent('09:11')
+    fireEvent.click(process)
+    expect(screen.getByText('先检查文件')).toBeVisible()
+    expect(screen.getByText('读取文件')).toBeVisible()
+  })
+
+  // 2026-11-02 验收复现：真实图执行几乎每轮都有「检索与记忆 · 未命中」，而那一行曾一律
+  // 挡住折叠，于是成功任务也不出现「处理过程」。正常检索结果应与工具一起收起。
+  it('folds a normal retrieval row together with the tool work', () => {
+    const tool = shellScenario.messages.find((row): row is Extract<typeof row, { kind: 'tool' }> => row.kind === 'tool')!
+    render(<Conversation scenario={{ ...shellScenario, stats: null, messages: [
+      { kind: 'user', id: 'u', text: '检查项目', at: '' },
+      { kind: 'memory', id: 'm', memory: {
+        retrieval: { outcome: 'miss', note: '本轮没有可引用的工作区文件或长期记忆。' },
+        write: null,
+      } },
+      { ...tool, id: 't', tool: { ...tool.tool, status: 'succeeded' } },
+      { kind: 'assistant', id: 'b', text: '这是最终结论', at: '' },
+    ] }} />)
+    const process = screen.getByRole('button', { name: /处理过程/ })
+    expect(process).toHaveAttribute('aria-expanded', 'false')
+    // 收起时那一行在 `hidden` 容器里：role 查询会跳过不可见子树，这里按标签取节点本身。
+    expect(screen.getByLabelText('检索与记忆')).not.toBeVisible()
+    expect(screen.getByText('这是最终结论')).toBeVisible()
+    fireEvent.click(process)
+    expect(screen.getByLabelText('检索与记忆')).toBeVisible()
+  })
+
+  // 反过来：需要用户注意的记忆行仍留在正文——检索失败、写入失败、有候选却没落库。
+  it.each([
+    ['retrieval failed', {
+      retrieval: { outcome: 'failed' as const, reason: '记忆库不可读', note: '本轮没有成功检索。' },
+      write: null,
+    }],
+    ['write failed', {
+      retrieval: { outcome: 'miss' as const, note: '本轮没有可引用的工作区文件或长期记忆。' },
+      write: { outcome: 'failed' as const, detail: '写入失败 · 不影响本轮回答' },
+    }],
+    ['write skipped', {
+      retrieval: { outcome: 'miss' as const, note: '本轮没有可引用的工作区文件或长期记忆。' },
+      write: { outcome: 'skipped' as const, detail: '中期与长期记忆都已关闭，候选没有落库' },
+    }],
+  ] as const)('keeps a memory row that needs attention exposed: %s', (_label, memory) => {
+    const tool = shellScenario.messages.find((row): row is Extract<typeof row, { kind: 'tool' }> => row.kind === 'tool')!
+    render(<Conversation scenario={{ ...shellScenario, stats: null, messages: [
+      { kind: 'user', id: 'u', text: '检查项目', at: '' },
+      { kind: 'memory', id: 'm', memory },
+      { ...tool, id: 't', tool: { ...tool.tool, status: 'succeeded' } },
+      { kind: 'assistant', id: 'b', text: '这是最终结论', at: '' },
+    ] }} />)
+    expect(screen.queryByRole('button', { name: /处理过程/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '检索与记忆' })).toBeVisible()
+  })
+
+  it.each(['failed', 'uncertain', 'pending', 'running'] as const)('keeps %s tool work visible', (status) => {
+    const tool = shellScenario.messages.find((row): row is Extract<typeof row, { kind: 'tool' }> => row.kind === 'tool')!
+    render(<Conversation scenario={{ ...shellScenario, stats: null, messages: [
+      { kind: 'user', id: 'u', text: '检查项目', at: '' },
+      { kind: 'assistant', id: 'a', text: '先检查文件', at: '' },
+      { ...tool, id: 't', tool: { ...tool.tool, status } },
+      { kind: 'assistant', id: 'b', text: '已有回复', at: '' },
+    ] }} />)
+    expect(screen.queryByRole('button', { name: /处理过程/ })).not.toBeInTheDocument()
+    expect(screen.getByText('先检查文件')).toBeVisible()
+  })
+
+  it('keeps the current running turn open and folds it only after completion', () => {
+    const tool = shellScenario.messages.find((row): row is Extract<typeof row, { kind: 'tool' }> => row.kind === 'tool')!
+    const scene = { ...shellScenario, stats: null, messages: [
+      { kind: 'user' as const, id: 'u', text: '检查项目', at: '' },
+      { kind: 'assistant' as const, id: 'a', text: '正在检查', at: '' },
+      { ...tool, id: 't', tool: { ...tool.tool, status: 'succeeded' as const } },
+      { kind: 'assistant' as const, id: 'b', text: '最终结论', at: '' },
+    ] }
+    const view = render(<Conversation scenario={{ ...scene, session: { ...scene.session, status: 'running' } }} />)
+    expect(screen.queryByRole('button', { name: /处理过程/ })).not.toBeInTheDocument()
+    expect(screen.getByText('正在检查')).toBeVisible()
+    view.rerender(<Conversation scenario={{ ...scene, session: { ...scene.session, status: 'completed' } }} />)
+    expect(screen.getByRole('button', { name: /处理过程/ })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByText('最终结论')).toBeVisible()
+  })
+
+  it('keeps an explicitly expanded tool visible after its turn completes', () => {
+    const tool = shellScenario.messages.find((row): row is Extract<typeof row, { kind: 'tool' }> => row.kind === 'tool')!
+    render(<Conversation scenario={{ ...shellScenario, stats: null, messages: [
+      { kind: 'user', id: 'u', text: '检查项目', at: '' },
+      { ...tool, id: 't', tool: { ...tool.tool, status: 'succeeded', expanded: true } },
+      { kind: 'assistant', id: 'b', text: '最终结论', at: '' },
+    ] }} />)
+    expect(screen.queryByRole('button', { name: /处理过程/ })).not.toBeInTheDocument()
+    expect(screen.getByText('读取文件')).toBeVisible()
+  })
+
   it('keeps thought, narration and tools in chronological order, without inventing thought', () => {
     const tool = shellScenario.messages.find(message => message.kind === 'tool')!
     const messages = [

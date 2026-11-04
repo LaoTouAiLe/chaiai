@@ -47,7 +47,7 @@ interface SettingsDialogProps {
   extraSections?: Partial<Record<SettingsSection, ReactNode>>
 }
 
-export type SettingsSection = 'models' | 'permissions' | 'skills' | 'capabilities' | 'general' | 'storage' | 'about' | 'execution' | 'file_changes' | 'agents' | 'retrieval' | 'web_access' | 'mcp' | 'attachments' | 'memory' | 'medium_term' | 'curated' | 'consolidation' | 'compression' | 'embedding' | 'advanced'
+export type SettingsSection = 'models' | 'permissions' | 'skills' | 'capabilities' | 'general' | 'storage' | 'about' | 'mobile' | 'execution' | 'file_changes' | 'agents' | 'retrieval' | 'web_access' | 'mcp' | 'attachments' | 'memory' | 'medium_term' | 'curated' | 'consolidation' | 'compression' | 'embedding' | 'advanced'
 
 /** 原型保留连接/权限；真实宿主注入应用设置各组。 */
 /**
@@ -66,6 +66,9 @@ const SECTIONS: readonly { id: SettingsSection; label: string }[] = [
   // 关于（2026-10-27）：版本与更新、卸载。与"数据位置"同组——都是"这台机器怎么跑"，
   // 而且它读的也是宿主形态（装在哪、能不能卸），不是发给模型的偏好。
   { id: 'about', label: '关于' },
+  // 移动访问（2026-11-03）：手机能不能连、配了几台。与「关于」同组——同样是这台机器的形态，
+  // 不是发给模型的偏好；而且它只读，管理动作在网关自己的页面上。
+  { id: 'mobile', label: '移动访问' },
   { id: 'execution', label: '任务执行' },
   { id: 'file_changes', label: '文件改动与还原' },
   { id: 'agents', label: '项目规则' },
@@ -75,6 +78,7 @@ const SECTIONS: readonly { id: SettingsSection; label: string }[] = [
   { id: 'memory', label: '长期记忆' },
   { id: 'medium_term', label: '中期记忆' },
   { id: 'curated', label: '常驻记忆' },
+  { id: 'consolidation', label: '记忆巩固' },
   { id: 'compression', label: '上下文压缩' },
   { id: 'embedding', label: '向量库与 Embedding' },
   { id: 'advanced', label: '高级配置' },
@@ -96,7 +100,7 @@ const SECTION_GROUPS: readonly { label: string; ids: readonly SettingsSection[] 
   { label: '记忆与上下文', ids: ['memory', 'medium_term', 'curated', 'consolidation', 'compression', 'embedding'] },
   // 分组标题只做归类；`通用与外观` 与只读的 `高级配置` 都是"改页面本身怎么跑"，同放一组。
   // 「数据位置」与通用同组：两者都是"这台机器怎么跑"，改完要重启或立即生效的本地设定。
-  { label: '通用', ids: ['general', 'storage', 'about', 'advanced'] },
+  { label: '通用', ids: ['general', 'storage', 'about', 'mobile', 'advanced'] },
 ]
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -186,7 +190,7 @@ function ConnectionCard({
         >
           {expanded ? '收起' : '详情'}
         </button>
-        <span className={styles.cardId}>{connection.id}</span>
+        {expanded ? <span className={styles.cardId}>{connection.id}</span> : null}
       </header>
 
       {expanded ? <>
@@ -321,7 +325,9 @@ export function SettingsDialog({
   const [pending, setPending] = useState<SettingsSearchHit | null>(null)
   /** 目标字段在当前取值下不渲染时（条件显示字段）的如实解释。 */
   const [notice, setNotice] = useState<string | null>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
   const panesRef = useRef<HTMLDivElement | null>(null)
+  const sectionScroll = useRef<Partial<Record<SettingsSection, number>>>({})
 
   const visibleSections = SECTIONS.filter(
     item => item.id === 'models' || item.id === 'permissions' || extraSections?.[item.id] !== undefined,
@@ -332,6 +338,7 @@ export function SettingsDialog({
       items: visibleSections.filter(item => group.ids.includes(item.id)),
     }))
     .filter(group => group.items.length > 0)
+  const navigationItems = groups.flatMap(group => group.items)
 
   // 搜索只覆盖偏好字段：模型连接与权限是手写分区，不在这份字段表里。
   const canSearch = visibleSections.some(item => item.id !== 'models' && item.id !== 'permissions')
@@ -344,9 +351,9 @@ export function SettingsDialog({
     return filterSettings(SETTINGS_SEARCH_INDEX, query).filter(hit => available.has(hit.group))
   }, [availableIds, query, searching])
 
-  // 切换分区或进出搜索时回到顶部：上一分区滚到底再切过去，新分区会从半截开始。
+  // Each section restores its own reading position; search owns a separate temporary view.
   useEffect(() => {
-    if (panesRef.current !== null) panesRef.current.scrollTop = 0
+    if (panesRef.current !== null) panesRef.current.scrollTop = searching ? 0 : (sectionScroll.current[section] ?? 0)
   }, [section, searching])
 
   // 弹窗打开期间锁住背后的页面滚动（2026-10-26）。理由与计数语义见 hook 注释：
@@ -365,7 +372,9 @@ export function SettingsDialog({
       if (cancelled) return
       const element = document.getElementById(targetId)
       if (element !== null) {
-        element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        const reduced = document.documentElement.dataset.motion === 'reduced' || window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+        element.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'center' })
+        element.querySelector<HTMLElement>('input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled)')?.focus({ preventScroll: true })
         element.classList.add('settings-field-flash')
         window.setTimeout(() => element.classList.remove('settings-field-flash'), 1600)
         setPending(null)
@@ -394,8 +403,19 @@ export function SettingsDialog({
     setPending(hit)
   }, [])
 
+  const navigateSection = (next: SettingsSection) => {
+    if (!searching && panesRef.current) sectionScroll.current[section] = panesRef.current.scrollTop
+    setQuery('')
+    setHitIndex(0)
+    setPending(null)
+    setNotice(null)
+    setSection(next)
+  }
+
   const searchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Escape') {
+    if (event.key === 'Escape' && searching) {
+      event.preventDefault()
+      event.stopPropagation()
       setQuery('')
       setHitIndex(0)
       return
@@ -432,18 +452,23 @@ export function SettingsDialog({
           {canSearch ? (
             <div className={styles.searchWrap}>
               <input
+                ref={searchRef}
                 type="search"
                 role="searchbox"
                 aria-label="搜索设置项"
                 className={styles.searchInput}
                 placeholder="搜索设置项（如：域名、超时）"
                 value={query}
+                aria-controls="settings-search-results"
+                aria-activedescendant={searching && hits.length > 0 ? `settings-search-hit-${Math.min(hitIndex, hits.length - 1)}` : undefined}
                 onChange={event => {
+                  if (!searching && panesRef.current) sectionScroll.current[section] = panesRef.current.scrollTop
                   setQuery(event.target.value)
                   setHitIndex(0)
                 }}
                 onKeyDown={searchKeyDown}
               />
+              {searching ? <button type="button" className={styles.clearSearch} aria-label="清空设置搜索" title="清空搜索（Esc）" onClick={() => { setQuery(''); setHitIndex(0); searchRef.current?.focus() }}><Close size={12} /></button> : null}
             </div>
           ) : null}
           <button
@@ -458,7 +483,7 @@ export function SettingsDialog({
 
         <div className={styles.body}>
           {/* 左侧分组导航：分组标签只是标题，不参与 tab 语义（`role="presentation"`）。 */}
-          <nav className={styles.nav} role="tablist" aria-label="设置分区">
+          <nav className={styles.nav} role="tablist" aria-label="设置分区" aria-orientation="vertical">
             {groups.map(group => (
               <div key={group.label} className={styles.navGroup} role="presentation">
                 <p className={styles.navLabel} role="presentation">{group.label}</p>
@@ -471,7 +496,19 @@ export function SettingsDialog({
                     aria-selected={section === item.id}
                     aria-controls={`settings-panel-${item.id}`}
                     className={`${styles.tab} ${section === item.id ? styles.tabSelected : ''}`}
-                    onClick={() => setSection(item.id)}
+                    tabIndex={section === item.id ? 0 : -1}
+                    onClick={() => navigateSection(item.id)}
+                    onKeyDown={event => {
+                      const index = navigationItems.findIndex(entry => entry.id === item.id)
+                      const next = event.key === 'ArrowDown' ? (index + 1) % navigationItems.length
+                        : event.key === 'ArrowUp' ? (index - 1 + navigationItems.length) % navigationItems.length
+                        : event.key === 'Home' ? 0 : event.key === 'End' ? navigationItems.length - 1 : null
+                      if (next === null) return
+                      event.preventDefault()
+                      const target = navigationItems[next]
+                      navigateSection(target.id)
+                      document.getElementById(`settings-tab-${target.id}`)?.focus()
+                    }}
                   >
                     {item.label}
                   </button>
@@ -480,16 +517,23 @@ export function SettingsDialog({
             ))}
           </nav>
 
+          <label className={styles.mobileNavigation}>
+            <span>设置分类</span>
+            <select aria-label="选择设置分类" value={section} onChange={event => navigateSection(event.target.value as SettingsSection)}>
+              {groups.map(group => <optgroup key={group.label} label={group.label}>{group.items.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</optgroup>)}
+            </select>
+          </label>
           <div className={styles.paneWrap}>
           <div className={styles.panes} ref={panesRef}>
           {notice === null ? null : <p className={styles.notice} role="status">{notice}</p>}
           {/* 搜索态只把分区切到 hidden：不卸载，未保存的草稿与滚动位置都还在。 */}
-          <div hidden={!searching} className={styles.hits} role="listbox" aria-label="设置项搜索结果">
+          <div hidden={!searching} className={styles.hits} id="settings-search-results" role="listbox" aria-label="设置项搜索结果">
             {hits.length === 0 ? (
               <p className={styles.hitsEmpty} role="status">没有匹配的设置项。换个词试试，例如「域名」「超时」「记忆」。</p>
             ) : hits.map((hit, index) => (
               <div
                 key={`${hit.group}-${hit.key}`}
+                id={`settings-search-hit-${index}`}
                 role="option"
                 aria-selected={index === hitIndex}
                 className={`${styles.hit} ${index === hitIndex ? styles.hitSelected : ''}`}

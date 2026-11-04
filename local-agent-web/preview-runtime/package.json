@@ -1,0 +1,13 @@
+{
+  "name": "chaiai-document-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@deepseek-ai/libreoffice-kit": "0.1.5",
+    "@deepseek-ai/libreoffice-kit-win32-x64": "0.1.5",
+    "@koromix/koffi-win32-x64": "3.1.1"
+  },
+  "scripts": {
+    "setup": "npm install --omit=optional --ignore-scripts"
+  }
+}

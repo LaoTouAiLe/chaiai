@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { expect, test, type Page, type Route } from '@playwright/test'
 import type { components } from '../src/api/schema.gen'
 
@@ -9,7 +10,8 @@ const snapshot: components['schemas']['SessionSnapshot'] = {
   messages: [
     { kind: 'user', message_id: 'question', text: '帮我查看项目文件与执行过程。' },
     { kind: 'tool', message_id: 'read', tool: { tool_call_id: 'read-1', tool_name: 'read_file',
-      status: 'ok', redacted_arguments: { path: 'README.md' }, elapsed_ms: 8, truncated: false, output_preview: '项目说明' } },
+      status: 'ok', redacted_arguments: { path: 'README.md' }, elapsed_ms: 8, truncated: false, output_preview: '项目说明',
+      delegation_scope: '' } },
     { kind: 'assistant', message_id: 'answer', text: '可以在右侧工作面板查看文件、改动和执行步骤。',
       complete: true, chunk_sequence: 0, reasoning_truncated: false, stream_channel: 'text' },
   ],
@@ -23,7 +25,7 @@ const changes: components['schemas']['SessionChangesView'] = {
   })) }], unrecorded: [],
 }
 
-async function setup(page: Page, withChanges = false, replyText?: string) {
+async function setup(page: Page, withChanges = false, replyText?: string, previewFiles?: string[]) {
   let filesFail = false
   let previewRequests = 0
   const searchWorkspaces: (string | null)[] = []
@@ -58,6 +60,7 @@ async function setup(page: Page, withChanges = false, replyText?: string) {
       }
       return route.fulfill({ json: diff })
     }
+    if (path === '/api/workspace/files' && previewFiles) return route.fulfill({ json: { entries: previewFiles.map(name => ({ name, path: name, kind: 'file', size_bytes: 1000 })), truncated: false } })
     if (path === '/api/workspace/files') return route.fulfill(filesFail
       ? { status: 500, json: { detail: 'test read failure' } }
       : { json: { entries: [
@@ -76,6 +79,12 @@ async function setup(page: Page, withChanges = false, replyText?: string) {
       if (url.searchParams.get('path') === '../outside.txt') return route.fulfill({ status: 403, json: { detail: '只能预览工作区内的文件。' } })
       return route.fulfill({ json: { kind: 'text', text: '# chaiai\n\n工作面板预览内容。', size_bytes: 48, truncated: false } })
     }
+    if (path === '/api/open-in-app/apps') return route.fulfill({ json: { available: true, apps: [
+      { id: 'explorer', label: '文件资源管理器', icon_url: '/api/open-in-app/icon/explorer' },
+      { id: 'cursor', label: 'Cursor', icon_url: '/api/open-in-app/icon/cursor' },
+    ] } })
+    if (path.startsWith('/api/open-in-app/icon/')) return route.fulfill({ status: 404, json: { detail: '没有取到这个应用的图标。' } })
+    if (path === '/api/open-in-app/open') return route.fulfill({ json: { ok: true, app_id: 'cursor', app_label: 'Cursor' } })
     if (path === '/api/terminals') return route.fulfill({ json: { available: false, items: [], reason: '此测试不启动真实终端' } })
     return route.fulfill({ status: 404, json: {} })
   })
@@ -104,6 +113,11 @@ test('工作面板：入口、文件预览、标签键盘导航和关闭恢复',
   await expect(panel.getByText('工作面板预览内容。', { exact: false })).toBeVisible()
   await noOverflow(page)
   await page.screenshot({ path: info.outputPath('panel-files.png') })
+  // 打开方式（2026-11-03）：菜单展开状态截一张，图标取不到时画首字母块。
+  await panel.getByRole('button', { name: '打开方式' }).click()
+  await expect(panel.getByRole('menuitem', { name: /Cursor/ })).toBeVisible()
+  await page.screenshot({ path: info.outputPath('panel-open-in-app.png') })
+  await page.keyboard.press('Escape')
   await panel.getByRole('button', { name: '新建页签' }).click()
   await panel.getByRole('button', { name: '步骤', exact: true }).click()
   await expect(panel.getByRole('button', { name: /帮我查看项目文件与执行过程/ })).toBeVisible()
@@ -196,6 +210,7 @@ test('工作面板：完整动效和设置中的减少动画均生效', async ({
 })
 
 test('改动页：目录常驻、切换对比、筛选、调宽及手机布局', async ({ page }, info) => {
+  await page.setViewportSize({ width: 1440, height: 900 })
   const { panel, errors } = await setup(page, true)
   await panel.getByRole('button', { name: '改动', exact: true }).click()
   const directory = panel.getByRole('complementary', { name: '改动目录' })
@@ -481,5 +496,150 @@ test('切换会话：文件打开指令不会污染另一会话的持久化标�
   await page.getByRole('button', { name: '工作面板', exact: true }).click()
   await expect(panel.getByRole('tab', { name: 'only-B.txt' })).toBeVisible()
   await expect(panel.getByRole('tab', { name: 'only-A.ts' })).toHaveCount(0)
+  expect(errors).toEqual([])
+})
+
+
+test('文件预览：Office 纸张版式、PDF 翻页缩放与文件树收起', async ({ page }, info) => {
+  const { panel, errors } = await setup(page, false, undefined, ['report.docx'])
+  await page.route('**/api/workspace/files?**', route => route.fulfill({ json: { entries: [
+    { name: 'report.docx', path: 'report.docx', kind: 'file', size_bytes: 1000 },
+  ], truncated: false } }))
+  await page.route('**/api/data-center/artifacts/preview?**', route => route.fulfill({ json: {
+    kind: 'document', url: '/api/data-center/artifacts/content?path=report.docx', size_bytes: 1000,
+  } }))
+  await page.route('**/api/data-center/artifacts/content?**', route => route.fulfill({
+    contentType: 'application/pdf', body: readFileSync(new URL('./fixtures/panel-report.pdf', import.meta.url)),
+  }))
+  await panel.getByRole('button', { name: '文件', exact: true }).click()
+  await panel.getByRole('button', { name: /^report\.docx/  }).click()
+  await panel.getByRole('button', { name: '收起文件树', exact: true }).click()
+  const canvas = panel.getByLabel('文档第 1 页', { exact: true })
+  await expect(canvas).toBeVisible()
+  await expect.poll(() => canvas.evaluate(el => (el as HTMLCanvasElement).width)).toBeGreaterThan(100)
+  await expect(panel.getByText('1 / 2', { exact: true })).toBeVisible()
+  await page.screenshot({ path: info.outputPath('office-document.png') })
+  await panel.getByRole('button', { name: '下一页', exact: true }).click()
+  await expect(panel.getByLabel('文档第 2 页')).toBeVisible()
+  await panel.getByRole('button', { name: '放大文档', exact: true }).click()
+  await expect(panel.getByRole('button', { name: '125%', exact: true })).toBeVisible()
+  await panel.getByRole('button', { name: '展开文件树', exact: true }).click()
+  await expect(panel.getByRole('button', { name: /^report\.docx/  })).toBeVisible()
+  await noOverflow(page)
+  expect(errors).toEqual([])
+})
+
+test('文件预览：Markdown 排版、HTML 隔离和源码切换', async ({ page }, info) => {
+  const { panel, errors } = await setup(page, false, undefined, ['guide.md', 'page.html'])
+  await page.route('**/api/workspace/files?**', route => route.fulfill({ json: { entries: [
+    { name: 'guide.md', path: 'guide.md', kind: 'file', size_bytes: 100 },
+    { name: 'page.html', path: 'page.html', kind: 'file', size_bytes: 100 },
+  ], truncated: false } }))
+  await page.route('**/api/data-center/artifacts/preview?**', route => route.fulfill({ json: {
+    kind: 'text', text: new URL(route.request().url()).searchParams.get('path') === 'page.html'
+      ? '<h1>网页预览</h1><script>parent.__previewEscaped=true</script>'
+      : '# 预览指南\n\n| 名称 | 状态 |\n| --- | --- |\n| 文档 | 完成 |', size_bytes: 100,
+  } }))
+  await panel.getByRole('button', { name: '文件', exact: true }).click()
+  await panel.getByRole('button', { name: /^guide\.md/  }).click()
+  await expect(panel.getByRole('heading', { name: '预览指南' })).toBeVisible()
+  await expect(panel.getByRole('table')).toBeVisible()
+  await page.screenshot({ path: info.outputPath('markdown-document.png') })
+  await panel.getByRole('button', { name: '源码', exact: true }).click()
+  await expect(panel.getByText('# 预览指南', { exact: false })).toBeVisible()
+  await panel.getByRole('button', { name: /^page\.html/  }).click()
+  await expect(page.frameLocator('iframe[title="HTML 文件预览"]').getByRole('heading', { name: '网页预览' })).toBeVisible()
+  expect(await page.evaluate(() => '__previewEscaped' in window)).toBe(false)
+  await noOverflow(page)
+  expect(errors).toEqual([])
+})
+
+test('文件预览：工作表切换和下一组行', async ({ page }, info) => {
+  const { panel, errors } = await setup(page, false, undefined, ['budget.xlsx'])
+  await page.route('**/api/workspace/files?**', route => route.fulfill({ json: { entries: [
+    { name: 'budget.xlsx', path: 'budget.xlsx', kind: 'file', size_bytes: 100 },
+  ], truncated: false } }))
+  await page.route('**/api/data-center/artifacts/preview?**', route => {
+    const params = new URL(route.request().url()).searchParams
+    const summary = params.get('sheet') === '汇总'
+    const next = Number(params.get('offset')) > 0
+    return route.fulfill({ json: { kind: 'spreadsheet', size_bytes: 100,
+      sheets: ['预算', '汇总'], sheet: summary ? '汇总' : '预算',
+      rows: summary ? [['合计', '12800']] : next ? [['最后一行', '800']] : [['项目', '预算'], ['设计', '12000']],
+      has_more: !summary && !next, next_offset: !summary && !next ? 200 : null,
+    } })
+  })
+  await panel.getByRole('button', { name: '文件', exact: true }).click()
+  await panel.getByRole('button', { name: /^budget\.xlsx/  }).click()
+  await expect(panel.getByRole('table', { name: '预算', exact: true })).toContainText('设计')
+  await page.screenshot({ path: info.outputPath('spreadsheet-document.png') })
+  await panel.getByRole('button', { name: '下一组', exact: true }).click()
+  await expect(panel.getByRole('table')).toContainText('最后一行')
+  await panel.getByRole('tab', { name: '汇总', exact: true }).click()
+  await expect(panel.getByRole('table', { name: '汇总', exact: true })).toContainText('12800')
+  await noOverflow(page)
+  expect(errors).toEqual([])
+})
+
+
+test('文件预览：真实空行保留，代码与纯文本单倍行高，顶部只有两行工具栏', async ({ page }, info) => {
+  const { panel, errors } = await setup(page, false, undefined, ['pom.xml', 'plain.txt'])
+  const source = ['<project>', '', ...Array.from({ length: 80 }, (_, i) => `  <item>${i}</item>`), '</project>'].join('\n')
+  await page.route('**/api/data-center/artifacts/preview?**', route => route.fulfill({ json: { kind: 'text', text: source, size_bytes: source.length } }))
+  await panel.getByRole('button', { name: '文件', exact: true }).click()
+  await panel.getByRole('button', { name: /^pom\.xml/ }).click()
+  const reader = panel.getByRole('region', { name: '文件预览', exact: true })
+  const lines = reader.locator('pre code .line')
+  await expect(lines).toHaveCount(83)
+  const checkLines = async (selector: string) => {
+    const positions = await reader.locator(selector).evaluateAll(elements => elements.slice(0, 8).map(el => ({ y: el.getBoundingClientRect().y, height: el.getBoundingClientRect().height })))
+    for (let i = 1; i < positions.length; i++) expect(positions[i].y - positions[i - 1].y).toBeCloseTo(19, 0)
+    expect(positions[1].height).toBeCloseTo(19, 0)
+  }
+  await checkLines('pre code .line')
+  const strip = (await panel.locator('[data-panel-navigation]').boundingBox())!
+  const toolbar = (await reader.locator('header').boundingBox())!
+  expect(strip.height).toBeLessThanOrEqual(38)
+  expect(toolbar.y + toolbar.height - strip.y).toBeLessThanOrEqual(77)
+  await page.screenshot({ path: info.outputPath('compact-file-preview.png') })
+  await panel.getByRole('button', { name: /^plain\.txt/ }).click()
+  await expect(reader.locator('pre > span')).toHaveCount(83)
+  await checkLines('pre > span')
+  await reader.getByRole('button', { name: '关闭自动换行', exact: true }).click()
+  await checkLines('pre > span')
+  await noOverflow(page)
+  expect(errors).toEqual([])
+})
+
+
+test('长文档可连续滚动到末页，只绘制附近页面，缩放保留阅读位置', async ({ page }, info) => {
+  const { panel, errors } = await setup(page, false, undefined, ['long.docx'])
+  await page.route('**/api/data-center/artifacts/preview?**', route => route.fulfill({ json: {
+    kind: 'document', url: '/api/data-center/artifacts/content?path=long.docx', size_bytes: 1000,
+  } }))
+  await page.route('**/api/data-center/artifacts/content?**', route => route.fulfill({ contentType: 'application/pdf',
+    body: readFileSync(new URL('./fixtures/panel-long-report.pdf', import.meta.url)),
+  }))
+  await panel.getByRole('button', { name: '文件', exact: true }).click()
+  await panel.getByRole('button', { name: /^long\.docx/ }).click()
+  await panel.getByRole('button', { name: '收起文件树', exact: true }).click()
+  const viewport = panel.getByRole('region', { name: '连续文档页面', exact: true })
+  await expect(viewport.locator('[data-pdf-page]')).toHaveCount(34)
+  await expect(viewport.getByLabel('文档第 1 页', { exact: true })).toHaveAttribute('data-rendered', 'true')
+  await viewport.hover()
+  await page.mouse.wheel(0, 900)
+  const currentPage = async () => Number((await panel.getByRole('toolbar', { name: '文档阅读工具' }).innerText()).match(/(\d+) \/ 34/)?.[1])
+  await expect.poll(currentPage).toBeGreaterThan(1)
+  const beforeZoom = await currentPage()
+  await panel.getByRole('button', { name: '放大文档', exact: true }).click()
+  await expect.poll(currentPage).toBeGreaterThanOrEqual(beforeZoom - 1)
+  expect(await viewport.locator('canvas').count()).toBeLessThan(10)
+  await viewport.evaluate(el => { el.scrollTop = el.scrollHeight })
+  await expect(viewport.getByLabel('文档第 34 页', { exact: true })).toHaveAttribute('data-rendered', 'true')
+  await expect(viewport.getByLabel('文档第 34 页', { exact: true })).toBeInViewport()
+  await expect.poll(currentPage).toBe(34)
+  expect(await viewport.locator('canvas').count()).toBeLessThan(10)
+  await page.screenshot({ path: info.outputPath('continuous-document.png') })
+  await noOverflow(page)
   expect(errors).toEqual([])
 })

@@ -14,7 +14,7 @@ export default defineConfig({
     strictPort: true,
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        target: 'http://127.0.0.1:8731',
         changeOrigin: false,
         ws: true,
       },
@@ -25,7 +25,7 @@ export default defineConfig({
    *
    * `preview.proxy` 默认**继承** `server.proxy`（Vite 文档）。而 e2e 的视觉基线用
    * `vite preview` 起静态站，于是每一屏页面的 `/api` 请求都被代理到
-   * `127.0.0.1:8000` 的**真实服务**——跑一次 e2e 就在真实数据里造出一批会话
+   * `127.0.0.1:8731` 的**真实服务**——跑一次 e2e 就在真实数据里造出一批会话
    * （实测：66 个空会话，`matched_turn_ids` 全为 0）。
    *
    * preview 只该发静态产物：清空后请求 `/api` 直接 404，前端按"没有后端"回落，

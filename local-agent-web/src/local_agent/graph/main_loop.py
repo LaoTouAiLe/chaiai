@@ -6,7 +6,14 @@ from collections.abc import Sequence
 from langchain_core.messages import AIMessage
 
 from local_agent.graph.projection import current_turn_ai_message, message_id
-from local_agent.graph.state import AgentState, EvidenceReference, ReflectionResult
+from local_agent.graph.routers import loop_limit_reached
+from local_agent.graph.state import (
+    AgentState,
+    EvidenceReference,
+    ReflectionResult,
+    make_decision_record,
+)
+from local_agent.graph.verification_stop import build_verification_nudge
 from local_agent.reflection.validators import EvidenceLevel
 
 
@@ -37,11 +44,28 @@ def decision_budget_instruction(state: AgentState, *, default_limit: int | None)
 def checkpoint_main_loop(
     state: AgentState, *, trust: EvidenceLevel, anomalies: Sequence[str],
     evidence: Sequence[EvidenceReference], pending_uncertain: Sequence[str], max_retries: int,
+    verify_on_stop: bool = False,
 ) -> AgentState:
-    """记录执行反馈；由主模型通过task_control决定继续、完成或请求输入。"""
+    """记录执行反馈；由主模型通过task_control决定继续、完成或请求输入。
+
+    收尾前可能有一次**验证提醒**（``verify_on_stop``，见
+    :mod:`local_agent.graph.verification_stop`）：改过代码却没跑通任何验证时，把这一版回答存为
+    兜底、本轮改成"继续"，让模型再看一眼。它**不是拦截**——任务状态不变、回答不丢、次数有上限，
+    而且只在"还没撞到循环上限"时发生（撞上限时提醒会把正常收尾变成 failed，见 ``completion_route``）。
+    """
     action = state.get("model_next_action", "continue")
     finished = action in {"finish", "ask_user"}
     completed = action == "finish"
+
+    nudge: str | None = None
+    if completed and verify_on_stop and not loop_limit_reached(state):
+        nudge = build_verification_nudge(state)
+    if nudge is not None:
+        # 提醒期间这一轮**不算结束**：状态仍 running，模型下一轮会带着提醒重新决策。
+        completed = False
+        finished = False
+        action = "continue"
+
     reflection = ReflectionResult(
         goal_achieved=completed, result_trust=trust, anomalies=tuple(anomalies),
         next_action=action, evidence=tuple(evidence),
@@ -50,9 +74,26 @@ def checkpoint_main_loop(
         "final_evidence": list(evidence), "reflection_result": reflection,
         "task_status": "completed" if completed else "blocked" if finished else "running",
         "tool_feedback_required": False,
+        # 每次都显式写：提醒只对**下一次**决策生效。不写 None 的话，模型照做之后那条提醒
+        # 还会一直挂在系统提示里，污染后面每一轮。
+        "verification_nudge": nudge,
     }
+    if nudge is not None:
+        result["verification_nudge_count"] = int(state.get("verification_nudge_count") or 0) + 1
+        # 只留第一次被顶下来的那一版：后续提醒不该用"更差的中间稿"覆盖它。
+        if not state.get("pending_verification_response"):
+            result["pending_verification_response"] = state.get("model_final_response") or None
+        # 轨迹页要能看出"这一轮为什么没结束"：提醒本身不进对话消息，只有这条记录可见。
+        result["decision_trace"] = [make_decision_record(
+            str(state.get("run_id") or "run"), stage="verification_stop",
+            summary="改过代码但还没有一次成功的验证结果，已推送验证提醒；本轮不结束，任务继续",
+            loop_count=int(state.get("loop_count", 0)),
+        )]
     if finished:
         text = state.get("model_final_response", "")
+        if not text.strip():
+            # 兜底：提醒之后模型没给出新正文就结束（例如被取消或被预算截断），交付提醒前那一版。
+            text = str(state.get("pending_verification_response") or "")
         result["final_response"] = text
         answer = current_turn_ai_message(state.get("messages", []))
         if answer is not None and message_id(answer):

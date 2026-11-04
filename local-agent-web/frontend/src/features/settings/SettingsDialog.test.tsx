@@ -410,3 +410,55 @@ describe('SettingsDialog · 权限分区（T38）', () => {
     expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
   })
 })
+
+
+describe('settings navigation interaction', () => {
+  const extras = { general: <input aria-label="外观草稿" defaultValue="草稿" />, memory: <p>记忆内容</p>, web_access: <p>联网内容</p> }
+  it('exposes the injected consolidation section in navigation and search', () => {
+    render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} extraSections={{ consolidation: <p>巩固设置内容</p> }} />)
+    fireEvent.click(screen.getByRole('tab', { name: '记忆巩固' }))
+    expect(screen.getByRole('tabpanel', { name: '记忆巩固' })).toBeVisible()
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索设置项' }), { target: { value: '启用后台记忆巩固' } })
+    fireEvent.click(screen.getByRole('option', { name: /启用后台记忆巩固/ }))
+    expect(screen.getByRole('tabpanel', { name: '记忆巩固' })).toBeVisible()
+  })
+  it('category clicks exit search and show their actual content', () => {
+    render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} extraSections={extras} />)
+    const search = screen.getByRole('searchbox', { name: '搜索设置项' })
+    fireEvent.change(search, { target: { value: '域名' } })
+    fireEvent.click(screen.getByRole('tab', { name: '长期记忆' }))
+    expect(search).toHaveValue('')
+    expect(screen.getByRole('tabpanel', { name: '长期记忆' })).toBeVisible()
+    expect(screen.getByText('记忆内容')).toBeVisible()
+  })
+  it('Escape clears search without bubbling into the enclosing dialog', () => {
+    const escape = vi.fn()
+    render(<div onKeyDown={escape}><SettingsDialog settings={settingsOf(settingsModelsScenario)} extraSections={extras} /></div>)
+    const search = screen.getByRole('searchbox', { name: '搜索设置项' })
+    fireEvent.change(search, { target: { value: '域名' } })
+    fireEvent.keyDown(search, { key: 'Escape' })
+    expect(search).toHaveValue('')
+    expect(escape).not.toHaveBeenCalled()
+  })
+  it('uses the visual category order for keyboard navigation', () => {
+    render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} extraSections={extras} />)
+    fireEvent.keyDown(screen.getByRole('tab', { name: '模型连接' }), { key: 'ArrowDown' })
+    expect(screen.getByRole('tab', { name: '权限' })).toHaveFocus()
+    fireEvent.keyDown(screen.getByRole('tab', { name: '权限' }), { key: 'End' })
+    expect(screen.getByRole('tab', { name: '通用与外观' })).toHaveFocus()
+  })
+  it('retains section drafts and restores each section scroll position', () => {
+    render(<SettingsDialog settings={settingsOf(settingsModelsScenario)} extraSections={extras} />)
+    const pane = screen.getByRole('tabpanel', { name: '模型连接' }).parentElement!
+    pane.scrollTop = 230
+    fireEvent.click(screen.getByRole('tab', { name: '通用与外观' }))
+    expect(pane.scrollTop).toBe(0)
+    fireEvent.change(screen.getByRole('textbox', { name: '外观草稿' }), { target: { value: '保留编辑' } })
+    pane.scrollTop = 140
+    fireEvent.click(screen.getByRole('tab', { name: '模型连接' }))
+    expect(pane.scrollTop).toBe(230)
+    fireEvent.change(screen.getByRole('combobox', { name: '选择设置分类' }), { target: { value: 'general' } })
+    expect(pane.scrollTop).toBe(140)
+    expect(screen.getByRole('textbox', { name: '外观草稿' })).toHaveValue('保留编辑')
+  })
+})

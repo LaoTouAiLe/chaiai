@@ -142,11 +142,11 @@ function InertImage({ alt }: ComponentPropsWithoutRef<'img'>) {
   return <span className={styles.imagePlaceholder}>[图片未自动加载{alt ? `：${alt}` : ''}]</span>
 }
 
-export function MarkdownMessage({ text }: { text: string }) {
+export function MarkdownMessage({ text, compact = false }: { text: string; compact?: boolean }) {
   return (
     // 自带一层容器：Markdown 的块级元素样式（外边距复位）只作用于自己的后代，
     // 不去猜外层组件的类名。
-    <div className={styles.root}>
+    <div className={compact ? `${styles.root} ${styles.compact}` : styles.root}>
       {/* GFM 扩展：表格、删除线、任务列表。`react-markdown` 默认只解析 CommonMark，缺了它模型
           输出的 Markdown 表格会退化成一行带竖线的普通文本（实测：表格是本项目架构回答的主要
           呈现形式）。`remark-gfm` 只增加语法解析，不改变上面第 1 条"不解析原始 HTML"的口径。 */}

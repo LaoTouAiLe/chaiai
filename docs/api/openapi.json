@@ -478,16 +478,94 @@
         "additionalProperties": false,
         "description": "单条产物的内容预览（§15.11.3）。\n\n**只允许工作区内、且不超过上限**的文件：这是\"看一眼\"而不是\"文件管理\"，\n不提供写入、下载、任意路径读取。",
         "properties": {
+          "beyond_limit": {
+            "default": false,
+            "title": "Beyond Limit",
+            "type": "boolean"
+          },
+          "has_more": {
+            "default": false,
+            "title": "Has More",
+            "type": "boolean"
+          },
           "kind": {
             "enum": [
               "text",
               "image",
+              "document",
+              "spreadsheet",
               "too_large",
               "unreadable",
               "binary"
             ],
             "title": "Kind",
             "type": "string"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "next_page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Page"
+          },
+          "offset": {
+            "default": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
+          },
+          "rows": {
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "sheet": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sheet"
+          },
+          "sheets": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Sheets",
+            "type": "array"
           },
           "size_bytes": {
             "default": 0,
@@ -515,6 +593,17 @@
               }
             ],
             "title": "Text"
+          },
+          "total_pages": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Pages"
           },
           "truncated": {
             "default": false,
@@ -2398,6 +2487,18 @@
             "title": "Changed Files",
             "type": "integer"
           },
+          "elapsed_ms": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Elapsed Ms"
+          },
           "error": {
             "anyOf": [
               {
@@ -2414,6 +2515,11 @@
             "minimum": 0.0,
             "title": "Evidence Count",
             "type": "integer"
+          },
+          "goal": {
+            "default": "",
+            "title": "Goal",
+            "type": "string"
           },
           "model_calls": {
             "default": 0,
@@ -2438,6 +2544,13 @@
             "minimum": 0.0,
             "title": "Tool Calls",
             "type": "integer"
+          },
+          "tools": {
+            "items": {
+              "$ref": "#/components/schemas/DelegationToolStepView"
+            },
+            "title": "Tools",
+            "type": "array"
           }
         },
         "required": [
@@ -2445,6 +2558,108 @@
           "status"
         ],
         "title": "DelegationChildView",
+        "type": "object"
+      },
+      "DelegationLiveLaneView": {
+        "description": "一路正在跑（或刚跑完、还在保留期内）的子任务。",
+        "properties": {
+          "child_id": {
+            "title": "Child Id",
+            "type": "string"
+          },
+          "goal": {
+            "default": "",
+            "title": "Goal",
+            "type": "string"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/DelegationLiveStepView"
+            },
+            "title": "Steps",
+            "type": "array"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "number"
+          }
+        },
+        "required": [
+          "child_id",
+          "scope",
+          "status",
+          "updated_at"
+        ],
+        "title": "DelegationLiveLaneView",
+        "type": "object"
+      },
+      "DelegationLiveStepView": {
+        "description": "子任务已经发起过的一次工具调用。\n\n**不是审计记录**：它只回答\"这一路此刻在查什么\"，跑完就被 `DelegationChildView` 里的\n统计取代。所以字段刻意少（没有 token、没有证据编号）。",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "target",
+          "status"
+        ],
+        "title": "DelegationLiveStepView",
+        "type": "object"
+      },
+      "DelegationLiveView": {
+        "properties": {
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/DelegationLiveLaneView"
+            },
+            "title": "Lanes",
+            "type": "array"
+          }
+        },
+        "title": "DelegationLiveView",
+        "type": "object"
+      },
+      "DelegationToolStepView": {
+        "description": "子任务自己的一次工具调用（2026-11-04）。\n\n**不是审计记录**：它只回答\"这一路查了哪些文件、跑了什么命令\"。来源是进程内的实时表\n（`local_agent.delegation_live`），不是 Checkpoint——子事件目前没有并进父状态。",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "status": {
+            "default": "",
+            "title": "Status",
+            "type": "string"
+          },
+          "target": {
+            "default": "",
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "DelegationToolStepView",
         "type": "object"
       },
       "EmbeddingPreferences": {
@@ -5261,6 +5476,354 @@
         "title": "MessageStartedPayload",
         "type": "object"
       },
+      "MobileChannelSettingView": {
+        "description": "页面上的一行通道配置。**与 `MobileChannelConfig` 同字段**——它就是那份配置的可编辑形态。",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "expose": {
+            "enum": [
+              "serve",
+              "funnel"
+            ],
+            "title": "Expose",
+            "type": "string"
+          },
+          "hostname": {
+            "title": "Hostname",
+            "type": "string"
+          },
+          "https_port": {
+            "title": "Https Port",
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "named",
+              "quick"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "port": {
+            "title": "Port",
+            "type": "integer"
+          },
+          "tls": {
+            "title": "Tls",
+            "type": "boolean"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "enabled",
+          "mode",
+          "hostname",
+          "expose",
+          "https_port",
+          "port",
+          "tls"
+        ],
+        "title": "MobileChannelSettingView",
+        "type": "object"
+      },
+      "MobileDeviceView": {
+        "description": "一台已配对设备。**不含 Token 摘要**：页面不需要它，泄露了也没用。",
+        "properties": {
+          "channel": {
+            "title": "Channel",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "channel",
+          "created_at"
+        ],
+        "title": "MobileDeviceView",
+        "type": "object"
+      },
+      "MobileDevicesView": {
+        "properties": {
+          "devices": {
+            "items": {
+              "$ref": "#/components/schemas/MobileDeviceView"
+            },
+            "title": "Devices",
+            "type": "array"
+          }
+        },
+        "required": [
+          "devices"
+        ],
+        "title": "MobileDevicesView",
+        "type": "object"
+      },
+      "MobileEmergencyStopRequest": {
+        "description": "紧急关闭。\n\n`revoke_devices` 单独给：**停止网关只断开连接，设备 Token 仍然有效**——重新开启后那台手机\n照样能用。怀疑令牌泄露时必须连设备一起清掉，否则\"关过一次\"只是心理安慰。",
+        "properties": {
+          "revoke_devices": {
+            "default": false,
+            "title": "Revoke Devices",
+            "type": "boolean"
+          }
+        },
+        "title": "MobileEmergencyStopRequest",
+        "type": "object"
+      },
+      "MobileGatewayActionView": {
+        "description": "启停网关的结果。`detail` 是**可以直接展示给用户**的句子。\n\n`ok=False` 时界面要如实显示失败原因，而不是给一个\"已完成\"的提示——\"我关的是不是真关了\"\n这个问题，在紧急场景下比任何别的信息都重要。",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "device_count": {
+            "title": "Device Count",
+            "type": "integer"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "running": {
+            "title": "Running",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ok",
+          "detail",
+          "running",
+          "device_count"
+        ],
+        "title": "MobileGatewayActionView",
+        "type": "object"
+      },
+      "MobileInfoView": {
+        "description": "移动网关的**只读**状态：只回答\"开着没、跑着没、配了几台、去哪儿管\"。\n\n**刻意不含任何操作**：生成配对码与撤销设备都在网关自己的管理页（`admin_url`）上。\n主服务不代它转发——§24 的\"主服务不为网关开例外\"因此仍然成立，跨源请求也一步都不用放。",
+        "properties": {
+          "admin_url": {
+            "title": "Admin Url",
+            "type": "string"
+          },
+          "device_count": {
+            "title": "Device Count",
+            "type": "integer"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "running": {
+            "title": "Running",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled",
+          "running",
+          "admin_url",
+          "device_count"
+        ],
+        "title": "MobileInfoView",
+        "type": "object"
+      },
+      "MobilePairUrlView": {
+        "description": "一个手机可达地址。`label` 是给人看的（\"同一 Wi-Fi\" / \"远程（Tailscale）\"）。",
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label",
+          "url"
+        ],
+        "title": "MobilePairUrlView",
+        "type": "object"
+      },
+      "MobilePairingCodeView": {
+        "description": "一次配对邀请：给手机扫的链接与它的二维码。\n\n``qr_svg`` 由服务端生成并内联返回——**不要把 code 拼进图片 URL**，那样这个一次性凭据会\n出现在访问日志里。",
+        "properties": {
+          "alternates": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/MobilePairUrlView"
+            },
+            "title": "Alternates",
+            "type": "array"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "expires_in": {
+            "title": "Expires In",
+            "type": "integer"
+          },
+          "pair_url": {
+            "title": "Pair Url",
+            "type": "string"
+          },
+          "qr_svg": {
+            "title": "Qr Svg",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "pair_url",
+          "qr_svg",
+          "expires_in"
+        ],
+        "title": "MobilePairingCodeView",
+        "type": "object"
+      },
+      "MobileRenameRequest": {
+        "description": "改设备显示名（UA 解析出来的型号代号用户认不出，允许自己起名）。",
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "title": "MobileRenameRequest",
+        "type": "object"
+      },
+      "MobileRevokeView": {
+        "properties": {
+          "revoked": {
+            "title": "Revoked",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "revoked"
+        ],
+        "title": "MobileRevokeView",
+        "type": "object"
+      },
+      "MobileSettingsRequest": {
+        "description": "保存整段移动访问配置。\n\n**整段提交而不是逐项**：页面就是一张表单，逐项保存会让\"改端口 + 关通道\"变成多次写入，\n中间失败一次就留下一份自相矛盾的配置。",
+        "properties": {
+          "channels": {
+            "items": {
+              "$ref": "#/components/schemas/MobileChannelSettingView"
+            },
+            "title": "Channels",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "gateway_port": {
+            "title": "Gateway Port",
+            "type": "integer"
+          },
+          "pairing_ttl_seconds": {
+            "title": "Pairing Ttl Seconds",
+            "type": "integer"
+          },
+          "ws_enabled": {
+            "title": "Ws Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled",
+          "gateway_port",
+          "pairing_ttl_seconds",
+          "ws_enabled",
+          "channels"
+        ],
+        "title": "MobileSettingsRequest",
+        "type": "object"
+      },
+      "MobileSettingsView": {
+        "description": "移动访问的**生效值**：设置库里有就用库里的，否则用 `config.yaml`。\n\n`source` 与 `restart_required` 是给界面看的，不参与计算：前者说明\"你看到的这份来自哪儿\"，\n后者说明\"改完之后网关进程还没重启，此刻还没生效\"——这两句不写清楚，用户会以为保存没成功。",
+        "properties": {
+          "channels": {
+            "items": {
+              "$ref": "#/components/schemas/MobileChannelSettingView"
+            },
+            "title": "Channels",
+            "type": "array"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "gateway_host": {
+            "title": "Gateway Host",
+            "type": "string"
+          },
+          "gateway_port": {
+            "title": "Gateway Port",
+            "type": "integer"
+          },
+          "pairing_ttl_seconds": {
+            "title": "Pairing Ttl Seconds",
+            "type": "integer"
+          },
+          "restart_required": {
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "source": {
+            "enum": [
+              "settings",
+              "config"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "ws_enabled": {
+            "title": "Ws Enabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled",
+          "gateway_host",
+          "gateway_port",
+          "pairing_ttl_seconds",
+          "ws_enabled",
+          "channels",
+          "source",
+          "restart_required"
+        ],
+        "title": "MobileSettingsView",
+        "type": "object"
+      },
       "ModelCallCompletedEvent": {
         "properties": {
           "event_id": {
@@ -6119,6 +6682,131 @@
           "payload"
         ],
         "title": "ModelUsageReportedEvent",
+        "type": "object"
+      },
+      "OpenInAppItemView": {
+        "additionalProperties": false,
+        "properties": {
+          "icon_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Icon Url"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label"
+        ],
+        "title": "OpenInAppItemView",
+        "type": "object"
+      },
+      "OpenInAppOpenRequest": {
+        "additionalProperties": false,
+        "description": "用本机的某个应用打开工作区里的一份文件。\n\n``app_id`` 只能是服务端目录里的 id（探测结果），**不是**可执行文件路径——客户端传什么\n命令过来都一律拒绝；启动参数也全部来自服务端目录。``path`` 与预览同一条边界。",
+        "properties": {
+          "app_id": {
+            "maxLength": 40,
+            "minLength": 1,
+            "pattern": "^[a-z0-9_-]+$",
+            "title": "App Id",
+            "type": "string"
+          },
+          "path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Path",
+            "type": "string"
+          },
+          "workspace_id": {
+            "anyOf": [
+              {
+                "maxLength": 128,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workspace Id"
+          }
+        },
+        "required": [
+          "app_id",
+          "path"
+        ],
+        "title": "OpenInAppOpenRequest",
+        "type": "object"
+      },
+      "OpenInAppResultView": {
+        "additionalProperties": false,
+        "description": "一次打开的结果：`app_label` 用于前端提示\"已用 X 打开\"。",
+        "properties": {
+          "app_id": {
+            "title": "App Id",
+            "type": "string"
+          },
+          "app_label": {
+            "title": "App Label",
+            "type": "string"
+          },
+          "ok": {
+            "default": true,
+            "title": "Ok",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "app_id",
+          "app_label"
+        ],
+        "title": "OpenInAppResultView",
+        "type": "object"
+      },
+      "OpenInAppView": {
+        "additionalProperties": false,
+        "description": "本机可用的应用清单。\n\n`available=False` **不是错误**：这台机器就是没有可打开的程序（或平台不支持），\n前端据此把「打开方式」按钮藏掉，而不是弹一个报错。",
+        "properties": {
+          "apps": {
+            "items": {
+              "$ref": "#/components/schemas/OpenInAppItemView"
+            },
+            "title": "Apps",
+            "type": "array"
+          },
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "available"
+        ],
+        "title": "OpenInAppView",
         "type": "object"
       },
       "OssCredentialRequest": {
@@ -9781,6 +10469,11 @@
             ],
             "title": "Approval Id"
           },
+          "delegation_scope": {
+            "default": "",
+            "title": "Delegation Scope",
+            "type": "string"
+          },
           "elapsed_ms": {
             "anyOf": [
               {
@@ -12033,9 +12726,82 @@
         "summary": "只读产物汇总"
       }
     },
+    "/api/data-center/artifacts/content": {
+      "get": {
+        "operationId": "artifact_content_api_data_center_artifacts_content_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "maxLength": 500,
+              "minLength": 1,
+              "title": "Path",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 128,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "default": "workspace",
+              "enum": [
+                "workspace",
+                "attachments"
+              ],
+              "title": "Scope",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/pdf": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "文档版式 PDF"
+      }
+    },
     "/api/data-center/artifacts/preview": {
       "get": {
-        "description": "看一眼产物的内容（§15.11.3）：只读、有大小上限、不代打开外链。",
+        "description": "看一眼产物的内容（§15.11.3）：只读、有大小上限、不代打开外链。\n\n`offset` / `page` 是分页参数（2026-11-03）：返回里的 `next_offset` / `next_page`\n原样回传即可取下一页。",
         "operationId": "preview_artifact_api_data_center_artifacts_preview_get",
         "parameters": [
           {
@@ -12078,6 +12844,61 @@
               ],
               "title": "Scope",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 8000000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "maximum": 20000,
+              "minimum": 1,
+              "title": "Page",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "presentation",
+            "required": false,
+            "schema": {
+              "default": "text",
+              "enum": [
+                "text",
+                "formatted"
+              ],
+              "title": "Presentation",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "sheet",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Sheet"
             }
           }
         ],
@@ -12335,6 +13156,25 @@
           }
         },
         "summary": "去重后的实际调用用量"
+      }
+    },
+    "/api/delegation/live": {
+      "get": {
+        "description": "委派在跑的时候，每一路\"此刻在查什么\"（2026-11-04）。\n\n**只读旁路**，不参与事件流：子 Agent 在独立线程里跑，中间态原本不在任何可读的地方，\n页面只能等全部结束。这里把子循环每步产生的工具事件摊出来，供委派卡在运行期间轮询。\n\n不做权限判定：它只暴露**目录名与工具名**（都是本机页面已可见的信息），\n且 `/api` 前缀本身走 §15.3 的同源校验。",
+        "operationId": "delegation_live_api_delegation_live_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DelegationLiveView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "正在跑的委派子任务"
       }
     },
     "/api/health": {
@@ -12627,6 +13467,283 @@
           }
         },
         "summary": "编辑 MCP Server 连接方式"
+      }
+    },
+    "/api/mobile/devices": {
+      "get": {
+        "operationId": "list_devices_api_mobile_devices_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileDevicesView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "已配对设备"
+      }
+    },
+    "/api/mobile/devices/{device_id}": {
+      "delete": {
+        "description": "删记录即撤销：那台手机的下一次请求会被拒。",
+        "operationId": "revoke_device_api_mobile_devices__device_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "device_id",
+            "required": true,
+            "schema": {
+              "title": "Device Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileRevokeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "撤销一台设备"
+      },
+      "patch": {
+        "description": "改名只影响显示，不动授权。",
+        "operationId": "rename_device_api_mobile_devices__device_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "device_id",
+            "required": true,
+            "schema": {
+              "title": "Device Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MobileRenameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileDeviceView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "重命名一台设备"
+      }
+    },
+    "/api/mobile/emergency-stop": {
+      "post": {
+        "description": "一键断开移动访问。\n\n`revoke_devices=true` 时连设备授权一起清掉——**只停网关是不够的**：重开之后旧 Token\n依然有效，而\"怀疑令牌泄露\"正是最需要这个按钮的场景。",
+        "operationId": "emergency_stop_api_mobile_emergency_stop_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MobileEmergencyStopRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileGatewayActionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "紧急关闭：停网关，可选撤销全部设备"
+      }
+    },
+    "/api/mobile/gateway/start": {
+      "post": {
+        "description": "立刻拉起网关，不等重启。已在跑就如实说\"已在运行\"。",
+        "operationId": "start_gateway_now_api_mobile_gateway_start_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileGatewayActionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "启动网关（立即生效）"
+      }
+    },
+    "/api/mobile/gateway/stop": {
+      "post": {
+        "description": "立刻停掉网关。**幂等**：没在跑也返回成功，方便\"多按几次确保关掉\"。",
+        "operationId": "stop_gateway_now_api_mobile_gateway_stop_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileGatewayActionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "停止网关（立即断开所有手机）"
+      }
+    },
+    "/api/mobile/info": {
+      "get": {
+        "description": "移动网关开着没、跑着没、配了几台、去哪儿管。\n\n设备数读的是落盘状态：网关没跑时**照样给出真实数字**——\"有 3 台已授权但服务没开\"\n正是用户最需要看到的那句话。这一个是只读的，所以不要求同源元数据（设置页轮询它）。",
+        "operationId": "mobile_info_api_mobile_info_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileInfoView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "移动访问状态（只读）"
+      }
+    },
+    "/api/mobile/pairing-code": {
+      "post": {
+        "description": "签发一次性配对码，连二维码一起返回。\n\n没有手机可达的通道时返回 409 并说明——给一个扫了打不开的二维码比不给更糟。",
+        "operationId": "create_pairing_code_api_mobile_pairing_code_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobilePairingCodeView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "生成一个配对二维码"
+      }
+    },
+    "/api/mobile/settings": {
+      "get": {
+        "description": "页面显示的那一份：设置库优先、`config.yaml` 是出厂默认。",
+        "operationId": "read_mobile_settings_api_mobile_settings_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileSettingsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "移动访问配置（生效值）"
+      },
+      "put": {
+        "description": "整段保存，并把生效值写成快照交给网关。\n\n**保存不等于生效**：网关是独立进程，必须重启才会读到新配置。返回体里\n`restart_required` 恒为 true，页面据此提示——不提示的话用户会以为保存失败了。",
+        "operationId": "save_mobile_settings_api_mobile_settings_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MobileSettingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MobileSettingsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "保存移动访问配置"
       }
     },
     "/api/model-connections": {
@@ -12971,6 +14088,103 @@
           }
         },
         "summary": "测试模型连接"
+      }
+    },
+    "/api/open-in-app/apps": {
+      "get": {
+        "description": "没探测到任何应用时回 `available=false`，不是错误。",
+        "operationId": "open_in_app_apps_api_open_in_app_apps_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenInAppView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "本机可用的「打开方式」"
+      }
+    },
+    "/api/open-in-app/icon/{app_id}": {
+      "get": {
+        "operationId": "open_in_app_icon_api_open_in_app_icon__app_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "app_id",
+            "required": true,
+            "schema": {
+              "title": "App Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "description": "这个应用没有可提取的图标"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "应用图标（PNG）"
+      }
+    },
+    "/api/open-in-app/open": {
+      "post": {
+        "operationId": "open_in_app_open_api_open_in_app_open_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OpenInAppOpenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpenInAppResultView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "用本机应用打开工作区里的文件"
       }
     },
     "/api/permissions": {

@@ -149,6 +149,13 @@ export type ToolCardView =
     kind: 'delegation'
     /** 每个子 Agent 的结局（§18.7）：状态、工具次数、token 预留、证据条数与失败原因。 */
     children: readonly DelegationChildView[]
+    /**
+     * 还没跑完的子任务的 `scope`（2026-11-04）。
+     *
+     * 委派一发起就要摊出 N 条卡：结果里只有"跑完之后"的 `children`，在此之前页面拿不到
+     * "到底派了几路"。这里用工具入参里的目录列表先占位，跑完再被 `children` 接管。
+     */
+    pending: readonly string[]
     /** 父图核对过的原文报告（带真实文件行号）；未完成时里面是原因说明。 */
     report: string
     truncated: boolean
@@ -162,14 +169,42 @@ export type ToolCardView =
  * **刻意不含"预留 token"**（2026-10-13 裁定）：那是切出来的上限、同一份配置下每路几乎一样，
  * 摆在对话卡里只会被读成"这一路花了多少"。实际花费看用量区（§15.7 要求预留与实际分开写）。
  */
+/**
+ * 子任务自己的一次工具调用（2026-11-04）。
+ *
+ * 只保留"它查了什么"：工具名、参数摘要、状态。子任务的完整工具行不再单独出现在对话时间线上——
+ * 它们是**那一路的调查过程**，收在对应的子卡片里才对得起来。
+ */
+export interface DelegationToolView {
+  name: string
+  summary: string
+  /** 后端给的是原始状态串（`ok` / `running` …），不映射成对话行的状态枚举。 */
+  status: string
+  /** 参数摘要之外的可读目标（文件路径 / 命令），没有就不显示。 */
+  target: string | null
+}
+
 export interface DelegationChildView {
   scope: string
+  /**
+   * 这一路要查的问题（截断）。**块头显示它**，比目录路径有信息量（2026-11-04，抄 Hermes/Codex）。
+   * 空 = 进程内记录已过期，那时只显示目录，不编造任务描述。
+   */
+  goal?: string
   status: 'completed' | 'failed'
   toolCalls: number
   modelCalls: number
   evidenceCount: number
   /** 这一路写成功的文件操作数（2026-11-02）：>0 就说明磁盘已被改动。 */
   changedFiles: number
+  /**
+   * 这一路实际跑了多久（2026-11-04）。`null` = 没有记录（旧检查点）。
+   *
+   * 几路并发时"总耗时"掩盖了"哪一路慢"，而后者才是判断"是不是卡住了"的依据。
+   */
+  elapsedMs: number | null
+  /** 这一路自己的工具调用序列（2026-11-04）。空 = 还没跑到 / 旧检查点没记归属。 */
+  tools?: readonly DelegationToolView[]
   error: string | null
 }
 
@@ -203,6 +238,13 @@ export interface ToolRowView {
   /** Short human summary of what the call is doing. */
   summary: string
   status: 'pending' | 'running' | 'succeeded' | 'failed' | 'uncertain'
+  /**
+   * 这条调用由哪一路子 Agent 产生（2026-11-04）。空 = 父 Agent 自己调的。
+   *
+   * 子任务的调用在委派收尾时并回父轮次，`runId` 被改写；没有这个字段，页面只能把几路调查
+   * 的调用整批摊在时间线上，或全部藏起来。
+   */
+  delegationScope?: string
   /** Pre-formatted duration; measuring timings is T34's job. */
   durationLabel: string
   /**

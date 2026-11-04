@@ -210,6 +210,9 @@ class ChildResearchReport(TypedDict):
     #: 子 Agent 实际写成功的文件操作数（2026-11-02 第二档）。只读子任务恒为 0。
     #: 存在它进工具结果，是为了让父 Agent 不能一边让子 Agent 改了文件、一边回答"只做了调查"。
     changed_files: NotRequired[int]
+    #: 这一路实际跑了多久（2026-11-04）。**只用于展示**：几路并发时"哪一路最慢"是用户判断
+    #: "是不是卡住了"的唯一依据，而并发总耗时把它掩盖了。缺失时页面不显示，而不是补 0。
+    elapsed_ms: NotRequired[int]
 
 
 class DelegatedWorkflowState(TypedDict):

@@ -235,6 +235,27 @@
   padding: var(--law-space-xs) var(--law-space-lg);
   font-size: var(--law-text-sm);
   line-height: var(--law-leading-sm);
+  /* 子任务的调查过程要换到下一行（2026-11-04）。 */
+  flex-wrap: wrap;
+}
+
+/* 还在跑的那一路：一个会呼吸的小圆点，和"已完成"的勾拉开区别。
+   不加动画时它和勾一样是静态符号，用户看不出哪一路还在动。 */
+.delegationRunning {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--law-state-info, #3b82f6);
+  animation: delegationPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes delegationPulse {
+  0%, 100% { opacity: .35; transform: scale(.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .delegationRunning { animation: none; opacity: .8; }
 }
 
 .delegationMark {
@@ -312,4 +333,182 @@
 .moreButton:hover {
   background: var(--law-button-ghost-hover);
   color: var(--law-text-primary);
+}
+
+/* 这一路自己的工具调用链（2026-11-04）：缩进在目录下面，一眼看出它属于哪一路。
+   之前这些调用要么整批摊在主时间线上，要么根本没展示——两者都不对。 */
+.delegationLane {
+  flex-basis: 100%;
+  margin: 2px 0;
+  padding-left: 22px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.delegationStep {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  font-size: var(--law-text-xs);
+  line-height: var(--law-leading-xs);
+  color: var(--law-text-caption);
+}
+
+.delegationStepName {
+  flex: none;
+  font-family: var(--law-font-mono);
+  opacity: .75;
+}
+
+.delegationStepText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 每路一张独立卡片（2026-11-04 用户要求）：它们不再是"一个框里的几行"，
+   而是并列的几张卡——用户要一眼看出这是两条并行的调查。 */
+.delegationStack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.delegationSummary {
+  margin: 0;
+  font-size: var(--law-text-xs);
+  color: var(--law-text-caption);
+}
+
+/* 卡头右侧的"指示点/勾 + 状态文字"：横排居中对齐，别让 8px 的点浮在基线上。 */
+.delegationBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* 一行一条子任务（2026-11-04，对齐 CodeBuddy 的 subagent 行）：
+   收起时只有"箭头 + 目录 + 状态"，点开才展开它自己的工具链。
+   比"每路一张完整卡片"轻得多——三条子任务不再等于三块大边框。 */
+.lane {
+  border: 1px solid var(--law-line-subtle, #e8e3dd);
+  /* 卡片感来自圆角 + 内边距，不来自更粗的边框（2026-11-04，照 hermes 的 rounded-xl + px-3 py-2）。 */
+  border-radius: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: transparent;
+}
+
+.lane > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.lane > summary::-webkit-details-marker {
+  display: none;
+}
+
+.laneHead {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  /* 脚手架衰减（照 hermes）：子任务行是过程性信息，压低到 67%，悬停/键盘聚焦回到全亮。
+     不做的话，几条子任务的文字会和正文抢注意力。 */
+  opacity: .67;
+  transition: opacity 120ms ease-out;
+}
+
+.laneHead:hover,
+.laneHead:focus-visible {
+  opacity: 1;
+}
+
+.laneHead:hover {
+  background: var(--law-surface-hover, rgba(0, 0, 0, .03));
+}
+
+.laneChevron {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  opacity: .55;
+}
+
+.lane > details[open] .laneChevron,
+.lane[open] > summary .laneChevron {
+  transform: rotate(90deg);
+}
+
+.laneScope {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-sm);
+}
+
+.laneMeta {
+  flex: none;
+  margin-left: auto;
+  padding-left: 8px;
+  font-size: var(--law-text-xs);
+  color: var(--law-text-caption);
+  white-space: nowrap;
+}
+
+.laneEmpty {
+  margin: 0;
+  padding: 0 9px 6px 27px;
+  font-size: var(--law-text-xs);
+  color: var(--law-text-caption);
+}
+
+/* 块头主文案是**任务目标**（自然语言，可截断），目录退成副标题（等宽、淡）。
+   抄 Hermes / Codex：用户想知道"它在查什么"，不是"它在哪个目录"（2026-11-04）。 */
+.laneGoal {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--law-text-sm);
+}
+
+.laneSub {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--law-font-mono);
+  font-size: var(--law-text-xs);
+  color: var(--law-text-caption);
+  opacity: .8;
+}
+
+/* 收起时只露**当前那一步**（2026-11-04，照 hermes 的 ticker）：
+   一行、不换行、溢出省略。铺历史会让几条子任务把对话挤满，而用户此刻只关心"它正在干嘛"。 */
+.laneTicker {
+  display: flex;
+  gap: 0.375rem;
+  min-width: 0;
+  margin: 0.125rem 0 0;
+  padding-left: 1.25rem;
+  overflow: hidden;
+  font-size: 0.6875rem;
+  line-height: 1.125rem;
+  color: var(--law-text-caption);
+  opacity: .85;
 }

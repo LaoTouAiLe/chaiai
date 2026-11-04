@@ -7,9 +7,7 @@
 }
 
 .scroll {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  padding: 32px 0 24px;
+flex: 1 1 auto; min-width: 0; overflow-x: hidden; overflow-y: auto; padding: 24px 0 28px; overscroll-behavior: contain;
 }
 
 .turn {
@@ -25,33 +23,22 @@
   flex-direction: column;
   /* 轮间距（24，2026-10-22 V3 由 32 收紧）> 轮内间距（12）：先按"问答"分组，再按段落分组。
      1440 屏上 32 会让两轮之间空出一整屏的呼吸感，正文反而显得零散。 */
-  gap: 36px;
-  width: 100%;
-  max-width: var(--law-conversation-max-width);
+  gap: 32px;
+  width: calc(100% - 2 * (var(--workspace-gutter) + 16px));
+  max-width: var(--conversation-content-width, var(--law-conversation-max-width));
   margin: 0 auto;
-  padding: 0 var(--workspace-gutter);
+  padding: 0;
 }
 
 .userRow {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: var(--law-space-xs);
+  gap: 8px;
 }
 
 .userBubble {
-  max-width: 82%;
-  padding: 12px 18px;
-  border-radius: 16px 16px 4px 16px;
-  background: var(--c-bubble);
-  font-size: var(--fs-chat);
-  line-height: var(--lh-chat);
-  color: var(--c-text-1);
-  /* 用户消息里可能整段没有断点（实测：一条带 utm 参数的链接把气泡撑破、文字溢出到列外）。
-     `max-width` 只限制**盒子**，没有断点的话文字照样溢出来。用 `overflow-wrap: anywhere` 而不是
-     `break-word`：前者同时缩小 min-content，flex（`.userRow` 是 column + align-items: flex-end）
-     下气泡才能正常收窄。`.assistantText` 早就有对应兜底，这里原本漏了（2026-10-16）。 */
-  overflow-wrap: anywhere;
+max-width: min(82%, 660px); padding: 12px 18px; border-radius: 20px; background: var(--c-bubble); font-size: var(--fs-chat); line-height: var(--lh-chat); color: var(--c-text-1); overflow-wrap: anywhere;
 }
 
 /* 追问引用块（2026-10-26）：抄豆包——浅底圆角块，与用户自己写的问题在视觉上分层。
@@ -220,18 +207,14 @@
 .assistantRow {
   display: flex;
   flex-direction: column;
-  gap: var(--law-space-sm);
+  gap: 16px;
 }
 
 /* 助手身份行（2026-10-21）：说明"这段是谁说的"。
    图标 + 产品名，不引入头像——模型是随时可切的，换头像等于换一张皮。 */
 .identity {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  /* 身份行属于**它下面那段**内容，不属于上一段：把与下一条的间距从 20 收到 8。
-     不这么做时，它会悬在上一轮与下一段正中间，看起来像一条独立的分隔说明。 */
-  margin-bottom: var(--sp-1);
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
 }
 
 .identityMark {
@@ -241,10 +224,10 @@
 }
 
 .identityName {
-  color: var(--law-text-primary);
-  font-size: var(--fs-body);
+  color: var(--c-text-2);
+  font-size: 12px;
   line-height: var(--law-leading-sm);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .assistantText {
@@ -339,6 +322,7 @@
 }
 
 .assistantTime {
+  color: var(--c-text-3);
   font-size: var(--law-text-xs);
   line-height: var(--law-leading-xs);
   font-variant-numeric: tabular-nums;
@@ -622,30 +606,40 @@
 .userImages {
   display: flex;
   flex-wrap: wrap;
-  gap: var(--law-space-sm);
-  margin: var(--law-space-sm) 0 0;
+  justify-content: flex-end;
+  max-width: 100%;
+  gap: 10px;
+  margin: 0;
   padding: 0;
   list-style: none;
 }
 
 .userImage img {
   display: block;
-  max-width: 220px;
-  max-height: 160px;
-  border-radius: var(--law-radius-md, 10px);
-  border: 1px solid var(--law-border-l1);
-  object-fit: contain;
-  background: var(--law-bg-layer-1);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  object-fit: cover;
 }
+.userImage { min-width: 0; max-width: 100%; }
 
 /* 缩略图是**按钮**（2026-10-16）：点开看原图。重置按钮外观，只留"可以点"的提示。 */
 .userImageButton {
-  display: block;
+  display: grid;
+  place-items: center;
+  max-width: 100%;
+  min-width: 44px;
+  min-height: 44px;
+  overflow: hidden;
   padding: 0;
-  border: none;
-  background: none;
+  border: .5px solid var(--c-line);
+  border-radius: 20px;
+  background: var(--c-panel);
   cursor: zoom-in;
 }
+.userImageButton[data-image-variant='tile'] { width: 64px; height: 64px; }
+.userImageButton[data-image-failed] { color: var(--c-text-3); font-size: 12px; line-height: 18px; cursor: pointer; }
 
 .userImageButton:focus-visible {
   outline: 2px solid var(--law-surface-selector);
@@ -680,7 +674,7 @@
 }
 
 @media (max-width: 720px) {
-  .column { padding-inline: var(--workspace-gutter); }
+  .column { padding-inline: 0; }
   .emptyList { grid-template-columns: 1fr; gap: var(--sp-2); }
   .emptyItem { flex-direction: row; gap: var(--sp-3); padding: var(--sp-3); }
   .emptyArt { display: block; }
@@ -693,10 +687,17 @@
   .emptyItem { padding: 0; }
 }
 
-.response { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.response { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
 .responseHead { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 2px; }
-.responseBody { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.responseBody { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.footerMeta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; min-width: 0; }
+.footer .stats { margin-top: 0; padding-top: 0; }
+.process { min-width: 0; }
+.processToggle { display: flex; align-items: center; justify-content: flex-start; gap: 8px; width: fit-content; max-width: 100%; min-height: 32px; padding: 4px 8px; border: 0; border-radius: 10px; color: var(--c-text-3); font-size: var(--law-text-sm); line-height: 24px; text-align: left; }
+.processToggle:hover { color: var(--c-text-1); background: var(--c-hover); }
+.processBody { display: flex; flex-direction: column; gap: 16px; padding: 16px 0; }
+.processBody[hidden] { display: none; }
 .operationCount { flex: 0 0 auto; padding: 3px 7px; border-radius: 5px; background: var(--c-panel); color: var(--c-text-3); font-size: var(--law-text-fixed-2xs); line-height: var(--law-leading-fixed-2xs); }
 /* 窄屏不再把它压到 9px（2026-10-30）：中文 9px 已经不可读，而它是"这一轮做了几次操作"的唯一
    提示。宽度不够时宁可让标题换行。 */
-@media (max-width: 720px) { .column { padding-inline: var(--workspace-gutter); } }
+@media (max-width: 720px) { .column { padding-inline: 0; } }

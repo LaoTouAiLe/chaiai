@@ -13,7 +13,7 @@ import { RunActivity } from './RunActivity'
 import { ReasoningRow } from './ReasoningRow'
 import { WebSources } from './WebSources'
 import { CompressionRow } from './CompressionRow'
-import { ImageLightbox } from './ImageLightbox'
+import { MessageImages } from './MessageImages'
 import { ErrorNotice } from '../error/ErrorNotice'
 import { MemoryRow } from '../memory/MemoryRow'
 import { ToolRow } from '../tool/ToolRow'
@@ -116,8 +116,6 @@ function UserMessage({
 }) {
   const pictures = images ?? []
   const docFiles = files ?? []
-  // 点开看原图（2026-10-16）：缩略图有尺寸上限（220×160），截图里的小字、UI 细节得放大才看得清。
-  const [zoomed, setZoomed] = useState<string | null>(null)
   // **就地编辑**（2026-10-21）：`null` = 不在编辑态。改动发生在这一条气泡上，不碰底部输入框——
   // 用户改的是"已经发出去的那句话"，不是要写一句新的。
   const [draft, setDraft] = useState<string | null>(null)
@@ -155,8 +153,9 @@ function UserMessage({
     <div className={styles.userRow}>
       {draft === null ? (
         <>
-          <div className={styles.userBubble}>
-            {/* 只发图不发字是**合法提交**（2026-10-16）：那时气泡里只有图，不渲染一个空段落。 */}
+          <MessageImages images={pictures} />
+          {shownQuestion !== '' || injectedContext !== '' || docFiles.length > 0 ? <div className={styles.userBubble}>
+            {/* Image-only messages have a gallery without an empty text bubble. */}
             {injectedContext === '' ? null : (
               <details className={styles.userContext}>
                 <summary className={styles.userContextSummary}>来自主会话的上下文</summary>
@@ -170,22 +169,6 @@ function UserMessage({
                 <blockquote className={styles.userQuote}>{quoted}</blockquote>
                 {askedText === '' ? null : <div className={styles.userQuestion}>{askedText}</div>}
               </>
-            )}
-            {pictures.length === 0 ? null : (
-              <ul className={styles.userImages} aria-label="随这条消息发送的图片">
-                {pictures.map((src) => (
-                  <li key={src} className={styles.userImage}>
-                    <button
-                      type="button"
-                      className={styles.userImageButton}
-                      aria-label="放大查看这张图片"
-                      onClick={() => setZoomed(src)}
-                    >
-                      <img src={src} alt="随消息发送的图片" loading="lazy" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
             )}
             {/* 随消息发送的**文档**（2026-10-29）：只显示文件名与体积，不提供下载/打开——
                 文件内容在磁盘上（`data/attachments/`），页面没有理由拿到它。要让助手读，
@@ -211,7 +194,7 @@ function UserMessage({
                 ))}
               </ul>
             )}
-          </div>
+          </div> : null}
           {/* 复制与编辑（2026-10-21）：只出现在用户自己的消息上，且**只有图标**——
               文字按钮会跟时间戳挤在同一行。 */}
           <div className={styles.userActions}>
@@ -277,9 +260,6 @@ function UserMessage({
         </div>
       )}
       <span className={styles.userTime}>{at}</span>
-      {zoomed === null ? null : (
-        <ImageLightbox src={zoomed} onClose={() => setZoomed(null)} />
-      )}
     </div>
   )
 }
@@ -300,7 +280,7 @@ function AssistantIdentity() {
   )
 }
 
-function AssistantMessage({ text, at, reasoning, reasoningTruncated, reasoningRunning, streaming }:
+function AssistantMessage({ text, reasoning, reasoningTruncated, reasoningRunning, streaming }:
   Extract<MessageView, { kind: 'assistant' }>) {
   return (
     <div className={styles.assistantRow}>
@@ -311,11 +291,6 @@ function AssistantMessage({ text, at, reasoning, reasoningTruncated, reasoningRu
           选中的文字不属于"回答正文"，不该弹出追问。 */}
       {text !== '' ? <div className={styles.assistantText} data-streaming={streaming || undefined} data-quotable>
         <MarkdownMessage text={text} />
-      </div> : null}
-      {/* 复制按钮已上移到"每轮一组"（`TurnActions`）：原来每个助手段落各一个，一轮下来七八个
-          重复按钮。这里只留时间。 */}
-      {at !== '' ? <div className={styles.actions}>
-        <span className={styles.assistantTime}>{at}</span>
       </div> : null}
     </div>
   )
@@ -520,6 +495,39 @@ type TurnGroup =
   | { kind: 'single'; row: MessageView }
   | { kind: 'tools'; rows: MessageView[] }
 
+/**
+ * 哪些记录必须留在正文、不能随「处理过程」收起。
+ *
+ * 检索与记忆行以前一律挡住折叠，可真实图执行几乎每轮都有「检索与记忆 · 未命中」，
+ * 于是一轮成功的任务永远不出现「处理过程」，工具记录一直占着正文（2026-11-02 验收）。
+ * 现在只有**需要用户注意**的那几种留下：检索失败、写入失败、有候选却没落库（`skipped`）。
+ * 命中 / 未命中 / 已写入是正常结果，跟随工具一起收起。
+ */
+function needsAttention(row: MessageView): boolean {
+  if (row.kind === 'error' || row.kind === 'compression') return true
+  if (row.kind === 'memory') {
+    const { retrieval, write } = row.memory
+    return retrieval.outcome === 'failed'
+      || write?.outcome === 'failed'
+      || write?.outcome === 'skipped'
+  }
+  if (row.kind === 'tool') return row.tool.status !== 'succeeded' || row.tool.expanded
+  if (row.kind === 'assistant') return row.streaming === true || row.reasoningRunning === true
+  return false
+}
+
+/** Completed successful work can fold; active, failed and uncertain records stay exposed. */
+function TurnProcess({ children, count }: { children: ReactNode; count: number }) {
+  const [open, setOpen] = useState(false)
+  return <div className={styles.process}>
+    <button type="button" className={styles.processToggle} aria-expanded={open}
+      aria-label={`处理过程（${count} 项工具操作）`} onClick={() => setOpen(!open)}>
+      <span>处理过程 · {count} 项工具操作</span><span aria-hidden="true">{open ? '▾' : '▸'}</span>
+    </button>
+    <div className={styles.processBody} hidden={!open}>{children}</div>
+  </div>
+}
+
 /** 把一轮里的消息切块：连续只读工具成组，其余逐个。 */
 function groupRows(rows: MessageView[]): TurnGroup[] {
   const groups: TurnGroup[] = []
@@ -672,6 +680,14 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
   const empty = scenario.empty ?? null
   const scrollRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
+  /**
+   * 「滑到最底」点下去之后的跟随意向（2026-11-03 修正）。
+   *
+   * 平滑滚动期间内容还在增长，距底会一直 >80px；按滚动位置判定就会把用户刚表达的
+   * "我要跟着看"读成"用户往上翻了"，于是停在回答中间。这里只在**用户自己滚动**
+   * （wheel / touch）时才把意向交回位置判定。
+   */
+  const jumpingRef = useRef(false)
   /** 一次拖选的快照（2026-10-26）：文本在选中当时就固定下来，之后选区被浏览器收起也不影响。 */
   const [picked, setPicked] = useState<PickedSelection | null>(null)
   const turnStats = new Map((scenario.turnStats ?? []).map((item) => [item.afterMessageId, item.stats]))
@@ -733,6 +749,7 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
 
   useEffect(() => {
     if (autoFollow) followRef.current = true
+    jumpingRef.current = false
   }, [autoFollow, scenario.sessionId])
 
   useEffect(() => {
@@ -760,8 +777,19 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
       ref={scrollRef}
       onScroll={autoFollow ? (event) => {
         const element = event.currentTarget
-        followRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80
+        const near = element.scrollHeight - element.scrollTop - element.clientHeight < 80
+        if (jumpingRef.current) {
+          // 跳转是按钮发起的：中途内容还在长，距底一直 >80 也不能当成"用户不想跟随"。
+          // 真正到底后把判定权交回位置逻辑。
+          if (near) jumpingRef.current = false
+          followRef.current = true
+          return
+        }
+        followRef.current = near
       } : undefined}
+      // 用户自己的滚动意图优先：一旦手向上翻，即使还停在跳转动画里也不再强制跟随。
+      onWheel={autoFollow ? () => { jumpingRef.current = false } : undefined}
+      onTouchMove={autoFollow ? () => { jumpingRef.current = false } : undefined}
     >
       <div className={styles.column}>
         {loading !== null ? (
@@ -784,12 +812,22 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
         {loading === null && empty === null ? (
           <>
             {turns.map((turn, index) => {
-              const stats = turnStats.get(turn.lastId)
+              const stats = turnStats.get(turn.lastId) ?? (index === turns.length - 1 ? scenario.stats ?? undefined : undefined)
               const parentTurnId = index === 0 ? null : turns[index - 1].id
               const groups = groupRows(turn.rows)
               const prompts = groups.filter((group) => group.kind === 'single' && group.row.kind === 'user')
               const replies = groups.filter((group) => !(group.kind === 'single' && group.row.kind === 'user'))
               const operationCount = turn.rows.filter((row) => row.kind === 'tool').length
+              const assistants = turn.rows.filter((row): row is Extract<MessageView, { kind: 'assistant' }> => row.kind === 'assistant')
+              const responseTime = assistants.filter(row => row.at !== '').at(-1)?.at ?? ''
+              const finalAssistant = assistants.filter(row => row.text.trim() !== '').at(-1)
+              const answerIndex = replies.findIndex(group => group.kind === 'single' && group.row.id === finalAssistant?.id)
+              const lastTool = turn.rows.filter(row => row.kind === 'tool').at(-1)
+              const active = index === turns.length - 1 && ['running', 'awaiting-approval', 'awaiting-input'].includes(scenario.session.status)
+              const safeProcess = turn.rows.every(row => !(needsAttention(row)))
+              const foldProcess = operationCount > 0 && answerIndex > 0 && !active && safeProcess
+                && finalAssistant !== undefined && lastTool !== undefined
+                && turn.rows.indexOf(finalAssistant) > turn.rows.indexOf(lastTool)
               const editHandler = index === turns.length - 1 ? onEditMessage : undefined
               const renderMessage = (row: MessageView) => <Message key={row.id} message={row} onToggleTool={onToggleTool} errorActions={errorActions} onDetachCommand={onDetachCommand} parentTurnId={parentTurnId} onEdit={editHandler} onOpenAttachment={onOpenAttachment} />
               const renderGroup = (group: TurnGroup) => group.kind === 'single'
@@ -799,18 +837,24 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
               return <div key={turn.id} data-turn-id={turn.id} className={styles.turn}>
                 {prompts.map(renderGroup)}
                 {replies.length === 0 ? null : <section className={styles.response} aria-label="智能体回复">
-                  <div className={styles.responseHead}><AssistantIdentity />{operationCount === 0 ? null : <span className={styles.operationCount}>{operationCount} 项工具操作</span>}</div>
-                  <div className={styles.responseBody}>{replies.map(renderGroup)}</div>
+                  <div className={styles.responseHead}><AssistantIdentity />{operationCount === 0 || foldProcess ? null : <span className={styles.operationCount}>{operationCount} 项工具操作</span>}</div>
+                  <div className={styles.responseBody}>
+                    {foldProcess ? <>
+                      <TurnProcess key={`process:${turn.id}`} count={operationCount}>{replies.slice(0, answerIndex).map(renderGroup)}</TurnProcess>
+                      {replies.slice(answerIndex).map(renderGroup)}
+                    </> : replies.map(renderGroup)}
+                  </div>
                   <WebSources rows={turn.rows} answer={turn.answerParts.join('\n\n')} />
                   {renderTurnChanges?.(turn.id)}
                   {stats === undefined && turn.answerParts.join('').trim() === '' ? null : <div className={styles.footer}>
-                    {stats === undefined ? <span /> : <TurnStats stats={stats} />}
+                    <div className={styles.footerMeta}>{stats === undefined ? null : <TurnStats stats={stats} />}
+                      {responseTime === '' ? null : <span className={styles.assistantTime} aria-label="回复时间">{responseTime}</span>}
+                    </div>
                     <TurnActions text={turn.answerParts.join('\n\n')} onQuote={onQuote} />
                   </div>}
                 </section>}
               </div>
             })}
-            {scenario.stats === null ? null : <TurnStats stats={scenario.stats} />}
             {scenario.activity == null ? null : <RunActivity key={scenario.activity.id} activity={scenario.activity} />}
           </>
         ) : null}
@@ -822,8 +866,17 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
       onJump={() => { followRef.current = false }}
     />
     {/* 「滑到最底」（2026-10-21）：往上翻历史之后，一键回到最新一轮。
-        与自动跟随（`followRef`）不冲突——点它滚到底时 onScroll 会把跟随重新打开。 */}
-    <ScrollToBottom paneRef={scrollRef} resetKey={scenario.sessionId ?? scenario.id} offsetBottom={14} />
+        跟随在这里**显式**恢复（2026-11-03）：只靠"滚到底时 onScroll 会重新打开"不行，
+        生成中的平滑滚动还没到底目标就过时了，于是停在回答中间。 */}
+    <ScrollToBottom
+      paneRef={scrollRef}
+      resetKey={scenario.sessionId ?? scenario.id}
+      offsetBottom={14}
+      onJump={autoFollow ? () => {
+        jumpingRef.current = true
+        followRef.current = true
+      } : undefined}
+    />
     {picked === null || onQuote === undefined ? null : (
       <SelectionBar
         picked={picked}

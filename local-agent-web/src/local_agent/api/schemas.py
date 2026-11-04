@@ -403,6 +403,177 @@ class AppInfoView(BaseModel):
     remove_data_note: str | None = None
 
 
+# ---- 委派实时进度（2026-11-04）-------------------------------------------
+
+
+class DelegationLiveStepView(BaseModel):
+    """子任务已经发起过的一次工具调用。
+
+    **不是审计记录**：它只回答"这一路此刻在查什么"，跑完就被 `DelegationChildView` 里的
+    统计取代。所以字段刻意少（没有 token、没有证据编号）。
+    """
+
+    name: str
+    #: 参数里最能说明"在查哪"的那一个（路径 / 命令 / 模式串）。取不到就是空串，不编造。
+    target: str
+    status: str
+
+
+class DelegationLiveLaneView(BaseModel):
+    """一路正在跑（或刚跑完、还在保留期内）的子任务。"""
+
+    child_id: str
+    scope: str
+    #: 这一路要查的问题（截断）。块头显示它，比目录路径有信息量——见 `DelegationChildView.goal`。
+    goal: str = ""
+    status: str
+    steps: list[DelegationLiveStepView] = Field(default_factory=list)
+    updated_at: float
+
+
+class DelegationLiveView(BaseModel):
+    lanes: list[DelegationLiveLaneView] = Field(default_factory=list)
+
+
+# ---- 移动访问（2026-11-03，设置页「移动访问」，架构 §24）-------------------
+
+
+class MobileInfoView(BaseModel):
+    """移动网关的**只读**状态：只回答"开着没、跑着没、配了几台、去哪儿管"。
+
+    **刻意不含任何操作**：生成配对码与撤销设备都在网关自己的管理页（`admin_url`）上。
+    主服务不代它转发——§24 的"主服务不为网关开例外"因此仍然成立，跨源请求也一步都不用放。
+    """
+
+    #: 配置里 `mobile.enabled` 的当前值。`false` 时其余字段都是"本来会是什么"。
+    enabled: bool
+    #: 网关进程此刻是否真的在监听。**与 `enabled` 分开**：配了但没启动是最常见的一态，
+    #: 两者合成一个布尔会让用户看到"开着"却连不上。
+    running: bool
+    #: 管理页地址（回环）。它只在本机能打开。
+    admin_url: str
+    #: 已配对设备数。读的是网关落盘的状态，网关没跑时也能显示——那时它才是用户关心的数字。
+    device_count: int
+
+
+class MobileDeviceView(BaseModel):
+    """一台已配对设备。**不含 Token 摘要**：页面不需要它，泄露了也没用。"""
+
+    id: str
+    label: str
+    #: 配对时走的通道名（`pair` / `lan` …）。
+    channel: str
+    created_at: str
+
+
+class MobileDevicesView(BaseModel):
+    devices: list[MobileDeviceView]
+
+
+class MobilePairUrlView(BaseModel):
+    """一个手机可达地址。`label` 是给人看的（"同一 Wi-Fi" / "远程（Tailscale）"）。"""
+
+    label: str
+    url: str
+
+
+class MobilePairingCodeView(BaseModel):
+    """一次配对邀请：给手机扫的链接与它的二维码。
+
+    ``qr_svg`` 由服务端生成并内联返回——**不要把 code 拼进图片 URL**，那样这个一次性凭据会
+    出现在访问日志里。
+    """
+
+    code: str
+    pair_url: str
+    qr_svg: str
+    #: 剩余有效秒数。页面据此做倒计时，过期后提示重新生成。
+    expires_in: int
+    #: 备选地址（不含 `pair_url` 自己）。某条通道"配了但没生效"时，第一个链接会打不开——那时
+    #: 用户需要一个能点的退路，而不是只看到"扫了没反应"。
+    alternates: list[MobilePairUrlView] = []
+
+
+class MobileRenameRequest(BaseModel):
+    """改设备显示名（UA 解析出来的型号代号用户认不出，允许自己起名）。"""
+
+    label: str
+
+
+class MobileRevokeView(BaseModel):
+    #: 是否真的删掉了一条记录（找不到时 `false`）。
+    revoked: bool
+
+
+class MobileChannelSettingView(BaseModel):
+    """页面上的一行通道配置。**与 `MobileChannelConfig` 同字段**——它就是那份配置的可编辑形态。"""
+
+    type: str
+    enabled: bool
+    mode: Literal["named", "quick"]
+    hostname: str
+    expose: Literal["serve", "funnel"]
+    https_port: int
+    port: int
+    tls: bool
+
+
+class MobileSettingsView(BaseModel):
+    """移动访问的**生效值**：设置库里有就用库里的，否则用 `config.yaml`。
+
+    `source` 与 `restart_required` 是给界面看的，不参与计算：前者说明"你看到的这份来自哪儿"，
+    后者说明"改完之后网关进程还没重启，此刻还没生效"——这两句不写清楚，用户会以为保存没成功。
+    """
+
+    enabled: bool
+    gateway_host: str
+    gateway_port: int
+    pairing_ttl_seconds: int
+    ws_enabled: bool
+    channels: list[MobileChannelSettingView]
+    #: `settings` = 页面保存过的值；`config` = 来自 config.yaml。
+    source: Literal["settings", "config"]
+    #: 网关进程是否还在用旧配置（保存后恒为 true，重启网关才清）。
+    restart_required: bool
+
+
+class MobileGatewayActionView(BaseModel):
+    """启停网关的结果。`detail` 是**可以直接展示给用户**的句子。
+
+    `ok=False` 时界面要如实显示失败原因，而不是给一个"已完成"的提示——"我关的是不是真关了"
+    这个问题，在紧急场景下比任何别的信息都重要。
+    """
+
+    ok: bool
+    detail: str
+    running: bool
+    device_count: int
+
+
+class MobileEmergencyStopRequest(BaseModel):
+    """紧急关闭。
+
+    `revoke_devices` 单独给：**停止网关只断开连接，设备 Token 仍然有效**——重新开启后那台手机
+    照样能用。怀疑令牌泄露时必须连设备一起清掉，否则"关过一次"只是心理安慰。
+    """
+
+    revoke_devices: bool = False
+
+
+class MobileSettingsRequest(BaseModel):
+    """保存整段移动访问配置。
+
+    **整段提交而不是逐项**：页面就是一张表单，逐项保存会让"改端口 + 关通道"变成多次写入，
+    中间失败一次就留下一份自相矛盾的配置。
+    """
+
+    enabled: bool
+    gateway_port: int
+    pairing_ttl_seconds: int
+    ws_enabled: bool
+    channels: list[MobileChannelSettingView]
+
+
 class UpdateCheckView(BaseModel):
     """一次检查更新的结果。**查不到不算错误**：`unavailable` + `note` 就是完整答复。"""
 
@@ -458,6 +629,21 @@ class CapabilitiesRequest(_Request):
     """
 
     changes: dict[str, bool] = Field(min_length=1)
+
+
+# ---- 打开方式（2026-11-03，架构 §15.11.4）----------------------------------
+
+
+class OpenInAppOpenRequest(_Request):
+    """用本机的某个应用打开工作区里的一份文件。
+
+    ``app_id`` 只能是服务端目录里的 id（探测结果），**不是**可执行文件路径——客户端传什么
+    命令过来都一律拒绝；启动参数也全部来自服务端目录。``path`` 与预览同一条边界。
+    """
+
+    app_id: str = Field(min_length=1, max_length=40, pattern=r"^[a-z0-9_-]+$")
+    path: str = Field(min_length=1, max_length=PATH_MAX_CHARS)
+    workspace_id: str | None = Field(default=None, max_length=REQUEST_ID_MAX_CHARS)
 
 
 # ---- 文件改动还原（2026-10-29）---------------------------------------------

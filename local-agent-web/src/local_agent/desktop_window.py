@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import sys
 import threading
+from pathlib import Path
 from typing import Final
 
 import uvicorn
@@ -26,6 +27,13 @@ WINDOW_TITLE: Final[str] = "chaiai"
 WINDOW_WIDTH: Final[int] = 1280
 WINDOW_HEIGHT: Final[int] = 860
 WINDOW_MIN_SIZE: Final[tuple[int, int]] = (960, 640)
+
+#: 窗口最多占可用工作区的比例（2026-11-03）。
+#:
+#: 为什么需要：`create_window` 收的是**逻辑像素**，125% 缩放下 1280×860 会变成
+#: 1600×1075，而 1080p 屏的工作区只有 1536×824（逻辑），底边直接跑到屏幕外
+#: （实测窗口矩形 224,224 → 1824,1299）。这里按工作区收缩并居中，设计尺寸只作上限。
+SCREEN_USAGE: Final[float] = 0.92
 
 #: 等端口就绪的上限（秒），与浏览器那条路同一个口径。
 READY_TIMEOUT_SECONDS: Final[float] = 20.0
@@ -56,13 +64,20 @@ def run(
     title: str = WINDOW_TITLE,
     width: int = WINDOW_WIDTH,
     height: int = WINDOW_HEIGHT,
+    storage_dir: Path | None = None,
 ) -> int:
     """起服务 + 开窗口，阻塞到用户关窗。
+
+    Args:
+        storage_dir: WebView2 的用户数据目录。给了就持久化（cookies / localStorage）；
+            ``None`` 时退回 pywebview 自己的默认位置。调用方应指向应用数据根。
 
     Returns:
         0 = 正常关闭；1 = 服务没起来（窗口不会开）。
     """
     import webview
+
+    window_width, window_height, window_x, window_y = _fit_to_work_area(width, height)
 
     probe_host, page_url = browser_open.page_target(host, port)
     server = uvicorn.Server(
@@ -96,16 +111,26 @@ def run(
         return 1
 
     print(f"正在打开窗口：{page_url}", flush=True)
+    storage = None
+    if storage_dir is not None:
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        storage = str(storage_dir)
     try:
         webview.create_window(
             title,
             page_url,
-            width=width,
-            height=height,
+            width=window_width,
+            height=window_height,
+            x=window_x,
+            y=window_y,
             min_size=WINDOW_MIN_SIZE,
         )
         # 阻塞到窗口关闭。`webview.start` 必须在主线程调用（Windows 的 GUI 约束）。
-        webview.start()
+        #
+        # `private_mode=False`（2026-11-03）：默认的私密模式不保留 local storage，关窗还会删掉
+        # 用户数据目录。页面的右栏标签状态、工作面板开合偏好、已关闭的终态审批卡都存在
+        # localStorage 里——桌面形态下会每次启动都丢，浏览器形态不会。
+        webview.start(private_mode=False, storage_path=storage)
     except BaseException:
         # 窗口起不来就把控制台还回去：否则用户面对的是"双击后什么都没有"，
         # 而这正是本项目一直在避免的那种失败形态。
@@ -115,6 +140,49 @@ def run(
         server.should_exit = True
         thread.join(timeout=SHUTDOWN_TIMEOUT_SECONDS)
     return 0
+
+
+def _work_area() -> tuple[int, int] | None:
+    """可用工作区（不含任务栏），单位与 ``create_window`` 的 width/height 一致。
+
+    进程 DPI-unaware 时两边都是系统缩放前的逻辑值（125% 缩放实测 1536×824）。拿不到就
+    返回 ``None``，由调用方退回"原尺寸 + 系统默认位置"。
+    """
+    try:
+        import ctypes
+
+        class _Rect(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        rect = _Rect()
+        if not ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+            return None
+        return int(rect.right - rect.left), int(rect.bottom - rect.top)
+    except Exception:  # noqa: BLE001 - 非 Windows / API 不可用：不拦着开窗
+        return None
+
+
+def _fit_to_work_area(max_width: int, max_height: int) -> tuple[int, int, int | None, int | None]:
+    """按可用工作区收缩并居中（2026-11-03）。
+
+    为什么需要：``create_window`` 收逻辑像素，125% 缩放下 1280×860 会变成 1600×1075，
+    1080p 屏的工作区只有 1536×824（逻辑），底边直接跑到屏幕外（实测窗口矩形
+    224,224 → 1824,1299）。这里把设计尺寸当**上限**，取工作区的 ``SCREEN_USAGE`` 并居中。
+    """
+    area = _work_area()
+    if area is None:
+        return max_width, max_height, None, None
+    work_width, work_height = area
+    if work_width <= 0 or work_height <= 0:
+        return max_width, max_height, None, None
+    width = min(max_width, int(work_width * SCREEN_USAGE))
+    height = min(max_height, int(work_height * SCREEN_USAGE))
+    return width, height, max(0, (work_width - width) // 2), max(0, (work_height - height) // 2)
 
 
 def _hide_console() -> int | None:

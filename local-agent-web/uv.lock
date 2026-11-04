@@ -810,6 +810,15 @@ wheels = [
 ]
 
 [[package]]
+name = "comtypes"
+version = "1.4.17"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/0e/ff/c7836bd0d78fc615281016f154f514e9d523d7cb9ab9e8b4d344adc5f5e7/comtypes-1.4.17.tar.gz", hash = "sha256:3d9c1e92ad8daf7600d371e76ee16161a627a5fb70c3144f6e52e78af6034363", size = 262743, upload-time = "2026-09-21T08:08:07.687Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/89/9c/d0bc1fb69ad22a04bdc01dd9b5613a2ebc4d02ba1ec24b02127dc93791ba/comtypes-1.4.17-py3-none-any.whl", hash = "sha256:4e0a221dde2c589b82977bed802efd71cd5eb67a380347b732e02735e597f586", size = 298743, upload-time = "2026-09-21T08:08:06.461Z" },
+]
+
+[[package]]
 name = "courlan"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2017,8 +2026,10 @@ version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "croniter" },
+    { name = "cryptography" },
     { name = "fastapi" },
     { name = "filelock" },
+    { name = "httpx" },
     { name = "keyring" },
     { name = "langchain-core" },
     { name = "langchain-openai" },
@@ -2027,6 +2038,7 @@ dependencies = [
     { name = "mcp" },
     { name = "openpyxl" },
     { name = "pathspec" },
+    { name = "pillow" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pypdf" },
@@ -2035,9 +2047,11 @@ dependencies = [
     { name = "python-multipart" },
     { name = "python-pptx" },
     { name = "pyyaml" },
+    { name = "qrcode" },
     { name = "send2trash" },
     { name = "streamlit" },
     { name = "trafilatura" },
+    { name = "uiautomation" },
     { name = "uvicorn" },
     { name = "websocket-client" },
     { name = "websockets" },
@@ -2055,7 +2069,6 @@ memory = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -2066,9 +2079,11 @@ dev = [
 requires-dist = [
     { name = "chromadb", marker = "extra == 'memory'", specifier = ">=1.5,<1.6" },
     { name = "croniter", specifier = ">=6.2.4" },
+    { name = "cryptography", specifier = ">=46,<51" },
     { name = "fastapi", specifier = ">=0.141.1" },
     { name = "fastembed", marker = "extra == 'memory'", specifier = ">=0.8,<0.9" },
     { name = "filelock" },
+    { name = "httpx", specifier = ">=0.28.1,<1" },
     { name = "keyring", specifier = ">=25.7.0" },
     { name = "langchain-core", specifier = ">=1.0,<2" },
     { name = "langchain-openai", specifier = ">=1.0,<2" },
@@ -2077,6 +2092,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=2.3.0" },
     { name = "openpyxl", specifier = ">=3.1.5,<4" },
     { name = "pathspec", specifier = ">=1.0,<2" },
+    { name = "pillow", specifier = ">=11,<13" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pypdf", specifier = ">=6.21.4,<7" },
@@ -2086,10 +2102,12 @@ requires-dist = [
     { name = "python-pptx", specifier = ">=1.0.2,<2" },
     { name = "pywebview", marker = "extra == 'desktop'", specifier = ">=6,<7" },
     { name = "pyyaml" },
+    { name = "qrcode", specifier = ">=8,<9" },
     { name = "send2trash", specifier = ">=2.1.0" },
     { name = "streamlit" },
     { name = "tiktoken", marker = "extra == 'memory'" },
     { name = "trafilatura", specifier = ">=2.0,<3" },
+    { name = "uiautomation", specifier = ">=2.0.29,<3" },
     { name = "uvicorn", specifier = ">=0.52.4" },
     { name = "websocket-client", specifier = ">=1.8,<2" },
     { name = "websockets", specifier = ">=16,<17" },
@@ -2098,7 +2116,6 @@ provides-extras = ["memory", "desktop"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -4774,6 +4791,18 @@ wheels = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "8.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8f/b2/7fc2931bfae0af02d5f53b174e9cf701adbb35f39d69c2af63d4a39f81a9/qrcode-8.2.tar.gz", hash = "sha256:35c3f2a4172b33136ab9f6b3ef1c00260dd2f66f858f24d88418a015f446506c", size = 43317, upload-time = "2025-05-01T15:44:24.726Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dd/b8/d2d6d731733f51684bbf76bf34dab3b70a9148e8f2cef2bb544fccec681a/qrcode-8.2-py3-none-any.whl", hash = "sha256:16e64e0716c14960108e85d853062c9e8bba5ca8252c0b4d0231b9df4060ff4f", size = 45986, upload-time = "2025-05-01T15:44:22.781Z" },
+]
+
+[[package]]
 name = "qtpy"
 version = "2.4.3"
 source = { registry = "https://pypi.org/simple" }
@@ -5683,6 +5712,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/d8/89/2bd035df331499589fc92e59375c17c6cea6a500453b2c5f6a6ec9572825/tzlocal-5.4.5.tar.gz", hash = "sha256:ba976898bad27945178c9ca25c222c19e322b30c10342b9f40b46714f70d2d5f", size = 31483, upload-time = "2026-10-22T09:09:26.38Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7b/c1/9be4e1a8a30db8729a86628073910e56f85aaf8a659e053f376a2e6ea5a8/tzlocal-5.4.5-py3-none-any.whl", hash = "sha256:ecab534f6d65d9deb4c4ea52c121ab6dd5958e9b878e71dcb102578269752454", size = 18215, upload-time = "2026-10-22T09:09:24.447Z" },
+]
+
+[[package]]
+name = "uiautomation"
+version = "2.0.29"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "comtypes" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/bc/23/8238b5cb73e54c3618ce4d443c1830a2749264a0d61a9b61637096b8dc7a/uiautomation-2.0.29.tar.gz", hash = "sha256:3c169112043ce21065aead1d79c3baebdafc9cf03bd24ded02b2db11d423d88d", size = 203970, upload-time = "2025-08-05T05:14:41.194Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b0/27/b9c4b33b4129805fa2c437fa13da06c71e74213ae46da098d194d89834fe/uiautomation-2.0.29-py3-none-any.whl", hash = "sha256:5dd51c9e77e70470142a13d903be67f256c445e7cf20b47ada0ece2bdaff9f32", size = 198985, upload-time = "2025-08-05T05:14:39.552Z" },
 ]
 
 [[package]]

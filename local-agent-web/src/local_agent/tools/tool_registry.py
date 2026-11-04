@@ -27,6 +27,7 @@ from local_agent.tools.image_tools import build_image_tools
 from local_agent.tools.mcp_tools import build_mcp_tool_search
 from local_agent.tools.memory_tools import build_memory_tools
 from local_agent.tools.plan_tools import build_plan_tools
+from local_agent.tools.screen_tools import build_screen_tools
 from local_agent.tools.search_tools import build_search_tools
 from local_agent.tools.session_tools import SessionSearchFn, build_session_tools
 from local_agent.tools.shell_tools import build_shell_tools
@@ -170,6 +171,9 @@ class ToolRegistry:
                 # 2026-10-16：看图（只读）。与 git 一样"总是被构造"，能不能用由能力层与工具内部
                 # 的失败闭合共同决定。
                 *build_image_tools(policy, vision_available=vision_available),
+                # 2026-11-04：看屏幕（只读）。同样"总是构造"：可见性由 `screen_read` 能力
+                # （默认关）与工具内部的平台/收图两道失败闭合共同决定。
+                *build_screen_tools(policy, vision_available=vision_available),
                 # 2026-10-13：自主委派（§18.7）。运行依赖（配置 / 模型 / 策略 / 用量 / 取消）只在装配时
                 # 可得，所以这里把运行侧的执行入口闭包进来——工具执行节点只传调用参数（`_invoke_tool`），
                 # 拿不到 `RuntimeContext`，这是 A 方案的注入点。

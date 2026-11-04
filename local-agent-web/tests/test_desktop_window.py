@@ -107,3 +107,51 @@ def test_hiding_is_a_no_op_outside_a_frozen_bundle(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(sys, "frozen", False, raising=False)
 
     assert desktop_window._hide_console() is None
+
+
+def test_window_shrinks_into_the_work_area(monkeypatch: pytest.MonkeyPatch) -> None:
+    """125% 缩放下 1280×860 变 1600×1075、底边出屏（2026-11-03 实测）：高度要收回工作区。"""
+    monkeypatch.setattr(desktop_window, "_work_area", lambda: (1536, 824))
+
+    width, height, x, y = desktop_window._fit_to_work_area(1280, 860)
+
+    assert width == 1280                      # 宽度本来就装得下，保持设计值
+    assert height == int(824 * desktop_window.SCREEN_USAGE)
+    assert height < 860
+    assert (x, y) == ((1536 - 1280) // 2, (824 - height) // 2)
+    assert x is not None and y is not None and y >= 0
+
+
+def test_window_geometry_falls_back_without_work_area(monkeypatch: pytest.MonkeyPatch) -> None:
+    """拿不到工作区：按原尺寸、不指定位置，而不是不开窗。"""
+    monkeypatch.setattr(desktop_window, "_work_area", lambda: None)
+
+    assert desktop_window._fit_to_work_area(1280, 860) == (1280, 860, None, None)
+
+
+def test_window_uses_the_fitted_geometry(fake_webview: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(desktop_window, "_wait_until_ready", lambda host, port: True)
+    monkeypatch.setattr(desktop_window, "_fit_to_work_area", lambda width, height: (1200, 800, 30, 40))
+    monkeypatch.setattr(fake_webview, "create_window",
+                        lambda *args, **kwargs: captured.update(kwargs))
+
+    assert _run() == 0
+    assert (captured["width"], captured["height"]) == (1200, 800)
+    assert (captured["x"], captured["y"]) == (30, 40)
+
+
+def test_webview_storage_survives_restarts(
+    fake_webview: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """私密模式不保留 localStorage：右栏标签、工作面板偏好、已关闭审批卡会每次丢。"""
+    captured: dict[str, Any] = {}
+    monkeypatch.setattr(desktop_window, "_wait_until_ready", lambda host, port: True)
+    monkeypatch.setattr(fake_webview, "start", lambda *args, **kwargs: captured.update(kwargs))
+    storage = tmp_path / "webview"
+
+    assert desktop_window.run(object(), host="127.0.0.1", port=8000, keepalive_seconds=5,
+                              storage_dir=storage) == 0
+    assert captured["private_mode"] is False
+    assert captured["storage_path"] == str(storage)
+    assert storage.is_dir()

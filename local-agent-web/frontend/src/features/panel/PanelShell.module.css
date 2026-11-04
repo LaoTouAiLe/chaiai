@@ -11,9 +11,10 @@
   border-left: 1px solid var(--c-line);
   transition: opacity var(--dur-panel) ease;
   animation: panel-in var(--dur-panel) var(--ease-panel);
-  margin: 8px 8px 8px 0;
-  border: 1px solid var(--c-line);
-  border-radius: 16px;
+  margin: 0;
+  border: 0;
+  border-left: 1px solid var(--c-line);
+  border-radius: 0;
 }
 
 .panel[data-resizing='true'] {
@@ -36,7 +37,7 @@
   min-height: 0;
   container-type: inline-size;
   overflow: hidden;
-  border-radius: 16px;
+  border-radius: 0;
   background: var(--c-canvas);
 }
 
@@ -101,35 +102,16 @@
   background: var(--c-accent-soft);
 }
 
-.head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex: 0 0 auto;
-  min-height: var(--law-header-height);
-  padding: var(--sp-2) var(--sp-4);
-}
-
-.headTitle {
-  color: var(--c-text-1);
-  font-size: var(--fs-ui);
-  font-weight: 600;
-  letter-spacing: .02em;
-}
-
-.head > button, .tabBar > button {
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-}
+.tabBar > button { flex-shrink: 0; width: 28px; height: 28px; }
 
 .tabBar {
   display: flex;
   align-items: center;
   flex: 0 0 auto;
   gap: var(--sp-1);
-  min-height: 44px;
-  padding: var(--sp-1) var(--sp-3) var(--sp-2);
+  height: 38px;
+  min-height: 38px;
+  padding: 3px 8px;
   border-bottom: 1px solid var(--c-line);
 }
 
@@ -197,7 +179,7 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 2px;
-  height: 32px;
+  height: 28px;
   padding: 0 4px 0 8px;
   border: 1px solid transparent;
   border-radius: var(--r-control);
@@ -743,3 +725,11 @@
 :global(:root[data-motion='reduced']) .menuItem:hover .menuArrow {
   transform: none;
 }
+
+/* File navigation stays on the right, with a compact handle available when hidden. */
+.filesSplit { position: relative; }
+.treeToggle { position: absolute; right: 7px; bottom: 8px; z-index: 5; display: grid; place-items: center; width: 28px; height: 28px; border: 1px solid var(--c-line); border-radius: 6px; background: var(--c-panel); color: var(--c-text-2); cursor: pointer; box-shadow: 0 1px 4px #0001; }
+.treeToggle:hover { background: var(--c-hover); color: var(--c-text-1); }
+.filesSideHead { padding: 8px; }
+.treeScroll { padding: 6px 4px 42px; }
+.filesSide { background: var(--c-bg); }

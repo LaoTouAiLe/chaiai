@@ -34,6 +34,9 @@ from local_agent.api.schemas import (
     CapabilitiesRequest,
     CreateSessionRequest,
     CreateSideChatRequest,
+    DelegationLiveLaneView,
+    DelegationLiveStepView,
+    DelegationLiveView,
     ErrorResponse,
     ExternalPathGrantRequest,
     HealthView,
@@ -41,6 +44,7 @@ from local_agent.api.schemas import (
     McpServerRequest,
     McpServerSpecRequest,
     ModelConnectionRequest,
+    OpenInAppOpenRequest,
     OssCredentialRequest,
     OssCredentialView,
     OssTestResult,
@@ -99,11 +103,13 @@ from local_agent.application.models import (
     WebSearchKeyView,
     WorkspaceRef,
 )
+from local_agent.application.open_in_app_models import OpenInAppResultView, OpenInAppView
 from local_agent.application.workspace_models import (
     GitDiffView,
     GitStatusView,
     WorkspaceFilesView,
 )
+from local_agent.delegation_live import snapshot as live_lanes_snapshot
 from local_agent.exceptions import AttachmentError, SessionStoreError
 from local_agent.model_settings import ConnectionDraft, SelectionRef
 from local_agent.model_settings.preferences import (
@@ -441,10 +447,75 @@ def _register_document_routes(router: APIRouter, service: Any) -> None:
         return AttachmentView(**saved)
 
 
+def _register_open_in_app_routes(router: APIRouter, service: Any) -> None:
+    """注册「打开方式」端点（2026-11-03，架构 §15.11.4）。
+
+    与本文件其他分组同样的理由单独成函数：``build_router`` 贴着规模棘轮的上限。
+
+    **边界**：清单与图标只读本机注册表/文件系统，不启动任何东西；``open`` 只在
+    **工作区内**的普通文件上启动**服务端目录里**的应用——应用 id 与启动参数都不来自客户端。
+    """
+    @router.get("/open-in-app/apps", response_model=OpenInAppView,
+                summary="本机可用的「打开方式」")
+    def open_in_app_apps() -> OpenInAppView:
+        """没探测到任何应用时回 `available=false`，不是错误。"""
+        return service.open_in_app_apps()
+
+    @router.get("/open-in-app/icon/{app_id}", summary="应用图标（PNG）",
+                responses={404: {"description": "这个应用没有可提取的图标"}})
+    def open_in_app_icon(app_id: str) -> Response:
+        payload = service.open_in_app_icon(app_id)
+        if payload is None:
+            raise HTTPException(status_code=404, detail="没有取到这个应用的图标。")
+        # 图标是静态资源：同一次会话里重复打开菜单不必再抽一遍。
+        return Response(content=payload, media_type="image/png",
+                        headers={"Cache-Control": "private, max-age=3600"})
+
+    @router.post("/open-in-app/open", response_model=OpenInAppResultView,
+                 summary="用本机应用打开工作区里的文件")
+    def open_in_app_open(payload: OpenInAppOpenRequest) -> OpenInAppResultView:
+        try:
+            return service.open_with_app(app_id=payload.app_id, path=payload.path,
+                                         workspace_id=payload.workspace_id)
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=409, detail=f"没能启动这个应用：{exc}") from exc
+
+
 def build_router(runtime: ApiRuntime) -> APIRouter:
     """构造业务路由（不含 SSE 与静态托管）。"""
     router = APIRouter(prefix="/api")
     service = runtime.service
+    @router.get("/delegation/live", response_model=DelegationLiveView, summary="正在跑的委派子任务")
+    def delegation_live() -> DelegationLiveView:
+        """委派在跑的时候，每一路"此刻在查什么"（2026-11-04）。
+
+        **只读旁路**，不参与事件流：子 Agent 在独立线程里跑，中间态原本不在任何可读的地方，
+        页面只能等全部结束。这里把子循环每步产生的工具事件摊出来，供委派卡在运行期间轮询。
+
+        不做权限判定：它只暴露**目录名与工具名**（都是本机页面已可见的信息），
+        且 `/api` 前缀本身走 §15.3 的同源校验。
+        """
+        return DelegationLiveView(
+            lanes=[
+                DelegationLiveLaneView(
+                    child_id=lane.child_id,
+                    scope=lane.scope,
+                    goal=lane.goal,
+                    status=lane.status,
+                    steps=[
+                        DelegationLiveStepView(name=step.name, target=step.target, status=step.status)
+                        for step in lane.steps
+                    ],
+                    updated_at=lane.updated_at,
+                )
+                for lane in live_lanes_snapshot()
+            ]
+        )
+
     @router.get("/data-center/memories", response_model=MemoryPageView, summary="只读记忆列表")
     def memory_page(workspace_id: str | None = None,
                     kind: Literal["all", "medium", "fact", "conclusion"] = "all",
@@ -486,15 +557,49 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         path: str = Query(min_length=1, max_length=500),
         workspace_id: str | None = Query(default=None, max_length=128),
         scope: Literal["workspace", "attachments"] = Query(default="workspace"),
+        offset: int = Query(default=0, ge=0, le=8_000_000),
+        page: int = Query(default=1, ge=1, le=20_000),
+        presentation: Literal["text", "formatted"] = "text",
+        sheet: str | None = Query(default=None, max_length=200),
     ) -> ArtifactPreviewView:
-        """看一眼产物的内容（§15.11.3）：只读、有大小上限、不代打开外链。"""
+        """看一眼产物的内容（§15.11.3）：只读、有大小上限、不代打开外链。
+
+        `offset` / `page` 是分页参数（2026-11-03）：返回里的 `next_offset` / `next_page`
+        原样回传即可取下一页。
+        """
         try:
-            return service.preview_artifact(path=path, workspace_id=workspace_id, scope=scope)
+            return service.preview_artifact(path=path, workspace_id=workspace_id, scope=scope,
+                                            offset=offset, page=page, presentation=presentation, sheet=sheet)
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.get("/data-center/artifacts/content", summary="文档版式 PDF", response_class=Response,
+                responses={200: {"content": {"application/pdf": {
+                    "schema": {"type": "string", "format": "binary"}}}}})
+    def artifact_content(
+        path: str = Query(min_length=1, max_length=500),
+        workspace_id: str | None = Query(default=None, max_length=128),
+        scope: Literal["workspace", "attachments"] = "workspace",
+    ) -> Response:
+        from local_agent.application.artifacts import resolve_preview_target
+        from local_agent.application.document_preview import render_pdf
+
+        try:
+            target = resolve_preview_target(service, path=path, workspace_id=workspace_id, scope=scope)
+            content = render_pdf(target)
+            return Response(content, media_type="application/pdf", headers={
+                "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": "inline; filename=document.pdf",
+            })
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (ValueError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # ---- 侧边会话（§21.7，2026-10-23）------------------------------------
@@ -842,6 +947,7 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
 
     # ---- 会话文件变更（2026-10-21；2026-10-30 搬进独立注册函数）--------------
     _register_changes_routes(router, service)
+    _register_open_in_app_routes(router, service)
 
     @router.post(
         "/sessions/{session_id}/messages",

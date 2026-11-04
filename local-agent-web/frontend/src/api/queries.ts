@@ -29,6 +29,7 @@ import {
   getWorkspaceGitStatus,
   listCronJobs,
   listCronRuns,
+  listOpenInApps,
   listWorkspaceFiles,
   previewArtifact,
   searchWorkspaceFiles,
@@ -83,6 +84,21 @@ export function useWorkspaceFiles(
     staleTime: 5000,
   })
 }
+/**
+ * 本机可用的「打开方式」（2026-11-03，§15.11.4）。
+ *
+ * 探测结果在服务端按进程缓存，这里再缓存五分钟：装/卸应用要重启服务才生效，
+ * 每开一次菜单都问一次没有意义。
+ */
+export function useOpenInApps(enabled: boolean) {
+  return useQuery({
+    queryKey: ['open-in-app', 'apps'],
+    queryFn: listOpenInApps,
+    enabled,
+    staleTime: 300_000,
+  })
+}
+
 /** 工作区文件名搜索（§21.6）：空串不发请求。 */
 export function useSearchWorkspaceFiles(q: string, workspaceId?: string) {
   return useQuery({
@@ -119,10 +135,11 @@ export function useArtifactsDetail(
   path: string | null,
   workspaceId?: string,
   scope: 'workspace' | 'attachments' = 'workspace',
+  presentation: 'text' | 'formatted' = 'text',
 ) {
   return useQuery({
-    queryKey: ['data-center', 'artifact-preview', scope, workspaceId ?? '', path],
-    queryFn: () => previewArtifact(path ?? '', workspaceId, scope),
+    queryKey: ['data-center', 'artifact-preview', scope, workspaceId ?? '', path, presentation],
+    queryFn: () => previewArtifact(path ?? '', workspaceId, scope, 0, 1, undefined, presentation),
     enabled: path !== null,
     staleTime: 60_000,
   })

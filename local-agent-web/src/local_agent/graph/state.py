@@ -300,6 +300,12 @@ class ToolEvent:
     output_digest: str = ""
     #: 所属轮次；与 ``tool_call_id`` 一起构成事件作用域（架构 §4.2、§4.3）。
     run_id: str = ""
+    #: 这条事件由哪一路子 Agent 产生（2026-11-04）。空串 = 父 Agent 自己调的工具。
+    #:
+    #: **为什么需要它**：子任务的工具事件在委派收尾时并回父轮次，``run_id`` 被改写成父的
+    #: ——页面因此分不清哪次调用属于哪一路，只能把整批摊成一片或干脆藏起来。这不是审计问题
+    #: （审计只关心"是谁、什么时候"），是展示问题：用户要看的是"这一路查了哪些文件"。
+    delegation_scope: str = ""
 
 
 class UserAttachmentRef(TypedDict):
@@ -619,6 +625,15 @@ class AgentState(TypedDict, total=False):
     max_loop_count: int | None
     model_next_action: Literal["continue", "finish", "ask_user"]
     model_final_response: str
+    #: 本轮"改完代码还没验证"的提醒文本（覆盖语义，2026-11-04）。
+    #: 它只随下一次决策请求发给模型，**不进 ``messages``**：不占轮次、不进页面历史、不参与轮次切分。
+    verification_nudge: str | None
+    #: 本轮已推送过几次验证提醒（覆盖语义，新请求复位）。上限在
+    #: :mod:`local_agent.graph.verification_stop` 里，用完就不再提醒。
+    verification_nudge_count: int
+    #: 被验证提醒顶下来的那一版回答（覆盖语义）。后续轮次若没给出更好的答案，用它兜底交付——
+    #: 这是 T43 第一版失败的教训：提醒失败时用户不能什么也拿不到。
+    pending_verification_response: str | None
 
     # 预算与压缩
     token_usage: TokenUsage

@@ -726,6 +726,19 @@ class SearchMatchView(_Dto):
     text: str
 
 
+class DelegationToolStepView(_Dto):
+    """子任务自己的一次工具调用（2026-11-04）。
+
+    **不是审计记录**：它只回答"这一路查了哪些文件、跑了什么命令"。来源是进程内的实时表
+    （`local_agent.delegation_live`），不是 Checkpoint——子事件目前没有并进父状态。
+    """
+
+    name: str
+    #: 参数里最能说明"在查哪"的那一个（路径 / 命令 / 模式串）。取不到就是空串，不编造。
+    target: str = ""
+    status: str = ""
+
+
 class DelegationChildView(_Dto):
     """一次自主委派里**一个子 Agent**的结局（§18.7）。
 
@@ -738,6 +751,9 @@ class DelegationChildView(_Dto):
     """
 
     scope: str
+    #: 这一路要查的问题（截断）。抄 Hermes / Codex：块头显示**"要做什么"**比"在哪个目录"有信息量。
+    #: 空 = 进程内记录已过期（默认保留 30 分钟），那时页面只显示目录，不编造任务描述。
+    goal: str = ""
     status: Literal["completed", "failed"]
     tool_calls: int = Field(default=0, ge=0)
     model_calls: int = Field(default=0, ge=0)
@@ -747,6 +763,12 @@ class DelegationChildView(_Dto):
     #: 必须出现在页面上，不能只留在工具结果的 JSON 里：它存在的意义是让父 Agent 无法在子 Agent 真改了
     #: 文件之后声称"我只做了调查"，而模型看得到、人看不到的数字等于没有监督。
     changed_files: int = Field(default=0, ge=0)
+    #: 这一路实际跑了多久（2026-11-04）。几路并发时，"总耗时"掩盖了"哪一路慢"，
+    #: 而后者才是用户判断"是不是卡住了"的依据。``None`` = 没有记录（旧检查点），页面不显示。
+    elapsed_ms: int | None = Field(default=None, ge=0)
+    #: 这一路自己的工具调用序列（2026-11-04）。空 = 进程内记录已过期（默认保留 30 分钟），
+    #: 或是在这个功能上线之前跑的——页面如实显示"没有记录到工具调用"，不编造。
+    tools: list[DelegationToolStepView] = Field(default_factory=list)
     #: 未完成时的原因（已脱敏、已有界）；完成时为 `None`。
     error: str | None = None
 
@@ -842,6 +864,9 @@ class ToolUseView(_Dto):
     outcome: ToolOutcomeView | None = None
     evidence: ToolEvidenceView | None = None
     web_sources: list[WebSourceView] = Field(default_factory=list)
+    #: 这条调用由哪一路子 Agent 产生（2026-11-04）。空串 = 父 Agent 自己调的。
+    #: 页面按它把子任务的链路拆进各自的卡片——没有它，几路调查的调用只能整批摊平。
+    delegation_scope: str = ""
 
     @field_validator("started_at", "finished_at")
     @classmethod

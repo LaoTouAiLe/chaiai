@@ -98,6 +98,7 @@ def reflection_node(state: AgentState, runtime: Runtime[RuntimeContext]) -> Agen
         return checkpoint_main_loop(
             state, trust="uncertain", anomalies=execution_feedback, evidence=[],
             pending_uncertain=[], max_retries=context.app_config.agent.max_retries_per_step,
+            verify_on_stop=context.app_config.agent.verify_on_stop,
         )
     if state.get("mode") == "chat":
         # 闲聊分支的唯一出口：按架构 §5.2 走同一个 reflection_node 校验记忆意图（详见

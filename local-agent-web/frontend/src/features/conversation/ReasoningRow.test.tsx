@@ -16,7 +16,7 @@ describe('ReasoningRow', () => {
     expect(screen.getByText('第一行')).toBeInTheDocument()
   })
 
-  it('renders thought as plain text and labels a truncated display', () => {
+  it('keeps raw HTML inert and labels a truncated display', () => {
     const { container } = render(<ReasoningRow text={'<script>bad()</script>\n真实思考'} running={false} truncated />)
     fireEvent.click(screen.getByRole('button', { name: '思考' }))
     expect(container.querySelector('script')).toBeNull()

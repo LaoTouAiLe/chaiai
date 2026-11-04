@@ -1,34 +1,16 @@
 .dock {
-  flex: 0 0 auto;
-  /* 2026-10-30：底部留白 20 → 6。页底已常驻「内容由 AI 生成」那行声明（它自带 4px 上内距），
-     再压 20px 就成了两段留白叠着，输入卡片悬在半空。 */
-  padding: 0 0 var(--law-space-sm);
+/* 全面屏手机的底部手势条会盖住输入框下沿；env() 在桌面恒为 0，不影响布局。 */
+flex: none; padding: 0 0 max(4px, env(safe-area-inset-bottom, 0px));
 }
 
 .stack {
-  display: flex;
-  flex-direction: column;
-  gap: var(--law-space-lg);
-  width: 100%;
-  max-width: var(--law-conversation-max-width);
-  margin: 0 auto;
-  padding: 0 var(--law-space-2xl);
+display: flex; flex-direction: column; gap: 8px; width: calc(100% - 2 * var(--workspace-gutter)); max-width: calc(var(--conversation-content-width, var(--law-conversation-max-width)) + 32px); margin: 0 auto; padding: 0;
 }
 
 .composer {
-  display: flex;
-  flex-direction: column;
-  gap: var(--law-space-md);
-  /* 2026-10-30：卡片内距 16/16/8 → 8/12/6 → 4/6/2（两次实机反馈都嫌宽）。
-     这是输入区四周那圈留白（DevTools 里的绿色块），**只动这一个值**：
-     卡片外面的间距、输入框高度、字号行高全部保持原样。 */
-  padding: var(--sp-1) var(--law-space-sm) var(--law-space-xxs);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-2xl);
-  background: var(--law-bg-layer-1);
-  box-shadow: var(--law-shadow-lv2);
-  /* `@` 候选浮层以卡片为定位基准（2026-10-30）。 */
-  position: relative;
+container-name: composer;
+container-type: inline-size;
+position: relative; display: flex; flex-direction: column; gap: 12px; padding: 12px 14px; border: .5px solid var(--c-line); border-radius: 28px; background: var(--dsw-specific-input-major); box-shadow: var(--sh-composer);
 }
 
 /* `@` 引用候选（2026-10-30）：贴在卡片上沿，最多 6 条、超出滚动。
@@ -138,19 +120,7 @@
 }
 
 .input {
-  display: block;
-  width: 100%;
-  /* 24px = 一行；48px = 两行起步（2026-10-21）。输入框是这一页最常点的东西，
-     一行的框会让人以为"只能写一句话"。 */
-  min-height: 48px;
-  /* 左内距 16 → 8（2026-10-30）：输入文字离卡片左边线原本是 16（卡片自身）+ 16（这里）= 32px，
-     看着空。收到 8 后是 24px。**只动这一处**，卡片尺寸、上下留白都保持原样。 */
-  padding: var(--law-space-md) var(--law-space-lg) var(--law-space-md) var(--law-space-md);
-  border: 0;
-  background: transparent;
-  font-size: var(--law-text-base);
-  line-height: var(--law-leading-base);
-  resize: none;
+display: block; width: 100%; min-height: 58px; padding: 8px 6px 0; border: 0; background: transparent; font-size: var(--fs-chat); line-height: var(--lh-chat); resize: none;
 }
 
 .input::placeholder {
@@ -162,12 +132,7 @@
 }
 
 .controls {
-  display: flex;
-  align-items: center;
-  /* 窄窗允许折行：整组（计量器+发送）下移一行，而不是把发送按钮推出视口。 */
-  flex-wrap: wrap;
-  gap: var(--law-space-md);
-  padding: 0 var(--law-space-xs);
+display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; min-width: 0; gap: 6px 8px; padding: 0;
 }
 
 /* 模式切换（2026-10-13 用户反馈"下拉太丑"）：改成**两段常驻的分段控件**——两个模式同时可见、
@@ -175,22 +140,14 @@
    （`--law-surface-selector` 轨道 + `--law-bg-layer-1` 抬起的选中块 + `--law-shadow-lv1`），
    所以它看起来就是本应用已有的"选中态"写法，不是新造的一种控件。 */
 .modeSelector {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--law-space-xxs);
-  /* `min-width: 0`（与 `.chip` 同一条口径）：窄窗下先让这一组可以被压缩，再由 `.controls` 的
-     折行把计量器与发送整组移到第二行——而不是把发送按钮顶出视口（640 宽度是有用例守着的）。 */
-  min-width: 0;
-  padding: var(--law-space-xxs);
-  border-radius: var(--law-radius-pill);
-  background: var(--law-surface-selector);
+display: inline-flex; align-items: center; gap: 2px; min-width: 0; padding: 2px; border: 0; border-radius: 10px; background: var(--c-hover);
 }
 
 .modeOption {
-  height: 22px;
+  height: 28px;
   min-width: 0;
   overflow: hidden;
-  padding: 0 var(--law-space-lg);
+  padding: 0 6px;
   border: 0;
   border-radius: var(--law-radius-pill);
   background: transparent;
@@ -211,10 +168,7 @@
 /* 选中的那一段：抬起来。`aria-pressed` 是状态本身，不另开一个类名——类名会允许"选中但没有
    `aria-pressed`"这种不一致状态存在。 */
 .modeOption[aria-pressed='true'] {
-  background: var(--law-bg-layer-1);
-  color: var(--law-text-primary);
-  font-weight: var(--law-weight-medium);
-  box-shadow: var(--law-shadow-lv1);
+background: var(--c-hover); color: var(--c-text-1); font-weight: 500; box-shadow: none;
 }
 
 /* 禁用（原型态、或这一轮正在跑）：保留配色、只降不透明度——整块灰掉会被读成"这个模式没了"。 */
@@ -227,8 +181,8 @@
 .right {
   display: flex;
   align-items: center;
-  gap: var(--law-space-md);
-  margin-left: auto;
+  grid-column: 3;
+  gap: 4px;
 }
 
 .command {
@@ -252,19 +206,12 @@
 /* `nowrap` 让内容成为不可收缩的最小宽度：没有 `min-width: 0` 时，两个 chip 会把
    发送按钮顶出视口（640 下越界 25–57px）。极窄时才截断文案。 */
 .chip {
-  height: 26px;
-  min-width: 0;
-  overflow: hidden;
-  padding: 0 var(--law-space-lg);
-  border-radius: var(--law-radius-pill);
-  border: 1px solid var(--law-border-l2);
-  background: var(--law-surface-selector);
-  color: var(--law-text-secondary);
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+display: flex; align-items: center; justify-self: start; gap: 4px; height: 28px; width: 100%; min-width: 0; max-width: 240px; padding: 0 4px; border-radius: 10px; border: 0; background: transparent; color: var(--c-text-1); font-size: var(--law-text-sm); line-height: var(--law-leading-sm); text-align: left;
 }
+.chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip > svg { flex: none; color: var(--c-text-3); }
+.chip:hover { background: var(--c-hover); }
+.stateNotes { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 2px 6px 0; }
 
 /* 「未流式」：一个**中性**标注，不是告警（关掉流式是正当选择，§19.4）。
    2026-10-12 实测（真服务截图）：原来的"浅灰底 + caption 文字"（#939aaa）太淡，看起来像**禁用**
@@ -273,49 +220,28 @@
 .streamNote {
   display: inline-flex;
   align-items: center;
-  height: 26px;
   flex: 0 0 auto;
-  padding: 0 var(--law-space-md);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-pill);
-  color: var(--law-text-secondary);
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-xs);
+  gap: 5px;
+  color: var(--c-text-3);
+  font-size: var(--law-text-fixed-xs);
+  line-height: 16px;
   white-space: nowrap;
 }
+.streamNote::before { content: ''; width: 3px; height: 3px; border-radius: 50%; background: currentColor; }
 
 .chip:hover {
   color: var(--law-text-primary);
 }
 
-.spacer {
-  flex: 1 1 auto;
-}
 
 .send {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--law-radius-pill);
-  background: var(--law-button-primary-fill);
-  color: var(--law-text-on-brand);
-  transition: background var(--law-duration-base) var(--law-ease);
+display: inline-flex; align-items: center; justify-content: center; flex: none; width: 40px; height: 40px; border-radius: 50%; background: var(--c-accent); color: var(--c-text-inverse); transition: background 150ms ease;
 }
 
 /* 「停止生成」（§17.4，2026-10-13 起有真实语义）：与发送同一个位置、同一套尺寸与配色——
    它是**同一个主按钮的另一种状态**，不是新加的一个控件。 */
 .stop {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: var(--law-radius-pill);
-  background: var(--law-button-primary-fill);
-  color: var(--law-text-on-brand);
-  transition: background var(--law-duration-base) var(--law-ease);
+display: inline-flex; align-items: center; justify-content: center; flex: none; width: 40px; height: 40px; border-radius: 50%; background: var(--c-accent); color: var(--c-text-inverse); transition: background 150ms ease;
 }
 
 .stop:hover:not(:disabled) {
@@ -383,20 +309,20 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--law-space-sm);
-  margin: 0 0 var(--law-space-sm);
+  gap: 10px;
+  margin: 0 0 4px;
   padding: 0;
   list-style: none;
 }
 
 .attachment {
   position: relative;
-  width: 56px;
-  height: 56px;
+  width: 64px;
+  height: 64px;
   overflow: hidden;
   border: 1px solid var(--law-border-l1);
   /* 带兜底：这个模块里没有 `--law-radius-md` 的既有用法，缺了也不该退化成直角。 */
-  border-radius: var(--law-radius-md, 10px);
+  border-radius: 20px;
   background: var(--law-bg-layer-1);
 }
 
@@ -507,13 +433,7 @@
    视觉上比卡片轻——它不是"要你决定"，而是"我已经替你排好了"，
    所以只有一条细边和浅底，不抢审批/提问卡的注意力。 */
 .queue {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
-  border: 1px solid var(--c-line);
-  border-radius: var(--r-control);
-  background: var(--c-sunken);
+display: flex; flex-direction: column; gap: 8px; margin: 0 12px -12px; padding: 10px 12px 16px; border: 1px solid var(--c-line); border-bottom: 0; border-radius: 16px 16px 0 0; background: var(--c-panel);
 }
 
 .queueHead {
@@ -635,3 +555,18 @@
 .queueEditor button { padding: 8px 14px; border-radius: 8px; background: var(--c-panel); color: var(--c-text-2); }
 .queueEditor button[type='submit'] { background: var(--c-accent); color: var(--c-text-inverse); }
 .queueEditor button:disabled { opacity: .4; cursor: not-allowed; }
+
+@media (pointer: coarse) { .input { font-size: max(16px, var(--law-text-base)); } }
+@media (max-width: 600px) {
+  .stack { width: calc(100% - 24px); padding-inline: 0; }
+  .composer { padding: 10px 12px 12px; border-radius: 24px; }
+  /* 32px 的圆钮在手机上稳定点不中（iOS HIG 建议触摸目标 ≥44px）。只放大可点区域，
+     图标本身不变——否则发送键会比文字大一圈，看起来像坏了。 */
+  .send { width: 40px; height: 40px; }
+}
+@container composer (max-width: 360px) {
+  .controls { grid-template-columns: minmax(0, 1fr) auto; }
+  .modeSelector { grid-column: 1 / -1; justify-self: start; }
+  .chip { grid-column: 1; }
+  .right { grid-column: 2; }
+}

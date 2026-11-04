@@ -7,10 +7,11 @@ interface AnchoredPopoverProps {
   label: string
   children: ReactNode
   onClose?: () => void
+  width?: number
 }
 
 /** Fixed to its trigger rather than participating in the composer or conversation layout. */
-export function AnchoredPopover({ anchorRef, label, children, onClose }: AnchoredPopoverProps) {
+export function AnchoredPopover({ anchorRef, label, children, onClose, width = 420 }: AnchoredPopoverProps) {
   const panel = useRef<HTMLDivElement>(null)
   const close = useRef(onClose)
   useLayoutEffect(() => { close.current = onClose }, [onClose])
@@ -22,13 +23,13 @@ export function AnchoredPopover({ anchorRef, label, children, onClose }: Anchore
       const margin = 12
       const gap = 8
       const rect = anchor?.getBoundingClientRect()
-      const width = Math.min(420, window.innerWidth - margin * 2)
+      const panelWidth = Math.min(width, window.innerWidth - margin * 2)
       const above = rect ? rect.top - margin - gap : window.innerHeight - margin * 2
       const below = rect ? window.innerHeight - rect.bottom - margin - gap : 0
       const upwards = above >= Math.min(320, below)
-      element.style.width = `${width}px`
+      element.style.width = `${panelWidth}px`
       element.style.maxHeight = `${Math.max(80, Math.min(480, upwards ? above : below))}px`
-      element.style.left = `${Math.max(margin, Math.min(rect?.left ?? margin, window.innerWidth - margin - width))}px`
+      element.style.left = `${Math.max(margin, Math.min(rect?.left ?? margin, window.innerWidth - margin - panelWidth))}px`
       element.style.top = `${upwards ? Math.max(margin, (rect?.top ?? window.innerHeight - margin) - gap - element.offsetHeight) : (rect?.bottom ?? margin) + gap}px`
       element.style.visibility = 'visible'
     }
@@ -63,7 +64,7 @@ export function AnchoredPopover({ anchorRef, label, children, onClose }: Anchore
       document.removeEventListener('keydown', keyboard, true)
       if (element.contains(document.activeElement) && anchor?.isConnected) anchor.focus({ preventScroll: true })
     }
-  }, [anchorRef])
+  }, [anchorRef, width])
 
   return createPortal(<div ref={panel} className={styles.popover} role="dialog" aria-label={label} tabIndex={-1}>
     {children}</div>, document.body)

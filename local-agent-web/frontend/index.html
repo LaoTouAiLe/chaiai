@@ -2,9 +2,27 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover 是 env(safe-area-inset-*) 生效的前提：没有它，刘海/圆角机型上
+         那四个内边距恒为 0，顶部标题和底部输入框会被系统区域盖住。 -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
     <meta name="application-name" content="chaiai" />
     <link rel="icon" type="image/svg+xml" href="/chaiai.svg" />
+    <!--
+      主屏幕安装（2026-11-03）：手机"添加到主屏幕"后以独立窗口打开、无地址栏。
+      刻意**不加** service worker：它唯一的作用是离线缓存，而本项目前端每次都要从服务端拿
+      最新产物，加一个会缓存的 SW 只会带来"改了前端却看到旧界面"这类难查的问题。
+      Chrome 与 iOS 现在都不要求 SW 即可安装。
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#e77737" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="chaiai" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <title>chaiai</title>
     <!--
       首屏防闪（V0）：偏好真源是服务端 /api/preferences，React 挂载前取不到。

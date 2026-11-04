@@ -5,10 +5,10 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid var(--law-border-l2);
-  border-radius: 14px;
+  border: .5px solid var(--c-line);
+  border-radius: 16px;
   background: var(--law-surface-menu);
-  box-shadow: var(--sh-overlay);
+  box-shadow: var(--sh-menu);
   color: var(--law-text-primary);
   overscroll-behavior: contain;
 }

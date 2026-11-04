@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
@@ -19,6 +20,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from pydantic import ValidationError
 
+from local_agent import delegation_live
 from local_agent.cancellation import CancellationToken
 from local_agent.capabilities import (
     readonly_child_capabilities,
@@ -314,6 +316,9 @@ def _run_child(parent: RuntimeContext, item: _PreparedChild) -> _ChildResult:
         "answer": ""}
     state: AgentState = {}
     recorder = _recorder(parent, item.child_id)
+    # 每路各自的耗时（2026-11-04）：几路并发时"总耗时"掩盖了"哪一路慢"，
+    # 而那正是用户判断"是不是卡住了"的依据。放在 try 之前，失败路径也要有值。
+    started_at = time.monotonic()
     timer.start()
     try:
         context = _child_context(parent, item, token)
@@ -351,10 +356,15 @@ def _run_child(parent: RuntimeContext, item: _PreparedChild) -> _ChildResult:
             "model_next_action": "continue", "loop_count": 0, "max_loop_count": None,
             "task_goal": item.task.question, "user_input": item.task.question,
             "messages": [HumanMessage(content=item.task.question, id=f"{item.child_id}:user")]}
+        # 登记"这一路开始跑了"（2026-11-04）：页面据此在委派还没返回时就摊出子任务行。
+        delegation_live.start_lane(item.child_id, item.task.scope, item.task.question)
         with use_model_recorder(recorder):
             for value in graph.compile().stream(initial, context=context, stream_mode="values",
                     config={"recursion_limit": (item.limits.max_steps + 2) * 6}):
                 state = cast(AgentState, value)
+                # 每完成一个节点就把这一路的工具事件同步出去（`values` 模式给的是完整 state，
+                # 所以直接重建，天然幂等）。没有这一步，页面只能等全部跑完。
+                delegation_live.sync_steps(item.child_id, state.get("tool_events"))
         if token.cancelled:
             raise ValueError(token.reason)
         report.update({"steps": int(state.get("loop_count", 0)),
@@ -378,11 +388,14 @@ def _run_child(parent: RuntimeContext, item: _PreparedChild) -> _ChildResult:
         report["error"] = reason[:512] or type(exc).__name__
     finally:
         timer.cancel()
+        report["elapsed_ms"] = int((time.monotonic() - started_at) * 1000)
         report["steps"] = int(state.get("loop_count", report["steps"]))
         report["tool_calls"] = len(state.get("tool_events", []))
         report["model_calls"] = int(state.get("loop_count", report["model_calls"]))
         # 子 Agent 改了什么必须回得去：父只拿到报告正文，不能让它"一边改文件一边说只做了调查"。
         report["changed_files"] = _changed_files(state)
+        # 哪怕这一路是失败/超时的，也要把状态落进实时表——否则页面上那行会一直转圈。
+        delegation_live.finish_lane(item.child_id, str(report["status"]))
     return _ChildResult(report, state, recorder.finished_records() if recorder is not None else [])
 
 
@@ -632,9 +645,15 @@ def dispatch_delegation(
     data["model_calls"] = sum(result.report["model_calls"] for result in results)
     data["phase"] = "verify"
     # 原审计汇入父轮次，ID 保留子标识；不合并子消息或模型正文。
+    # `delegation_scope` 记下这一路看的是哪个目录（2026-11-04）：`run_id` 被改写成父之后，
+    # 这是唯一还能分辨"这条工具调用属于哪一路"的字段，页面按它把链路拆进各自的卡片。
     return {"workflow": data, "task_status": "running",
         "model_call_records": [replace(record, run_id=state["run_id"]) for result in results for record in result.records],
-        "tool_events": [replace(event, run_id=state["run_id"]) for result in results for event in result.state.get("tool_events", [])],
+        "tool_events": [
+            replace(event, run_id=state["run_id"], delegation_scope=result.report["scope"])
+            for result in results
+            for event in result.state.get("tool_events", [])
+        ],
         "tool_results": [{**record, "run_id": state["run_id"]} for result in results for record in result.state.get("tool_results", [])],
         "decision_trace": [record for result in results for record in result.state.get("decision_trace", [])],
         "error_events": [{**record, "run_id": state["run_id"]} for result in results for record in result.state.get("error_events", [])]}
@@ -753,14 +772,28 @@ def make_delegation_runner(context: RuntimeContext) -> Callable[[Sequence[Mappin
         # 父节点收尾时会排空的那一个（§18.7 的审计通道）。
         delegated = replace(context, child_index=None, delegated_research=request.model_dump())
         result = run_delegation({"run_id": run_id, "session_mode": "agent", "agent_loop_version": 1, "messages": []}, delegated)
+        data: dict[str, Any] = dict(result.get("workflow") or {})
         if delegated.delegation_audit is not None:
+            # 子任务的事件此刻 ``run_id`` 还是各自的 child_id（收尾时才被改写成父轮次），
+            # 正好用来反查"这一路看的是哪个目录"（2026-11-04）。不在这里写进去，
+            # 并回父之后**再也分不出**哪条调用属于哪一路——页面就只能看到一张空壳卡。
+            scope_by_child = {
+                str(child.get("child_id") or ""): str(child.get("scope") or "")
+                for child in data.get("children") or []
+            }
+            events = [
+                replace(event, delegation_scope=scope_by_child.get(str(event.run_id), ""))
+                for event in result.get("tool_events") or []
+            ]
             audit = {
-                key: result.get(key) or []
-                for key in ("model_call_records", "tool_events", "tool_results", "decision_trace", "error_events")
+                "model_call_records": result.get("model_call_records") or [],
+                "tool_events": events,
+                "tool_results": result.get("tool_results") or [],
+                "decision_trace": result.get("decision_trace") or [],
+                "error_events": result.get("error_events") or [],
             }
             if any(audit.values()):
                 delegated.delegation_audit.append(audit)
-        data: dict[str, Any] = dict(result.get("workflow") or {})
         children = [
             ChildOutcome(
                 scope=str(child.get("scope") or "."),

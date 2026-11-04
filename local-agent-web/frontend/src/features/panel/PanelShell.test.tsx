@@ -18,6 +18,8 @@ vi.mock('../../api/queries', () => ({
     mocks.artifactDetail(...args)
     return { data: { kind: 'text', text: 'preview' } }
   },
+  // 打开方式与本文件断言无关：探测不可用，入口不渲染。
+  useOpenInApps: () => ({ data: { available: false, apps: [] } }),
   useSessionChanges: () => ({ data: { turns: [{ run_id: 'r1', files: mocks.recordedPaths.map(path => ({ path })) }], unrecorded: mocks.changedPaths.map(path => ({ path })) }, isPending: false, isError: mocks.changesError, refetch: mocks.retry }),
 }))
 vi.mock('../code-changes/ChangesPanel', () => ({ FileDiff: ({ path }: { path: string }) => <div>对比 {path}</div>, FileRestoreControl: () => <button>还原此文件</button> }))
@@ -99,12 +101,12 @@ it('separates restored tabs by session and uses a filename as the tab title', ()
 it('keeps the attachment preview root when restoring a saved file tab', () => {
   const path = '2026/10/30/s1/document.xlsx'
   const view = render(<PanelShell {...props} focus={{ tab: 'files', path, scope: 'attachments' }} />)
-  expect(mocks.artifactDetail).toHaveBeenLastCalledWith(path, 'w1', 'attachments')
+  expect(mocks.artifactDetail).toHaveBeenLastCalledWith(path, 'w1', 'attachments', 'formatted')
   view.unmount()
   mocks.artifactDetail.mockClear()
   render(<PanelShell {...props} />)
   expect(screen.getByRole('tab', { name: 'document.xlsx' })).toBeVisible()
-  expect(mocks.artifactDetail).toHaveBeenLastCalledWith(path, 'w1', 'attachments')
+  expect(mocks.artifactDetail).toHaveBeenLastCalledWith(path, 'w1', 'attachments', 'formatted')
 })
 
 it('offers retry without claiming an empty file tree while loading or failed', () => {

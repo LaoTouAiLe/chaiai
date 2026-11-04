@@ -62,6 +62,8 @@ const toolMessage = (
     tool_call_id: 'call-9',
     tool_name: 'read_file',
     status,
+    // 父 Agent 自己调的工具：没有归属（2026-11-04）。
+    delegation_scope: '',
     redacted_arguments: { path: 'src/app.ts' },
     approval_id: null,
     output_preview: 'first line',
@@ -134,11 +136,11 @@ describe('mapTool', () => {
         children: [
           {
             scope: 'docs', status: 'completed', tool_calls: 4, model_calls: 1,
-            evidence_count: 6, changed_files: 2, error: null,
+            evidence_count: 6, changed_files: 2, error: null, goal: '取消流程怎么走',
           },
           {
             scope: 'src', status: 'failed', tool_calls: 0, model_calls: 1,
-            evidence_count: 0, changed_files: 0, error: '子任务超时',
+            evidence_count: 0, changed_files: 0, error: '子任务超时', goal: '有哪些入口',
           },
         ],
         truncated: false,
@@ -996,5 +998,68 @@ describe('labels', () => {
     // 不推断（"有增量"不算）、不替服务端决定（缺字段就是缺，不给默认值）。
     expect(mapSession(snapshot({ answer_streaming: true }), 'mid-model').answerStreaming).toBe(true)
     expect(mapSession(snapshot({ answer_streaming: false }), 'mid-model').answerStreaming).toBe(false)
+  })
+})
+
+/**
+ * 委派刚发起、还没有结果时（2026-11-04）：必须能摊出"派了几路"。
+ *
+ * 服务端把入参里的 `tasks` 压成了 scope 的 JSON 数组字符串（`projection._display_arguments`），
+ * 这里只做解析。解析失败就退化成不带子行的卡——**不编造**，编造出来的行会让用户以为
+ * 派出去的目录和他说的不一样。
+ */
+describe('子任务的工具行归属', () => {
+  /**
+   * 子任务的调用在委派收尾时并回父轮次（2026-11-04）：它们**不该**出现在主时间线上，
+   * 否则一轮对话会凭空多出十几行"哪个子任务、什么时候、读了什么"的工具行，而用户关心的是
+   * "这一路查了什么"。归属靠 `delegation_scope`，不是时间。
+   */
+  it('带归属的工具行不进主时间线', () => {
+    const base = toolMessage('ok')
+    const scoped = {
+      ...base,
+      tool: { ...base.tool, delegation_scope: 'src/local_agent/tools' },
+    }
+    const mapped = mapMessages(snapshot({ messages: [scoped] as unknown as Snapshot['messages'] }))
+
+    expect(mapped.filter((message) => message.kind === 'tool')).toHaveLength(0)
+  })
+
+  it('父 Agent 自己的工具行照常显示', () => {
+    const base = toolMessage('ok')
+    const mapped = mapMessages(snapshot({ messages: [base] as unknown as Snapshot['messages'] }))
+
+    expect(mapped.filter((message) => message.kind === 'tool')).toHaveLength(1)
+  })
+})
+
+describe('委派进行中的占位', () => {
+  it('从工具入参里取出每一路的目录', () => {
+    const tool = {
+      tool_call_id: 't-delegate',
+      tool_name: 'delegate_research',
+      status: 'running',
+      redacted_arguments: { tasks: '["src/local_agent/tools","src/local_agent/graph"]' },
+    } as unknown as Parameters<typeof mapTool>[0]
+
+    const view = mapTool(tool)
+    expect(view.card.kind).toBe('delegation')
+    if (view.card.kind !== 'delegation') return
+    // 还没有结果，所以真实结局为空；占位行来自入参。
+    expect(view.card.children).toEqual([])
+    expect(view.card.pending).toEqual(['src/local_agent/tools', 'src/local_agent/graph'])
+  })
+
+  it('入参坏掉时不给造假的行', () => {
+    const tool = {
+      tool_call_id: 't-bad',
+      tool_name: 'delegate_research',
+      status: 'running',
+      redacted_arguments: { tasks: 'not-json' },
+    } as unknown as Parameters<typeof mapTool>[0]
+
+    const view = mapTool(tool)
+    if (view.card.kind !== 'delegation') throw new Error('应当是委派卡')
+    expect(view.card.pending).toEqual([])
   })
 })

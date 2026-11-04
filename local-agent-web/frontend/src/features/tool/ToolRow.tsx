@@ -170,7 +170,7 @@ export function ToolRow({ tool, onToggle, onDetach }: ToolRowProps) {
           {tool.card.kind === 'file-mutation' ? (
             <DiffCard diff={tool.card.diff} />
           ) : (
-            <ToolCard card={tool.card} />
+            <ToolCard card={tool.card} elapsed={runningElapsed} />
           )}
           {tool.evidence == null ? null : (
             <p className={styles.evidence}>

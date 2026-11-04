@@ -9,6 +9,7 @@ import { pickWorkspaceDirectory } from '../../api/client'
 import type { ApiError, ModelConnectionDto, ModelConnectionInput } from '../../api/client'
 import { toSettingsView } from '../../api/viewModels'
 import { AboutSection } from './AboutSection'
+import { MobileSection } from './MobileSection'
 import { ConnectionForm } from './ConnectionForm'
 import { EditorDialog } from '../../components/ui/EditorDialog'
 import { SettingsDialog } from './SettingsDialog'
@@ -118,6 +119,8 @@ export function ModelSettingsDialog({ onClose }: { onClose: () => void }) {
         // 关于（2026-10-27）：不是偏好分区——它读的是宿主形态（版本、装在哪、能不能卸），
         // 后端也刻意没让它进设置库。所以单独注入，不塞进 `FIELDS`。
         about: <AboutSection />,
+        // 移动访问（2026-11-03）：同样是只读的宿主形态（网关开没开、配了几台），也不进设置库。
+        mobile: <MobileSection />,
       }}
       permissionBusy={permissions.busy}
       permissionError={permissions.error?.message ?? null}

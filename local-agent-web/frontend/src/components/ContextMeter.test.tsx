@@ -9,6 +9,12 @@ function readout(container: HTMLElement): string {
 }
 
 describe('ContextMeter', () => {
+  it('keeps exact context usage accessible in compact composer mode', () => {
+    const { container } = render(<ContextMeter compact meter={{ usedTokens: 84_000, windowTokens: 128_000, scope: 'current' }} />)
+    expect(container.firstElementChild).toHaveClass('compact')
+    expect(screen.getByRole('img')).toHaveAccessibleName(/上下文已用 66%/)
+    expect(within(screen.getByRole('tooltip')).getByText('84,000 / 128,000 tokens')).toBeInTheDocument()
+  })
   it('shows the used and window counts for a known request', () => {
     render(<ContextMeter meter={{ usedTokens: 371_000, windowTokens: 1_000_000, scope: 'previous' }} />)
     expect(screen.getByText('371k / 1000k')).toBeInTheDocument()

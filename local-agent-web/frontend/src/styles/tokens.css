@@ -1,7 +1,11 @@
-﻿/**
+@import './dsh-platform.css';
+@import './dsh-elevation.css';
+
+/**
  * Design tokens for the local Agent web UI.
- * 2026-10-28: separated workbench surfaces and violet interaction accents supersede
- * historical V0/V3 measurements in the migration comments below.
+ * 2026-11-02: colors and elevations come from the DSH sheets imported above;
+ * --c-* and --law-* preserve existing feature components and preferences.
+ * Historical migration comments and measurements below describe earlier versions.
  *
  * 规范：[docs/plans/UI_PAGE_IMPLEMENTATION.md](../../../../docs/plans/UI_PAGE_IMPLEMENTATION.md) §2。
  *
@@ -14,8 +18,7 @@
  * 3. **未迁移的旧名**（字号、行高、间距、按钮、diff、调色板）——本批保持原值不动。
  *    字号与间距留到 V2/V3：改名会让全站发生布局位移，必须与骨架调整同一批做。
  *
- * 配色原则：surface 与文字一律不透明实色。唯一允许的 alpha 是
- * 遮罩 `--c-scrim`、阴影、以及叠在不透明底上的 hover 阴影色。
+ * Current borders and hover fills follow DSH alpha tokens over opaque surfaces.
  */
 
 :root {
@@ -24,34 +27,35 @@
      所以结果一定是整数 px，且行高、标题一起按步长走。`--law-font-scale`
      （原来的 .9 / 1.125 乘法）已废弃，不再有任何地方引用。 */
   --law-font-step: 0;
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l2);
 
   /* ===== 1. 新体系：surface ============================================ */
   /* 三层中性底靠明度区分，不用边框制造层次。 */
-  --c-canvas: #fdfdfe;
-  --c-panel: #f7f6f9;
-  --c-raised: #ffffff;
-  --c-sunken: #f1f0f5;
+  --c-canvas: var(--dsw-alias-bg-base);
+  --c-panel: var(--dsw-specific-sidebar-fill);
+  --c-raised: var(--dsw-alias-bg-layer-2);
+  --c-sunken: var(--dsw-alias-bg-layer-1);
   /* hover / active 比 sunken 再深一档：在 panel(#f7f8fa) 上必须可见。
      2026-10-22 截图复核后从 #eef0f4 / #e4e7ec 调深——原值在侧栏选中行上几乎看不出来。 */
-  --c-hover: #eae8f0;
-  --c-active: #e6e2f0;
+  --c-hover: var(--dsw-alias-interactive-bg-hover);
+  --c-active: var(--dsw-alias-interactive-bg-hover);
   /* 用户气泡：比 #edf3fe 略淡，但必须在白底上仍能分辨出发言方。 */
-  --c-bubble: #eeedf3;
+  --c-bubble: var(--dsw-specific-bubble);
 
   /* 边界：一条默认 hairline + 一条强调 hairline */
-  --c-line: #e6e3ec;
-  --c-line-strong: #d6d1e0;
+  --c-line: var(--dsw-alias-border-l2);
+  --c-line-strong: var(--dsw-alias-border-l4);
 
   /* 文字：四级。承载信息的只有前三档，off 只用于禁用与纯装饰。 */
-  --c-text-1: #27242e; /* 17.0:1 on #fff */
-  --c-text-2: #585362; /*  8.1:1 */
-  --c-text-3: #736c7e; /* metadata remains readable on the sidebar surface */
-  --c-text-off: #a3a3ae; /*  2.8:1，禁止承载信息 */
+  --c-text-1: var(--dsw-alias-label-primary); /* 17.0:1 on #fff */
+  --c-text-2: var(--dsw-alias-label-secondary); /*  8.1:1 */
+  --c-text-3: var(--dsw-alias-label-tertiary); /* metadata remains readable on the sidebar surface */
+  --c-text-off: var(--dsw-alias-label-dimmed); /*  2.8:1，禁止承载信息 */
   --c-text-inverse: #ffffff;
 
   /* 强调与语义（文字色均已按白底核算 ≥4.5:1） */
-  --c-accent: #7154a5;
-  --c-accent-soft: #eee8f7;
+  --c-accent: var(--dsw-alias-state-business-primary);
+  --c-accent-soft: var(--dsw-alias-state-business-tertiary);
   --c-success: #12805c;
   --c-success-soft: #e9f7f1;
   --c-warn: #b45309;
@@ -60,36 +64,36 @@
   --c-danger-soft: #fdeeee;
 
   /* 全站唯一允许的 surface 级 alpha */
-  --c-scrim: #0b0d1280;
+  --c-scrim: var(--dsw-alias-bg-mask-1);
 
   /* ===== 1. 新体系：圆角 ============================================== */
   /* 控件、内容面板与浮层分层；画布边缘与输入区使用各自的布局圆角。 */
-  --r-control: 8px;
-  --r-panel: 12px;
-  --r-overlay: 16px;
+  --r-control: 12px;
+  --r-panel: 16px;
+  --r-overlay: 28px;
   --r-pill: 999px;
 
   /* ===== 1. 新体系：阴影 ============================================== */
-  --sh-overlay: 0 0 0 1px #0000000f, 0 8px 24px #1018281a, 0 2px 6px #1018280f;
-  --sh-menu: 0 0 0 1px #00000012, 0 4px 12px #10182814;
+  --sh-overlay: var(--dsw-elevation-prominent);
+  --sh-menu: var(--dsw-elevation-soft);
 
   /* ===== 1. 新体系：字体与字号 ======================================== */
-  --font-ui: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
-  --font-mono-code: 'JetBrains Mono', 'Cascadia Mono', 'SF Mono', Consolas,
-    'Microsoft YaHei Mono', 'Liberation Mono', Menlo, monospace;
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-mono-code: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas,
+    'Liberation Mono', Menlo, Courier, 'PingFang SC', 'Microsoft YaHei';
 
-  --fs-caption: 11px;
-  --lh-caption: 16px;
-  --fs-meta: 12px;
-  --lh-meta: 18px;
-  --fs-body: 13px;
-  --lh-body: 20px;
-  --fs-ui: 14px;
-  --lh-ui: 20px;
-  --fs-chat: calc(15px + var(--law-font-step) * 2px);
-  --lh-chat: calc(26px + var(--law-font-step) * 3px);
-  --fs-title: 16px;
-  --lh-title: 24px;
+  --fs-caption: 12px;
+  --lh-caption: 18px;
+  --fs-meta: 13px;
+  --lh-meta: 20px;
+  --fs-body: 14px;
+  --lh-body: 22px;
+  --fs-ui: calc(15px + var(--law-font-step) * 1px);
+  --lh-ui: 24px;
+  --fs-chat: calc(16px + var(--law-font-step) * 2px);
+  --lh-chat: calc(28px + var(--law-font-step) * 3px);
+  --fs-title: 18px;
+  --lh-title: 26px;
   --fs-heading: 22px;
   --lh-heading: 30px;
   --fs-display: 32px;
@@ -230,11 +234,11 @@
   --law-button-primary-fill: var(--c-accent);
   --law-button-primary-hover: color-mix(in srgb, var(--c-accent) 90%, #000);
   --law-button-primary-disabled: var(--law-blue-grey-100);
-  --law-button-ghost-fill: var(--law-blue-grey-00);
-  --law-button-ghost-hover: var(--law-blue-grey-75);
-  --law-button-ghost-active-fill: var(--law-blue-grey-100);
-  --law-button-ghost-active-hover: var(--law-blue-grey-150);
-  --law-button-ghost-active-border: var(--law-blue-grey-500);
+  --law-button-ghost-fill: var(--c-raised);
+  --law-button-ghost-hover: var(--c-hover);
+  --law-button-ghost-active-fill: var(--c-active);
+  --law-button-ghost-active-hover: var(--c-hover);
+  --law-button-ghost-active-border: var(--c-line-strong);
   --law-button-info-fill: var(--law-accent-500);
   --law-button-info-hover: var(--law-accent-400);
 
@@ -256,18 +260,18 @@
      2026-10-30 起改为**整 px 步进**：`基准 + step × 步长`。原来按 `.9 / 1.125` 乘，
      小档会把 15px 算成 13.5px、26px 行高算成 23.4px —— 半像素在 Windows 上会被取整到
      更糊的一侧。步长取整后每档都是整数，且行高与字号同向加减，比例不会走样。 */
-  --law-text-xxs: calc(11px + var(--law-font-step) * 1px);
-  --law-leading-xxs: calc(14px + var(--law-font-step) * 1px);
-  --law-text-xs: calc(12px + var(--law-font-step) * 1px);
-  --law-leading-xs: calc(18px + var(--law-font-step) * 2px);
-  --law-text-sm: calc(13px + var(--law-font-step) * 1px);
-  --law-leading-sm: calc(20px + var(--law-font-step) * 2px);
-  --law-text-md: calc(14px + var(--law-font-step) * 1px);
-  --law-leading-md: calc(22px + var(--law-font-step) * 2px);
+  --law-text-xxs: calc(12px + var(--law-font-step) * 1px);
+  --law-leading-xxs: calc(16px + var(--law-font-step) * 1px);
+  --law-text-xs: calc(13px + var(--law-font-step) * 1px);
+  --law-leading-xs: calc(20px + var(--law-font-step) * 2px);
+  --law-text-sm: calc(14px + var(--law-font-step) * 1px);
+  --law-leading-sm: calc(22px + var(--law-font-step) * 2px);
+  --law-text-md: calc(15px + var(--law-font-step) * 1px);
+  --law-leading-md: calc(24px + var(--law-font-step) * 2px);
   --law-text-base: calc(16px + var(--law-font-step) * 2px);
-  --law-leading-base: calc(24px + var(--law-font-step) * 2px);
-  --law-text-lg: calc(16px + var(--law-font-step) * 2px);
-  --law-leading-lg: calc(28px + var(--law-font-step) * 3px);
+  --law-leading-base: calc(28px + var(--law-font-step) * 2px);
+  --law-text-lg: calc(18px + var(--law-font-step) * 2px);
+  --law-leading-lg: calc(30px + var(--law-font-step) * 3px);
   --law-text-xl: calc(20px + var(--law-font-step) * 2px);
   --law-leading-xl: calc(28px + var(--law-font-step) * 3px);
 
@@ -303,23 +307,23 @@
   --law-space-4xl: 32px;
 
   /* 布局：顶栏 63 → 56（2026-10-22 拍板，§12 决策 1） */
-  --law-sidebar-width: 332px;
-  --law-sidebar-width-collapsed: 64px;
-  --law-header-height: 78px;
+  --law-sidebar-width: 272px;
+  --law-sidebar-width-collapsed: 48px;
+  --law-header-height: 76px;
   /* 会话行高 34 → 28（2026-10-22）：对齐 hermes 侧栏行（26–28），一屏多看 3–4 条。 */
-  --law-session-row-height: 32px;
+  --law-session-row-height: 40px;
   /* 对话列宽（2026-10-22）：760 → 960。760 在 1440 屏上两边各留 340px 空白，太窄；
      1080 又显得散（正文与工具行拉得太开）。960 是两者折中，正文仍由 72ch 限制阅读宽度。 */
-  --law-conversation-max-width: 880px;
+  --law-conversation-max-width: 920px;
 
   /* 动效：旧名保持原值；新代码用 `--dur-*` / `--ease-*` */
   --law-ease: cubic-bezier(0.4, 0, 0.2, 1);
   --law-duration-fast: 0.1s;
   --law-duration-base: 0.2s;
   --law-duration-slow: 0.3s;
-  --r-shell: 18px;
-  --r-composer: 16px;
-  --sh-composer: 0 4px 20px -6px #3d2a5d12, 0 1px 3px #3d2a5d08;
+  --r-shell: 0px;
+  --r-composer: 28px;
+  --sh-composer: var(--dsw-elevation-soft);
   --page-gutter: clamp(20px, 4vw, 48px);
   --size-control: 36px;
   --size-control-sm: 30px;
@@ -330,17 +334,20 @@
   --size-brand: 26px;
   --size-welcome-mark: 36px;
   --sh-welcome-mark: 0 8px 24px -12px #ab5a2e38;
-  --size-settings-width: 1100px;
+  --size-settings-width: 960px;
   --size-settings-height: 790px;
-  --size-settings-nav: 212px;
-  --c-rail: #eeedf2;
-  --size-nav-rail: 64px;
-  --sh-frame: 0 1px 3px #2e25400a;
-  --workspace-gutter: clamp(16px, 2.3vw, 32px);
+  --size-settings-nav: 196px;
+  --c-rail: var(--dsw-specific-sidebar-fill);
+  --size-nav-rail: 48px;
+  --sh-frame: none;
+  --workspace-gutter: 16px;
 }
 
 :root[data-font-size='small'] { --law-font-step: -1; }
 :root[data-font-size='large'] { --law-font-step: 1; }
+@media (max-width: 600px) {
+  :root { --workspace-gutter: 12px; }
+}
 
 /**
  * 深色：**只覆盖 `--c-*`**。
@@ -351,31 +358,31 @@
 :root[data-theme='dark'] {
   color-scheme: dark;
 
-  --c-canvas: #1d1b22;
+  --c-canvas: var(--dsw-alias-bg-base);
   /* 2026-10-22 深色截图复核：panel 与 canvas 明度差过小（#16181d vs #111318），三栏糊成一片，
      panel 提亮到 #1a1d23、hairline 提到 #2e333c，让分区在深色下也能看出来。 */
-  --c-panel: #222029;
-  --c-raised: #282530;
-  --c-sunken: #2c2835;
-  --c-hover: #34303e;
-  --c-active: #3d324e;
-  --c-bubble: #302b3a;
+  --c-panel: var(--dsw-specific-sidebar-fill);
+  --c-raised: var(--dsw-alias-bg-layer-2);
+  --c-sunken: var(--dsw-alias-bg-layer-1);
+  --c-hover: var(--dsw-alias-interactive-bg-hover);
+  --c-active: var(--dsw-alias-interactive-bg-hover);
+  --c-bubble: var(--dsw-specific-bubble);
 
-  --c-line: #37313f;
-  --c-line-strong: #4c4358;
+  --c-line: var(--dsw-alias-border-l2);
+  --c-line-strong: var(--dsw-alias-border-l4);
 
-  --c-text-1: #f1edf6;
-  --c-text-2: #c6bdcf;
+  --c-text-1: var(--dsw-alias-label-primary);
+  --c-text-2: var(--dsw-alias-label-secondary);
   /* 三级文字暗色下提亮一档（2026-10-30）：#a69bb3 在 #1d1b22 上只有 6.46:1，而 dsh 的暗色
      三级是 8.54:1 —— 这是"暗色下层级更通透"的唯一一处真实差距。取 #b1a7bc（7.40:1）：
      提亮约 15%，同时与二级（9.40:1）仍保持 1.27 倍差距，不至于把"次要"和"次级"混成一级。
      **浅色不动**：那边的 #736c7e 是 4.95:1，已达 AA；dsh 浅色三级只有 3.71:1，不能照抄。 */
-  --c-text-3: #b1a7bc;
-  --c-text-off: #737384;
-  --c-text-inverse: #21172d;
+  --c-text-3: var(--dsw-alias-label-tertiary);
+  --c-text-off: var(--dsw-alias-label-dimmed);
+  --c-text-inverse: #ffffff;
 
-  --c-accent: #c2a5ef;
-  --c-accent-soft: #362b45;
+  --c-accent: var(--dsw-alias-state-business-primary);
+  --c-accent-soft: var(--dsw-alias-state-business-tertiary);
   --c-success: #3dd68c;
   --c-success-soft: #12271e;
   --c-warn: #f0a742;
@@ -383,7 +390,7 @@
   --c-danger: #ff6b6b;
   --c-danger-soft: #2c1618;
 
-  --c-scrim: #000000a6;
+  --c-scrim: var(--dsw-alias-bg-mask-1);
 
   /* 未迁移项仍需手动覆盖（它们不经过 --c-*） */
   --law-blue-grey-00: #181a1f;
@@ -417,9 +424,9 @@
   --law-diff-del-text: #ff9fa6;
   --law-diff-gutter: #8b949e;
   --law-diff-num-text: #d1d5db;
-  --sh-composer: 0 8px 32px -16px #00000050, 0 2px 6px #00000018;
-  --c-rail: #18161d;
-  --sh-frame: 0 1px 3px #00000018;
+  --sh-composer: var(--dsw-elevation-soft);
+  --c-rail: var(--dsw-specific-sidebar-fill);
+  --sh-frame: none;
 }
 :root[data-motion='reduced'] *,
 :root[data-motion='reduced'] *::before,

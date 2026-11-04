@@ -401,3 +401,5 @@
     justify-content: flex-start;
   }
 }
+
+.unsaved { margin: 0; color: var(--c-warn); font-size: 12px; line-height: 18px; }

@@ -45,6 +45,25 @@ dependencies = [
   "python-docx>=1.2.0,<2",
   "openpyxl>=3.1.5,<4",
   "python-pptx>=1.0.2,<2",
+  # 截屏（2026-11-04）：`screenshot` 用 Pillow 的 `ImageGrab` 抓前台窗口并缩放到 JPEG。
+  # 它本来是 python-pptx 的传递依赖（本机实测 12.3.0），这里显式声明：直接用它就该自己说了算，
+  # 否则 python-pptx 换实现时会被动地"少一个包"。纯 ctypes 自研方案实测产出大近 5 倍，不用。
+  "pillow>=11,<13",
+  # 移动网关（2026-11-03，架构 §24）：反代要一条能流式读响应的 HTTP 客户端，
+  # 标准库 urllib 做不到"逐块取、边收边发"。它原来只在 dev 组里（测试客户端用），
+  # 移到运行时依赖后 dev 组不再需要单独声明。
+  "httpx>=0.28.1,<1",
+  # 局域网通道的自签 CA 与服务器证书（架构 §24）。它本来是 keyring 的传递依赖，
+  # 这里显式声明：直接用它就该自己说了算，否则 keyring 换实现时会被动地"少一个包"。
+  "cryptography>=46,<51",
+  # 配对二维码（架构 §24）：纯 Python 生成，不依赖 Pillow；终端与 SVG 两种输出都用它。
+  "qrcode>=8,<9",
+  # 读界面控件树（2026-11-04）：`read_ui` 用它枚举前台窗口的 UIA 控件。
+  # 为什么不自己写 ctypes COM：UIA 的 vtable 手写不现实，而这套是纯 Python + comtypes，
+  # 本机实测 Python 3.13 可用（uiautomation 2.0.29 / comtypes 1.4.17），取一次 300 节点约 0.3 秒。
+  # **只在 Windows 上真正使用**：`screen_uia.available()` 会先判平台，非 Windows 直接说不可用。
+  # PyInstaller 侧需要 hidden-import（comtypes 动态生成模块），打包验收时一并确认。
+  "uiautomation>=2.0.29,<3",
 ]
 
 [project.optional-dependencies]
@@ -66,7 +85,6 @@ dev = [
     "pytest-asyncio",
     "ruff",
     "mypy",
-    "httpx>=0.28.1",
 ]
 
 [tool.setuptools.packages.find]
@@ -119,6 +137,10 @@ module = [
   # 输入输出都是原始类型；为它单独引入 `types-croniter` 不值得。
   "croniter",
   "croniter.*",
+  # 配对二维码（2026-11-03）：qrcode 没有类型存根，调用点只用了 QRCode 构造与 get_matrix，
+  # 输入输出都是原始类型；为它装 types-qrcode（并不存在）不值得。
+  "qrcode",
+  "qrcode.*",
 ]
 follow_imports = "skip"
 ignore_missing_imports = true

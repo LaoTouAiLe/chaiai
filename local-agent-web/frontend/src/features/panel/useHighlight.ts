@@ -11,7 +11,7 @@ import { codeToHtml } from 'shiki'
  * 为什么不用 CodeMirror（hermes 用的那套）：那是**编辑器**，我们只读，
  * 为了一段只读文本挂一个编辑器实例不划算。
  */
-export function useHighlight(code: string, lang: string): string | null {
+export function useHighlight(code: string, lang: string, limit = 20_000): string | null {
   const [html, setHtml] = useState<string | null>(null)
 
   useEffect(() => {
@@ -19,13 +19,18 @@ export function useHighlight(code: string, lang: string): string | null {
       setHtml(null)
       return
     }
+    // 高亮是有代价的：超过 `limit` 就退回纯文本——**内容仍然完整**，只是没有着色。
+    // 这一条必须跟着分页走，否则"加载更多"之后新增的段落会是黑的（2026-11-03）。
+    if (code.length > limit) {
+      setHtml(null)
+      return
+    }
     let cancelled = false
-    // 只高亮前 20000 字符：再长渲染会很慢，而预览本身也截断在这个量级。
-    void codeToHtml(code.slice(0, 20_000), { lang, themes: { light: 'github-light', dark: 'github-dark' } })
+    void codeToHtml(code, { lang, themes: { light: 'github-light', dark: 'github-dark' } })
       .then((result) => { if (!cancelled) setHtml(result) })
       .catch(() => { if (!cancelled) setHtml(null) })
     return () => { cancelled = true }
-  }, [code, lang])
+  }, [code, lang, limit])
 
   return html
 }

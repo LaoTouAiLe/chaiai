@@ -626,6 +626,8 @@ export const toolsScenario: ConversationScenario = {
         finishedLabel: '14:07',
         card: {
           kind: 'delegation',
+          // 这个场景是"已经跑完"的形态，所以没有进行中的占位行。
+          pending: [],
           children: [
             {
               scope: 'docs',
@@ -634,6 +636,7 @@ export const toolsScenario: ConversationScenario = {
               modelCalls: 1,
               evidenceCount: 6,
               changedFiles: 1,
+              elapsedMs: 12400,
               error: null,
             },
             {
@@ -643,6 +646,7 @@ export const toolsScenario: ConversationScenario = {
               modelCalls: 1,
               evidenceCount: 0,
               changedFiles: 0,
+              elapsedMs: 30000,
               error: '子任务超时',
             },
           ],

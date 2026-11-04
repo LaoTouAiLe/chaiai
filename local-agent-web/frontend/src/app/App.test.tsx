@@ -1,9 +1,25 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { App } from './App'
 
 function openScenario(id: string): void {
   window.history.replaceState({}, '', `/?state=${id}`)
+}
+
+/**
+ * Renders the app inside the provider it always has in production.
+ *
+ * Delegated tool cards poll `/api/delegation/live` through React Query, so a bare
+ * `<App />` throws "No QueryClient set" as soon as one is on screen.
+ */
+function renderApp(): void {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  render(
+    <QueryClientProvider client={client}>
+      <App />
+    </QueryClientProvider>,
+  )
 }
 
 /**
@@ -23,7 +39,7 @@ function sessionRow(title: string): HTMLElement {
 describe('App sidebar state', () => {
   it('takes the selected session run state from the scenario, not the fixture', () => {
     openScenario('approval-expired')
-    render(<App />)
+    renderApp()
 
     // The fixture row is "awaiting-approval", but this scenario's session is idle:
     // nothing is pending, so no row may claim a decision is waiting.
@@ -34,13 +50,13 @@ describe('App sidebar state', () => {
 
   it('still shows a pending decision while one really is pending', () => {
     openScenario('approval')
-    render(<App />)
+    renderApp()
     expect(within(sessionRow('清理构建产物')).getByText('等待审批')).toBeInTheDocument()
   })
 
   it('leaves unselected rows on their own fixture state', () => {
     openScenario('shell')
-    render(<App />)
+    renderApp()
     fireEvent.click(screen.getByRole('button', { name: 'local-agent-web展示更多会话' }))
     // The selected row is the shell session; the approval row is untouched.
     expect(within(sessionRow('给 README 补一段快速开始')).getByText('已完成')).toBeInTheDocument()
@@ -49,7 +65,7 @@ describe('App sidebar state', () => {
 
   it('highlights nothing and explains the disabled input when no workspace is selected', () => {
     openScenario('empty-no-workspace')
-    render(<App />)
+    renderApp()
     const current = screen
       .getAllByRole('listitem')
       .filter((row) => row.getAttribute('aria-current') === 'true')
@@ -60,7 +76,7 @@ describe('App sidebar state', () => {
 
   it('marks exactly the scenario session as current', () => {
     openScenario('tools')
-    render(<App />)
+    renderApp()
     const rows = screen.getAllByRole('listitem')
     const current = rows.filter((row) => row.getAttribute('aria-current') === 'true')
     expect(current).toHaveLength(1)

@@ -4,7 +4,7 @@
 // 页面用的展示视图模型在 `features/*/adapters.ts` 里映射，两者不混。
 //
 // 两条硬规则：
-// 1. **只走相对路径 `/api`**：生产同源（由 Python 服务托管），开发由 Vite 代理到 127.0.0.1:8000；
+// 1. **只走相对路径 `/api`**：生产同源（由 Python 服务托管），开发由 Vite 代理到 127.0.0.1:8731；
 //    客户端从不拼绝对地址，也就不会把请求发到用户没配过的机器上。
 // 2. **错误分两种形状**：业务错误是 `{"error": ErrorView}`，传输层拒绝（403/413/422）是
 //    `{"detail": ...}`。两者都要能被调用方区分，且都**不得**把响应原文当作展示文本直接抛给用户。
@@ -870,11 +870,48 @@ export function previewArtifact(
   path: string,
   workspaceId?: string,
   scope: 'workspace' | 'attachments' = 'workspace',
+  offset = 0,
+  page = 1,
+  sheet?: string,
+  presentation: 'text' | 'formatted' = 'text',
 ): Promise<components['schemas']['ArtifactPreviewView']> {
   const query = new URLSearchParams({ path })
+  if (presentation === 'formatted') query.set('presentation', presentation)
+  if (sheet) query.set("sheet", sheet)
   if (workspaceId) query.set('workspace_id', workspaceId)
   if (scope !== 'workspace') query.set('scope', scope)
+  // 首屏不带分页参数：`offset=0&page=1` 是默认值，带上只是让缓存键变脏。
+  if (offset > 0) query.set('offset', String(offset))
+  if (page > 1) query.set('page', String(page))
   return request(`/api/data-center/artifacts/preview?${query}`)
+}
+
+// ---- 打开方式（2026-11-03，§15.11.4）------------------------------------
+
+/** 本机可用的应用清单；`available=false` 时前端把入口整个藏起来。 */
+export function listOpenInApps(): Promise<Schemas['OpenInAppView']> {
+  return request('/api/open-in-app/apps')
+}
+
+/** 图标地址直接给 `<img src>` 用：同源、由浏览器缓存，不用再走一次 JSON。 */
+export function openInAppIconUrl(appId: string): string {
+  return `/api/open-in-app/icon/${encodeURIComponent(appId)}`
+}
+
+/**
+ * 用某个本机应用打开文件。
+ *
+ * `app_id` 只能是清单里出现过的 id——服务端只认自己的目录，传路径或命令一律 422。
+ */
+export function openInApp(
+  appId: string,
+  path: string,
+  workspaceId?: string,
+): Promise<Schemas['OpenInAppResultView']> {
+  return request('/api/open-in-app/open', {
+    method: 'POST',
+    body: JSON.stringify({ app_id: appId, path, ...(workspaceId === undefined ? {} : { workspace_id: workspaceId }) }),
+  })
 }
 
 // ---- 定时任务（§21.5，2026-10-22 J2）-----------------------------------
@@ -992,6 +1029,113 @@ export type UninstallResultDto = components['schemas']['UninstallView']
 /** 「关于」页的本机事实：版本、安装形态（安装版/绿色包/源码）、数据目录、卸载可用性。 */
 export function getAppInfo(): Promise<AppInfoDto> {
   return request<AppInfoDto>('/api/app/info')
+}
+
+// ---- 委派实时进度（2026-11-04）--------------------------------------------
+
+export type DelegationLiveStepDto = components['schemas']['DelegationLiveStepView']
+export type DelegationLiveLaneDto = components['schemas']['DelegationLiveLaneView']
+export type DelegationLiveDto = components['schemas']['DelegationLiveView']
+
+/**
+ * 正在跑的委派子任务：每一路此刻在查什么（2026-11-04）。
+ *
+ * 只读旁路，只在委派卡还在跑的时候轮询。跑完就不再请求——之后以快照里的
+ * `children` 为准（那条"工具行以快照为权威"的线没被破）。
+ */
+export function getDelegationLive(): Promise<DelegationLiveDto> {
+  return request<DelegationLiveDto>('/api/delegation/live')
+}
+
+// ---- 移动访问（2026-11-03，设置页「移动访问」，架构 §24）--------------------
+
+export type MobileInfoDto = components['schemas']['MobileInfoView']
+
+/**
+ * 移动网关的只读状态：开着没、跑着没、配了几台、去哪管。
+ *
+ * 配对与撤销由下面三个接口直接提供——配对状态是本机的一份文件，主服务与网关读同一份，
+ * 所以设置页能把二维码和设备列表直接嵌进来，不必跨 origin 去请求网关。
+ */
+export function getMobileInfo(): Promise<MobileInfoDto> {
+  return request<MobileInfoDto>('/api/mobile/info')
+}
+
+export type MobileDeviceDto = components['schemas']['MobileDeviceView']
+export type MobilePairingCodeDto = components['schemas']['MobilePairingCodeView']
+
+/** 已配对设备。只读，不含 Token 摘要。 */
+export function getMobileDevices(): Promise<{ devices: MobileDeviceDto[] }> {
+  return request<{ devices: MobileDeviceDto[] }>('/api/mobile/devices')
+}
+
+/** 生成一次性配对码 + 它的二维码（SVG 由服务端内联返回，避免码进图片 URL 与访问日志）。 */
+export function createMobilePairingCode(): Promise<MobilePairingCodeDto> {
+  return request<MobilePairingCodeDto>('/api/mobile/pairing-code', { method: 'POST' })
+}
+
+/** 撤销：删记录即失效，那台手机的下一次请求会被拒。 */
+export function deleteMobileDevice(id: string): Promise<{ revoked: boolean }> {
+  return request<{ revoked: boolean }>(`/api/mobile/devices/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+}
+
+/** 改名只影响显示，不动授权。 */
+export function renameMobileDevice(id: string, label: string): Promise<MobileDeviceDto> {
+  return request<MobileDeviceDto>(`/api/mobile/devices/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ label }),
+  })
+}
+
+export type MobileSettingsDto = components['schemas']['MobileSettingsView']
+export type MobileChannelSettingDto = components['schemas']['MobileChannelSettingView']
+export type MobileSettingsInput = components['schemas']['MobileSettingsRequest']
+
+/** 移动访问的生效配置：设置库优先，`config.yaml` 是出厂默认。 */
+export function getMobileSettings(): Promise<MobileSettingsDto> {
+  return request<MobileSettingsDto>('/api/mobile/settings')
+}
+
+/**
+ * 保存整段配置。
+ *
+ * 返回体里 `restart_required` 恒为 true：网关是独立进程，必须重启才读到新值。界面要如实提示，
+ * 否则用户会以为保存失败。
+ */
+export function saveMobileSettings(payload: MobileSettingsInput): Promise<MobileSettingsDto> {
+  return request<MobileSettingsDto>('/api/mobile/settings', {
+    method: 'PUT',
+    body: JSON.stringify(payload),
+  })
+}
+
+export type MobileGatewayActionDto = components['schemas']['MobileGatewayActionView']
+
+/** 立刻拉起网关（不等重启）。 */
+export function startMobileGateway(): Promise<MobileGatewayActionDto> {
+  return request<MobileGatewayActionDto>('/api/mobile/gateway/start', { method: 'POST' })
+}
+
+/** 立刻停掉网关：所有已连接的手机立即断开。幂等，可以连按。 */
+export function stopMobileGateway(): Promise<MobileGatewayActionDto> {
+  return request<MobileGatewayActionDto>('/api/mobile/gateway/stop', { method: 'POST' })
+}
+
+/**
+ * 紧急关闭。
+ *
+ * `revokeDevices=true` 时连设备授权一起清掉——**只停网关不够**：重开之后旧 Token 依然有效，
+ * 而"怀疑令牌泄露"正是这个按钮存在的理由。
+ */
+export function emergencyStopMobile(
+  revokeDevices: boolean,
+): Promise<MobileGatewayActionDto> {
+  return request<MobileGatewayActionDto>('/api/mobile/emergency-stop', {
+    method: 'POST',
+    body: JSON.stringify({ revoke_devices: revokeDevices }),
+  })
 }
 
 /**

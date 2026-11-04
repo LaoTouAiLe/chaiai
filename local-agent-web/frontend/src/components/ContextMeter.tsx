@@ -17,6 +17,8 @@ interface ContextMeterProps {
    * （matrix 22/23 要求"没有指针也能拿到同一份详情"）。
    */
   onToggle?: () => void
+  /** Composer chrome keeps counts in its accessible tooltip and detail panel. */
+  compact?: boolean
 }
 
 const SCOPE_LABEL: Record<ContextMeterView['scope'], string> = {
@@ -113,7 +115,7 @@ function MeterDetail({ meter }: { meter: ContextMeterView }) {
  * available as a pinned panel through `MeterPanel`, so the numbers are reachable
  * without a pointer (matrix 22/23).
  */
-export function ContextMeter({ meter, open = false, onToggle, triggerRef }: ContextMeterProps) {
+export function ContextMeter({ meter, open = false, onToggle, triggerRef, compact = false }: ContextMeterProps) {
   const known = meter.usedTokens !== null && meter.windowTokens !== null && meter.windowTokens > 0
   // 分子超过分母时圆环填充封顶整圈（视觉上不可能超过一圈），但**数字**如实（>100%），
   // 两者口径分开：过去数字也被钳成 100%，于是"读数是 2,000,000 / 1,000,000 却写 100%"自相矛盾。
@@ -134,7 +136,7 @@ export function ContextMeter({ meter, open = false, onToggle, triggerRef }: Cont
   const nearLimit = known && rawRatio >= 0.8
 
   return (
-    <div className={styles.meter} title={detail}>
+    <div className={compact ? `${styles.meter} ${styles.compact}` : styles.meter} title={detail}>
       <button
         ref={triggerRef}
         type="button"

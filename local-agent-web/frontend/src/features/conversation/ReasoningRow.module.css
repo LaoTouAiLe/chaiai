@@ -19,8 +19,7 @@
   transform: translateX(-100%); animation: scan 2.6s ease-out infinite;
 }
 .body {
-  max-height: 264px; overflow-y: auto; padding: 4px 0 4px 22px;
-  font-size: var(--law-text-md); line-height: var(--law-leading-base); white-space: pre-wrap; overflow-wrap: anywhere;
+  min-width: 0; padding: 4px 0 4px 22px; overflow-wrap: anywhere;
 }
 .limit { display: block; padding-left: 22px; font-size: var(--law-text-xs); line-height: var(--law-leading-sm); }
 @keyframes scan { to { transform: translateX(100%); } }

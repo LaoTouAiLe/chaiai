@@ -1,5 +1,7 @@
 import { useState, type ReactNode } from 'react'
-import { Check, Copy, Doc } from '../../components/icons'
+import { useQuery } from '@tanstack/react-query'
+import { getDelegationLive, type DelegationLiveLaneDto } from '../../api/client'
+import { Check, ChevronDown, ChevronRight, Copy, Doc } from '../../components/icons'
 import type { ToolCardView } from '../../fixtures/types'
 import { copyText } from '../conversation/clipboard'
 import { useLineWindow, windowOf, type LineWindow } from './lineWindow'
@@ -301,44 +303,180 @@ function TodoCard({ card }: { card: Extract<ToolCardView, { kind: 'todo' }> }) {
  * 摆法照参照实现的任务面板（成员 / 状态 / 工具调用次数 / token），而不是把工具返回的 JSON
  * 原样摊开——用户要判断的是"哪一路查到了、花了多少、哪一路没成"，这些必须是字段，不是一句话。
  */
-function DelegationCard({ card }: { card: Extract<ToolCardView, { kind: 'delegation' }> }) {
-  const done = card.children.filter((child) => child.status === 'completed').length
+/** 子任务自己的耗时：一秒以下给毫秒（并发时这一档很常见），否则给一位小数的秒。 */
+function formatChildElapsed(milliseconds: number): string {
+  return milliseconds < 1000 ? `${String(milliseconds)}ms` : `${(milliseconds / 1000).toFixed(1)}s`
+}
+
+/**
+ * 一路子任务的**独立卡片**（2026-11-04 用户明确要求）。
+ *
+ * 之前所有子任务挤在一张卡里分行显示——本质还是"一个框"，用户看不出这是两条并行的调查。
+ * 现在每一路自己一张卡：标题是它看的目录，正文是它自己的工具链。
+ */
+function DelegationLaneCard({
+  goal,
+  scope,
+  status,
+  meta,
+  steps,
+}: {
+  goal: string
+  scope: string
+  status: 'running' | 'completed' | 'failed'
+  meta: string
+  steps: readonly { name: string; target: string }[]
+}) {
+  // **一律默认收起**（2026-11-04，照 hermes）：块头 + 一行当前活动已经够回答
+  // "它在干什么、跑到哪了"，铺开全部步骤会把几条子任务撑成一屏。要看完整链路点一下。
+  const [open, setOpen] = useState(false)
+  // 收起时要露的那一步：**最后一条**（hermes 的 ticker 只显示当前活动，不铺历史）。
+  const latest = steps.length === 0 ? undefined : steps[steps.length - 1]
+  // 块头显示"要做什么"（goal），目录退到后面当定位信息（2026-11-04，抄 Hermes / Codex）。
+  // goal 缺失时（进程内记录过期）退回只显示目录，不编造任务描述。
+  const showGoal = goal !== ''
+  return (
+    <section className={styles.lane} aria-label="委派子任务" data-status={status}>
+      <button
+        type="button"
+        className={styles.laneHead}
+        aria-expanded={open}
+        onClick={() => { setOpen((value) => !value) }}
+      >
+        <span className={styles.laneChevron} aria-hidden="true">
+          {open ? <ChevronDown /> : <ChevronRight />}
+        </span>
+        {status === 'running' ? (
+          <span className={`${styles.delegationMark} ${styles.delegationRunning}`} aria-hidden="true" />
+        ) : null}
+        {status === 'completed' ? <Check /> : null}
+        <span className={showGoal ? styles.laneGoal : styles.laneScope}>
+          {showGoal ? goal : scope}
+        </span>
+        {showGoal ? <span className={styles.laneSub}>{scope}</span> : null}
+        <span className={styles.laneMeta}>{meta}</span>
+      </button>
+      {open === false ? (
+        // 收起时只露**当前那一步**（hermes 的 ticker 做法）：一行，随最新调用滚动。
+        // 跑完的那一路没有"当前"，就不占这一行——结果已经在块头里。
+        status === 'running' && latest !== undefined ? (
+          <p className={styles.laneTicker}>
+            <span className={styles.delegationStepName}>{latest.name}</span>
+            <span className={styles.delegationStepText}>{latest.target}</span>
+          </p>
+        ) : null
+      ) : steps.length === 0 ? (
+        <p className={styles.laneEmpty}>
+          {status === 'running' ? '还在读…' : '这一路没有记录到工具调用'}
+        </p>
+      ) : (
+        <ol className={styles.delegationLane}>
+          {steps.map((step, index) => (
+            <li key={`${String(index)}:${step.name}`} className={styles.delegationStep}>
+              <span className={styles.delegationStepName}>{step.name}</span>
+              <span className={styles.delegationStepText}>{step.target}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  )
+}
+
+function DelegationCard({
+  card,
+  elapsed,
+}: {
+  card: Extract<ToolCardView, { kind: 'delegation' }>
+  elapsed?: string | null
+}) {
   const lines = card.report === '' ? [] : card.report.split('\n')
   const lineWindow = useLineWindow(lines.length)
+  // 只在这张卡还在跑的时候轮询（2026-11-04）：跑完就以快照里的 `children` 为准。
+  // 轮询失败不升级成错误态——它只是增强，拿不到就退化成"进行中…"。
+  const live = useQuery({
+    queryKey: ['delegation-live'],
+    queryFn: getDelegationLive,
+    enabled: card.pending.length > 0,
+    refetchInterval: 1500,
+    retry: false,
+  })
+  const liveLanes = new Map<string, DelegationLiveLaneDto>(
+    (live.data?.lanes ?? []).map((lane) => [lane.scope, lane]),
+  )
+
+  // 每一路一张卡：在跑的排前面（上面在动、下面有结果），跑完的那一路立刻换成结果卡。
+  const running = card.pending
+    .filter((scope) => !card.children.some((child) => child.scope === scope))
+    .map((scope) => {
+      const lane = liveLanes.get(scope)
+      return {
+        key: `pending:${scope}`,
+        scope,
+        goal: lane?.goal ?? '',
+        status: 'running' as const,
+        meta: '进行中…',
+        steps: (lane?.steps ?? []).map((step) => ({ name: step.name, target: step.target })),
+      }
+    })
+  const finished = card.children.map((child, index) => ({
+    key: `${String(index)}:${child.scope}`,
+    scope: child.scope,
+    goal: child.goal ?? '',
+    status: child.status,
+    meta: child.status === 'completed'
+      // 只给用户能据以判断的几项（证据、工具次数、写盘次数、耗时）。**不写"预留 token"**：那是切出来的
+      // 上限、每路几乎一样，摆在这里会被读成"这一路花了多少"（2026-10-13 裁定）。
+      // 「改动 N 次」只在真写过时出现（2026-11-02）：子 Agent 改了文件却只显示"已完成"，
+      // 用户就无从判断磁盘动过没有——那也是父 Agent 最容易顺势谎称"只做了调查"的地方。
+      // 耗时排最后且可缺省（2026-11-04）：几路并发时它是"哪一路慢"的唯一依据。
+      ? `已完成 · 证据 ${String(child.evidenceCount)} · 工具 ${String(child.toolCalls)} 次${
+        child.changedFiles > 0 ? ` · 改动 ${String(child.changedFiles)} 次` : ''
+      }${child.elapsedMs === null ? '' : ` · ${formatChildElapsed(child.elapsedMs)}`}`
+      : `未完成 · ${child.error ?? '原因未记录'}`,
+    steps: (child.tools ?? []).map((tool) => ({ name: tool.name, target: tool.target ?? tool.summary })),
+  }))
+
+  const lanes = [...running, ...finished]
+  const done = finished.filter((lane) => lane.status === 'completed').length
+  // 有在跑的才报等待时长：全都跑完还挂一个"已等待 45s"只会让人以为卡住了。
+  const waiting = running.length > 0 && typeof elapsed === 'string' && elapsed !== ''
+
   return (
-    <CardShell
-      label="委派只读调查"
-      title="委派只读调查"
-      meta={`${String(done)}/${String(card.children.length)} 个子任务已完成`}
-    >
-      <ul className={styles.delegations}>
-        {card.children.map((child, index) => (
-          <li key={`${String(index)}:${child.scope}`} className={styles.delegation}>
-            <span className={styles.delegationMark} aria-hidden="true">
-              {child.status === 'completed' ? <Check /> : null}
+    <div className={styles.delegationStack}>
+      <p className={styles.delegationSummary}>
+        {`${String(done)}/${String(lanes.length)} 个子任务已完成`}
+        {waiting ? ` · 已等待 ${String(elapsed)}` : ''}
+      </p>
+      {lanes.map((lane) => (
+        <DelegationLaneCard
+          key={lane.key}
+          goal={lane.goal}
+          scope={lane.scope}
+          status={lane.status}
+          meta={lane.meta}
+          steps={lane.steps}
+        />
+      ))}
+      {lines.length === 0 ? null : (
+        // 汇总报告与子任务行同一形状（可折叠），但它默认收起：它是核对结论，
+        // 不是"正在发生的事"，一上来就铺满屏会把子任务挤下去。
+        <details className={styles.lane}>
+          <summary className={styles.laneHead}>
+            <span className={styles.laneChevron} aria-hidden="true">
+              <ChevronRight />
             </span>
-            <span className={styles.delegationScope}>{child.scope}</span>
-            <span className={styles.delegationMeta}>
-              {child.status === 'completed'
-                // 只给用户能据以判断的几项（证据、工具次数、写盘次数、状态）。**不写"预留 token"**：那是切出来的
-                // 上限、每路几乎一样，摆在这里会被读成"这一路花了多少"（2026-10-13 裁定）。
-                // 「改动 N 次」只在真写过时出现（2026-11-02）：子 Agent 改了文件却只显示"已完成"，
-                // 用户就无从判断磁盘动过没有——那也是父 Agent 最容易顺势谎称"只做了调查"的地方。
-                ? `已完成 · 证据 ${String(child.evidenceCount)} · 工具 ${String(child.toolCalls)} 次${
-                  child.changedFiles > 0 ? ` · 改动 ${String(child.changedFiles)} 次` : ''}`
-                : `未完成 · ${child.error ?? '原因未记录'}`}
-            </span>
-          </li>
-        ))}
-      </ul>
-      {lines.length === 0
-        ? null
-        : <pre className={styles.terminal}>{windowOf(lines, lineWindow.shown).join('\n')}</pre>}
-      <MoreLines lineWindow={lineWindow} />
-      {card.truncated ? (
-        <p className={styles.note}>内容较长，页面里是服务端给的有界预览；完整原文仍在本地工具事件中。</p>
-      ) : null}
-    </CardShell>
+            <span className={styles.laneScope}>汇总报告</span>
+            <span className={styles.laneMeta}>{`${String(lines.length)} 行`}</span>
+          </summary>
+          <pre className={styles.terminal}>{windowOf(lines, lineWindow.shown).join('\n')}</pre>
+          <MoreLines lineWindow={lineWindow} />
+          {card.truncated ? (
+            <p className={styles.note}>内容较长，页面里是服务端给的有界预览；完整原文仍在本地工具事件中。</p>
+          ) : null}
+        </details>
+      )}
+    </div>
   )
 }
 
@@ -360,7 +498,14 @@ function GenericCard({ card }: { card: Extract<ToolCardView, { kind: 'generic' }
  * renderer allowed to show free text: a wrong payload never gets drawn as a
  * specialised card.
  */
-export function ToolCard({ card }: { card: ToolCardView }) {
+export function ToolCard({
+  card,
+  elapsed,
+}: {
+  card: ToolCardView
+  /** 这一行已经跑了多久（只有运行中有值）。委派用它显示"已等待 N 秒"，其余卡片不看它。 */
+  elapsed?: string | null
+}) {
   switch (card.kind) {
     case 'read':
       return <ReadCard card={card} />
@@ -375,7 +520,7 @@ export function ToolCard({ card }: { card: ToolCardView }) {
     case 'todo':
       return <TodoCard card={card} />
     case 'delegation':
-      return <DelegationCard card={card} />
+      return <DelegationCard card={card} elapsed={elapsed} />
     case 'generic':
       return <GenericCard card={card} />
     /* v8 ignore next 2 -- file mutations render through DiffCard in ToolRow */

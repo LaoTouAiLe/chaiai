@@ -334,6 +334,11 @@ def prepare_context_node(
         "plan_managed": False,
         "model_next_action": "continue",
         "model_final_response": "",
+        # 验证提醒（2026-11-04）：三个都是"本轮"字段，新请求必须复位——否则上一轮的提醒会
+        # 跟着新任务继续发给模型，计数也会跨任务累加。
+        "verification_nudge": None,
+        "verification_nudge_count": 0,
+        "pending_verification_response": None,
         "workflow": None,
         "pending_tool_calls": [],
         "deferred_tool_calls": [],

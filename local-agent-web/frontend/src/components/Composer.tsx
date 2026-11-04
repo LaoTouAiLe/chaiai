@@ -747,30 +747,10 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                   onClick={actions?.onToggleModelMenu}
                   aria-expanded={actions?.onToggleModelMenu === undefined ? undefined : modelMenu !== null}
                   aria-label={actions?.onToggleModelMenu === undefined ? undefined : '选择会话模型'}
+                  title={session.modelLabel || '选择模型'}
                 >
-                  {actions !== undefined && session.modelLabel === '' ? '选择模型' : session.modelLabel}
+                  <span>{actions !== undefined && session.modelLabel === '' ? '选择模型' : session.modelLabel}</span><svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>
                 </button>
-                {/* v0.8 T74（§19.4）：关闭流式时**明说**"未流式"——否则用户只会看到一段长时间的
-                    什么都没发生，然后再一次出现整段回答。未知（原型夹具）不显示任何东西。 */}
-                {session.answerStreaming === false ? (
-                  <span
-                    className={styles.streamNote}
-                    title="未启用流式：回答在完成时一次性出现，不是逐字出现。可在设置里为该模型连接打开流式。"
-                  >
-                    未流式
-                  </span>
-                ) : null}
-                {/* §17.4：这一轮是被停下来的。**中性标注**，与"未流式"同一套写法——它不是告警，
-                    也不说"失败"：用户自己停的不该被说成出错。 */}
-                {stopped ? (
-                  <span
-                    className={styles.streamNote}
-                    title="这一轮已被停止：已经执行的工具不会回滚。要接着做，直接发下一条即可。"
-                  >
-                    已停止
-                  </span>
-                ) : null}
-                <div className={styles.spacer} />
                 {/* 计量器与发送是一个整体：窄窗整组折到第二行，而不是把发送挤出视口。 */}
                 <div className={styles.right}>
                   {/* 加图片（2026-10-19 用户反馈）：与粘贴**同一套处理**（都只是拿到 File），
@@ -798,7 +778,7 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                       event.target.value = ''
                     }}
                   />
-                  <ContextMeter meter={meter} triggerRef={meterTrigger} open={meterOpen} onToggle={actions?.onToggleMeter} />
+                  <ContextMeter meter={meter} triggerRef={meterTrigger} open={meterOpen} onToggle={actions?.onToggleMeter} compact />
                   {/* v0.4 exposes no `cancel_task()`, so the primary action is never a
                       stop button: sending is simply unavailable until the turn ends
                       (ARCHITECTURE §15.2, plan §T30). */}
@@ -844,6 +824,12 @@ export function Composer({ mode = 'agent', session, plan, meter, takeover, model
                     </button>
                   )}
                 </div>
+                {session.answerStreaming === false || stopped ? <div className={styles.stateNotes}>
+                  {session.answerStreaming === false ? <span className={styles.streamNote}
+                    title="未启用流式：回答在完成时一次性出现，不是逐字出现。可在设置里为该模型连接打开流式。">未流式</span> : null}
+                  {stopped ? <span className={styles.streamNote}
+                    title="这一轮已被停止：已经执行的工具不会回滚。要接着做，直接发下一条即可。">已停止</span> : null}
+                </div> : null}
               </div>
             </div>
           </>

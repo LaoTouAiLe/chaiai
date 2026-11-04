@@ -6,7 +6,7 @@
   place-items: center;
   padding: 24px;
   background: var(--law-bg-mask);
-  backdrop-filter: blur(4px);
+  backdrop-filter: var(--dsw-mask-blur);
 }
 .dialog {
   display: flex;
@@ -15,8 +15,8 @@
   max-height: min(840px, calc(100dvh - 48px));
   min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--law-border-l2);
-  border-radius: 18px;
+  border: .5px solid var(--law-border-l2);
+  border-radius: 28px;
   background: var(--c-canvas);
   box-shadow: var(--sh-overlay);
   color: var(--law-text-primary);
@@ -30,7 +30,7 @@
   padding: 24px 24px 18px;
   border-bottom: 1px solid var(--law-border-l1);
 }
-.header h2 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -.03em; }
+.header h2 { margin: 0; font-size: 16px; font-weight: 500; letter-spacing: 0; }
 .header p { margin: 7px 0 0; color: var(--law-text-secondary); font-size: var(--law-text-sm); line-height: 1.6; }
 .close {
   flex: none;

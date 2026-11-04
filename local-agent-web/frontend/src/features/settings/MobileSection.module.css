@@ -1,0 +1,315 @@
+/* 「移动访问」的局部样式（2026-11-03）。分区骨架与按钮复用 PreferenceSection.module.css。 */
+
+/* 二维码与说明并排：竖排会让表单区一下子变得很长。 */
+.invite {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.qrBox {
+  width: max-content;
+  padding: 10px;
+  background: #fff;
+  border: 1px solid var(--line, #e7e2dc);
+  border-radius: 0.5rem;
+}
+
+/* 后端返回的是 SVG 字符串，它自带宽高；这里只管兜底尺寸与排版。 */
+.qrBox :global(svg) {
+  display: block;
+  width: 200px;
+  height: 200px;
+}
+
+.inviteMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+  font-size: 0.85rem;
+}
+
+.inviteTtl {
+  margin: 0;
+  font-weight: 600;
+  color: #a3312a;
+}
+
+.altLabel {
+  display: inline-block;
+  margin-right: 0.35rem;
+  font-size: 0.78rem;
+  opacity: 0.7;
+}
+
+.inviteLink {
+  margin: 0.35rem 0 0;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.devices {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+}
+
+.device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.6rem 0;
+  border-top: 1px solid var(--line, #e7e2dc);
+}
+
+.device:first-child {
+  border-top: 0;
+}
+
+.deviceText {
+  min-width: 0;
+}
+
+.deviceName {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.deviceMeta {
+  font-size: 0.82rem;
+  opacity: 0.7;
+}
+
+.deviceActions {
+  display: flex;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+/* 破坏性动作：只改颜色，不抢按钮的基础样式（基础样式来自它所在的容器）。 */
+.dangerGhost {
+  color: #a3312a;
+  border-color: #e3c9c6;
+}
+/* 对话框里的确认按钮：底色由 `.dialogActions .danger` 覆盖成实心红。 */
+.danger {
+  color: #a3312a;
+}
+.dangerGhost:hover:not(:disabled) {
+  background: #fdf3f2;
+}
+
+/* ---- 对话框内部（RenameDeviceDialog / RevokeDeviceDialog / EmergencyStopDialog）---- */
+
+.dialogField {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+.dialogField input {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--line, #e7e2dc);
+  border-radius: 0.4rem;
+  background: #fff;
+  color: inherit;
+}
+.dialogField input:focus {
+  outline: 2px solid var(--c-accent, #c2571a);
+  outline-offset: 1px;
+}
+
+.dialogText {
+  margin: 0 0 0.75rem;
+  font-size: 0.88rem;
+  line-height: 1.65;
+  color: #4a453f;
+}
+
+.dialogCheck {
+  display: flex;
+  gap: 0.5rem;
+  align-items: flex-start;
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+.dialogCheck small {
+  display: block;
+  margin-top: 0.3rem;
+  font-size: 0.78rem;
+  opacity: 0.75;
+}
+
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 1.1rem;
+}
+.dialogActions button {
+  font: inherit;
+  padding: 0.5rem 0.9rem;
+  border-radius: 0.45rem;
+  border: 1px solid var(--line, #e7e2dc);
+  background: #fff;
+  color: inherit;
+  cursor: pointer;
+}
+.dialogActions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+/* 特异性要压过 `.dialogActions button`，否则红色被基础样式盖掉。 */
+.dialogActions .danger {
+  color: #fff;
+  background: #a3312a;
+  border-color: #a3312a;
+}
+.dialogActions .danger:hover:not(:disabled) {
+  background: #8e2a24;
+}
+
+/* ---- 状态条 ------------------------------------------------------------- */
+
+.statusBar {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  padding: 0.6rem 0.8rem;
+  border: 1px solid var(--line, #e7e2dc);
+  border-radius: 0.6rem;
+  background: #fbfaf8;
+}
+
+.badge {
+  flex: none;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.badgeOn {
+  color: #1c6b3a;
+  background: #e6f4ea;
+}
+.badgeOff {
+  color: #7a7069;
+  background: #eeebe7;
+}
+
+.statusMeta {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 0.85rem;
+  opacity: 0.8;
+}
+
+.statusActions {
+  display: flex;
+  gap: 0.45rem;
+  flex: none;
+}
+.statusActions button {
+  font: inherit;
+  padding: 0.4rem 0.85rem;
+  border-radius: 0.45rem;
+  border: 1px solid var(--line, #e7e2dc);
+  background: #fff;
+  color: inherit;
+  cursor: pointer;
+}
+.statusActions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.notice {
+  margin: 0.6rem 0 0;
+  padding: 0.5rem 0.7rem;
+  border-radius: 0.5rem;
+  background: #f2f7ef;
+  color: #2c5a2a;
+  font-size: 0.85rem;
+}
+
+.hint {
+  margin: 0.6rem 0 0;
+  font-size: 0.85rem;
+  line-height: 1.65;
+  opacity: 0.75;
+}
+
+/* ---- 分区 --------------------------------------------------------------- */
+
+.block {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line, #e7e2dc);
+}
+
+.blockTitle {
+  margin: 0 0 0.6rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.blockBody {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.blockActions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.config {
+  margin-top: 1.25rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--line, #e7e2dc);
+}
+
+.configSummary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.field input,
+.field select {
+  font: inherit;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line, #e7e2dc);
+  border-radius: 0.4rem;
+  background: #fff;
+  color: inherit;
+}
+
+.checkRow {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-top: 0.6rem;
+  font-size: 0.85rem;
+}
+
+.channel {
+  margin-top: 0.9rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--line, #e7e2dc);
+  border-radius: 0.5rem;
+}

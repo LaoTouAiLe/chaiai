@@ -1,0 +1,270 @@
+/* 文件预览（2026-11-03）：贴边铺满 + 顶部工具条 + 行号；不再是"卡里套卡"。 */
+
+.pane {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--c-bg, transparent);
+}
+
+.bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 38px;
+  padding: 0 var(--sp-2) 0 var(--sp-3);
+  border-bottom: 1px solid var(--c-line);
+}
+
+.name {
+  min-width: 40px;
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--c-text-1);
+  font-size: var(--fs-meta);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dir {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--c-text-3);
+  font-family: var(--font-mono-code);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+.counter {
+  flex-shrink: 0;
+  color: var(--c-text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.tool {
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--c-text-2);
+  font-size: var(--fs-meta);
+  cursor: pointer;
+}
+
+.tool:hover,
+.tool[aria-pressed='true'] {
+  border-color: var(--c-line);
+  background: var(--c-hover);
+  color: var(--c-text-1);
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 0;
+  overscroll-behavior: contain;
+}
+
+.state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  min-height: 160px;
+  padding: var(--sp-6) var(--sp-4);
+  text-align: center;
+}
+
+.hint {
+  margin: 0;
+  color: var(--c-text-3);
+  font-size: var(--fs-meta);
+  line-height: 1.6;
+}
+
+.image {
+  display: block;
+  max-width: 100%;
+  margin: 0 auto;
+  padding: var(--sp-3);
+}
+
+/* ---- 代码区 ------------------------------------------------------------- */
+
+.code {
+  min-height: 100%;
+  font-family: var(--font-mono-code);
+  font-size: 12px;
+  line-height: 19px;
+  tab-size: 2;
+}
+
+.highlight :global(pre),
+.plain {
+  margin: 0;
+  padding: 8px 0 24px;
+  background: transparent !important;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+/* 行号：吃 shiki 自己的 `.line` 元素，不额外生成 DOM。 */
+.highlight :global(pre) {
+  counter-reset: code-line;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.highlight :global(.line) {
+  position: relative;
+  display: block;
+  min-height: 19px;
+  padding: 0 12px 0 52px;
+  white-space: pre-wrap;
+}
+
+.highlight :global(.line)::before {
+  counter-increment: code-line;
+  content: counter(code-line);
+  position: absolute;
+  top: 0;
+  left: 8px;
+  display: inline-block;
+  width: 36px;
+  margin-right: 0;
+  padding-right: 0;
+  color: var(--c-text-3);
+  text-align: right;
+  user-select: none;
+}
+
+.nowrap .highlight :global(.line) {
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.plain { white-space: normal; }
+.plainLine {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr);
+  min-height: 19px;
+  padding-right: 12px;
+}
+.gutter {
+  display: block;
+  padding-right: 8px;
+  color: var(--c-text-3);
+  text-align: right;
+  user-select: none;
+}
+.plainText {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.nowrap .plainText {
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.body.nowrap {
+  overflow-x: auto;
+}
+
+/* ---- 底部状态 ----------------------------------------------------------- */
+
+.foot {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 30px;
+  padding: 0 var(--sp-3);
+  border-top: 1px solid var(--c-line);
+  color: var(--c-text-3);
+  font-size: 11px;
+}
+
+.footNote {
+  font-variant-numeric: tabular-nums;
+}
+
+.footError {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--c-danger, #c0392b);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.foot > button:last-child {
+  margin-left: auto;
+}
+
+/* DSH document surfaces: fixed tools, independent scrollports and quiet paper. */
+.bar { height: 38px; flex-wrap: nowrap; gap: 4px; padding-block: 3px; }
+.dir { display: none; }
+.pane { container-type: inline-size; }
+.tool { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; font-size: 12px; }
+.tool:focus-visible, .readerTools button:focus-visible, .sheetTabs button:focus-visible { outline: 2px solid var(--c-accent); outline-offset: -2px; }
+.modeSwitch { display: flex; border-radius: 6px; background: var(--c-hover); padding: 2px; }
+.modeSwitch button { border: 0; background: none; color: var(--c-text-3); padding: 3px 7px; border-radius: 4px; font-size: 11px; cursor: pointer; }
+.modeSwitch button[aria-pressed='true'] { background: var(--c-panel); color: var(--c-text-1); box-shadow: 0 1px 3px #0001; }
+.document, .imageView { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.body:has(.document), .body:has(.imageView) { overflow: hidden; }
+.readerTools { display: flex; align-items: center; flex: 0 0 auto; min-height: 36px; gap: 6px; padding: 3px 10px; border-bottom: 1px solid var(--c-line); color: var(--c-text-2); font: 11px var(--font-ui, sans-serif); background: var(--c-panel); }
+.readerTools button { border: 0; border-radius: 5px; min-width: 26px; height: 26px; padding: 0 6px; background: transparent; color: inherit; cursor: pointer; }
+.readerTools button:hover { background: var(--c-hover); }
+.readerTools button:disabled { opacity: .3; cursor: default; }
+.paperViewport { flex: 1; min-height: 0; overflow: auto; padding: 20px; background: var(--dsw-alias-bg-document-preview, #eef0f2); }
+.paperViewport canvas { display: block; margin-inline: auto; background: white; box-shadow: 0 2px 12px #0002; }
+.paperViewport canvas[hidden] { display: none; }
+.imageViewport { flex: 1; min-height: 0; overflow: auto; padding: 24px; background: repeating-conic-gradient(#8881 0% 25%, transparent 0% 50%) 0 0 / 16px 16px; }
+.image { padding: 0; object-fit: contain; }
+.markdown { padding: 24px clamp(16px, 5cqw, 40px) 48px; max-width: 900px; margin: auto; color: var(--c-text-1); }
+.htmlFrame { width: 100%; height: 100%; min-height: 320px; border: 0; background: white; }
+.sheetViewport { flex: 1; min-height: 0; overflow: auto; background: white; color: #25282e; }
+.sheetGrid { border-collapse: separate; border-spacing: 0; font: 12px/1.6 var(--font-ui, sans-serif); min-width: 100%; table-layout: fixed; }
+.sheetGrid th, .sheetGrid td { border-right: 1px solid #e8e9ec; border-bottom: 1px solid #e8e9ec; padding: 4px 10px; min-width: 96px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; height: 28px; }
+.sheetGrid th { font-weight: 400; color: #777e89; background: #f7f8fa; text-align: center; }
+.sheetGrid thead th { position: sticky; top: 0; z-index: 2; }
+.sheetGrid tbody th { position: sticky; left: 0; min-width: 40px; z-index: 1; }
+.sheetGrid tbody tr:hover td { background: #f5f8ff; }
+.sheetTabs { display: flex; overflow-x: auto; flex: 0 0 auto; border-top: 1px solid var(--c-line); background: var(--c-panel); }
+.sheetTabs button { border: 0; border-right: 1px solid var(--c-line); padding: 8px 16px; background: transparent; color: var(--c-text-2); font-size: 12px; white-space: nowrap; cursor: pointer; }
+.sheetTabs button[aria-selected='true'] { color: var(--c-accent); box-shadow: inset 0 -2px currentColor; background: var(--c-hover); }
+.foot { flex-wrap: wrap; padding-block: 4px; }
+@container (max-width: 360px) { .counter { display: none; } .bar { padding-inline: 6px; } .name { flex: 1; } }
+
+.paper { position: relative; width: max-content; margin-inline: auto; }
+.paper[hidden] { display: none; }
+.pdfText { position: absolute; inset: 0; overflow: clip; line-height: 1; text-align: initial; transform-origin: 0 0; --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size)); }
+.pdfText :is(span, br) { position: absolute; color: transparent; white-space: pre; cursor: text; transform-origin: 0 0; user-select: text; }
+.pdfText > :not(:global(.markedContent)), .pdfText :global(.markedContent) span { --font-height: 0; --scale-x: 1; --rotate: 0deg; font-size: calc(var(--text-scale-factor) * var(--font-height)); transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv)); }
+.pdfText :global(.markedContent) { display: contents; }
+.pdfText ::selection { background: #6699ff66; }
+
+/* Continuous pages keep their space while offscreen raster/text layers are released. */
+.paperViewport { position: relative; overflow-anchor: none; }
+.pdfPage { position: relative; flex: none; margin: 0 auto 16px; background: white; box-shadow: 0 2px 12px #0002; }
+.pdfPage:last-child { margin-bottom: 0; }
+.pdfPage canvas { margin: 0; box-shadow: none; }
+.pagePlaceholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 12px; color: #777; font-size: 12px; }

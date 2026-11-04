@@ -1,214 +1,69 @@
-/* Markdown 正文：只用设计 Token（T30）。 */
-
-/* Markdown 会把文本包进 <p>/<ul>，而原型期的回答正文是**单个 <p>**：复位块级外边距，
-   保证两者行盒相同——54 张视觉基线靠这一点保持不变。 */
-.root > :is(p, ul, ol, pre, blockquote, table, h1, h2, h3, h4, h5, h6) {
-  margin: 0;
-}
-
-/* 块间距 8 → 16（2026-10-30）：原来 8px 与 15px 的正文字号比只有 0.53，句与句之间松（行高 26）
-   而段落之间紧，节奏是倒的——所以长回答读起来"一整片"。16px 才让"分段"比"换行"更显眼。 */
-.root > * + * {
-  margin-top: var(--law-space-xl);
-}
-
+/* AI prose rhythm adapted from DeepSeek Harness MarkdownText (MIT).
+   See docs/licenses/deepseek-harness-MIT.txt. Scoped to message content only. */
 .root {
   min-width: 0;
   overflow-wrap: anywhere;
+  font-family: var(--font-ui);
+  font-size: var(--fs-chat);
+  line-height: var(--lh-chat);
+  color: var(--c-text-1);
+  text-autospace: normal;
 }
 
-.root :is(table, pre) {
-  max-width: 100%;
-}
+/* Use low-specificity reset selectors so headings and nested blocks can set their rhythm. */
+.root :where(p, ul, ol, blockquote, table) { margin: 16px 0; }
+.root :where(h1, h2, h3) { margin: 32px 0 16px; font-weight: 700; }
+.root :where(h4, h5, h6) { margin: 16px 0; font-weight: 600; }
+.root h1 { font-size: calc(24px + var(--law-font-step) * 2px); line-height: calc(34px + var(--law-font-step) * 3px); }
+.root h2 { font-size: calc(22px + var(--law-font-step) * 2px); line-height: calc(32px + var(--law-font-step) * 3px); }
+.root h3 { font-size: calc(20px + var(--law-font-step) * 2px); line-height: calc(30px + var(--law-font-step) * 3px); }
+.root :is(h4, h5, h6) { font-size: inherit; line-height: inherit; }
+.compact { font-size: var(--law-text-sm); line-height: var(--law-leading-md); color: var(--c-text-2); }
+.compact :where(p, ul, ol, blockquote) { margin: 8px 0; }
+.compact :is(h1, h2, h3, h4, h5, h6) { margin: 12px 0 8px; font-size: inherit; line-height: inherit; font-weight: 600; }
+.root :is(h1, h2, h3, h4, h5, h6) strong { font-weight: inherit; }
+.root strong { font-weight: 600; }
 
-/* 表格（2026-10-30）：这一块原来**没有任何样式**，落到浏览器默认——单元格 1px 内边距、
-   默认 2px 间隙、无行分隔线。而表格是本项目架构类回答的主要呈现形式，一密集就糊成一团。
-   现在字号降到 13/22（`--law-text-sm`）、单元格 10/16、行间一条 hairline，首末列贴边
-   （否则表格左右内缘会比正文多缩进一截）。`display: block` 保留：宽表要在自身内横向滚动，
-   不撑破对话列。 */
-.root table {
-  display: block;
-  overflow-x: auto;
-  border-collapse: collapse;
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-md);
-}
+/* Restore semantic markers removed by the application chrome reset. */
+.root ul { list-style: disc; padding-left: 20px; }
+.root ol { list-style: decimal; padding-left: 20px; }
+.root ul ul { list-style-type: circle; }
+.root ul ul ul { list-style-type: square; }
+.root li:not(:first-child) { margin-top: 6px; }
+.root li::marker { color: var(--c-text-2); }
+.root li > p { margin: 8px 0; }
+.root li > :is(ul, ol) { margin-top: 4px; }
+.root li > :first-child { margin-top: 0; }
+.root li > :last-child { margin-bottom: 0; }
+.root :global(.task-list-item) { list-style: none; }
+.root input[type='checkbox'] { margin: 0 8px 0 0; accent-color: var(--c-accent); }
 
-.root :is(th, td) {
-  padding: 10px 16px;
-  text-align: left;
-  vertical-align: top;
-  border-bottom: 1px solid var(--law-border-l1);
-}
-
-/* 表头分隔线用深一档的边界色：它是"列名"与"数据"的分界，与行间线同色会失去层级。 */
-.root th {
-  font-weight: var(--law-weight-semibold);
-  border-bottom-color: var(--law-border-l3);
-}
-
+.root blockquote { padding-left: 14px; border-left: 2px solid var(--c-line-strong); color: var(--c-text-2); }
+.root blockquote > :first-child { margin-top: 0; }
+.root blockquote > :last-child { margin-bottom: 0; }
+.root hr { height: 1px; border: 0; margin: 32px 0; background: var(--c-line); }
+.root table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: var(--law-text-sm); line-height: var(--law-leading-md); }
+.root :is(th, td) { min-width: 96px; padding: 10px 16px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--c-line); }
+.root th { font-weight: 500; border-bottom-color: var(--c-line-strong); }
 .root :is(th, td):first-child { padding-left: 0; }
 .root :is(th, td):last-child { padding-right: 0; }
 
-.root :is(ul, ol) {
-  padding-left: var(--law-space-2xl);
-}
-
-/* 列表项之间留 6px、并给序号/圆点上弱色（2026-10-30）：原来条目间零间距、标记用正文色，
-   多行列表会糊成一块，标点还把眼睛往右拽。 */
-.root li:not(:first-child) {
-  margin-top: var(--law-space-sm);
-}
-
-/* 列表项内部（2026-10-30）：条目里"一段文字 + 一个子列表"原本零间距，子列表像被吸在上一条上。 */
-.root li > * + * {
-  margin-top: var(--law-space-xs);
-}
-
-.root li::marker {
-  color: var(--law-text-tertiary);
-}
-
-/* 标题分级（2026-10-30）：原来 h1–h4 全是 14px/22px，比正文 15px 还小，回答里的 `##` 只能
-   看到一个"更小的粗体行"，层级等于没有。改成 21/19/18/14 四级递减；h4 不再放大、只加粗
-   （与正文同级是最常见的用法：它是"段内小标题"）。
-   档位直接写 `calc(基准px + var(--law-font-step) * 步长px)` 而不新增 token：tokens.css §3 把
-   字号 token 迁移留到 V3，但这里必须跟字号设置走，否则用户选"大"之后标题不跟随、层级会重新
-   塌掉。用步进而不是乘法，是为了让 21px 在大档变成 23px 而不是 23.6px。 */
-.root h1 {
-  font-size: calc(21px + var(--law-font-step) * 2px);
-  line-height: calc(30px + var(--law-font-step) * 3px);
-}
-
-.root h2 {
-  font-size: calc(19px + var(--law-font-step) * 2px);
-  line-height: calc(28px + var(--law-font-step) * 3px);
-}
-
-.root h3 {
-  font-size: calc(18px + var(--law-font-step) * 2px);
-  line-height: calc(26px + var(--law-font-step) * 3px);
-}
-
-.root h4 {
-  font-size: var(--law-text-md);
-  line-height: var(--law-leading-md);
-  font-weight: var(--law-weight-semibold);
-}
-
-/* h5/h6（2026-10-30）：原来没有规则，落到浏览器默认（比正文还大）。压到小一档并加粗，
-   保证"标题一路递减"到正文之下仍然成立。 */
-.root :is(h5, h6) {
-  font-size: var(--law-text-sm);
-  line-height: var(--law-leading-sm);
-  font-weight: var(--law-weight-semibold);
-}
-
-/* 加粗固定 600（2026-10-30）：中文在 700 下笔画会糊成一片；600 才既有强调又能读。
-   标题不参与——它们的字重由各自规则（或浏览器默认）决定。 */
-.root strong {
-  font-weight: var(--law-weight-semibold);
-}
-
-/* 分隔线（2026-10-30）：原来落浏览器默认（内嵌 1px 边 + 字体相关的外边距），
-   在正文里粗细和颜色都跟界面对不上。 */
-.root hr {
-  height: 1px;
-  border: 0;
-  background: var(--law-border-l1);
-  margin: var(--law-space-xl) 0;
-}
-
-/* 内距 8 → 12（2026-10-30）：8px 时竖线与正文只隔一个字宽，读起来像"缩进"而不是"引用"。 */
-.root blockquote {
-  padding-left: var(--law-space-lg);
-  border-left: 2px solid var(--law-border-l2);
-  color: var(--law-text-secondary);
-}
-
-/* 引用块内部的段落节奏（2026-10-30）：根级的 16px 只作用于直接子元素，而 `blockquote > p`
-   的 margin 已被 base.css 复位成 0 —— 多段引用原本会挤成一整块。 */
-.root blockquote > * + * {
-  margin-top: var(--law-space-sm);
-}
-
-.inline {
-  overflow-wrap: anywhere;
-  padding: 0 4px;
-  border-radius: var(--law-radius-xs);
-  background: var(--law-surface-inline-code);
-  font-family: var(--law-font-mono);
-  font-size: var(--law-text-sm);
-}
-
-.block {
-  border: 1px solid var(--c-line);
-  border-radius: var(--r-panel);
-  overflow: hidden;
-}
-
-.bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--law-space-sm);
-  padding: var(--sp-2) var(--sp-3);
-  background: var(--c-sunken);
-  border-bottom: 1px solid var(--law-border-l1);
-}
-
-/* 语言名（2026-10-21）：只说"这是什么语言"，不承担切换高亮的职责（本期没有那个能力）。 */
-.language {
-  color: var(--law-text-caption);
-  font-family: var(--law-font-mono);
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-xs);
-}
-
-.pre {
-  margin: 0;
-  padding: var(--sp-4);
-  overflow-x: auto;
-  background: var(--c-sunken);
-  font-family: var(--law-font-mono);
-  font-size: var(--fs-body);
-  line-height: var(--lh-chat);
-}
-
-.copy {
-  padding: 0 var(--law-space-sm);
-  border: 1px solid var(--law-border-l2);
-  border-radius: var(--law-radius-sm);
-  background: var(--law-button-ghost-fill);
-  color: var(--law-text-secondary);
-  font-family: var(--law-font-sans);
-  font-size: var(--law-text-xs);
-  line-height: var(--law-leading-xs);
-  cursor: pointer;
-}
-
-.copy:hover {
-  background: var(--law-button-ghost-hover);
-}
-
-.link {
-  color: var(--law-accent-700);
-  text-decoration: underline;
-}
-
-.fileLink {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 3px;
-  max-width: 100%;
-  vertical-align: baseline;
-  text-decoration: none;
-}
-
+.inline { overflow-wrap: anywhere; padding: 0 5px; border: .5px solid var(--c-line); border-radius: 8px; background: var(--dsw-alias-markdown-inline-code); font-family: var(--font-mono-code); font-size: .875em; }
+.block { min-width: 0; margin: 16px 0; border: .5px solid var(--c-line); border-radius: 16px; overflow: hidden; }
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 14px; background: var(--c-panel); border-bottom: 0; }
+.language { color: var(--c-text-3); font-family: var(--font-mono-code); font-size: 11px; line-height: 18px; }
+.pre { margin: 0; padding: 16px 20px; max-width: 100%; overflow-x: auto; background: var(--c-panel); font-family: var(--font-mono-code); font-size: calc(13px + var(--law-font-step) * 1px); line-height: calc(22px + var(--law-font-step) * 2px); }
+.pre code { font: inherit; }
+.copy { padding: 2px 6px; border-radius: 6px; color: var(--c-text-2); font-family: var(--font-ui); font-size: 12px; line-height: 18px; cursor: pointer; }
+.copy:hover { background: var(--c-hover); }
+.link { color: var(--c-accent); font-weight: 500; text-decoration: none; }
+.link:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+.fileLink { display: inline-flex; align-items: baseline; gap: 3px; max-width: 100%; vertical-align: baseline; text-decoration: none; }
 .fileLink:hover > span:last-child { text-decoration: underline; }
 .fileLink > span:first-child { flex-shrink: 0; align-self: center; }
-.fileLink:focus-visible { outline-offset: 3px; border-radius: var(--law-radius-xs); }
+.fileLink:focus-visible { outline-offset: 3px; border-radius: 6px; }
+.imagePlaceholder { color: var(--c-text-2); }
 
-.imagePlaceholder {
-  color: var(--law-text-secondary);
-}
+/* Trim only the document edges; preserve the internal block margins above. */
+.root > :first-child { margin-top: 0; }
+.root > :last-child { margin-bottom: 0; }

@@ -122,6 +122,7 @@ def open_api(
         static_dir: Path | None = None,
         base_dir: Path | None = None,
         client_base_url: str = LOCAL_BASE_URL,
+        client_addr: tuple[str, int] | None = None,
         **model_kwargs: Any,
     ) -> tuple[TestClient, ApiRuntime]:
         runtime = open_runtime(
@@ -131,7 +132,16 @@ def open_api(
             static_dir=static_dir,
         )
         runtimes.append(runtime)
-        return TestClient(create_app(runtime), base_url=client_base_url), runtime
+        return (
+            TestClient(
+                create_app(runtime),
+                base_url=client_base_url,
+                # 默认对端是 `testclient`（不是回环），所以"只接受本机"的端点需要显式给出
+                # 真实回环地址才能测到放行那一侧。
+                client=client_addr or ("testclient", 50000),
+            ),
+            runtime,
+        )
 
     yield _open
     for runtime in runtimes:
@@ -142,6 +152,36 @@ def open_api(
 def api(open_api: OpenApi) -> tuple[TestClient, ApiRuntime]:
     """默认的一套：闲聊假模型。"""
     return open_api(decision="chat", reply="假回答")
+
+
+def test_artifact_visual_content_is_bounded_to_workspace(api, tmp_path):
+    from pypdf import PdfWriter
+
+    client, runtime = api
+    root = runtime.service._workspace_root
+    document = PdfWriter()
+    document.add_blank_page(width=595, height=842)
+    document.write(root / "preview.pdf")
+    metadata = client.get("/api/data-center/artifacts/preview", params={
+        "path": "preview.pdf", "presentation": "formatted",
+    })
+    assert metadata.status_code == 200
+    assert metadata.json()["kind"] == "document"
+    response = client.get(metadata.json()["url"])
+    assert response.status_code == 200
+    assert response.content.startswith(b"%PDF-")
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["content-type"] == "application/pdf"
+    assert client.get("/api/data-center/artifacts/content", params={
+        "path": str(tmp_path.parent / "outside.pdf"),
+    }).status_code == 403
+    assert client.get("/api/data-center/artifacts/content", params={
+        "path": "missing.pdf",
+    }).status_code == 404
+    (root / "invalid.pdf").write_text("invalid", encoding="utf-8")
+    assert client.get("/api/data-center/artifacts/content", params={
+        "path": "invalid.pdf",
+    }).status_code == 422
 
 
 def _create_session(client: TestClient, *, title: str = "会话") -> str:
@@ -2471,6 +2511,24 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/app/info",
         "/api/app/update/check",
         "/api/app/uninstall",
+        # 2026-11-03：本机应用列表 / 用默认程序打开 / 取图标（desktop_apps 那批改动带来的，
+        # 之前漏登记导致本用例一直红——补登的是**已存在**的端点，不是新开接口）。
+        "/api/open-in-app/apps",
+        "/api/open-in-app/open",
+        "/api/open-in-app/icon/{app_id}",
+        # 2026-11-03：设置页「移动访问」——状态与本机专用管理。
+        # 配对状态是本机的一份 JSON，主服务与网关读同一份，所以生成配对码 / 撤销 / 改名
+        # 都放在这里，设置页就能把二维码与设备列表直接嵌进来（不必跨 origin 请求网关）。
+        "/api/mobile/info",
+        "/api/mobile/pairing-code",
+        "/api/mobile/devices",
+        "/api/mobile/devices/{device_id}",
+        # 2026-11-03：移动访问配置的可视化编辑（设置库优先、config.yaml 是出厂默认）。
+        "/api/mobile/settings",
+        # 2026-11-03：紧急启停——"出问题后能操控关闭"，不等改配置与重启。
+        "/api/mobile/gateway/start",
+        "/api/mobile/gateway/stop",
+        "/api/mobile/emergency-stop",
         "/api/workspaces",
         "/api/workspaces/pick",
         "/api/workspaces/select",
@@ -2553,9 +2611,15 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/storage",
         "/api/preferences/memory/test",
         "/api/data-center/memories",
+        # 2026-11-04：委派在跑时每一路的实时进度（只读旁路，让委派卡能在运行期间显示
+        # "这一路正在查什么"，而不是等全部跑完）。
+        "/api/delegation/live",
         "/api/data-center/usage",
         # §15.11.1、§15.11.3：产物汇总与只读预览。
         "/api/data-center/artifacts",
+        # 2026-11-04：重新导出 openapi 时暴露出来的既有漂移——端点早就在（测试一直在用），
+        # 但 `docs/api/openapi.json` 没跟上，白名单也就一直没登记它。
+        "/api/data-center/artifacts/content",
         "/api/data-center/artifacts/preview",
         "/api/permissions/grants",
         # 联网检索的服务凭据（Tavily）：读状态 + 写入/删除，密钥不回读（§6.8）。
@@ -3990,3 +4054,34 @@ def test_mcp_concurrent_config_writes_do_not_lose_other_servers(api):
         for future in futures:
             future.result()
     assert {server.name for server in runtime.service.mcp_view().servers} == {f"s{i}" for i in range(12)}
+
+
+# ---- 移动访问端点（2026-11-03，§24）--------------------------------------
+
+
+def test_mobile_devices_read_does_not_require_origin(open_api: OpenApi) -> None:
+    """读接口只要求回环对端。
+
+    浏览器对 GET 不发 ``Origin``；第一版给读接口也加了"必须同源"，结果是顶部显示"已配对 1 台"、
+    列表却写着"还没有配对的设备"——**状态与列表各自说明一件相反的事**，这是最难自查的一类。
+    """
+    client, _runtime = open_api(client_addr=("127.0.0.1", 50000))
+    response = client.get("/api/mobile/devices")
+    assert response.status_code == 200
+    assert isinstance(response.json()["devices"], list)
+
+
+def test_mobile_write_requires_same_origin(open_api: OpenApi) -> None:
+    """写接口要求同源浏览器元数据：挡 CSRF，也挡本机脚本直接签发配对码。"""
+    client, _runtime = open_api(client_addr=("127.0.0.1", 50000))
+    assert client.post("/api/mobile/pairing-code").status_code == 403
+
+
+def test_mobile_endpoints_reject_non_loopback_peer(api: tuple[TestClient, ApiRuntime]) -> None:
+    """默认客户端的对端是 `testclient`（不是回环）：连读都要拒。
+
+    防的是有人打开 ``web.allow_non_loopback`` 之后，局域网里任何人都能列出/撤销设备。
+    """
+    client, _runtime = api
+    assert client.get("/api/mobile/devices").status_code == 403
+    assert client.get("/api/mobile/info").status_code == 200  # 只读状态不设限：设置页要能显示

@@ -12,14 +12,13 @@ const STARTERS = [
 export function WelcomePanel({ empty, onUsePrompt }: { empty: EmptyStateView; onUsePrompt?: (prompt: string) => void }) {
   return <section className={styles.welcome} aria-label="开始工作">
     <div className={styles.intro}>
-      <div className={styles.brand}><img src="/chaiai.svg" width="34" height="34" alt="" /><span>你的本地工作空间</span></div>
-      <h2>{empty.title}</h2>
+      <div className={styles.brand}><img src="/chaiai.svg" width="36" height="36" alt="" /><h2>{empty.title}</h2></div>
       <p className={styles.description}>{empty.description}</p>
     </div>
     {empty.highlightsTitle === undefined || empty.highlights === undefined ? null : <section aria-label={empty.highlightsTitle} className={styles.starters}>
       <ol>{empty.highlights.map((item, index) => {
         const starter = STARTERS[index]
-        return <li key={item}><button type="button" disabled={onUsePrompt === undefined} onClick={() => onUsePrompt?.(starter?.prompt ?? item)}>
+        return <li key={item}><button type="button" title={item} disabled={onUsePrompt === undefined} onClick={() => onUsePrompt?.(starter?.prompt ?? item)}>
           <div className={styles.cardTop}><span className={styles.cardIcon}><WorkbenchIcon name={starter?.icon ?? 'chat'} size={19} /></span><WorkbenchIcon name="arrow" size={15} /></div>
           <strong>{starter?.title ?? '开始一个任务'}</strong><span className={styles.detail}>{item}</span>
         </button></li>

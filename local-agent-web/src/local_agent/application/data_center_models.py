@@ -129,13 +129,31 @@ class ArtifactPreviewView(DataView):
     不提供写入、下载、任意路径读取。
     """
 
-    kind: Literal["text", "image", "too_large", "unreadable", "binary"]
-    #: 文本内容（`kind=text` 时）；已按 `PREVIEW_TEXT_LIMIT` 截断。
+    kind: Literal["text", "image", "document", "spreadsheet", "too_large", "unreadable", "binary"]
+    sheets: list[str] = Field(default_factory=list)
+    sheet: str | None = None
+    rows: list[list[str]] = Field(default_factory=list)
+    #: 文本内容（`kind=text` 时）；这一页，最多 `PREVIEW_TEXT_LIMIT` 字符。
     text: str | None = None
     #: 图片的 data URL（`kind=image` 时）；不进缓存、不落盘。
     url: str | None = None
     size_bytes: int = 0
+    #: **这一页之后还有内容**（下一页用 `offset` / `page` 取）。
     truncated: bool = False
+    #: 本页在**整份文本里**的起始字符偏移（2026-11-03，分页用）。
+    offset: int = 0
+    #: 还有下一页；前端据此显示「加载更多」。
+    has_more: bool = False
+    #: 下一面的取法：`next_offset` / `next_page` 原样回传即可。两个都是 `None` = 没有下一页。
+    #: 为什么要由服务端算：文档会在"同一文档页里继续切字符"和"换下一段文档页"之间切换，
+    #: 让前端自己判断就得把后端的抽取窗口复制到浏览器里。
+    next_offset: int | None = None
+    next_page: int | None = None
+    #: 文档的页码（1 起）与总页数；纯文本页为 `None`。
+    page: int | None = None
+    total_pages: int | None = None
+    #: 文件本身超出可读前缀上限，**后面再也取不到**了（与 `has_more` 不是一回事）。
+    beyond_limit: bool = False
     #: 二进制文件的扩展名（`kind=binary` 时，如 `docx`）。
     #:
     #: 为什么不解析：hermes 与 codex **都不做** docx（前者只认 code/html/svg，

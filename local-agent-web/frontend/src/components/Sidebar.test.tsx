@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Sidebar, type SidebarActions, type SidebarManagement } from './Sidebar'
 
 describe('Sidebar 未读与运行中（2026-10-30）', () => {
@@ -181,6 +181,20 @@ it('会话行显示"现在在做什么"，没有状态的行不占位（v0.8 T71
   expect(screen.queryByText('需人工核对')).not.toBeInTheDocument()
 })
 
+it('idle and completed sessions keep their title, unread mark and time without repeated status rows', () => {
+  const { container } = render(<Sidebar workspaces={[{ id: 'w', title: '项目', sessions: [
+    { id: 'idle', title: '空闲会话', status: 'idle', timeLabel: '刚刚', selected: false },
+    { id: 'done', title: '已完成会话', status: 'completed', timeLabel: '昨天', selected: false, unread: true },
+    { id: 'waiting', title: '等待回答的会话', status: 'awaiting-input', timeLabel: '2 分钟', selected: false },
+  ] }]} />)
+  expect(screen.queryByText('本地会话')).not.toBeInTheDocument()
+  expect(screen.queryByText('任务已结束')).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: /空闲会话/ })).toHaveAttribute('title', '空闲会话 · 空闲 · 刚刚')
+  expect(screen.getByRole('button', { name: /已完成会话/ })).toHaveAttribute('title', '已完成会话 · 已完成 · 昨天')
+  expect(container.querySelector('[data-unread="true"]')).toHaveTextContent('已完成会话')
+  expect(screen.getByText('等你回答')).toBeVisible()
+})
+
 it('搜索会话会筛选侧栏，并能清空恢复', () => {
   render(<Sidebar workspaces={[{
     id: 'workspace-1', title: '项目', sessions: [
@@ -205,16 +219,19 @@ it('状态筛选与搜索共同生效，切回全部保留原始会话', () => {
     { id: 'input', title: '回答问题', status: 'awaiting-input', timeLabel: '', selected: false },
     { id: 'done', title: '已结束的任务', status: 'completed', timeLabel: '', selected: false },
   ] }]} />)
+  fireEvent.click(screen.getByRole('button', { name: /^筛选会话$/ }))
   fireEvent.click(screen.getByRole('button', { name: '进行中的会话' }))
   expect(screen.getByText('运行测试')).toBeInTheDocument()
   expect(screen.queryByText('审批改动')).not.toBeInTheDocument()
   fireEvent.change(screen.getByRole('searchbox', { name: '搜索会话' }), { target: { value: '审批' } })
   expect(screen.getByText('没有匹配的会话')).toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: /^筛选会话$/ }))
   fireEvent.click(screen.getByRole('button', { name: '等待处理的会话' }))
   expect(screen.getByText('审批改动')).toBeInTheDocument()
   fireEvent.change(screen.getByRole('searchbox', { name: '搜索会话' }), { target: { value: '' } })
   expect(screen.getByText('回答问题')).toBeInTheDocument()
   expect(screen.getByText('等待回答')).toHaveClass('visually-hidden')
+  fireEvent.click(screen.getByRole('button', { name: /^筛选会话$/ }))
   fireEvent.click(screen.getByRole('button', { name: '全部会话' }))
   expect(screen.getByText('已结束的任务')).toBeInTheDocument()
 })
@@ -243,4 +260,44 @@ it('每个工作区独立展示更多，保留选中项且搜索全部会话', (
   expect(screen.queryByText('甲会话5')).not.toBeInTheDocument()
   fireEvent.change(screen.getByRole('searchbox', { name: '搜索会话' }), { target: { value: '乙会话6' } })
   expect(screen.getByText('乙会话6')).toBeInTheDocument()
+})
+
+
+describe('workspace groups fold independently from session selection', () => {
+  const groups = [
+    { id: 'fold-a', title: '项目 A', sessions: [{ id: 'a', title: 'A 的会话', status: 'completed' as const, selected: true, timeLabel: '刚刚' }] },
+    { id: 'fold-b', title: '项目 B', sessions: [{ id: 'b', title: 'B 的会话', status: 'completed' as const, selected: false, timeLabel: '昨天' }] },
+  ]
+  beforeEach(() => { localStorage.removeItem('sidebar.workspace-folds.v1') })
+
+  it('folding hides only its own sessions and remembers the state after remount', () => {
+    const select = vi.fn()
+    const view = render(<Sidebar workspaces={groups} actions={{ onSelectWorkspace: select, onAddWorkspace: vi.fn(), onSelectSession: vi.fn(), onNewSession: vi.fn(), onOpenSettings: vi.fn(), onToggleCollapse: vi.fn() }} />)
+    fireEvent.click(screen.getByRole('button', { name: '收起工作区「项目 A」' }))
+    expect(screen.queryByRole('button', { name: /A 的会话/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /B 的会话/ })).toBeVisible()
+    expect(select).not.toHaveBeenCalled()
+    view.unmount()
+    render(<Sidebar workspaces={groups} />)
+    expect(screen.getByRole('button', { name: '展开工作区「项目 A」' })).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(screen.getByRole('button', { name: '展开工作区「项目 A」' }))
+    expect(screen.getByRole('button', { name: /A 的会话/ })).toBeVisible()
+  })
+
+  it('search reveals matching folded sessions temporarily and clearing it restores the fold', () => {
+    localStorage.setItem('sidebar.workspace-folds.v1', JSON.stringify(['fold-a']))
+    render(<Sidebar workspaces={groups} />)
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索会话' }), { target: { value: 'A 的会话' } })
+    expect(screen.getByRole('button', { name: /A 的会话/ })).toBeVisible()
+    expect(screen.getByRole('button', { name: '收起工作区「项目 A」' })).toBeDisabled()
+    fireEvent.change(screen.getByRole('searchbox', { name: '搜索会话' }), { target: { value: '' } })
+    expect(screen.getByRole('button', { name: '展开工作区「项目 A」' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByRole('button', { name: /A 的会话/ })).not.toBeInTheDocument()
+  })
+
+  it('invalid saved state does not prevent the sidebar from rendering', () => {
+    localStorage.setItem('sidebar.workspace-folds.v1', '{broken')
+    render(<Sidebar workspaces={groups} />)
+    expect(screen.getByRole('button', { name: /A 的会话/ })).toBeVisible()
+  })
 })

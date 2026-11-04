@@ -22,7 +22,7 @@ from local_agent.context import agents_loader
 from local_agent.exceptions import SecurityError, WorkspaceBoundaryError
 from local_agent.graph import builder
 from local_agent.graph.state import RuntimeContext
-from local_agent.security import shell_guard
+from local_agent.security import path_guard, shell_guard
 from local_agent.security.approval import action_fingerprint
 from local_agent.security.path_guard import (
     ExternalPathPolicy,
@@ -216,6 +216,40 @@ def test_protected_git_segment_is_case_insensitive_on_windows(tmp_path: Path) ->
     assert protected_target_reason(tmp_path / "repo" / ".GIT" / "config") == "Git 元数据目录"
     assert protected_target_reason(tmp_path / "repo" / ".GiT" / "config") == "Git 元数据目录"
     assert protected_target_reason(tmp_path / "repo" / "src" / "a.py") is None
+
+
+def test_user_temp_area_is_not_a_system_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """用户自己的临时区不是系统关键目录（2026-11-03 macOS CI 实测）。
+
+    现场：macOS 的 ``TMPDIR`` 在 ``/private/var/folders/...``，而 ``/var`` 在系统目录列表里，
+    于是"工作区建在系统临时目录"⇒ 所有写操作被判"禁止修改受保护目标"，270 个用例连锁失败。
+
+    这里把豁免点 monkeypatch 成本机临时目录：测的是**豁免机制**，不是 macOS 的字符串本身，
+    因此 Windows 上也能跑。
+    """
+    monkeypatch.setattr(path_guard, "_USER_TEMP_DIRS_POSIX", (tmp_path.resolve(),))
+    inside = (tmp_path / "ws" / "file.py").resolve()
+
+    # 把 tmp_path 同时当作"系统目录"：没有豁免时这里必然返回"系统关键目录"
+    assert path_guard._protected_resolved_reason(
+        inside, Path.home(), (tmp_path.resolve(),)
+    ) is None
+
+    # 豁免只覆盖那一棵子树：兄弟目录仍按系统目录处理（不能借着豁免把整个盘放行）
+    parent = tmp_path.parent.resolve()
+    sibling = (parent / "outside").resolve()
+    assert path_guard._protected_resolved_reason(
+        sibling, Path.home(), (parent,)
+    ) == f"系统关键目录（{parent.as_posix()}）"
+
+
+def test_var_itself_stays_in_the_system_list() -> None:
+    """只豁免 per-user 临时区，没有一刀切砍掉 ``/var``（Linux 上 ``/var/lib`` 仍受保护）。"""
+    assert "/var" in path_guard._SYSTEM_DIRS_POSIX
+    assert Path("/var/folders") in path_guard._USER_TEMP_DIRS_POSIX
+    assert Path("/private/var/folders") in path_guard._USER_TEMP_DIRS_POSIX
 
 
 def test_device_and_extended_length_prefixes_are_rejected(tmp_path: Path) -> None:

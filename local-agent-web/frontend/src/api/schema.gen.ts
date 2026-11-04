@@ -297,6 +297,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/data-center/artifacts/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 文档版式 PDF */
+        get: operations["artifact_content_api_data_center_artifacts_content_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/data-center/artifacts/preview": {
         parameters: {
             query?: never;
@@ -307,6 +324,9 @@ export interface paths {
         /**
          * 产物内容预览
          * @description 看一眼产物的内容（§15.11.3）：只读、有大小上限、不代打开外链。
+         *
+         *     `offset` / `page` 是分页参数（2026-11-03）：返回里的 `next_offset` / `next_page`
+         *     原样回传即可取下一页。
          */
         get: operations["preview_artifact_api_data_center_artifacts_preview_get"];
         put?: never;
@@ -343,6 +363,32 @@ export interface paths {
         };
         /** 去重后的实际调用用量 */
         get: operations["usage_page_api_data_center_usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/delegation/live": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 正在跑的委派子任务
+         * @description 委派在跑的时候，每一路"此刻在查什么"（2026-11-04）。
+         *
+         *     **只读旁路**，不参与事件流：子 Agent 在独立线程里跑，中间态原本不在任何可读的地方，
+         *     页面只能等全部结束。这里把子循环每步产生的工具事件摊出来，供委派卡在运行期间轮询。
+         *
+         *     不做权限判定：它只暴露**目录名与工具名**（都是本机页面已可见的信息），
+         *     且 `/api` 前缀本身走 §15.3 的同源校验。
+         */
+        get: operations["delegation_live_api_delegation_live_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -480,6 +526,182 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/mobile/devices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 已配对设备 */
+        get: operations["list_devices_api_mobile_devices_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mobile/devices/{device_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * 撤销一台设备
+         * @description 删记录即撤销：那台手机的下一次请求会被拒。
+         */
+        delete: operations["revoke_device_api_mobile_devices__device_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * 重命名一台设备
+         * @description 改名只影响显示，不动授权。
+         */
+        patch: operations["rename_device_api_mobile_devices__device_id__patch"];
+        trace?: never;
+    };
+    "/api/mobile/emergency-stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 紧急关闭：停网关，可选撤销全部设备
+         * @description 一键断开移动访问。
+         *
+         *     `revoke_devices=true` 时连设备授权一起清掉——**只停网关是不够的**：重开之后旧 Token
+         *     依然有效，而"怀疑令牌泄露"正是最需要这个按钮的场景。
+         */
+        post: operations["emergency_stop_api_mobile_emergency_stop_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mobile/gateway/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 启动网关（立即生效）
+         * @description 立刻拉起网关，不等重启。已在跑就如实说"已在运行"。
+         */
+        post: operations["start_gateway_now_api_mobile_gateway_start_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mobile/gateway/stop": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 停止网关（立即断开所有手机）
+         * @description 立刻停掉网关。**幂等**：没在跑也返回成功，方便"多按几次确保关掉"。
+         */
+        post: operations["stop_gateway_now_api_mobile_gateway_stop_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mobile/info": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 移动访问状态（只读）
+         * @description 移动网关开着没、跑着没、配了几台、去哪儿管。
+         *
+         *     设备数读的是落盘状态：网关没跑时**照样给出真实数字**——"有 3 台已授权但服务没开"
+         *     正是用户最需要看到的那句话。这一个是只读的，所以不要求同源元数据（设置页轮询它）。
+         */
+        get: operations["mobile_info_api_mobile_info_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mobile/pairing-code": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 生成一个配对二维码
+         * @description 签发一次性配对码，连二维码一起返回。
+         *
+         *     没有手机可达的通道时返回 409 并说明——给一个扫了打不开的二维码比不给更糟。
+         */
+        post: operations["create_pairing_code_api_mobile_pairing_code_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/mobile/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 移动访问配置（生效值）
+         * @description 页面显示的那一份：设置库优先、`config.yaml` 是出厂默认。
+         */
+        get: operations["read_mobile_settings_api_mobile_settings_get"];
+        /**
+         * 保存移动访问配置
+         * @description 整段保存，并把生效值写成快照交给网关。
+         *
+         *     **保存不等于生效**：网关是独立进程，必须重启才会读到新配置。返回体里
+         *     `restart_required` 恒为 true，页面据此提示——不提示的话用户会以为保存失败了。
+         */
+        put: operations["save_mobile_settings_api_mobile_settings_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/model-connections": {
         parameters: {
             query?: never;
@@ -567,6 +789,60 @@ export interface paths {
          *     失败只写进这条连接的检测结果，**不改变当前选择**，也不回退到别的模型（§6.8）。
          */
         post: operations["test_model_connection_api_model_connections__connection_id__test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/open-in-app/apps": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 本机可用的「打开方式」
+         * @description 没探测到任何应用时回 `available=false`，不是错误。
+         */
+        get: operations["open_in_app_apps_api_open_in_app_apps_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/open-in-app/icon/{app_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** 应用图标（PNG） */
+        get: operations["open_in_app_icon_api_open_in_app_icon__app_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/open-in-app/open": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** 用本机应用打开工作区里的文件 */
+        post: operations["open_in_app_open_api_open_in_app_open_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1917,10 +2193,37 @@ export interface components {
          */
         ArtifactPreviewView: {
             /**
+             * Beyond Limit
+             * @default false
+             */
+            beyond_limit: boolean;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
+            /**
              * Kind
              * @enum {string}
              */
-            kind: "text" | "image" | "too_large" | "unreadable" | "binary";
+            kind: "text" | "image" | "document" | "spreadsheet" | "too_large" | "unreadable" | "binary";
+            /** Next Offset */
+            next_offset?: number | null;
+            /** Next Page */
+            next_page?: number | null;
+            /**
+             * Offset
+             * @default 0
+             */
+            offset: number;
+            /** Page */
+            page?: number | null;
+            /** Rows */
+            rows?: string[][];
+            /** Sheet */
+            sheet?: string | null;
+            /** Sheets */
+            sheets?: string[];
             /**
              * Size Bytes
              * @default 0
@@ -1930,6 +2233,8 @@ export interface components {
             suffix?: string | null;
             /** Text */
             text?: string | null;
+            /** Total Pages */
+            total_pages?: number | null;
             /**
              * Truncated
              * @default false
@@ -2873,6 +3178,8 @@ export interface components {
              * @default 0
              */
             changed_files: number;
+            /** Elapsed Ms */
+            elapsed_ms?: number | null;
             /** Error */
             error?: string | null;
             /**
@@ -2880,6 +3187,11 @@ export interface components {
              * @default 0
              */
             evidence_count: number;
+            /**
+             * Goal
+             * @default
+             */
+            goal: string;
             /**
              * Model Calls
              * @default 0
@@ -2897,6 +3209,70 @@ export interface components {
              * @default 0
              */
             tool_calls: number;
+            /** Tools */
+            tools?: components["schemas"]["DelegationToolStepView"][];
+        };
+        /**
+         * DelegationLiveLaneView
+         * @description 一路正在跑（或刚跑完、还在保留期内）的子任务。
+         */
+        DelegationLiveLaneView: {
+            /** Child Id */
+            child_id: string;
+            /**
+             * Goal
+             * @default
+             */
+            goal: string;
+            /** Scope */
+            scope: string;
+            /** Status */
+            status: string;
+            /** Steps */
+            steps?: components["schemas"]["DelegationLiveStepView"][];
+            /** Updated At */
+            updated_at: number;
+        };
+        /**
+         * DelegationLiveStepView
+         * @description 子任务已经发起过的一次工具调用。
+         *
+         *     **不是审计记录**：它只回答"这一路此刻在查什么"，跑完就被 `DelegationChildView` 里的
+         *     统计取代。所以字段刻意少（没有 token、没有证据编号）。
+         */
+        DelegationLiveStepView: {
+            /** Name */
+            name: string;
+            /** Status */
+            status: string;
+            /** Target */
+            target: string;
+        };
+        /** DelegationLiveView */
+        DelegationLiveView: {
+            /** Lanes */
+            lanes?: components["schemas"]["DelegationLiveLaneView"][];
+        };
+        /**
+         * DelegationToolStepView
+         * @description 子任务自己的一次工具调用（2026-11-04）。
+         *
+         *     **不是审计记录**：它只回答"这一路查了哪些文件、跑了什么命令"。来源是进程内的实时表
+         *     （`local_agent.delegation_live`），不是 Checkpoint——子事件目前没有并进父状态。
+         */
+        DelegationToolStepView: {
+            /** Name */
+            name: string;
+            /**
+             * Status
+             * @default
+             */
+            status: string;
+            /**
+             * Target
+             * @default
+             */
+            target: string;
         };
         /** EmbeddingPreferences */
         EmbeddingPreferences: {
@@ -4145,6 +4521,193 @@ export interface components {
              */
             role: "user" | "assistant";
         };
+        /**
+         * MobileChannelSettingView
+         * @description 页面上的一行通道配置。**与 `MobileChannelConfig` 同字段**——它就是那份配置的可编辑形态。
+         */
+        MobileChannelSettingView: {
+            /** Enabled */
+            enabled: boolean;
+            /**
+             * Expose
+             * @enum {string}
+             */
+            expose: "serve" | "funnel";
+            /** Hostname */
+            hostname: string;
+            /** Https Port */
+            https_port: number;
+            /**
+             * Mode
+             * @enum {string}
+             */
+            mode: "named" | "quick";
+            /** Port */
+            port: number;
+            /** Tls */
+            tls: boolean;
+            /** Type */
+            type: string;
+        };
+        /**
+         * MobileDeviceView
+         * @description 一台已配对设备。**不含 Token 摘要**：页面不需要它，泄露了也没用。
+         */
+        MobileDeviceView: {
+            /** Channel */
+            channel: string;
+            /** Created At */
+            created_at: string;
+            /** Id */
+            id: string;
+            /** Label */
+            label: string;
+        };
+        /** MobileDevicesView */
+        MobileDevicesView: {
+            /** Devices */
+            devices: components["schemas"]["MobileDeviceView"][];
+        };
+        /**
+         * MobileEmergencyStopRequest
+         * @description 紧急关闭。
+         *
+         *     `revoke_devices` 单独给：**停止网关只断开连接，设备 Token 仍然有效**——重新开启后那台手机
+         *     照样能用。怀疑令牌泄露时必须连设备一起清掉，否则"关过一次"只是心理安慰。
+         */
+        MobileEmergencyStopRequest: {
+            /**
+             * Revoke Devices
+             * @default false
+             */
+            revoke_devices: boolean;
+        };
+        /**
+         * MobileGatewayActionView
+         * @description 启停网关的结果。`detail` 是**可以直接展示给用户**的句子。
+         *
+         *     `ok=False` 时界面要如实显示失败原因，而不是给一个"已完成"的提示——"我关的是不是真关了"
+         *     这个问题，在紧急场景下比任何别的信息都重要。
+         */
+        MobileGatewayActionView: {
+            /** Detail */
+            detail: string;
+            /** Device Count */
+            device_count: number;
+            /** Ok */
+            ok: boolean;
+            /** Running */
+            running: boolean;
+        };
+        /**
+         * MobileInfoView
+         * @description 移动网关的**只读**状态：只回答"开着没、跑着没、配了几台、去哪儿管"。
+         *
+         *     **刻意不含任何操作**：生成配对码与撤销设备都在网关自己的管理页（`admin_url`）上。
+         *     主服务不代它转发——§24 的"主服务不为网关开例外"因此仍然成立，跨源请求也一步都不用放。
+         */
+        MobileInfoView: {
+            /** Admin Url */
+            admin_url: string;
+            /** Device Count */
+            device_count: number;
+            /** Enabled */
+            enabled: boolean;
+            /** Running */
+            running: boolean;
+        };
+        /**
+         * MobilePairUrlView
+         * @description 一个手机可达地址。`label` 是给人看的（"同一 Wi-Fi" / "远程（Tailscale）"）。
+         */
+        MobilePairUrlView: {
+            /** Label */
+            label: string;
+            /** Url */
+            url: string;
+        };
+        /**
+         * MobilePairingCodeView
+         * @description 一次配对邀请：给手机扫的链接与它的二维码。
+         *
+         *     ``qr_svg`` 由服务端生成并内联返回——**不要把 code 拼进图片 URL**，那样这个一次性凭据会
+         *     出现在访问日志里。
+         */
+        MobilePairingCodeView: {
+            /**
+             * Alternates
+             * @default []
+             */
+            alternates: components["schemas"]["MobilePairUrlView"][];
+            /** Code */
+            code: string;
+            /** Expires In */
+            expires_in: number;
+            /** Pair Url */
+            pair_url: string;
+            /** Qr Svg */
+            qr_svg: string;
+        };
+        /**
+         * MobileRenameRequest
+         * @description 改设备显示名（UA 解析出来的型号代号用户认不出，允许自己起名）。
+         */
+        MobileRenameRequest: {
+            /** Label */
+            label: string;
+        };
+        /** MobileRevokeView */
+        MobileRevokeView: {
+            /** Revoked */
+            revoked: boolean;
+        };
+        /**
+         * MobileSettingsRequest
+         * @description 保存整段移动访问配置。
+         *
+         *     **整段提交而不是逐项**：页面就是一张表单，逐项保存会让"改端口 + 关通道"变成多次写入，
+         *     中间失败一次就留下一份自相矛盾的配置。
+         */
+        MobileSettingsRequest: {
+            /** Channels */
+            channels: components["schemas"]["MobileChannelSettingView"][];
+            /** Enabled */
+            enabled: boolean;
+            /** Gateway Port */
+            gateway_port: number;
+            /** Pairing Ttl Seconds */
+            pairing_ttl_seconds: number;
+            /** Ws Enabled */
+            ws_enabled: boolean;
+        };
+        /**
+         * MobileSettingsView
+         * @description 移动访问的**生效值**：设置库里有就用库里的，否则用 `config.yaml`。
+         *
+         *     `source` 与 `restart_required` 是给界面看的，不参与计算：前者说明"你看到的这份来自哪儿"，
+         *     后者说明"改完之后网关进程还没重启，此刻还没生效"——这两句不写清楚，用户会以为保存没成功。
+         */
+        MobileSettingsView: {
+            /** Channels */
+            channels: components["schemas"]["MobileChannelSettingView"][];
+            /** Enabled */
+            enabled: boolean;
+            /** Gateway Host */
+            gateway_host: string;
+            /** Gateway Port */
+            gateway_port: number;
+            /** Pairing Ttl Seconds */
+            pairing_ttl_seconds: number;
+            /** Restart Required */
+            restart_required: boolean;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "settings" | "config";
+            /** Ws Enabled */
+            ws_enabled: boolean;
+        };
         /** ModelCallCompletedEvent */
         ModelCallCompletedEvent: {
             /** Event Id */
@@ -4514,6 +5077,60 @@ export interface components {
             stream_sequence: number;
             /** Task Id */
             task_id: string;
+        };
+        /** OpenInAppItemView */
+        OpenInAppItemView: {
+            /** Icon Url */
+            icon_url?: string | null;
+            /** Id */
+            id: string;
+            /** Label */
+            label: string;
+        };
+        /**
+         * OpenInAppOpenRequest
+         * @description 用本机的某个应用打开工作区里的一份文件。
+         *
+         *     ``app_id`` 只能是服务端目录里的 id（探测结果），**不是**可执行文件路径——客户端传什么
+         *     命令过来都一律拒绝；启动参数也全部来自服务端目录。``path`` 与预览同一条边界。
+         */
+        OpenInAppOpenRequest: {
+            /** App Id */
+            app_id: string;
+            /** Path */
+            path: string;
+            /** Workspace Id */
+            workspace_id?: string | null;
+        };
+        /**
+         * OpenInAppResultView
+         * @description 一次打开的结果：`app_label` 用于前端提示"已用 X 打开"。
+         */
+        OpenInAppResultView: {
+            /** App Id */
+            app_id: string;
+            /** App Label */
+            app_label: string;
+            /**
+             * Ok
+             * @default true
+             */
+            ok: boolean;
+        };
+        /**
+         * OpenInAppView
+         * @description 本机可用的应用清单。
+         *
+         *     `available=False` **不是错误**：这台机器就是没有可打开的程序（或平台不支持），
+         *     前端据此把「打开方式」按钮藏掉，而不是弹一个报错。
+         */
+        OpenInAppView: {
+            /** Apps */
+            apps?: components["schemas"]["OpenInAppItemView"][];
+            /** Available */
+            available: boolean;
+            /** Reason */
+            reason?: string | null;
         };
         /**
          * OssCredentialRequest
@@ -6154,6 +6771,11 @@ export interface components {
         ToolUseView: {
             /** Approval Id */
             approval_id?: string | null;
+            /**
+             * Delegation Scope
+             * @default
+             */
+            delegation_scope: string;
             /** Elapsed Ms */
             elapsed_ms?: number | null;
             evidence?: components["schemas"]["ToolEvidenceView"] | null;
@@ -7333,12 +7955,49 @@ export interface operations {
             };
         };
     };
+    artifact_content_api_data_center_artifacts_content_get: {
+        parameters: {
+            query: {
+                path: string;
+                workspace_id?: string | null;
+                scope?: "workspace" | "attachments";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/pdf": string;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     preview_artifact_api_data_center_artifacts_preview_get: {
         parameters: {
             query: {
                 path: string;
                 workspace_id?: string | null;
                 scope?: "workspace" | "attachments";
+                offset?: number;
+                page?: number;
+                presentation?: "text" | "formatted";
+                sheet?: string | null;
             };
             header?: never;
             path?: never;
@@ -7434,6 +8093,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delegation_live_api_delegation_live_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DelegationLiveView"];
                 };
             };
         };
@@ -7682,6 +8361,258 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    list_devices_api_mobile_devices_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileDevicesView"];
+                };
+            };
+        };
+    };
+    revoke_device_api_mobile_devices__device_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                device_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileRevokeView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    rename_device_api_mobile_devices__device_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                device_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MobileRenameRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileDeviceView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    emergency_stop_api_mobile_emergency_stop_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MobileEmergencyStopRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileGatewayActionView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    start_gateway_now_api_mobile_gateway_start_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileGatewayActionView"];
+                };
+            };
+        };
+    };
+    stop_gateway_now_api_mobile_gateway_stop_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileGatewayActionView"];
+                };
+            };
+        };
+    };
+    mobile_info_api_mobile_info_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileInfoView"];
+                };
+            };
+        };
+    };
+    create_pairing_code_api_mobile_pairing_code_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobilePairingCodeView"];
+                };
+            };
+        };
+    };
+    read_mobile_settings_api_mobile_settings_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileSettingsView"];
+                };
+            };
+        };
+    };
+    save_mobile_settings_api_mobile_settings_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MobileSettingsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MobileSettingsView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -7948,6 +8879,97 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    open_in_app_apps_api_open_in_app_apps_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenInAppView"];
+                };
+            };
+        };
+    };
+    open_in_app_icon_api_open_in_app_icon__app_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                app_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description 这个应用没有可提取的图标 */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    open_in_app_open_api_open_in_app_open_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["OpenInAppOpenRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OpenInAppResultView"];
                 };
             };
             /** @description Validation Error */

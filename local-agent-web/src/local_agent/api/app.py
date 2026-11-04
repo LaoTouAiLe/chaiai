@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse, Response
 from local_agent.api.browsers import build_browser_router
 from local_agent.api.container import ApiRuntime
 from local_agent.api.maintenance import build_maintenance_router
+from local_agent.api.mobile_info import build_mobile_router
 from local_agent.api.routes import build_router, status_for_code
 from local_agent.api.schema_extras import merge_event_schemas
 from local_agent.api.security import LocalBoundaryMiddleware
@@ -144,6 +145,8 @@ def create_app(runtime: ApiRuntime) -> FastAPI:
     # 应用身份与维护（2026-10-27）：与业务路由分开装配——它读宿主形态（版本、装在哪、能不能卸），
     # 也没有对应的应用服务用例。
     app.include_router(build_maintenance_router(runtime))
+    # 移动访问状态（2026-11-03，§24）：只读，且**不代网关转发任何操作**——管理页在网关自己那侧。
+    app.include_router(build_mobile_router(runtime))
     app.include_router(build_events_router(runtime))
     app.include_router(build_terminal_router(runtime))
     app.include_router(build_browser_router(browsers))

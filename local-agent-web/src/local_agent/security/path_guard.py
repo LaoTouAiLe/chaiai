@@ -130,6 +130,19 @@ _SYSTEM_DIRS_POSIX: tuple[str, ...] = (
     "/System",
 )
 
+#: POSIX 上属于**当前用户**的临时区：虽在 ``/var`` 之下，但**不是**系统关键目录。
+#:
+#: macOS 的 ``TMPDIR`` 默认是 ``/var/folders/<xx>/.../T/``，而 ``/var`` 是 ``/private/var`` 的
+#: 符号链接，``resolve()`` 之后落在 ``/private/var/folders/...``——它会被"``/var`` 属于系统关键
+#: 目录"这条判成不可写。2026-11-03 macOS CI 实测：270 个用例因"写文件被拒"连锁失败；
+#: 真实用户把工作区放在系统临时目录时同样写不了。这是判定过宽，不是测试环境问题。
+#:
+#: 只豁免这一棵子树：``/var/lib`` / ``/var/log`` / ``/var/db`` 仍按系统目录处理。
+_USER_TEMP_DIRS_POSIX: tuple[Path, ...] = (
+    Path("/private/var/folders"),
+    Path("/var/folders"),
+)
+
 #: Windows 上**不是普通路径**的两种前缀（§20.2 ③）：扩展长度（``\\?\``，含 ``\\?\UNC\``）与
 #: 设备命名空间（``\\.\``）。它们按设计绕开正常化，因此一律拒绝而不是尝试归一。
 _WINDOWS_DEVICE_PREFIXES: tuple[str, ...] = ("\\\\?\\", "\\\\.\\")
@@ -430,6 +443,19 @@ class ProtectedPathContext:
         )
 
 
+def _is_user_temp_dir(resolved: Path) -> bool:
+    """``resolved`` 是否落在"当前用户自己的临时区"（见 ``_USER_TEMP_DIRS_POSIX``）。
+
+    只按路径形状判断、**不按平台短路**：Windows 上 ``/private/var/folders`` 会解析到当前盘的
+    ``\\private\\var\\folders``，不可能命中真实目标，等价于没有豁免；而按平台短路会让这条
+    判定在 Windows 上无法被测试覆盖（豁免本身也就无从验证）。
+    """
+    return any(
+        resolved == directory or directory in resolved.parents
+        for directory in _USER_TEMP_DIRS_POSIX
+    )
+
+
 def _protected_resolved_reason(
     resolved: Path, home: Path, system_directories: tuple[Path, ...] | None = None,
 ) -> str | None:
@@ -449,9 +475,14 @@ def _protected_resolved_reason(
     for name in _PROTECTED_DIRECTORY_NAMES:
         if name in parts:
             return f"凭据或工具元数据目录（{name}）"
-    for directory in _system_directories() if system_directories is None else system_directories:
-        if resolved == directory or directory in resolved.parents:
-            return f"系统关键目录（{directory.as_posix()}）"
+    # 用户自己的临时区不是系统关键目录（见 ``_USER_TEMP_DIRS_POSIX``）：只豁免这一条判定，
+    # 上面的根目录 / 主目录 / ``.git`` / 凭据目录四条照旧生效。
+    if not _is_user_temp_dir(resolved):
+        for directory in (
+            _system_directories() if system_directories is None else system_directories
+        ):
+            if resolved == directory or directory in resolved.parents:
+                return f"系统关键目录（{directory.as_posix()}）"
     return None
 
 

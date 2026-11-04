@@ -1,4 +1,4 @@
-type IconName = 'chat' | 'tasks' | 'data' | 'artifacts' | 'capabilities' | 'cron' | 'settings' | 'search' | 'folder' | 'plus' | 'terminal' | 'file' | 'arrow' | 'collapse' | 'expand'
+type IconName = 'chat' | 'tasks' | 'data' | 'artifacts' | 'capabilities' | 'cron' | 'settings' | 'search' | 'filter' | 'folder' | 'plus' | 'terminal' | 'file' | 'arrow' | 'collapse' | 'expand'
 
 const PATHS: Record<IconName, string> = {
   chat: 'M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-6 4V6a2 2 0 0 1 2-2ZM7 9h10M7 13h6',
@@ -9,6 +9,7 @@ const PATHS: Record<IconName, string> = {
   cron: 'M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM12 7v5l3 2',
   settings: 'M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1 1-3ZM15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z',
   search: 'M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0Zm-2 5 6 6',
+  filter: 'M4 6h16M7 12h10M10 18h4',
   folder: 'M3 7V5h6l2 3h10v11H3V7Z',
   plus: 'M12 5v14M5 12h14',
   terminal: 'M4 5h16v14H4V5Zm4 4 3 3-3 3m5 0h3',

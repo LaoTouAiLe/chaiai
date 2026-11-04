@@ -67,11 +67,10 @@ export function TopBar({
 
   return <header className={styles.bar}>
     <div className={styles.left}>
-      <div className={styles.breadcrumb}><WorkbenchIcon name="folder" size={13} /><span>{workspace ?? '本地工作台'}</span></div>
+      <div className={styles.breadcrumb}><WorkbenchIcon name="folder" size={16} /><span>{workspace ?? '本地工作台'}</span></div>
       <h1 className={styles.title}>{title}</h1>
     </div>
     <div className={styles.actions}>
-      <SegmentedControl options={options} value={activeTab} onChange={interactive ? select : undefined} ariaLabel="会话视图" variant="plain" />
       {sideChatParent === null ? null : <button type="button" className={styles.sideChatTag} onClick={onPromoteSideChat} title={`这是从「${sideChatParent}」开的侧聊。点一下变成正式会话。`}>
         侧聊{onPromoteSideChat === undefined ? null : <span className={styles.sideChatHint}>提升</span>}
       </button>}
@@ -79,5 +78,6 @@ export function TopBar({
         <WorkbenchIcon name="expand" size={16} /><span className={styles.panelLabel}>工作面板</span>
       </Button>}
     </div>
+    <div className={styles.tabs}><SegmentedControl options={options} value={activeTab} onChange={interactive ? select : undefined} ariaLabel="会话视图" variant="plain" /></div>
   </header>
 }

@@ -206,6 +206,8 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
     </section>
   }
   const fields = draft?.fields ?? fieldsFor(view, group)
+  const savedFields = fieldsFor(draft?.base ?? view, group)
+  const changedCount = draft ? Object.keys(fields).filter(key => fields[key] !== savedFields[key]).length : 0
   /**
    * 打开**本机原生**目录选择器，把选中的绝对路径填进草稿（2026-10-26）。
    *
@@ -355,6 +357,7 @@ export function PreferenceSection({ group }: { group: PreferenceGroup }) {
     {group === 'storage' ? null : (
     <div className={styles.actionBar}>
       <div className={styles.feedback}>
+        {changedCount > 0 && !busy ? <p role="status" className={styles.unsaved}>有 {changedCount} 项修改尚未保存</p> : null}
         {error ? <p role="alert" className={styles.error}>{error} <button type="button" disabled={busy} onClick={() => { void query.refetch().then(result => { if (!result.isError) { setDraft(null); setError(null); setProbe(null) } }) }}>重新读取并放弃草稿</button></p> : null}
         {saved ? <p role="status" className={styles.saved}>{group === 'general' ? '已保存并生效' : (group === 'embedding' || group === 'medium_term') && resources?.restart_required ? '已保存，新缓存目录需重启后端生效' : '已保存，下一次新任务生效'}</p> : null}
         {probe && probe.version === (draft?.base.version ?? view.version) ? <p role="status" className={probe.result.state === 'passed' ? styles.saved : styles.error}>

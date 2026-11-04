@@ -1,9 +1,25 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import type { ReactElement, ReactNode } from 'react'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { fireEvent, render as baseRender, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { toolsScenario } from '../../fixtures/scenarios'
 import type { ToolCardView, ToolRowView } from '../../fixtures/types'
 import { ToolCard } from './ToolCards'
 import { ToolRow } from './ToolRow'
+
+const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+/**
+ * 委派卡会轮询实时进度（2026-11-04），所以任何渲染都要有 QueryClient。
+ * 这里覆盖 `render` 而不是逐个改调用点：26 个用例都渲染在同一个 Provider 下才一致。
+ */
+function render(ui: ReactElement) {
+  return baseRender(ui, {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  })
+}
 
 function cards(): readonly ToolCardView[] {
   return toolsScenario.messages.flatMap((message) => (message.kind === 'tool' ? [message.tool.card] : []))
@@ -58,10 +74,13 @@ describe('ToolCard', () => {
   it('lists each delegated child with its status, counts and failure reason', () => {
     render(<ToolCard card={cardOf('delegation')} />)
 
-    expect(screen.getByText('委派只读调查')).toBeInTheDocument()
+    // 每路一张独立卡片（2026-11-04 用户要求）：不再是"一个框里分几行"，
+    // 所以这里按 region 数量断言，而不是找一个大标题。
+    expect(screen.getAllByRole('region', { name: '委派子任务' })).toHaveLength(2)
     expect(screen.getByText('1/2 个子任务已完成')).toBeInTheDocument()
     expect(screen.getByText('docs')).toBeInTheDocument()
-    expect(screen.getByText('已完成 · 证据 6 · 工具 4 次 · 改动 1 次')).toBeInTheDocument()
+    // 耗时排在最后（2026-11-04）：几路并发时它是"哪一路慢"的唯一依据。
+    expect(screen.getByText('已完成 · 证据 6 · 工具 4 次 · 改动 1 次 · 12.4s')).toBeInTheDocument()
     // 未完成的那一路必须说明原因：只显示"未完成"用户没法判断要不要重派。
     expect(screen.getByText('未完成 · 子任务超时')).toBeInTheDocument()
     // **不摆"预留 token"**（2026-10-13 裁定）：那是切出来的上限、每路几乎一样，摆在这里会被读成
@@ -69,6 +88,107 @@ describe('ToolCard', () => {
     expect(screen.queryByText(/预留/)).not.toBeInTheDocument()
     // 核对过的原文摆在同一张卡里（路径 + 行号，用户据此核对）。
     expect(screen.getByText(/docs\/cancel\.md:1/)).toBeInTheDocument()
+  })
+
+  /**
+   * 委派**还没跑完**时（2026-11-04）：一发起就摊出 N 条子任务行。
+   *
+   * 改之前只能等全部跑完，用户看到的是一张泛泛的"委派只读调查"空壳，十几秒里完全不知道
+   * 派了几路、在查什么。这条断言守的就是那个体验。
+   */
+  it('shows one pending row per delegated child before any result comes back', () => {
+    render(
+      <ToolCard
+        card={{
+          kind: 'delegation',
+          children: [],
+          pending: ['src/local_agent/tools', 'src/local_agent/graph'],
+          report: '',
+          truncated: false,
+        }}
+      />,
+    )
+
+    // 总数要把"还在跑"的算进去，否则会显示 0/0，看起来像什么都没派出去。
+    expect(screen.getByText('0/2 个子任务已完成')).toBeInTheDocument()
+    expect(screen.getByText('src/local_agent/tools')).toBeInTheDocument()
+    expect(screen.getByText('src/local_agent/graph')).toBeInTheDocument()
+    expect(screen.getAllByText('进行中…')).toHaveLength(2)
+  })
+
+  /**
+   * 折叠行为（2026-11-04，对齐 CodeBuddy 的 subagent 行）：
+   * 跑完的默认收起（结果在标题行里），点一下才展开它自己的工具链。
+   * 运行中的默认展开——用户此刻要看的就是"它在查什么"。
+   */
+  it('collapses a finished child and expands it on click', () => {
+    render(
+      <ToolCard
+        card={{
+          kind: 'delegation',
+          children: [{
+            scope: 'docs',
+            status: 'completed',
+            toolCalls: 1,
+            modelCalls: 1,
+            evidenceCount: 1,
+            changedFiles: 0,
+            elapsedMs: 900,
+            tools: [{ name: 'read_file', summary: '', status: 'succeeded', target: 'docs/a.md' }],
+            error: null,
+          }],
+          pending: [],
+          report: '',
+          truncated: false,
+        }}
+      />,
+    )
+
+    // 收起时看不到工具名，但状态仍在标题行上。
+    expect(screen.queryByText('read_file')).not.toBeInTheDocument()
+    expect(screen.getByText(/已完成 · 证据 1/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { expanded: false }))
+    expect(screen.getByText('read_file')).toBeInTheDocument()
+    expect(screen.getByText('docs/a.md')).toBeInTheDocument()
+  })
+
+  /**
+   * 等待时长（2026-11-04）：委派可能跑几十秒，没有计时的话"还在跑"和"卡住了"看起来一样。
+   *
+   * 只在**有子任务还在跑**时显示。全跑完还挂着"已等待 45s"反而会让人以为它没结束。
+   */
+  it('reports how long the delegation has been waiting, only while it is running', () => {
+    const { rerender } = render(
+      <ToolCard
+        card={{
+          kind: 'delegation',
+          children: [],
+          pending: ['src/local_agent/tools'],
+          report: '',
+          truncated: false,
+        }}
+        elapsed="12s"
+      />,
+    )
+    expect(screen.getByText('0/1 个子任务已完成 · 已等待 12s')).toBeInTheDocument()
+
+    rerender(
+      <ToolCard
+        card={{
+          kind: 'delegation',
+          children: [
+            { scope: 'src/local_agent/tools', status: 'completed', toolCalls: 3, modelCalls: 1, evidenceCount: 2, changedFiles: 0, elapsedMs: 8200, error: null },
+          ],
+          pending: [],
+          report: '',
+          truncated: false,
+        }}
+        elapsed="12s"
+      />,
+    )
+    expect(screen.getByText('1/1 个子任务已完成')).toBeInTheDocument()
+    expect(screen.queryByText(/已等待/)).not.toBeInTheDocument()
   })
 
   it('reads a window with its own line numbers and the file total', () => {

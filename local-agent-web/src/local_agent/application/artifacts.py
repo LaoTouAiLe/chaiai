@@ -57,7 +57,14 @@ MAX_DAYS = 365
 #: 截图常见 300–800 KB，256 KB 会把大部分截图挡在门外（2026-10-22 实测）。
 PREVIEW_TEXT_MAX_BYTES = 256 * 1024
 PREVIEW_IMAGE_MAX_BYTES = 2 * 1024 * 1024
+#: 一页返回多少字符（2026-11-03）：原来这是**总量**，`package-lock.json` 只能看到前 547 行。
+#: 现在它是**页大小**，前端可以继续取后面的页。
 PREVIEW_TEXT_LIMIT = 20_000
+#: 分页时可读的**前缀上限**：一次请求读这么多字节再按页切片。
+#: 为什么不按字节偏移分页：`sanitize_text` 会改写长度，字节偏移与字符偏移对不上；
+#: 读前缀再切字符是最省心且每页内容稳定的做法。超过这个上限的部分确实取不到，
+#: 如实以 `beyond_limit` 告诉前端，不假装还有。
+PREVIEW_TOTAL_MAX_BYTES = 4 * 1024 * 1024
 
 #: 已知二进制格式（2026-10-23）：按**扩展名**判定，不做内容嗅探。
 #: 这些文件按 UTF-8 解码出来必然是乱码，与其展示乱码不如明确说不支持。
@@ -333,23 +340,25 @@ def artifacts(
     )
 
 
-def _preview_document(target: Path, size: int) -> ExtractOutcome | None:
+def _preview_document(target: Path, size: int, start_page: int = 1) -> ExtractOutcome | None:
     """把文档提取成纯文本；不是文档、旧版二进制或解析失败都返回 ``None``。
 
     返回 ``None`` 时调用方仍回 ``kind="binary"``——"这个格式读不出来"和"读出来是空的"
     是两种结果，不能让失败伪装成一份空文档。
+
+    `start_page`（2026-11-03）：文档分页，一次仍然抽 `PREVIEW_DOCUMENT_PAGES` 页。
     """
     stat = target.stat()
-    key = (str(target), stat.st_mtime_ns, size)
+    key = (str(target), stat.st_mtime_ns, size, start_page)
     cached = _PREVIEW_DOC_CACHE.get(key)
     if cached is not None:
         return cached
     try:
         outcome = extract_document(
             DocumentIo.from_path(target),
-            sha256=f"{key[0]}:{key[1]}",
-            start_page=1,
-            end_page=PREVIEW_DOCUMENT_PAGES,
+            sha256=f"{key[0]}:{key[1]}:{key[3]}",
+            start_page=start_page,
+            end_page=start_page + PREVIEW_DOCUMENT_PAGES - 1,
         )
     except DocumentExtractError:
         # 损坏、加密、超出大小上限：一律按"不支持预览"处理。用户点开一个坏文件
@@ -363,16 +372,8 @@ def _preview_document(target: Path, size: int) -> ExtractOutcome | None:
     return outcome
 
 
-def preview(service: ApplicationService, *, path: str, workspace_id: str | None = None,
-            scope: str = "workspace") -> ArtifactPreviewView:
-    """预览一条产物的内容（§15.11.3）。
-
-    三条硬边界，缺一条这个接口就会变成"任意文件读取"：
-
-    1. **只读工作区内**：`resolve()` 之后必须仍在工作区根之下（防 `../` 与符号链接逃逸）。
-    2. **有上限**：文本超过 256 KB 截断返回，图片超过 2 MB 只回元信息。
-    3. **不碰外链**：`http(s)` 交给浏览器窗口打开，服务端不做请求（否则就是 SSRF）。
-    """
+def resolve_preview_target(service: ApplicationService, *, path: str, workspace_id: str | None = None,
+                           scope: str = "workspace") -> Path:
     if path.lower().startswith(("http://", "https://")):
         raise ValueError("外链产物请直接在浏览器中打开。")
     if scope == "attachments":
@@ -392,7 +393,37 @@ def preview(service: ApplicationService, *, path: str, workspace_id: str | None 
         raise PermissionError("只能预览工作区内的文件。") from None
     if not target.is_file():
         raise LookupError("文件不存在或已被删除。")
+    return target
+
+
+def preview(service: ApplicationService, *, path: str, workspace_id: str | None = None,
+            scope: str = "workspace", offset: int = 0,
+            page: int = 1, presentation: str = "text", sheet: str | None = None) -> ArtifactPreviewView:
+    """预览一条产物的内容（§15.11.3）。
+
+    三条硬边界，缺一条这个接口就会变成"任意文件读取"：
+
+    1. **只读工作区内**：`resolve()` 之后必须仍在工作区根之下（防 `../` 与符号链接逃逸）。
+    2. **有上限**：文本读前 4 MB 做前缀，图片超过 2 MB 只回元信息。
+    3. **不碰外链**：`http(s)` 交给浏览器窗口打开，服务端不做请求（否则就是 SSRF）。
+
+    **分页**（2026-11-03）：一页 20,000 字符（文档一页 5 个文档页），`has_more` /
+    `next_offset` / `next_page` 告诉前端怎么取下一页——这是"能看完"的唯一正路：
+    一次给全会让大文件把响应和 DOM 一起拖死。
+    """
+    target = resolve_preview_target(service, path=path, workspace_id=workspace_id, scope=scope)
     size = target.stat().st_size
+    if presentation == "formatted":
+        from urllib.parse import urlencode
+
+        from local_agent.application.document_preview import OFFICE, spreadsheet
+
+        if target.suffix.lower() == ".xlsx":
+            return ArtifactPreviewView(**spreadsheet(target, sheet=sheet, offset=offset))
+        if target.suffix.lower() in OFFICE | {".pdf"}:
+            query = urlencode({"path": path, "scope": scope, **({"workspace_id": workspace_id} if workspace_id else {})})
+            return ArtifactPreviewView(kind="document", size_bytes=size,
+                                       url=f"/api/data-center/artifacts/content?{query}")
     with target.open("rb") as handle:
         head = handle.read(32)
     media = detect_image_media_type(head)
@@ -412,28 +443,54 @@ def preview(service: ApplicationService, *, path: str, workspace_id: str | None 
         # 文档预览（2026-10-29）：agent 早就能读 docx/xlsx/pptx/pdf，而这里一直说"不支持"，
         # 同一个文件两种待遇。后缀只决定"要不要尝试"——真正的格式由提取层按魔数再判一次
         # （"扩展名叫 .xls、内容其实是 XLSX"是实测存在的真实情况）。
-        outcome = _preview_document(target, size)
+        outcome = _preview_document(target, size, max(1, page))
         if outcome is not None:
             text = proj.sanitize_text(outcome.text, service._secrets)
-            return ArtifactPreviewView(
-                kind="text",
-                text=text[:PREVIEW_TEXT_LIMIT],
-                size_bytes=size,
-                truncated=(
-                    len(text) > PREVIEW_TEXT_LIMIT or outcome.total_pages > outcome.last_page
-                ),
-            )
+            return _text_page(text, size=size, offset=offset,
+                              page=outcome.last_page, total_pages=outcome.total_pages)
         return ArtifactPreviewView(kind="binary", size_bytes=size,
                                    suffix=target.suffix.lower().lstrip("."))
-    # 文本**不因超限整份拒绝**（2026-10-22 实机反馈）：读前 N 字节照常返回，
-    # 只把 truncated 置起来。以前这里回 too_large，用户点开 package-lock.json 只看到一句"超限"，
-    # 等于什么都没给。
+    # 文本**不因超限整份拒绝**（2026-10-22 实机反馈）：读前缀照常返回，只是分页。
     with target.open("rb") as handle:
-        chunk = handle.read(PREVIEW_TEXT_MAX_BYTES)
+        chunk = handle.read(PREVIEW_TOTAL_MAX_BYTES)
     text = proj.sanitize_text(chunk.decode("utf-8", errors="replace"), service._secrets)
-    truncated = size > PREVIEW_TEXT_MAX_BYTES or len(text) > PREVIEW_TEXT_LIMIT
-    return ArtifactPreviewView(kind="text", text=text[:PREVIEW_TEXT_LIMIT],
-                               size_bytes=size, truncated=truncated)
+    return _text_page(text, size=size, offset=offset, beyond_limit=size > PREVIEW_TOTAL_MAX_BYTES)
+
+
+def _text_page(text: str, *, size: int, offset: int, page: int | None = None,
+               total_pages: int | None = None,
+               beyond_limit: bool = False) -> ArtifactPreviewView:
+    """把一份（已脱敏的）文本切成"从 `offset` 开始的一页"，并算好下一面怎么取。
+
+    文档比纯文本多一层：一页文档文本自己也可能超过 `PREVIEW_TEXT_LIMIT`，所以"下一页"
+    可能是**同一段文档往后切字符**，也可能是**换下一段文档页**。这个判断只在这里做一次，
+    前端照 `next_offset` / `next_page` 回传即可。
+    """
+    start = max(0, min(offset, len(text)))
+    page_text = text[start:start + PREVIEW_TEXT_LIMIT]
+    end = start + len(page_text)
+    within = end < len(text)
+    more_pages = total_pages is not None and page is not None and total_pages > page
+    if within:
+        next_offset, next_page = end, page
+    elif more_pages and page is not None:
+        next_offset, next_page = 0, page + 1
+    else:
+        next_offset, next_page = None, None
+    has_more = next_offset is not None
+    return ArtifactPreviewView(
+        kind="text",
+        text=page_text,
+        size_bytes=size,
+        truncated=has_more,
+        offset=start,
+        has_more=has_more,
+        next_offset=next_offset,
+        next_page=next_page,
+        page=page,
+        total_pages=total_pages,
+        beyond_limit=beyond_limit,
+    )
 
 
 

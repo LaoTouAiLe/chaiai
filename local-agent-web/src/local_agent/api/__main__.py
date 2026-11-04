@@ -34,6 +34,8 @@ from local_agent.api.app import create_app
 from local_agent.api.container import open_runtime
 from local_agent.config import ConfigError
 from local_agent.exceptions import SessionStoreError
+from local_agent.mobile import supervisor as mobile_supervisor
+from local_agent.mobile.runtime import gateway_runtime
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -42,6 +44,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     # 自我 spawn 的对话框分支：必须在 argparse **之前**，它不做任何装配就接走整个进程。
     if directory_picker.PICK_DIRECTORY_FLAG in forwarded:
         return directory_picker.main(forwarded)
+    # 打包形态没有 `-m`，所以网关用同一个 exe 加一个参数启动（2026-11-03，§24）。
+    # 与上面那条一样，它必须在 argparse 之前接走整个进程：这是另一个程序的入口，不是本程序的开关。
+    if mobile_supervisor.GATEWAY_FLAG in forwarded:
+        from local_agent.mobile import __main__ as gateway_main
+
+        return gateway_main.main(
+            [item for item in forwarded if item != mobile_supervisor.GATEWAY_FLAG]
+        )
 
     parser = argparse.ArgumentParser(
         prog="python -m local_agent.api",
@@ -98,6 +108,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     web = app_config.web
+    # 数据根**总是**打出来（2026-10-26）：它是备份/迁移/排障的唯一锚点。这里先算出来，
+    # 因为拉起网关也要用它定位日志目录。
+    data_root = app_paths.data_root_of(app_config)
+    # 移动网关随主服务一起起（2026-11-03，§24 用户选 A）：配了 `mobile.enabled` 就自动拉起，
+    # 主服务退出时收掉。它**仍然是独立进程**——崩了不会带走主服务，主服务也不重启它。
+    gateway = mobile_supervisor.start_gateway(
+        app_config, config_path=config_path, data_root=data_root
+    )
+    # 把句柄交给 HTTP 层：设置页的"立即关闭"要能真的停掉这个子进程（2026-11-03）。
+    gateway_runtime().attach(config_path=config_path, data_root=data_root, process=gateway)
+
+    def _shutdown() -> None:
+        """统一收尾：先收网关（含它的子进程树），再关运行时。"""
+        process = gateway_runtime().detach()
+        if process is not None:
+            process.stop()
+        runtime.close()
+
     if not config_module.is_loopback_host(web.host):
         print(
             f"警告：web.allow_non_loopback=true，服务监听非回环地址 {web.host}；"
@@ -121,8 +149,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if runtime.service.model_configured()
         else "\n还没有可用的模型连接：打开设置页添加一条（不需要重启服务）。"
     )
-    # 数据根**总是**打出来（2026-10-26）：它是备份/迁移/排障的唯一锚点，两种形态都要知道。
-    data_root = app_paths.data_root_of(app_config)
     data_hint = f"\n数据目录：{data_root}"
     # 换根之后旧数据不会自动搬（2026-10-26）。不提示的话，用户看到的只是"会话全没了"。
     legacy = config_path.resolve().parent / "data"
@@ -146,10 +172,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 host=web.host,
                 port=web.port,
                 keepalive_seconds=web.keepalive_seconds,
+                # WebView2 的 cookies / localStorage 落这里（2026-11-03）：不指定就会散在
+                # pywebview 自己的默认位置，卸载/换数据根时都收不回来。
+                storage_dir=data_root / "webview",
             )
         finally:
             # 窗口关掉才算"服务结束"：这里与下面浏览器分支的收尾口径一致。
-            runtime.close()
+            _shutdown()
 
     if show_ui:
         # 后台线程等端口真的可连再打开：抢在服务就绪之前打开会得到一张连接失败的页面。
@@ -166,7 +195,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             log_level="info",
         )
     finally:
-        runtime.close()
+        _shutdown()
     return 0
 
 

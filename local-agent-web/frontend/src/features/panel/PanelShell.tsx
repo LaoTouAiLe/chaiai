@@ -1,15 +1,15 @@
 ﻿import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 
-import { useArtifactsDetail, useSearchWorkspaceFiles, useSessionChanges, useSideChatCreation, useWorkspaceFiles } from '../../api/queries'
-import { ApiError, closeBrowser, newRequestId, requestTerminal, stopTerminal } from '../../api/client'
+import { useSearchWorkspaceFiles, useSessionChanges, useSideChatCreation, useWorkspaceFiles } from '../../api/queries'
+import { closeBrowser, newRequestId, requestTerminal, stopTerminal } from '../../api/client'
 import { sameFilePath } from '../conversation/fileLinks'
 import type { TraceView as TraceViewModel } from '../../fixtures/types'
 import { Button } from '../../components/ui/Button'
 import { SearchField } from '../../components/ui/SearchField'
 import { FileDiff, FileRestoreControl } from '../code-changes/ChangesPanel'
 import { FileIcon } from './fileIcon'
-import { languageOf, useHighlight } from './useHighlight'
 import { FileTree } from './FileTree'
+import { PreviewPane } from './PreviewPane'
 import { SideChatPane } from './SideChatPane'
 import { usePaneResize } from './usePaneResize'
 import styles from './PanelShell.module.css'
@@ -399,17 +399,10 @@ export function PanelShell({
     >
       <div className={styles.resizer} {...handle} role="separator" aria-label="拖动调整面板宽度" aria-orientation="vertical" title="拖动调整宽度，双击恢复默认；方向键微调" />
       <div className={styles.surface}>
-        <header className={styles.head}>
-          <span className={styles.headTitle}>工作面板</span>
-          <Button variant="icon" size="sm" aria-label="关闭面板" title="关闭面板" onClick={requestClose}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
-              <path d="M6 6l12 12M18 6 6 18" />
-            </svg>
-          </Button>
-        </header>
+
         {cleanupError ? <div role="alert" className={styles.filesSideHead}><p className={styles.hint}>{cleanupError}</p>
           <Button size="sm" variant="ghost" onClick={() => setCleanupError(null)}>知道了</Button></div> : null}
-        <div className={styles.tabBar} data-panel-navigation>
+        <header className={styles.tabBar} data-panel-navigation>
           <button ref={homeRef} type="button" className={`${styles.homeButton} ${active === null ? styles.homeActive : ''}`}
             aria-label="工作面板首页" aria-pressed={active === null} title="工作面板首页" onClick={() => selectTab(null)}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
@@ -486,7 +479,12 @@ export function PanelShell({
               <path d="M12 5v14M5 12h14" />
             </svg>
           </Button>
-        </div>
+          <Button variant="icon" size="sm" aria-label="关闭面板" title="关闭面板" onClick={requestClose}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+              <path d="M6 6l12 12M18 6 6 18" />
+            </svg>
+          </Button>
+        </header>
 
         {active === null ? (
           <nav className={styles.menu} aria-label="工作面板功能">
@@ -583,15 +581,14 @@ function FilesTab({ workspaceId, scope, openFile, onOpenFile }: {
   onOpenFile: (path: string | null) => void
 }) {
   const [filter, setFilter] = useState('')
+  const [treeOpen, setTreeOpen] = useState(true)
   // 树宽可拖（2026-10-23）：深目录的路径很长，固定 220px 不够看，窄屏又太占。
-  const { width: treeWidth, handle: treeHandle } = usePaneResize(220, 140, 420)
+  const { width: treeWidth, handle: treeHandle } = usePaneResize(200, 140, 420)
   // 一次性取**整棵树**（`recursive`）：树状展示下不再有"逐层点进去"（2026-10-23 实机反馈）。
   const listing = useWorkspaceFiles('', workspaceId !== null, true, workspaceId ?? undefined)
   // 输入关键词就切到**全项目搜索**：只筛当前目录的话，找一个文件要逐层点进去。
   const search = useSearchWorkspaceFiles(filter, workspaceId ?? undefined)
   const searching = filter.trim() !== ''
-  // 预览必须带所属工作区：不传会按"启动工作区"解析，在别的会话工作区里必然读不到文件。
-  const content = useArtifactsDetail(openFile, workspaceId ?? undefined, scope)
 
   // 搜索模式用服务端结果（已过滤），否则用整棵树。两个分支都要用，所以提到最前。
   const treeEntries = searching
@@ -608,48 +605,15 @@ function FilesTab({ workspaceId, scope, openFile, onOpenFile }: {
 
   if (openFile !== null) {
     return (
-      <div className={styles.filesSplit}>
+      <div className={styles.filesSplit} data-tree-open={treeOpen}>
+        {scope === 'workspace' ? <button className={styles.treeToggle} aria-label={treeOpen ? '收起文件树' : '展开文件树'} aria-expanded={treeOpen} onClick={() => setTreeOpen(value => !value)}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></svg></button> : null}
         <div className={styles.filesMain}>
-          <div className={styles.filesHead}>
-            <FileIcon path={openFile} />
-            <code className={styles.pathText} title={openFile}>{openFile}</code>
-            <Button size="sm" variant="ghost" onClick={() => onOpenFile(null)}>关闭</Button>
-          </div>
-          <div className={styles.filesBody}>
-            {content.isPending ? <p className={styles.hint}>正在读取…</p> : null}
-            {content.isError ? <div role="alert">
-              <p className={styles.hint}>{content.error instanceof ApiError
-                ? content.error.message : '读不到这个文件：它可能已被删除，或不在当前工作区内。'}</p>
-              <Button size="sm" variant="ghost" onClick={() => void content.refetch()}>重试</Button>
-            </div> : null}
-            {content.data?.kind === 'image' ? (
-              <img className={styles.image} src={content.data.url ?? undefined} alt="" />
-            ) : null}
-            {content.data?.kind === 'text' ? (
-              <HighlightedText text={content.data.text ?? ''} path={openFile} />
-            ) : null}
-            {content.data?.kind === 'text' && content.data.truncated ? (
-              <p className={styles.hint}>
-                文件 {formatSize(content.data.size_bytes)}，只显示开头部分。
-              </p>
-            ) : null}
-            {content.data?.kind === 'too_large' ? (
-              <p className={styles.hint}>
-                图片 {formatSize(content.data.size_bytes)}，超过预览上限（2 MB）。
-              </p>
-            ) : null}
-            {content.data?.kind === 'unreadable' ? <p className={styles.hint}>这个文件读不出来。</p> : null}
-            {/* 二进制（2026-10-23）：以前按文本解码，docx 是一屏乱码。现在明确说不支持。 */}
-            {content.data?.kind === 'binary' ? (
-              <p className={styles.hint}>
-                这是 .{content.data.suffix} 文件（{formatSize(content.data.size_bytes)}），二进制内容无法预览。
-              </p>
-            ) : null}
-          </div>
+          <PreviewPane key={`${scope}:${workspaceId}:${openFile}`} path={openFile} workspaceId={workspaceId} scope={scope}
+            onClose={() => onOpenFile(null)} />
         </div>
         {/* 附件预览不摆文件树（2026-10-30）：附件不在工作区里，树里永远点不到它，
             留着只是一块空白 + 一条误导的分隔条。 */}
-        {scope === 'attachments' ? null : (
+        {scope === 'attachments' || !treeOpen ? null : (
           <>
             <div className={styles.filesResizer} {...treeHandle} role="separator"
               aria-label="拖动调整文件树宽度" aria-orientation="vertical" />
@@ -674,7 +638,8 @@ function FilesTab({ workspaceId, scope, openFile, onOpenFile }: {
   }
 
   return (
-    <div className={styles.filesSplit}>
+    <div className={styles.filesSplit} data-tree-open={treeOpen}>
+        {scope === 'workspace' ? <button className={styles.treeToggle} aria-label={treeOpen ? '收起文件树' : '展开文件树'} aria-expanded={treeOpen} onClick={() => setTreeOpen(value => !value)}><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></svg></button> : null}
       <div className={styles.filesMain}>
         <div className={styles.filesEmpty}>
           <span className={styles.filesEmptyIcon} aria-hidden="true">
@@ -687,6 +652,7 @@ function FilesTab({ workspaceId, scope, openFile, onOpenFile }: {
           <p className={styles.filesEmptyHint}>从文件树中选择文件即可在此处预览</p>
         </div>
       </div>
+      {treeOpen ? <>
       <div className={styles.filesResizer} {...treeHandle} role="separator"
         aria-label="拖动调整文件树宽度" aria-orientation="vertical" />
       <FileTreeSide
@@ -703,6 +669,7 @@ function FilesTab({ workspaceId, scope, openFile, onOpenFile }: {
         pending={listing.isPending && !searching}
         onRetry={() => { void (searching ? search.refetch() : listing.refetch()) }}
       />
+      </> : null}
     </div>
   )
 }
@@ -713,18 +680,6 @@ function FilesTab({ workspaceId, scope, openFile, onOpenFile }: {
  * 放在预览区**右侧**、固定宽度：点文件只换左边的内容，树不跳走——
  * "点一下就跳进去、再点返回"是上一版被否掉的交互。
  */
-/**
- * 带语法高亮的文本预览（2026-10-23）。
- *
- * `shiki` 输出的是**它自己生成的 HTML**（不是用户内容），`dangerouslySetInnerHTML` 在这里安全。
- * 语言认不出或高亮失败时 `useHighlight` 返回 null，退回纯文本 `<pre>`。
- */
-function HighlightedText({ text, path }: { text: string; path: string }) {
-  const html = useHighlight(text, languageOf(path))
-  if (html === null) return <pre className={styles.pre}>{text}</pre>
-  return <div className={styles.highlight} dangerouslySetInnerHTML={{ __html: html }} />
-}
-
 function FileTreeSide({
   width, entries, onSelectFile, selectedPath, filter, onFilter,
   searching, searchFetching, truncated, error, pending, onRetry,
@@ -889,10 +844,4 @@ function PanelEmpty({ kind, title, hint }: { kind: Tab; title: string; hint: str
     <p className={styles.filesEmptyTitle}>{title}</p>
     <p className={styles.filesEmptyHint}>{hint}</p>
   </div>
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
 }

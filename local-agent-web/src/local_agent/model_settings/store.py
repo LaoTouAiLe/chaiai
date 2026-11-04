@@ -333,6 +333,45 @@ class CapabilityStore:
         return resolve_switches(self._defaults, merged)
 
 
+#: **移动访问**配置在 ``settings_meta`` 里的键（2026-11-03；架构 §24）。
+#:
+#: 与能力开关、MCP 同一口径：库里只存**用户在页面上改过的那一份**，``config.yaml`` 仍然是出厂默认。
+#: 存整段而不是逐项：页面就是一张整表单，逐项存会把"改通道 A 的端口 + 关通道 B"变成多次独立写入，
+#: 中间任何一次失败都会留下一份自相矛盾的配置。
+META_MOBILE_SETTINGS = "mobile.settings"
+
+
+@dataclass
+class MobileSettingsStore:
+    """移动访问配置的读写（§24）。
+
+    读不出来（坏 JSON、不是对象）一律当作"没改过"，回落到 ``config.yaml``——与
+    :class:`CapabilityStore` 同一条失败闭合：一条坏记录不该让整个移动访问从页面上消失。
+    """
+
+    connection: sqlite3.Connection
+
+    def read(self) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT value FROM settings_meta WHERE key = ?", (META_MOBILE_SETTINGS,)
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            parsed = json.loads(str(row[0]))
+        except ValueError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def write(self, payload: dict[str, Any]) -> None:
+        self.connection.execute(
+            "INSERT INTO settings_meta (key, value, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (META_MOBILE_SETTINGS, json.dumps(payload, sort_keys=True), now_iso()),
+        )
+        self.connection.commit()
+
+
 #: MCP Server 的开关与工具名单在 ``settings_meta`` 里的键（2026-10-20；契约 §6.13）。
 #:
 #: 与能力开关同一口径：库只记**用户动过的 server**。``mcp.json`` 里新加的 server 因此天然是关的
@@ -575,6 +614,8 @@ class SettingsDatabase:
     skills: SkillStore
     #: 每台 MCP Server 的开关与工具名单（2026-10-20）。
     mcp: McpServerStore
+    #: 移动访问配置（2026-11-03，§24）：页面上改过的那一份，覆盖 config.yaml 的出厂默认。
+    mobile: MobileSettingsStore
     #: 打开时用的凭据存储（2026-10-20）：对象存储密钥与模型连接共用这一份。
     credentials: Any = None
 
@@ -631,6 +672,7 @@ def open_settings_database(
         web_search=WebSearchKeyStore(credentials),
         skills=SkillStore(connection),
         mcp=McpServerStore(connection),
+        mobile=MobileSettingsStore(connection),
         # 对象存储密钥与模型连接共用同一份凭据存储（2026-10-20）。
         credentials=credentials,
     )

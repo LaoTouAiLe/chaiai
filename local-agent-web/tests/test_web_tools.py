@@ -716,11 +716,15 @@ def test_web_tools_are_visible_to_every_profile(
 def test_web_tools_are_declared_as_untrusted_sources() -> None:
     # 2026-10-20 追加 `mcp_tool_search`：MCP 工具的描述与返回值同样来自第三方进程（契约 §6.13），
     # 与网页同级，所以同样进不可信来源。这不是放宽，是**扩大**不可信范围。
+    # 2026-11-04 追加 `screenshot`：屏幕内容里会出现网页文字与弹窗，可以携带注入指令，
+    # 与网页同级（ARCHITECTURE §18.9）。同样是**扩大**不可信范围，不是放宽。
     assert set(untrusted_tool_names()) == {
         "web_search",
         "web_fetch",
         "browser",
         "mcp_tool_search",
+        "screenshot",
+        "read_ui",
     }
     # 不写 `[-2:]`：新增能力一律**追加在末尾**（T54 追加了 Git），位置断言会随每次新增而失效。
     assert {"web_search", "web_fetch"} <= set(tool_names_for("tool", PROFILES["researcher"]))

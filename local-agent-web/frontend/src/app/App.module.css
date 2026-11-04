@@ -1,24 +1,13 @@
 .app {
-  display: flex;
-  align-items: stretch;
-  height: 100%;
-  background: var(--c-rail);
-  gap: 0;
+display: flex; align-items: stretch; height: 100%; overflow: hidden; background: var(--c-canvas);
 }
 
 .main {
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-width: 0;
-  margin: 8px 8px 8px 0;
-  border: 1px solid var(--c-line);
-  border-radius: 16px;
-  background: var(--c-canvas);
-  overflow: hidden;
-  border-left: 1px solid var(--c-line);
-  box-shadow: var(--sh-frame);
+display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; min-width: 0; background: var(--c-canvas); overflow: hidden;
+container-type: inline-size;
+container-name: workbench;
+/* DSH's adaptive reading axis; the composer extends 16px beyond each text edge. */
+--conversation-content-width: clamp(680px, 64cqw, var(--law-conversation-max-width));
 }
 
 
@@ -127,7 +116,7 @@
 }
 
 @media (max-width: 720px) {
-  .main { margin: 6px 6px 6px 0; border-radius: 12px; }
+  .main { min-width: 0; }
 }
 
 @media (prefers-reduced-motion: no-preference) {

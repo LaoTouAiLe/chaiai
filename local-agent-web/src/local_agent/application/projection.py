@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import hashlib
 import json
@@ -29,6 +30,7 @@ from typing import Any, Final, Literal
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
+from local_agent import delegation_live
 from local_agent.application import errors as app_errors
 from local_agent.application.errors import ErrorCategory, ErrorView
 from local_agent.application.models import (
@@ -37,6 +39,7 @@ from local_agent.application.models import (
     CompressionView,
     ContextMeterView,
     DelegationChildView,
+    DelegationToolStepView,
     ErrorMessageView,
     FileDiffHunkView,
     FileDiffLineView,
@@ -330,8 +333,43 @@ _DISPLAY_ARGUMENT_NAMES: Final[frozenset[str]] = frozenset({
     "start_line", "end_line", "pattern", "glob", "output_mode", "ignore_case",
     "include_hidden", "max_entries", "max_chars", "max_matches", "max_files",
     "env_keys", "explanation",
+    # 委派（§18.7）的子任务列表。**只暴露 scope**，见 `_display_arguments` 里的特判：
+    # 页面要在"还没跑完"时就摊出 N 条子任务卡，所以必须提前知道有几路、分别看哪个目录。
+    "tasks",
 })
 DISPLAY_ARGUMENT_CHARS: Final[int] = 2000
+
+
+#: 委派链路里不展示的工具：`task_control` 是内部收尾信号，不是调查动作。
+_HIDDEN_DELEGATION_STEPS: Final[frozenset[str]] = frozenset({"task_control"})
+
+
+def _delegation_scopes(value: Any) -> list[str] | None:
+    """从 `tasks` 参数里取出每一路的目录；不是委派参数时返回 ``None``。
+
+    **为什么要解析字符串**：工具层写事件时把所有参数值都 ``str()`` 了
+    （``tool_runner._redacted_arguments``），到这里 `tasks` 已经是 Python repr 字符串
+    （实测形如 ``[{'question': '...', 'scope': 'src/x'}]``），不是列表。
+    不解析回来，页面就不知道"这次派了几路"，只能等全部跑完——正是它以前的表现。
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            value = json.loads(text)
+        except (TypeError, ValueError):
+            try:
+                value = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                return None
+    if not isinstance(value, (list, tuple)):
+        return None
+    return [
+        str(item.get("scope", "")).strip()[:DISPLAY_ARGUMENT_CHARS]
+        for item in value
+        if isinstance(item, Mapping) and str(item.get("scope", "")).strip()
+    ]
 
 
 def _display_arguments(arguments: Any, secrets: Iterable[str] = ()) -> dict[str, str]:
@@ -350,9 +388,17 @@ def _display_arguments(arguments: Any, secrets: Iterable[str] = ()) -> dict[str,
             continue
         if value is None:
             rendered[str(key)] = ""
-        else:
-            text = sanitize_text(str(value), secrets)
-            rendered[str(key)] = text if len(text) <= DISPLAY_ARGUMENT_CHARS else text[:DISPLAY_ARGUMENT_CHARS] + "…（已截断）"
+            continue
+        if key == "tasks":
+            # 委派的子任务列表：只留**目录**（`scope`），丢掉 `question` 正文。
+            # 页面在"还没跑完"时只需要知道有几路、分别看哪里；把问题正文塞进参数展示，
+            # 既会撑爆卡片，也会让用户输入在参数区多出现一次。
+            scopes = _delegation_scopes(value)
+            if scopes is not None:
+                rendered["tasks"] = json.dumps(scopes, ensure_ascii=False)
+                continue
+        text = sanitize_text(str(value), secrets)
+        rendered[str(key)] = text if len(text) <= DISPLAY_ARGUMENT_CHARS else text[:DISPLAY_ARGUMENT_CHARS] + "…（已截断）"
     return rendered
 
 
@@ -984,9 +1030,33 @@ def _tool_outcome(
                     model_calls=_int_of(item.get("model_calls")) or 0,
                     evidence_count=_int_of(item.get("evidence_count")) or 0,
                     changed_files=_int_of(item.get("changed_files")) or 0,
+                    # 缺失时给 None 而不是 0：0 毫秒是个断言（"它瞬间跑完了"），而"这台机器没记"
+                    # 是另一件事，页面该区别对待。
+                    elapsed_ms=_int_of(item.get("elapsed_ms")),
                     error=child_error or None,
                 )
             )
+        # 逐路的工具链（2026-11-04）：子事件没有并进 Checkpoint（`delegation_audit` 那条链
+        # 没打通），所以从进程内实时表按目录回填——它是同一份数据的"跑完之后"形态，
+        # 保留 30 分钟。过期就留空，让页面如实说"没有记录到工具调用"，不编造。
+        lanes = delegation_live.lanes_for([child.scope for child in children])
+        for child in children:
+            lane = lanes.get(child.scope)
+            child.goal = lane.goal if lane is not None else ""
+            steps = lane.steps if lane is not None else []
+            child.tools = [
+                DelegationToolStepView(
+                    name=step.name,
+                    # `list_dir` 的 path 常是 `.`（子任务的 cwd 就是这一路的目录），
+                    # 直接显示 `.` 等于没说；换成目录本身，用户才知道在哪儿列的。
+                    target=step.target if step.target not in {"", "."} else child.scope,
+                    status=step.status,
+                )
+                for step in steps
+                # `task_control` 是收尾信号，不是调查动作——它出现在链路里只会让人以为查了东西。
+                if step.name not in _HIDDEN_DELEGATION_STEPS
+            ]
+
         done = sum(1 for child in children if child.status == "completed")
         summary = f"{len(children)} 个子任务 · {done} 个已完成"
         if note:
@@ -1132,6 +1202,8 @@ def project_tool_rows(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) 
                 started_at=started,
                 finished_at=finished,
                 elapsed_ms=_elapsed_ms(started, finished),
+                # 子任务的调用并回父轮次时带着它自己的目录（2026-11-04）：页面据此把链路分卡。
+                delegation_scope=str(event.get("delegation_scope") or ""),
                 outcome=outcome,
                 # 证据没有轮次字段：只在本轮的行上贴，历史轮次的行保持为 `None`。
                 evidence=verification,

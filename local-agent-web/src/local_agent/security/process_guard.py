@@ -432,6 +432,58 @@ def run_process(
     )
 
 
+def launch_detached(
+    argv: list[str] | tuple[str, ...],
+    *,
+    env: dict[str, str] | None = None,
+    cwd: str | Path | None = None,
+    watch_seconds: float = 1.0,
+) -> None:
+    """把一个 GUI 程序**交出去**：启动后不再跟它有任何关系（右栏「打开方式」用）。
+
+    与其他入口的三条差别都是**故意**的，不能拿 :func:`run_process` 顶替：
+
+    1. **不登记、不挂 Job、不套沙箱**：用户关掉本服务，不该把他打开的 IDE 一起杀掉；
+       沙箱是给"受控执行"的写侧边界，用户主动打开的编辑器必须能正常写文件。
+    2. **stdio 全 DEVNULL**：GUI 程序若继承了我们的管道，管道读端消失后它写日志会崩。
+    3. **POSIX 上 ``start_new_session``**：脱离我们的进程组，同样是为了不被一起终止。
+
+    代价是它**不支持**超时、取消与沙箱——那些属于受控执行，不属于"交出去就不管"。
+
+    Args:
+        watch_seconds: 早期失败看护窗口：窗口内进程自己退出（非 0 或找不到依赖）就算启动失败，
+            抛 :class:`OSError`；窗口过后仍在跑就算成功。
+
+    Raises:
+        OSError: 启动失败（含可执行文件不存在、早期退出）。
+    """
+    command = [str(item) for item in argv]
+    if not command:
+        msg = "launch_detached 需要非空 argv"
+        raise ValueError(msg)
+    platform = resolve_platform_name()
+    kwargs: dict[str, Any] = {}
+    if platform == PLATFORM_POSIX:
+        kwargs["start_new_session"] = True
+    handle: subprocess.Popen[bytes] = subprocess.Popen(
+        windows_command_line(command) if platform == PLATFORM_WINDOWS else command,
+        cwd=None if cwd is None else str(cwd),
+        env=env,
+        shell=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **kwargs,
+    )
+    deadline = time.monotonic() + max(0.0, watch_seconds)
+    while time.monotonic() < deadline:
+        code = handle.poll()
+        if code is not None:
+            msg = f"启动后立刻退出（退出码 {code}）：{Path(command[0]).name}"
+            raise OSError(msg)
+        time.sleep(0.05)
+
+
 def resolve_platform_name(platform: str | None = None) -> str:
     """终止策略用哪一套：显式给 ``windows`` / ``posix``，否则按当前系统。"""
     if platform:

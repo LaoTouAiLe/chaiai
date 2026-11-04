@@ -107,7 +107,7 @@ test('轨迹表头贴住滚动区域，上滑不会压缩顶部栏', async ({ pa
   const messages: Snapshot['messages'] = Array.from({ length: 60 }, (_, i) => ({
     kind: 'tool' as const, message_id: `tm${i}`, tool: { tool_call_id: `t${i}`, tool_name: 'read_file',
       status: 'ok' as const, redacted_arguments: { path: `file${i}.txt` }, truncated: false,
-      output_preview: `结果${i}`, elapsed_ms: 12 },
+      output_preview: `结果${i}`, elapsed_ms: 12, delegation_scope: '' },
   }))
   await backend(page, { ...base, messages })
   await page.getByRole('tab', { name: '轨迹', exact: true }).click()

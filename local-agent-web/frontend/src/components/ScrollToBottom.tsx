@@ -17,9 +17,16 @@ interface ScrollToBottomProps {
   resetKey: string
   /** 距容器底部的像素：设置里让开吸底操作栏，会话里紧贴滚动区底部。 */
   offsetBottom?: number
+  /**
+   * 点击时先通知调用方（2026-11-03）。
+   *
+   * 平滑滚动只是个动画，目标高度在点击那一刻就定死了；内容还在增长时（流式回答）
+   * 动画结束时目标已经过时，停在半路。是否继续跟随属于调用方的状态，组件不猜。
+   */
+  onJump?: () => void
 }
 
-export function ScrollToBottom({ paneRef, resetKey, offsetBottom }: ScrollToBottomProps) {
+export function ScrollToBottom({ paneRef, resetKey, offsetBottom, onJump }: ScrollToBottomProps) {
   const [visible, setVisible] = useState(false)
 
   const measure = useCallback(() => {
@@ -63,6 +70,7 @@ export function ScrollToBottom({ paneRef, resetKey, offsetBottom }: ScrollToBott
       onClick={() => {
         const pane = paneRef.current
         if (pane === null) return
+        onJump?.()
         pane.scrollTo({ top: pane.scrollHeight, behavior: 'smooth' })
       }}
     >

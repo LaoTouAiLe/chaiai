@@ -7,6 +7,7 @@
   display: grid;
   place-items: center;
   background: var(--c-scrim);
+  backdrop-filter: var(--dsw-mask-blur);
   /* 2026-10-26：滚到边界后不要沿 DOM 链把滚轮传给背后的页面。
      完整修复还需要组件里锁 body（overlay 本身不可滚动时这条不生效），两处配合见组件注释。 */
   overscroll-behavior: contain;
@@ -18,10 +19,10 @@
 .dialog {
   display: flex;
   flex-direction: column;
-  width: min(1100px, calc(100vw - 32px));
+  width: min(960px, calc(100vw - 48px));
   height: min(800px, calc(100dvh - 32px));
   /* 2026-10-22 V4：24px 圆角收到 10px，阴影统一到 --sh-overlay（§2.5 / §2.6） */
-  border-radius: 18px;
+  border-radius: 28px;
   background: var(--c-canvas);
   box-shadow: var(--sh-overlay);
   overflow: hidden;
@@ -29,14 +30,7 @@
 }
 
 .header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: var(--law-space-md) var(--law-space-xl);
-  padding: 24px 28px;
-  border-bottom: 1px solid var(--law-border-l1);
-  background: var(--c-raised);
+display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; padding: 20px 24px; border-bottom: 1px solid var(--c-line); background: var(--c-raised);
 }
 
 .headerText {
@@ -60,7 +54,7 @@
   min-width: 0;
   padding: 0 var(--law-space-lg);
   border: 1px solid var(--c-line);
-  border-radius: 9px;
+  border-radius: var(--r-control);
   background: var(--c-panel);
   color: var(--law-text-primary);
   font: inherit;
@@ -72,10 +66,7 @@
 }
 
 .title {
-  font-size: 22px;
-  line-height: var(--lh-heading);
-  font-weight: 600;
-  letter-spacing: -.035em;
+font-size: 20px; line-height: 28px; font-weight: 500; letter-spacing: -.4px;
 }
 
 .subtitle {
@@ -214,12 +205,12 @@
 .nav {
   display: flex;
   flex-direction: column;
-  gap: 22px;
+  gap: 20px;
   min-height: 0;
   overflow-y: auto;
   /* 滚到顶/底就停住，别把滚轮传给背后的会话区（2026-10-26）。 */
   overscroll-behavior: contain;
-  padding: 24px 12px;
+  padding: 20px 12px;
   border-right: 1px solid var(--c-line);
   background: var(--c-panel);
 }
@@ -345,9 +336,9 @@
    弹窗底是 --c-canvas（白），卡片用 --c-panel（灰），靠明度差就够，不需要框线。 */
 .card {
   padding: var(--sp-5);
-  border: 0;
+  border: 1px solid var(--c-line);
   border-radius: var(--r-panel);
-  background: var(--c-sunken);
+  background: var(--c-raised);
 }
 
 .cardHead {
@@ -416,7 +407,7 @@
 .cardId {
   flex: 0 0 auto;
   margin-left: auto;
-  color: var(--c-text-off);
+  color: var(--c-text-3);
   font-family: var(--font-mono-code);
   font-size: var(--fs-caption);
   line-height: 18px;
@@ -573,6 +564,7 @@
 .cardActions,
 .confirm {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--law-space-md);
   margin-top: var(--law-space-lg);
@@ -592,6 +584,8 @@
 
 .action,
 .cancel {
+  flex-shrink: 0;
+  white-space: nowrap;
   height: 30px;
   padding: 0 var(--law-space-xl);
   border: 1px solid var(--law-border-l2);
@@ -607,6 +601,8 @@
 }
 
 .actionDanger {
+  flex-shrink: 0;
+  white-space: nowrap;
   height: 30px;
   margin-left: auto;
   padding: 0 var(--law-space-xl);
@@ -656,9 +652,7 @@
 }
 
 .tabSelected {
-  background: var(--c-accent-soft);
-  color: var(--c-accent);
-  font-weight: 550;
+background: var(--c-active); color: var(--c-text-1); font-weight: 500;
 }
 
 /* ---- permissions (T38) -------------------------------------------------- */
@@ -920,4 +914,31 @@
 
 @media (max-width: 520px) {
   .formGrid { grid-template-columns: minmax(0, 1fr); }
+  .card { padding: 16px; }
+  .cardHead { flex-wrap: wrap; gap: 6px; }
+  .cardName { flex: 1 1 100%; }
+  .cardModel { max-width: 100%; }
+  .cardActions { gap: 8px; }
+  .action, .cancel, .actionDanger { padding-inline: 10px; }
+}
+
+@media (max-width: 760px) {
+  .overlay { padding: 0; }
+  .dialog { width: 100vw; height: 100dvh; border: 0; border-radius: 0; }
+  .nav { flex-wrap: nowrap; overflow-x: auto; padding: 8px 16px; }
+  .navGroup { flex: none; }
+  .tab { min-height: 32px; }
+}
+
+/* One usable category selector on narrow windows, rather than a long horizontal tab strip. */
+.searchWrap { position: relative; }
+.searchInput { padding-right: 34px; }
+.clearSearch { position: absolute; right: 6px; display: grid; place-items: center; width: 24px; height: 24px; border-radius: 6px; color: var(--c-text-3); }
+.clearSearch:hover { background: var(--c-hover); color: var(--c-text-1); }
+.mobileNavigation { display: none; }
+@media (max-width: 760px) {
+  .nav { display: none; }
+  .mobileNavigation { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--c-line); background: var(--c-panel); font-size: 12px; color: var(--c-text-3); }
+  .mobileNavigation select { flex: 1; min-width: 0; height: 34px; padding: 0 10px; border: 1px solid var(--c-line); border-radius: 10px; color: var(--c-text-1); background: var(--c-canvas); font: inherit; font-size: 13px; }
+  .panes { padding: 20px 16px 0; }
 }

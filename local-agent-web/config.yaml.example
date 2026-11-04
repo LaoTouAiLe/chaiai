@@ -270,6 +270,11 @@ agent:
   max_tool_loops: null
   max_retries_per_step: 2
   require_evidence_for_completion: false
+  # 改完代码却没跑通任何验证就想收尾时，推一次提醒（2026-11-04）。
+  #
+  # 默认 false：每次提醒会多花一轮模型调用。打开后是**提醒不是拦截**——不判失败、不换掉
+  # 模型给出的回答，最多 2 次，且只对代码文件触发（改 README/文档不会要求跑测试）。
+  verify_on_stop: false
 
 # Agent 能力档位（v0.5 T50，契约 §16.1；2026-10-13 起**只给出厂默认**）。
 #
@@ -421,7 +426,7 @@ jobs:
 # 否则启动校验直接拒绝（不允许"改了就暴露到公网"这种静默升级）。
 web:
   host: "127.0.0.1"
-  port: 8000
+  port: 8731
   allow_non_loopback: false
   # 允许的 Host 头（防 DNS rebinding）；非回环部署时把域名写进来。
   allowed_hosts:
@@ -440,6 +445,66 @@ web:
   sse_idle_timeout_seconds: 300    # SSE 空闲上限：超过则关闭该连接（不取消任务）
   sse_max_pending_events: 200      # 单次排空超过它就判定客户端落后：结束订阅并要求重连
   keepalive_seconds: 15            # HTTP keep-alive 超时（uvicorn timeout_keep_alive）
+
+# 移动访问与多通道（2026-11-03，架构 §24）。
+#
+# **默认关闭**，且关闭时不起任何进程、不占端口、不写任何文件——这一节存在与否不影响现有安装。
+# 打开后是一个**独立进程**（`python -m local_agent.mobile`），不是主服务的一部分：
+# 它崩了不影响正在跑的任务，关掉它主服务照旧只听回环。
+#
+# 主服务**不需要**改 host、也不需要打开 allow_non_loopback：网关反代时把 Host/Origin
+# 改写成 127.0.0.1:<web.port>，所以 §15.3 的同源校验原样生效，不给主服务开豁免。
+#
+# gateway_host / gateway_port 是网关自己的监听面，固定回环；它必须与 web.port 不同
+# （相同会变成"网关反代到自己"，配置校验直接拒绝）。
+mobile:
+  enabled: false
+  gateway_host: "127.0.0.1"
+  gateway_port: 8732
+  # 短期配对码有效期（秒）。超时重生成；重新生成即作废旧码。
+  pairing_ttl_seconds: 300
+  # 是否转发终端的 WebSocket。默认开——远程执行 terminal 与远程执行 HTTP 接口是同级权限，
+  # 单独关它并不会更安全。留这个开关是为了**排查**：某条隧道下 WS 表现异常时，关掉它让页面
+  # 其余部分先能用，而不是整条通道下线。
+  ws_enabled: true
+  # 通道：每项独立开关、独立配对、独立设备授权。
+  # 局域网授权不等于远程授权——不要把它们理解成同一个总开关。
+  #   lan         自签 CA + 网卡枚举，只在同一 Wi-Fi/热点下可用，延迟最低
+  #   tailscale   调 `tailscale serve`，证书由它签发；只在你的 tailnet 内可达，不暴露公网
+  #   cloudflared mode: quick（随机临时域名，**不支持 SSE**，流式会退化）| named（固定域名，需账号）
+  #   cpolar / frp 后置：没有域名也没有 Tailscale 时的兜底，首批不实现
+  channels:
+    - type: lan
+      enabled: false
+      # 局域网端口。它是同一进程的**第二个监听**（回环上是 gateway_port），所以两者不能相同。
+      port: 8743
+      # 是否用 HTTPS（默认 false）。
+      #   false ＝ 明文 http：手机打开就能用，不弹证书警告。代价写清楚——**同一网段里的其他人
+      #           可以在链路上看到你与这个 Agent 的全部通信内容**（包括你发的每一条消息）。
+      #           自己家、可信办公网够用。
+      #   true  ＝ 自签证书 https：每台手机首次（或清缓存后）要点一次"仍要继续访问"。
+      #           咖啡厅、公司访客网这类环境请打开它。
+      # 远程通道（tailscale / cloudflared）不受这一项影响：它们永远是 https。
+      tls: false
+    - type: tailscale
+      enabled: false
+      # 需要电脑装好 Tailscale 并 `tailscale up` 登录。
+      #   serve  = 只有登录同一个 tailnet 的设备能访问（更安全，手机也要装 Tailscale）
+      #   funnel = 公网可达（手机免安装，安全全压在配对码与设备 Token 上；dsh-mobile 用的这种）
+      # 域名由 Tailscale 自动签发（你的机器名.xxx.ts.net），不需要自己配证书。
+      expose: "serve"
+      # 对外 HTTPS 端口。Tailscale 只放行 443 / 8443 / 10000（它的硬件策略），443 被占用时换后两个。
+      https_port: 443
+    - type: cloudflared
+      enabled: false
+      mode: "named"                # named（推荐，固定域名）| quick（测试用）
+      hostname: ""                 # named 模式下必填，例如 "agent.example.com"
+    # - type: cpolar
+    #   enabled: false
+    # - type: frp
+    #   enabled: false
+  # 配对记录、设备 Token 摘要与证书**不在这里**：它们是网关的运行状态，落在
+  # data_root/mobile/ 下。这里手改它们不会生效，撤销请走设置页（手改也不会断开在线连接）。
 
 # 确定性工作流（v0.7 T65–T67，架构 §18.2/§18.3/§18.5）与自主委派（§18.7）。
 #

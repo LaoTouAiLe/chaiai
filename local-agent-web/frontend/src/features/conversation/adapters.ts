@@ -232,6 +232,8 @@ function outcomeCard(tool: ToolUse, outcome: ToolOutcome): ToolCardView {
       // 报告正文只作有界预览摆在同一张卡里。
       return {
         kind: 'delegation',
+        // 已经跑完：占位行让位给真实结局，避免同一路子任务出现两次。
+        pending: [],
         children: (outcome.children ?? []).map((child) => ({
           scope: child.scope,
           status: child.status === 'completed' ? 'completed' : 'failed',
@@ -239,6 +241,17 @@ function outcomeCard(tool: ToolUse, outcome: ToolOutcome): ToolCardView {
           modelCalls: child.model_calls ?? 0,
           evidenceCount: child.evidence_count ?? 0,
           changedFiles: child.changed_files ?? 0,
+          // 缺字段给 null 而不是 0：0 毫秒是"它瞬间跑完了"这个断言，与"没记录"是两件事。
+          elapsedMs: child.elapsed_ms ?? null,
+          goal: child.goal ?? '',
+          // 这一路自己的工具链（2026-11-04）：服务端从进程内实时表回填，保留 30 分钟。
+          // 空数组就是"没有记录"，页面如实说明，不编造。
+          tools: (child.tools ?? []).map((tool) => ({
+            name: tool.name,
+            summary: '',
+            status: tool.status ?? '',
+            target: tool.target === undefined || tool.target === '' ? null : tool.target,
+          })),
           error: child.error ?? null,
         })),
         report: outcome.text ?? '',
@@ -330,6 +343,8 @@ export function mapTool(tool: ToolUse): ToolRowView {
     // 轨迹视图与对话行看的是同一次调用：这里把契约里有、卡片用不到的字段如实带上，
     // 免得轨迹再去别处拼一份可能对不上的数据。
     toolCallId: tool.tool_call_id,
+    // 子任务的调用（2026-11-04）：非空就是它属于哪一路，`mapMessages` 据此把它收进对应卡片。
+    delegationScope: tool.delegation_scope ?? '',
     // 运行中的行要"已跑多久"：给原始时间戳，页面按本地时钟算，而不是只拿一个排好版的时长。
     startedAt: tool.started_at ?? undefined,
     parameters,
@@ -363,6 +378,16 @@ export function mapTool(tool: ToolUse): ToolRowView {
           output: preview,
           collapsedLines: 0,
         }
+        : outcome === null && tool.tool_name === 'delegate_research'
+        // 委派刚发起、还没结果（2026-11-04）：先把 N 路子任务摊成"进行中"的行。
+        // 否则用户只能看到一张泛泛的"自主委派调查"，等全部跑完才知道派了几路、分别看哪里。
+        ? {
+          kind: 'delegation',
+          children: [],
+          pending: pendingDelegationScopes(tool.redacted_arguments),
+          report: preview,
+          truncated: tool.truncated === true,
+        }
         : outcome === null
         ? {
           kind: 'generic',
@@ -380,6 +405,26 @@ export function mapTool(tool: ToolUse): ToolRowView {
  * 详情」——用户实拍反馈"什么都没有"。这里与 `run_shell` 在无 outcome 时同一条口径：
  * 用**投影层已脱敏的参数**说明这次改了什么，不解析任何结果正文（结果里没有可展示内容）。
  */
+/**
+ * 委派刚发起时，从工具入参里取"要跑哪几个目录"（2026-11-04）。
+ *
+ * 服务端把 `tasks` 压成了 JSON 数组字符串（只含 `scope`，见 `projection._display_arguments`）。
+ * 这里只解析与容错：解析不出来就是"不知道要跑几路"，退化成一张不带子行的卡——**不编造**。
+ */
+function pendingDelegationScopes(
+  args: Record<string, string> | null | undefined,
+): readonly string[] {
+  const raw = args?.tasks
+  if (raw === undefined || raw === '') return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+  } catch {
+    return []
+  }
+}
+
 function memoryCard(args: Record<string, string>): ToolCardView {
   const target = args.target === 'user' ? '用户画像 USER.md' : '我的笔记 MEMORY.md'
   const action = args.action ?? (args.operations === undefined ? '' : 'batch')
@@ -488,6 +533,8 @@ export function mapMessages(snapshot: Snapshot, tail: StreamTail | null = null):
   // 上下文压缩落在哪一轮（2026-10-16）：压缩发生在**这一轮的开头**（上下文到线才压，压完才开始干活），
   // 所以它挂在那一轮的用户消息之后——与 Think、工具行同一条时间线。依据是那一轮的 `events`
   // 里的 compaction 记录（落 Checkpoint，刷新可读），不是猜。
+  // 子任务的工具行按目录分组（2026-11-04）：委派跑完才把事件并回父轮次，所以这里能一次拿全。
+  const subagentTools = new Map<string, ToolRowView[]>()
   const compactionByUser = new Map<string, CompressionRowView>()
   for (const turn of snapshot.turn_usages ?? []) {
     const compaction = (turn.events ?? []).find((event) => event.kind === 'compaction')
@@ -547,9 +594,20 @@ export function mapMessages(snapshot: Snapshot, tail: StreamTail | null = null):
             ? tail.channel ?? message.stream_channel : message.stream_channel) === 'reasoning',
         })
         break
-      case 'tool':
-        mapped.push({ kind: 'tool', id: message.message_id, tool: mapTool(message.tool) })
+      case 'tool': {
+        const tool = mapTool(message.tool)
+        // 子任务的调用（2026-11-04）：**不进时间线**。它们是那一路的调查过程，
+        // 收进它自己的卡片里才对得起来；摊在主时间线上会让一轮对话多出十几行无关的工具调用。
+        const laneScope = tool.delegationScope ?? ''
+        if (laneScope !== '') {
+          const bucket = subagentTools.get(laneScope)
+          if (bucket === undefined) subagentTools.set(laneScope, [tool])
+          else bucket.push(tool)
+          break
+        }
+        mapped.push({ kind: 'tool', id: message.message_id, tool })
         break
+      }
       case 'error':
         mapped.push({ kind: 'error', id: message.message_id, notice: mapError(message.error) })
         break
@@ -562,6 +620,26 @@ export function mapMessages(snapshot: Snapshot, tail: StreamTail | null = null):
       }
       default:
         break
+    }
+  }
+  // 把每一路的调查过程挂回它自己的子卡片（2026-11-04）。
+  // 必须在整轮消息映射完之后做：子任务的工具事件时间上早于委派完成，遇到委派那条时它们还没读到。
+  if (subagentTools.size > 0) {
+    for (const view of mapped) {
+      if (view.kind !== 'tool' || view.tool.card.kind !== 'delegation') continue
+      const card = view.tool.card
+      view.tool.card = {
+        ...card,
+        children: card.children.map((child) => ({
+          ...child,
+          tools: (subagentTools.get(child.scope) ?? []).map((row) => ({
+            name: row.name,
+            summary: row.summary,
+            status: row.status,
+            target: row.target,
+          })),
+        })),
+      }
     }
   }
   if (tail !== null && (tail.text !== '' || (tail.reasoning ?? '') !== '') &&

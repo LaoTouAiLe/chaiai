@@ -267,6 +267,8 @@ def open_runtime(
             skills=None if settings is None else settings.skills,
             # MCP 的开关存储与连接管理器（2026-10-20）：两者都可能为 None（没库 / 总开关关着）。
             mcp=None if settings is None else settings.mcp,
+            # 移动访问配置（2026-11-03，§24）：与上面同源，没有库时页面只读、值等于 config.yaml。
+            mobile_settings=None if settings is None else settings.mobile,
             mcp_manager=mcp_manager,
             # 重载与错误回报都要读这份文件；位置与 config.yaml 同目录。
             mcp_config_path=base_dir / DEFAULT_MCP_PATH,

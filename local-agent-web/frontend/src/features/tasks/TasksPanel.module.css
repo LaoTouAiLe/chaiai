@@ -6,7 +6,7 @@
   min-height: 0;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 36px clamp(20px, 4vw, 64px);
+  padding: 32px clamp(20px, 4vw, 56px);
   background: var(--c-canvas);
 }
 .eyebrow { display: block; margin-bottom: 8px; color: var(--law-text-tertiary); font-size: var(--law-text-fixed-sm); }
@@ -20,11 +20,11 @@
 
 .title {
   margin: 0;
-  font-size: 28px;
+  font-size: var(--fs-heading);
   line-height: var(--lh-heading);
-  font-weight: var(--law-weight-semibold);
+  font-weight: 500;
   color: var(--law-text-primary);
-  letter-spacing: -.035em;
+  letter-spacing: 0;
 }
 
 .note {
@@ -44,7 +44,7 @@
   color: var(--law-text-secondary);
   background: var(--c-panel);
   border: 1px solid var(--law-border-l2);
-  border-radius: 8px;
+  border-radius: var(--r-control);
   cursor: pointer;
 }
 

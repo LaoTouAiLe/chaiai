@@ -78,6 +78,9 @@ INFINITE = 0xFFFFFFFF
 
 GENERIC_WRITE = 0x40000000
 GENERIC_READ = 0x80000000
+#: 把**已存在**的进程装进 Job 需要的访问权（``AssignProcessToJobObject`` 要求 PROCESS_SET_QUOTA）。
+PROCESS_TERMINATE = 0x0001
+PROCESS_SET_QUOTA = 0x0100
 #: ``GetStdHandle`` 的标准句柄号（无符号 32 位写法）。
 STD_ERROR_HANDLE = 0xFFFFFFF4
 STD_INPUT_HANDLE = 0xFFFFFFF6
@@ -1034,6 +1037,32 @@ def _attach_kill_on_close_job(process_handle: int) -> int | None:
         return ctypes.get_last_error()
     _LIVE_JOBS.append(int(job))
     return None
+
+
+def attach_pid_to_kill_on_close_job(pid: int) -> str | None:
+    """把**已经启动**的进程装进 ``KILL_ON_JOB_CLOSE`` 的 Job；成功返回 ``None``。
+
+    与 :func:`_attach_kill_on_close_job` 的分工：那个在"挂起创建"路径上直接拿句柄；这个给
+    ``subprocess.Popen`` 之后才拿到 pid 的调用方用（移动网关就是这一种）。
+
+    **为什么需要它**：不装 Job 的话，宿主被强杀（任务管理器、IDE 崩溃）之后子进程会活下来。
+    对一个"远程访问入口"来说，那意味着用户以为关掉了远程访问，手机其实还能连进来——这不是
+    不便，是安全问题。
+
+    **句柄故意不关**：Job 在最后一个句柄关闭时杀掉里面的全部进程，而"持有句柄的进程退出"
+    正是我们要的时机。
+    """
+    try:
+        _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        _kernel32.OpenProcess.restype = wintypes.HANDLE
+        handle = _kernel32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, False, pid)
+    except (AttributeError, OSError) as exc:  # pragma: no cover - 平台/权限异常
+        return f"OpenProcess 失败：{exc}"
+    if not handle:
+        return f"OpenProcess 失败：Win32 错误 {ctypes.get_last_error()}"
+    error = _attach_kill_on_close_job(int(handle))
+    _kernel32.CloseHandle(handle)
+    return None if error is None else f"装入 Job 失败：Win32 错误 {error}"
 
 
 def _release_completed_jobs() -> None:

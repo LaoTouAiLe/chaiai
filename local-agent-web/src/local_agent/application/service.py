@@ -47,6 +47,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import TypeAdapter
 
 from local_agent import config as config_module
+from local_agent import desktop_apps
 from local_agent.application import artifacts as artifacts_module
 from local_agent.application import (
     conversation,
@@ -116,6 +117,11 @@ from local_agent.application.models import (
     WebSearchKeyView,
     WorkspaceRef,
 )
+from local_agent.application.open_in_app_models import (
+    OpenInAppItemView,
+    OpenInAppResultView,
+    OpenInAppView,
+)
 from local_agent.application.recovery import (
     TASK_TERMINAL_STATUSES,
     JobVerdict,
@@ -175,6 +181,7 @@ from local_agent.model_settings import (
     ConnectionDraft,
     ConnectionStore,
     McpServerStore,
+    MobileSettingsStore,
     ModelBinding,
     ModelConnection,
     PermissionStore,
@@ -668,6 +675,9 @@ class ApplicationService:
         #: 每台 MCP Server 的开关与工具名单（2026-10-20；契约 §6.13）。``None`` = 没有设置库
         #: 或该功能没接线：此时所有 server 按"关"处理，页面不提供开关。
         mcp: McpServerStore | None = None,
+        #: 移动访问配置（2026-11-03，§24）。``None`` = 没有设置库：页面只读，值与
+        #: ``config.yaml`` 一致，保存回 503 并说明原因（与其它 store 同一口径）。
+        mobile_settings: MobileSettingsStore | None = None,
         #: MCP 连接管理器（由容器创建并 ``start()``）。**故意用 ``Any``**：它的类型来自
         #: ``mcp.manager``，而那个模块会导入 ``mcp`` SDK——服务层不该为了一个注解把 SDK 拉进来。
         mcp_manager: Any = None,
@@ -710,6 +720,9 @@ class ApplicationService:
         #: MCP 的开关存储与连接管理器（2026-10-20）。两者都为 ``None`` 时，``mcp`` 能力不会进
         #: 有效集合（`build_runtime_context` 的 `mcp_available`），行为与接入前一致。
         self._mcp = mcp
+        #: 移动访问配置（2026-11-03，§24）。``None`` = 没有设置库：``config.yaml`` 就是唯一来源，
+        #: 页面只读并如实说明"保存不可用"。
+        self._mobile_settings = mobile_settings
         self._mcp_manager = mcp_manager
         self._mcp_config_lock = threading.RLock()
         self._mcp_config_path = None if mcp_config_path is None else Path(mcp_config_path)
@@ -1029,12 +1042,15 @@ class ApplicationService:
                                           offset=offset, limit=limit, refresh=refresh)
 
     def preview_artifact(self, *, path: str, workspace_id: str | None = None,
-                         scope: str = "workspace") -> ArtifactPreviewView:
+                         scope: str = "workspace", offset: int = 0,
+                         page: int = 1, presentation: str = "text", sheet: str | None = None) -> ArtifactPreviewView:
         """预览一条产物的内容（§15.11.3）：只读、有大小上限、不碰外链。
 
         `scope` 决定路径相对谁：`workspace`（默认）或 `attachments`（附件根）。
+        `offset` / `page` 是**分页**参数（2026-11-03）：一页 20,000 字符 / 文档 5 页。
         """
-        return artifacts_module.preview(self, path=path, workspace_id=workspace_id, scope=scope)
+        return artifacts_module.preview(self, path=path, workspace_id=workspace_id, scope=scope,
+                                        offset=offset, page=page, presentation=presentation, sheet=sheet)
 
     # ---- 右栏只读面板（§21.6，2026-10-22）--------------------------------
     def list_workspace_files(self, *, path: str = "",
@@ -1054,6 +1070,46 @@ class ApplicationService:
     def workspace_git_diff(self, *, path: str,
                            workspace_id: str | None = None) -> GitDiffView:
         return workspace_view.git_diff(self, path=path, workspace_id=workspace_id)
+
+    # ---- 右栏「打开方式」（2026-11-03）------------------------------------
+    def open_in_app_apps(self) -> OpenInAppView:
+        """本机可用的打开方式清单。**探测结果只说明有什么可用，不做任何启动。**"""
+        apps = desktop_apps.available_apps()
+        items = [
+            OpenInAppItemView(
+                id=app.id, label=app.label,
+                icon_url=f"/api/open-in-app/icon/{app.id}" if app.icon_source else None,
+            )
+            for app in apps
+        ]
+        return OpenInAppView(
+            available=bool(items), apps=items,
+            reason=None if items else "没有探测到本机可用的应用。",
+        )
+
+    def open_in_app_icon(self, app_id: str) -> bytes | None:
+        """某个应用的 32px 图标（PNG）。取不到返回 ``None``，路由据此回 404。"""
+        return desktop_apps.icon_png(app_id)
+
+    def open_with_app(self, *, app_id: str, path: str,
+                      workspace_id: str | None = None) -> OpenInAppResultView:
+        """用本机应用打开一个**工作区内**的文件（§15.11.4）。
+
+        路径边界与预览同一条：``resolve()`` 之后必须仍在工作区根之下。这里的"执行"只是
+        启动用户自己的程序，**不执行被预览的内容**，也不接受任何命令参数——参数来自服务端目录。
+        """
+        root = Path(self._path_for_workspace_id(workspace_id) if workspace_id
+                    else self._workspace_root).resolve()
+        candidate = Path(path)
+        target = (candidate if candidate.is_absolute() else root / candidate).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError:
+            raise PermissionError("只能打开工作区内的文件。") from None
+        if not target.is_file():
+            raise LookupError("文件不存在，可能已被删除。")
+        app = desktop_apps.open_with(app_id, target)
+        return OpenInAppResultView(app_id=app.id, app_label=app.label)
 
     # ---- 记忆维护（2026-11-02，架构 §10.3）--------------------------------
     @property
@@ -2073,6 +2129,50 @@ class ApplicationService:
                 )
             ],
         )
+
+    # ---- 移动访问配置（2026-11-03；§24）--------------------------------------
+
+    def effective_mobile_config(self) -> tuple[config_module.MobileConfig, bool]:
+        """生效的 ``mobile`` 配置，以及它是否来自设置库。
+
+        **设置库优先、``config.yaml`` 是出厂默认**——与能力开关、MCP 开关同一口径：用户在页面上
+        改过就以页面为准，重启之后读到的仍是用户的选择，而不是被配置文件盖回去。
+        """
+        base = self._app_config.mobile
+        store = self._mobile_settings
+        if store is None:
+            return base, False
+        stored = self._sqlite_access(store.read)
+        if not stored:
+            return base, False
+        try:
+            merged = {**base.model_dump(), **stored}
+            return config_module.MobileConfig.model_validate(merged), True
+        except ValueError:
+            # 坏值不该让移动访问整个从页面上消失：退回配置文件并留日志，比"配置丢失"好查得多。
+            _LOGGER.warning("设置库里的 mobile 配置无法解析，已退回 config.yaml", exc_info=True)
+            return base, False
+
+    def save_mobile_config(
+        self, config: config_module.MobileConfig
+    ) -> tuple[config_module.MobileConfig, bool]:
+        """保存整段 ``mobile`` 配置；返回保存后的生效值与来源。
+
+        **整段覆盖而不是逐项合并**：页面就是一张表单，逐项写会让"改端口 + 关通道"变成多次写入，
+        中间失败一次就留下一份自相矛盾的配置。
+
+        Raises:
+            ApplicationError: 没有可用设置库。
+        """
+        store = self._mobile_settings
+        if store is None:
+            raise app_errors.model_settings_invalid(
+                detail="设置库不可用：移动访问配置只能改 config.yaml，改完重启服务。",
+                occurred_at=_now(),
+            )
+        payload = config.model_dump()
+        self._sqlite_access(lambda: store.write(payload))
+        return self.effective_mobile_config()
 
     def capability_switches(self) -> dict[str, bool]:
         """当前生效的完整开关表（§16.1）：**设置库优先、``config.yaml`` 只是出厂默认**。
