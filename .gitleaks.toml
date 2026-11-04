@@ -23,3 +23,18 @@ paths = [
   '''.*\.example''',
   '''.*\.md''',
 ]
+
+# 兼容性基线里的哈希不是凭据（2026-11-03）。
+#
+# `generic-api-key` 只看"字段名像 key + 值熵高"，于是把
+#
+#     "openapi_sha256": "…64 位十六进制…"
+#
+# 判成泄露。这个**不能靠改字段名解决**：它是基线契约的一部分，改名等于基线失效。
+# 所以只放过"这一个字段 + 这一种形状"，而不是把整个 docs 目录排除在扫描之外——
+# 上面那条 `docs/.*` 已经足够粗，不要再扩大它的面积。
+[[allowlists]]
+description = "compatibility-baseline.json 的 openapi_sha256 是哈希，不是凭据"
+paths = ['''docs/release/compatibility-baseline\.json''']
+regexTarget = "match"
+regexes = ['''"openapi_sha256"\s*:\s*"[0-9a-f]{64}"''']

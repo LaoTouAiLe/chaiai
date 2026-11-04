@@ -45,3 +45,7 @@ local-agent-web/frontend/e2e/__screenshots__.bak/
 # 本机专用的 Playwright / 审查配置与产物
 **/*.local.config.ts
 .review-artifacts/
+
+# Local dependency download cache
+.npm-cache/
+local-agent-web/preview-runtime/node_modules/
