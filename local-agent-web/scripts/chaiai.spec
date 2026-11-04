@@ -112,6 +112,22 @@ for _package in ("pypdf", "docx", "openpyxl", "pptx"):
     binaries += _bin
     hiddenimports += _hidden
 
+# 屏幕能力（2026-11-04）：`uiautomation` 与 `comtypes` 都是**函数内延迟导入**
+# （`screen_uia.available()` / `screen_input.available()` 里 `import uiautomation`），
+# PyInstaller 的静态分析看不见。2026-11-04 实测：首次打包后 `_internal/uiautomation`
+# 与 `_internal/comtypes` **都不存在**，冻结后的表现是"截屏能用、读控件树与点击全部报
+# 不可用"（`available()` 捕到 ImportError 就当平台不支持）。
+# comtypes 还会在运行时动态生成 `comtypes.gen`，因此整包收集而不是逐个 hiddenimports。
+for _package in ("uiautomation", "comtypes"):
+    try:
+        _data, _bin, _hidden = collect_all(_package)
+    except Exception:
+        continue
+    datas += _data
+    binaries += _bin
+    hiddenimports += _hidden
+hiddenimports += ["comtypes.client", "comtypes.stream"]
+
 # 桌面窗口（2026-10-23）：pywebview 的 Windows 后端是"按平台字符串导入"的
 # （`webview.platforms.winforms` / `edgechromium`），静态分析看不到；它自带的
 # WebView2 程序集（Microsoft.Web.WebView2.*.dll、WebBrowserInterop.*.dll）也在 `webview/lib/` 下，
