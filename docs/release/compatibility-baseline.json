@@ -1,7 +1,7 @@
 {
   "api_version": "0.4.0",
-  "config_defaults_sha256": "aee64a6a69e23226b0a96c028dcdf086da751a652cbb10a776e850aa5560bc3a",
-  "config_schema_sha256": "20023e66c4d8d928ebbb1d387a5ff5763b7cbc61d4c7340bf1eef40d2a90e6d5",
+  "config_defaults_sha256": "76d6dea9cdf26824fb9c5e47f39b263d9d506f04589cda48369fcd745e70ba95",
+  "config_schema_sha256": "e14f687b5a5e1f8dfc8be51e0fee7168a7281949dc089abc1a8ff650efb81b8c",
   "database_versions": {
     "chat": 18,
     "long_term": 3,
@@ -48,7 +48,7 @@
     "task_cancelled"
   ],
   "manifest_version": 1,
-  "openapi_sha256": "52b9bae7f8dcc7abc6f05c1edec6f59810e677e2c16fa14e53db5c58acae8444",
+  "openapi_sha256": "7d21bb9fc13c5b3ab3153e746f485f727de48d3613a3ffa1ca75d68168e61b17",
   "package_version": "0.2.0",
   "release_status": "candidate",
   "release_target": "1.0.0"
