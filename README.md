@@ -65,7 +65,7 @@ cd ..
 uv run python -m local_agent.api
 ```
 
-Open http://127.0.0.1:8000 . For development, run `npm run dev` in `frontend/` (5173, proxied to 8000).
+Open http://127.0.0.1:8731 . For development, run `npm run dev` in `frontend/` (5173, proxied to 8731).
 Prefer a desktop window over a browser tab: `uv run python -m local_agent.api --window`.
 
 Configuration: you can start with no `config.yaml` at all and add a model connection in the UI. If you do want a file,

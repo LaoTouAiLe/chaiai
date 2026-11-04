@@ -112,7 +112,7 @@
     <nav class="breadcrumbs" aria-label="当前位置"><a href="index.html">文档</a><span aria-hidden="true">/</span><span aria-current="page">操作手册</span></nav>
     <p class="kicker">MANUAL · 第 1 章</p>
     <h1>安装与第一次启动</h1>
-    <p class="lead">两条路：用发行包，或从源码跑。两条路最后都得到同一个本机服务 <code>http://127.0.0.1:8000</code>。</p>
+    <p class="lead">两条路：用发行包，或从源码跑。两条路最后都得到同一个本机服务 <code>http://127.0.0.1:8731</code>。</p>
 
     <div class="prose">
       <h2>需要什么</h2>
@@ -131,14 +131,14 @@ npm run build
 cd ..
 uv run python -m local_agent.api</code></pre>
       <p>
-        首次启动会创建本机数据库，之后浏览器打开 <code>http://127.0.0.1:8000</code> 就能进界面。
+        首次启动会创建本机数据库，之后浏览器打开 <code>http://127.0.0.1:8731</code> 就能进界面。
         开发时也可以另开一个终端，在 <code>frontend/</code> 执行 <code>npm run dev</code>，
         用 <code>http://127.0.0.1:5173</code> 访问（<code>/api</code> 会代理到 8000）。
       </p>
 
       <h2>用发行包启动</h2>
       <p>
-        取得发行包后按随包说明安装并启动，入口同样是 <code>127.0.0.1:8000</code>。
+        取得发行包后按随包说明安装并启动，入口同样是 <code>127.0.0.1:8731</code>。
         安装方式、版本要求与升级 / 卸载步骤以随包文档为准。
       </p>
 
@@ -146,7 +146,7 @@ uv run python -m local_agent.api</code></pre>
       <ul>
         <li>终端没有报错，浏览器能打开界面并看到输入框；</li>
         <li>根路径提示「前端产物不存在」时，是还没构建前端——按提示在 <code>frontend/</code> 执行 <code>npm run build</code>，或在开发态用 <code>npm run dev</code>；</li>
-        <li><code>127.0.0.1:8000</code> 只在本机可访问，同一局域网的其他设备打不开，这是设计而不是故障。</li>
+        <li><code>127.0.0.1:8731</code> 只在本机可访问，同一局域网的其他设备打不开，这是设计而不是故障。</li>
       </ul>
 
       <figure>

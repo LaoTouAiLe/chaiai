@@ -29,9 +29,9 @@ cd ..
 uv run python -m local_agent.api
 ```
 
-浏览器打开 http://127.0.0.1:8000。前端构建后刷新；后端更新后重启服务。没有产物时根路径提供构建提示，API 仍可用。Python/Node/npm 版本要求以 `pyproject.toml` 与 `frontend/package.json` 为准，精确依赖由锁文件确定。
+浏览器打开 http://127.0.0.1:8731。前端构建后刷新；后端更新后重启服务。没有产物时根路径提供构建提示，API 仍可用。Python/Node/npm 版本要求以 `pyproject.toml` 与 `frontend/package.json` 为准，精确依赖由锁文件确定。
 
-开发时另开终端，在 `frontend/` 执行 `npm run dev`，访问 http://127.0.0.1:5173；Vite 将 `/api` 代理到后端 :8000。生产运行只需要 Python 服务和前端产物，不启动 Node 服务。T40 旧 EXE 试用包已交付，不能作为 v1.0 新代码的分发验收。
+开发时另开终端，在 `frontend/` 执行 `npm run dev`，访问 http://127.0.0.1:5173；Vite 将 `/api` 代理到后端 :8731。生产运行只需要 Python 服务和前端产物，不启动 Node 服务。T40 旧 EXE 试用包已交付，不能作为 v1.0 新代码的分发验收。
 
 v1.0 候选提供显式诊断：`.venv/Scripts/python.exe -m local_agent.api --diagnose`，
 不启动服务或读取 Key；摘要检查 YAML、静态产物和已有 SQLite，不读取网页配置覆盖。
@@ -287,7 +287,7 @@ npm run test:live      # 真 Python 服务 + 确定性假模型：两轮/刷新/
 npm run test:live:streaming  # 真 SSE 增量、完成与刷新去重
 npm run test:live:variants   # 长回答、空回答与模型异常
 npm run build          # typecheck + vite build → dist/
-npm run dev            # 开发服务器 127.0.0.1:5173，把 /api 代理到 127.0.0.1:8000
+npm run dev            # 开发服务器 127.0.0.1:5173，把 /api 代理到 127.0.0.1:8731
 npm run generate:api   # 从受控 OpenAPI 生成 src/api/schema.gen.ts
 npm run check:api      # 漂移检查：重新生成后必须与已入库的生成文件逐字节相同
 ```
@@ -432,7 +432,7 @@ fixture 与视图模型在 `src/fixtures/`。它们是**展示用视图模型**�
 | `uv run python -m local_agent.api` 直接拒绝启动 | `web.host` 被改成非回环地址，而 `web.allow_non_loopback` 仍为 `false` | 改回 `127.0.0.1`；确实要对外暴露时显式设 `web.allow_non_loopback: true`，并清楚 v0.4 **没有鉴权** |
 | 启动报数据库锁被占 | 已经有同一个库的实例在跑（排他锁 `data/checkpoints.sqlite.api.lock`） | 用已在跑的那个进程，或先把它停掉——同一目录只能有一个 Python 服务（见「单进程、单 worker」） |
 | 启动报“数据库自检失败” | 数据库损坏或无法完成检查，迁移尚未执行 | 停服务并保留原库及 WAL；按上面的自检/备份恢复步骤恢复到新路径，不删除原库或直接建空库 |
-| 打开 `http://127.0.0.1:8000/` 只有一段提示 | 没有构建产物，服务只提供 API | `cd frontend; npm ci; npm run build`，然后刷新 |
+| 打开 `http://127.0.0.1:8731/` 只有一段提示 | 没有构建产物，服务只提供 API | `cd frontend; npm ci; npm run build`，然后刷新 |
 | `npm run dev` 起不来（端口 5173） | Vite 配了 `strictPort` | 停掉占用 5173 的进程；不要靠改端口绕过，代理目标写死在 `vite.config.ts` |
 | 页面出现「事件流提示：stream_idle_timeout / stream_overrun」 | 服务端主动结束了这条 SSE 连接（长时间无事件 / 客户端读得太慢） | 前端会自动重连并先取快照，**任务不会被取消**；偶发可忽略，持续出现看服务端日志 |
 | 页面出现「事件流提示：snapshot_refresh_failed」 | 对账用的快照请求失败 | 切会话瞬间的取消是正常行为、不会再报；其他情况先确认后端进程还活着 |

@@ -60,7 +60,7 @@ cd ..
 uv run python -m local_agent.api
 ```
 
-打开 http://127.0.0.1:8000 。开发时在 `frontend/` 跑 `npm run dev`（5173，代理到 8000）。
+打开 http://127.0.0.1:8731 。开发时在 `frontend/` 跑 `npm run dev`（5173，代理到 8731）。
 想要桌面窗口而不是浏览器：`uv run python -m local_agent.api --window`。
 
 配置：首次可以不建 `config.yaml`，直接在网页设置里添加模型连接；需要改文件时从
