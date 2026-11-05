@@ -1,14 +1,14 @@
 {
   "exceptions": {
     "file:application/service.py": {
-      "file_lines": 4679
+      "file_lines": 4780
     },
     "function:api/browsers.py::build_browser_router": {
       "complexity": 24
     },
     "function:api/routes.py::build_router": {
-      "complexity": 102,
-      "function_lines": 906
+      "complexity": 107,
+      "function_lines": 968
     },
     "function:api/terminals.py::build_terminal_router": {
       "complexity": 26
@@ -34,8 +34,14 @@
       "function_lines": 452,
       "nesting": 7
     },
+    "function:mobile/__main__.py::main": {
+      "complexity": 24
+    },
+    "function:mobile/gateway.py::create_gateway": {
+      "complexity": 23
+    },
     "function:security/policy.py::SecurityPolicy.classify_tool": {
-      "complexity": 21
+      "complexity": 23
     },
     "function:security/shell_guard.py::prepare_shell": {
       "complexity": 23
