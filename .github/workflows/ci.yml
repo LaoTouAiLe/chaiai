@@ -121,6 +121,10 @@ jobs:
         os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    env:
+      # 与 backend 同一口径：runner 是 en-US locale，Python 默认 cp1252，打印中文会
+      # UnicodeEncodeError（脚本自己也会 reconfigure，这里是第二道保险）。
+      PYTHONIOENCODING: utf-8
     defaults:
       run:
         working-directory: local-agent-web

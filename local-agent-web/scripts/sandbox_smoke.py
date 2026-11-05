@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import argparse
 import platform
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -67,35 +70,65 @@ def check_windows(root: Path) -> list[str]:
     return problems
 
 
+def _bwrap_userns_error() -> str | None:
+    """这个 runner 能不能起 bwrap 的 user namespace；不能时返回原因。
+
+    为什么单独探一下（2026-11-05 CI 实测）：GitHub 的 ubuntu runner 跑在容器里，
+    `bwrap --unshare-user` 会以 "setting up uid map: Permission denied" 失败。那是
+    **环境不允许**，不是实现坏了——同一份实现换一台普通 Linux 就能过。把它报成
+    "沙箱外写入没被拒绝"会指向完全错误的方向。
+    """
+    from local_agent.security import posix_sandbox
+
+    executable = posix_sandbox.bwrap_path()
+    if executable is None:
+        return "bwrap 不在 PATH"
+    try:
+        probe = subprocess.run(
+            [executable, "--unshare-user", "--dev-bind", "/", "/", "true"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"探测失败：{exc}"
+    if probe.returncode == 0:
+        return None
+    detail = (probe.stderr or probe.stdout or "").strip().splitlines()
+    return detail[0] if detail else f"bwrap 探测退出码 {probe.returncode}"
+
+
 def check_posix(root: Path) -> list[str]:
     """Linux / macOS 的真实写探针：可写根内能写、根外写不进去。
 
     两条都要验：只验前者会漏掉"根本没隔离"，只验后者会漏掉"隔离过头、工作区也写不了"。
     """
-    import subprocess
-    import tempfile
-
     from local_agent.security import posix_sandbox
 
     problems: list[str] = []
     inside = root / ".sandbox-probe"
     inside.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory() as outside:
-        def run(script: str) -> subprocess.CompletedProcess[str]:
-            argv = posix_sandbox.wrap_argv(
-                ["sh", "-c", script], writable_roots=[str(inside)], cwd=str(inside),
-            )
-            # `check=False`：非零退出是**预期结果**之一（根外写入必须失败），由调用点判定。
-            return subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
+    # 探针位置必须落在**两条后端放行列表之外**。bwrap 只 bind 可写根；seatbelt 没有私有
+    # tmpfs，额外放行了真实 TMPDIR——而 `tempfile` 在 macOS 上正好就落在 TMPDIR 里，
+    # 于是"根外写入"永远是允许的，探针测不到边界（2026-11-05 CI 实测）。改到 $HOME 下。
+    outside = Path(tempfile.mkdtemp(prefix=".chaiai-sandbox-outside-", dir=str(Path.home())))
 
+    def run(script: str) -> subprocess.CompletedProcess[str]:
+        argv = posix_sandbox.wrap_argv(
+            ["sh", "-c", script], writable_roots=[str(inside)], cwd=str(inside),
+        )
+        # `check=False`：非零退出是**预期结果**之一（根外写入必须失败），由调用点判定。
+        return subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
+
+    try:
         allowed = run(f"echo ok > {inside}/probe.txt")
         if allowed.returncode != 0 or not (inside / "probe.txt").exists():
             problems.append(
                 f"可写根内写入失败（rc={allowed.returncode}）：{allowed.stderr.strip()[:300]}"
             )
         denied = run(f"echo no > {outside}/nope.txt")
-        if denied.returncode == 0 or (Path(outside) / "nope.txt").exists():
-            problems.append("沙箱外的写入**没有被拒绝**：边界没有生效")
+        if denied.returncode == 0 or (outside / "nope.txt").exists():
+            problems.append(f"沙箱外的写入**没有被拒绝**（{outside}）：边界没有生效")
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
         (inside / "probe.txt").unlink(missing_ok=True)
     return problems
 
@@ -104,6 +137,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="沙箱冒烟检查")
     parser.add_argument("--require", action="store_true", help="本平台验不了时也算失败")
     args = parser.parse_args()
+
+    # CI 的 Windows runner 是 cp1252 控制台：打印中文会 UnicodeEncodeError（2026-11-05 实测：
+    # 沙箱其实已经通过了，却因为下面那句"OK …"崩掉，看起来像冒烟失败）。显式转 UTF-8，
+    # 比依赖 workflow 里的 PYTHONIOENCODING 更可靠——本地 cp936 控制台同样受益。
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     system = platform.system()
     root = Path.cwd()
@@ -123,7 +162,15 @@ def main() -> int:
 
     if posix_sandbox.available():
         # 说清走的是哪条路：bwrap（换视图）与 landlock（只挡写）能力不同，报错时差很多。
-        print(f"  backend: {posix_sandbox.backend()}")
+        backend = posix_sandbox.backend()
+        print(f"  backend: {backend}")
+        if backend == "bwrap":
+            userns_error = _bwrap_userns_error()
+            if userns_error is not None:
+                print(f"  SKIP 这个环境起不了 bwrap 的 user namespace（{userns_error}）。")
+                print("       GitHub 的容器化 runner 常禁用 unprivileged userns；")
+                print("       这不是实现问题，同样的代码在普通 Linux 上可验。")
+                return 1 if args.require else 0
         problems = check_posix(root)
         if problems:
             for item in problems:
