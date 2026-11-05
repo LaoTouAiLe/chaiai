@@ -30,7 +30,10 @@ jobs:
   backend:
     name: backend / pytest
     runs-on: windows-latest
-    timeout-minutes: 40
+    # 40 → 70（2026-11-05）：修掉那批"提前崩"的用例之后，测试真的在跑完整流程
+    # （65 秒的长命令用例、真实子进程等待），跑到 79% 就撞上 40 分钟上限被取消，
+    # 连失败清单都来不及输出。给足余量，比事后重跑便宜。
+    timeout-minutes: 70
     env:
       # runner 是 en-US locale：Python 默认 cp1252，pytest 打印中文断言信息会 UnicodeEncodeError。
       PYTHONIOENCODING: utf-8
