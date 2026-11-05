@@ -67,6 +67,11 @@ jobs:
             Get-Content pytest.log |
               Select-String -Pattern '^(FAILED|ERROR)' |
               ForEach-Object { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $_.Line }
+            # 同时走 annotation：它可以通过公开 API 读到（摘要区不能），失败清单不必再靠人工贴日志。
+            Get-Content pytest.log |
+              Select-String -Pattern '^(FAILED|ERROR)' |
+              Select-Object -First 10 |
+              ForEach-Object { Write-Host "::error::$($_.Line)" }
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
           }
           exit $code
@@ -167,6 +172,10 @@ jobs:
               tail -40 smoke.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            # annotation 可以被公开 API 读到：失败的最后 10 行就是定位所需的全部证据。
+            tail -10 smoke.log | while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error::${line}"
+            done
           fi
           exit "$code"
 
@@ -212,6 +221,9 @@ jobs:
               grep -E '^(FAILED|ERROR)' pytest.log | head -60
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
+            grep -E '^(FAILED|ERROR)' pytest.log | head -10 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
           fi
           exit "$code"
 
