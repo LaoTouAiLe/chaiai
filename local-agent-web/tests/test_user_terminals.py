@@ -218,7 +218,13 @@ def test_capacity_bounded_replay_exit_and_idle(terminal_api, monkeypatch):
     spawned[0].output = b"1234567890abcdefghij"
     spawned[0].exit = 7
     with manager._lock:
-        manager._get(live[1]["terminal_id"]).activity = 0
+        # 不能写 `activity = 0`：回收判据是 `time.monotonic() - activity > IDLE_SECONDS`，
+        # 而 monotonic 是**开机以来的秒数**。CI 的 runner 是新起的虚拟机，开机几分钟时
+        # `monotonic() - 0` 还没到 30 分钟，用例就永远等不到回收（本地机器开机几天，
+        # 同一行代码却"碰巧"通过）。按相对时间构造才与机器运行时长无关。
+        manager._get(live[1]["terminal_id"]).activity = (
+            time.monotonic() - terminals.IDLE_SECONDS - 1
+        )
     # 3 秒在 CI 的 runner 上不够（2026-11-05 实测）：空闲回收是后台线程按周期扫，
     # 负载高时一次扫描可能被推迟好几秒。等待窗口放宽到 15 秒——这里验的是"最终会回收"，
     # 不是"回收有多快"。
