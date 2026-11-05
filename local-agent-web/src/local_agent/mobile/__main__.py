@@ -198,18 +198,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1
 
-    if not app_config.mobile.enabled:
-        print(
-            "移动访问未启用：在配置里设置 mobile.enabled: true 之后再启动网关"
-            "（默认关闭，关闭时不会启动任何进程）。",
-            file=sys.stderr,
-        )
-        return 1
-
     # 设置库里的覆盖值由主服务写成快照；网关只认快照，不碰 sqlite（§24 的边界）。
+    # **必须先合并快照再判 enabled**（2026-11-05）：设置页打开的移动访问只写设置库与快照、
+    # 不写 config.yaml，按出厂默认先判会把这条主路径直接拒掉——用户点了"启动"，
+    # 子进程却以退出码 1 结束，日志里只有一句"未启用"。
     effective = effective_mobile(app_config)
     if effective != app_config.mobile:
         app_config = app_config.model_copy(update={"mobile": effective})
+
+    if not app_config.mobile.enabled:
+        print(
+            "移动访问未启用：在设置页打开移动访问，或在配置里设置 mobile.enabled: true "
+            "之后再启动网关（默认关闭，关闭时不会启动任何进程）。",
+            file=sys.stderr,
+        )
+        return 1
 
     state_dir = _state_dir(app_config)
 
