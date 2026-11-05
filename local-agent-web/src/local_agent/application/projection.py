@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import ast
-import dataclasses
 import hashlib
 import json
 import re
@@ -30,7 +29,6 @@ from typing import Any, Final, Literal
 
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
-from local_agent import delegation_live
 from local_agent.application import errors as app_errors
 from local_agent.application.errors import ErrorCategory, ErrorView
 from local_agent.application.models import (
@@ -38,8 +36,6 @@ from local_agent.application.models import (
     AssistantMessageView,
     CompressionView,
     ContextMeterView,
-    DelegationChildView,
-    DelegationToolStepView,
     ErrorMessageView,
     FileDiffHunkView,
     FileDiffLineView,
@@ -78,7 +74,21 @@ from local_agent.application.models import (
     cache_hit_ratio,
     context_usage_ratio,
 )
-from local_agent.config import redact_secrets
+from local_agent.application.text_render import (
+    _KEY_LIKE,
+    _MASK,  # noqa: F401 - 本模块不再自用，但 pending_views 仍从这里取
+    TOOL_DETAIL_PATHS,
+    TOOL_DETAIL_STREAM_CHARS,
+    TOOL_DETAIL_TEXT_CHARS,
+    _as_mapping,
+    _bounded,
+    _int_of,
+    _mappings,
+    _optional_sanitized,
+    _optional_str,
+    sanitize_text,
+)
+from local_agent.application.tool_outcome_views import delegation_outcome, web_outcome
 from local_agent.context.web_citations import cited_source
 from local_agent.graph.projection import message_id, project_messages
 from local_agent.graph.scope import tool_scope_key
@@ -225,11 +235,6 @@ _ERROR_TEXT: Final[dict[str, tuple[str, str]]] = {
     ),
 }
 
-#: 密钥**样式**（不只是已知密钥值）：即使调用方没把环境里的密钥传进来，这里也要抹掉，
-#: 否则 `ErrorView` 的 fail-closed 校验会让整份快照构造失败——那比少显示一段文字更糟。
-_KEY_LIKE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}")
-_MASK = "***"
-
 _OPERATION_NAMES: Final[dict[str, str]] = {
     "list_dir": "查看目录", "read_file": "读取文件", "edit_file": "修改文件",
     "write_file": "写入文件", "delete_file": "删除文件", "run_shell": "运行命令",
@@ -253,28 +258,14 @@ def _public_error_text(text: str, secrets: Iterable[str]) -> str:
         public = re.sub(rf"(?<![\w]){name}(?![\w])", label, public)
     return public[:TOOL_DETAIL_STREAM_CHARS]
 
-#: 工具详情的展示上限（§15.8）：超长内容有界折叠，完整正文留在本地工具事件里，不进入页面。
-TOOL_DETAIL_TEXT_CHARS: Final[int] = 4000
-TOOL_DETAIL_STREAM_CHARS: Final[int] = 2000
-TOOL_DETAIL_PATHS: Final[int] = 200
 #: 结构化 diff 的展示上限（行）：超出就不再累积，并如实标记 `truncated`。
 TOOL_DIFF_LINES: Final[int] = 400
-#: 网页检索卡片里列出的前几条标题（2026-10-26）：卡片只回答"命中了什么"，完整来源由
-#: `_web_sources` 另行渲染——两边都列全量会让同一批结果在页面上出现两遍。
-WEB_DETAIL_HITS: Final[int] = 5
 
 #: unified diff 的 hunk 头：`@@ -old_start[,old_count] +new_start[,new_count] @@`。
 _HUNK_HEADER = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
-def sanitize_text(text: str, secrets: Iterable[str] = ()) -> str:
-    """展示文本仅脱敏已知密钥与密钥样式串；路径原样保留。
 
-    节点侧的 `error_events` 文案是给内部看的，进入页面之前必须过这一层（§15.5、§15.8）。
-    这里**不静默吞掉**别的内容，只做这两类替换，其余原样保留。
-    """
-    cleaned = redact_secrets(text, list(secrets))
-    return _KEY_LIKE.sub(_MASK, cleaned)
 
 
 REASONING_DISPLAY_LIMIT = 16_000
@@ -339,9 +330,6 @@ _DISPLAY_ARGUMENT_NAMES: Final[frozenset[str]] = frozenset({
 })
 DISPLAY_ARGUMENT_CHARS: Final[int] = 2000
 
-
-#: 委派链路里不展示的工具：`task_control` 是内部收尾信号，不是调查动作。
-_HIDDEN_DELEGATION_STEPS: Final[frozenset[str]] = frozenset({"task_control"})
 
 
 def _delegation_scopes(value: Any) -> list[str] | None:
@@ -430,35 +418,6 @@ def _stage_failed(state: Mapping[str, Any], stage: str) -> bool:
     推导，不新增 State 字段）；两边一致性由测试对照。
     """
     return any(str(event.get("stage") or "") == stage for event in _run_errors(state))
-
-
-def _mappings(value: Any) -> list[Mapping[str, Any]]:
-    """把 State 里的序列字段统一成**映射视图**。
-
-    State 里同时存在 TypedDict（`ErrorEvent` / `ToolResultRecord` / `ApprovalDecision`…，运行时就是 dict）
-    与 dataclass（`PlanStep` / `ToolEvent` / `EvidenceReference` / `MemoryCandidate`）。投影只按字段名读，
-    不关心载体，所以这里统一成"能 `.get` 的东西"——**不能只认 dict**：实测 `tool_events` 是 dataclass 列表，
-    只按 dict 读会让工具行全部退回 `pending`（页面把已完成的工具显示成等待中）。
-    """
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return []
-    items: list[Mapping[str, Any]] = []
-    for item in value:
-        normalized = _as_mapping(item)
-        if normalized is not None:
-            items.append(normalized)
-    return items
-
-
-def _as_mapping(value: Any) -> Mapping[str, Any] | None:
-    """单个 State 值 → 映射视图（同样兼容 dataclass）。"""
-    if isinstance(value, Mapping):
-        return value
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {field.name: getattr(value, field.name) for field in dataclasses.fields(value)}
-    if hasattr(value, "__dict__"):
-        return {str(key): item for key, item in vars(value).items()}
-    return None
 
 
 # ---- 消息 ------------------------------------------------------------------
@@ -638,24 +597,6 @@ def project_plan(state: Mapping[str, Any], *, secrets: Iterable[str] = ()) -> Pl
     if not steps and not goal:
         return None
     return PlanView(goal=goal or "（未记录任务目标）", steps=steps)
-
-
-def _bounded(text: str, limit: int) -> tuple[str, bool]:
-    """有界正文：超过 `limit` 就截断并如实说"这里还有更多"。"""
-    if len(text) <= limit:
-        return text, False
-    return text[:limit], True
-
-
-def _int_of(value: Any) -> int | None:
-    """整数取值；`bool` 是 `int` 的子类，但"真/假"不是数字，不能当计数用。"""
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def _optional_sanitized(value: Any, secrets: Iterable[str]) -> str | None:
-    """非空字符串 → 已脱敏文本；空值 → `None`（不伪造空串）。"""
-    text = _optional_str(value)
-    return sanitize_text(text, secrets) if text is not None else None
 
 
 def _tool_payload_queues(messages: Iterable[AnyMessage]) -> dict[str, deque[Mapping[str, Any] | None]]:
@@ -934,61 +875,7 @@ def _tool_outcome(
         )
 
     if tool_name in {"web_search", "web_fetch"}:
-        # 网页工具的详情（2026-10-26）。此前它们不在识别表里，卡片只剩一句"该结果格式暂无可展示
-        # 的详情"——而工具其实回了不少东西，只是被当成"认不出的 JSON"隐去了。
-        #
-        # 这里**只在形状可识别时**产出：失败结果的载荷是 `{"error": ...}` 或残缺对象，必须让它
-        # 走 `None` 分支，由通用渲染器配 `_public_error_text` 说明真实原因；否则会被
-        # "0 条来源"盖掉。所以先按关键字段是否存在 + 类型对不对把关，不按有没有内容猜。
-        if tool_name == "web_search":
-            hits_raw = payload.get("results")
-            if not isinstance(hits_raw, list):
-                return None
-            hits = _mappings(hits_raw)
-            provider = _optional_str(payload.get("provider")) or ""
-            summary = f"{len(hits)} 条来源"
-            if provider:
-                summary = f"{summary} · 后端 {provider}"
-            # 变量名不能叫 `lines`：同一个函数前面的 `read_file` 分支已经用这个名字存"总行数"
-            # （`int | None`）。同作用域重名会让类型检查与后来读代码的人都分不清这两者。
-            hit_lines: list[str] = []
-            for item in hits[:WEB_DETAIL_HITS]:
-                title = sanitize_text(str(item.get("title") or ""), secrets).strip()
-                source = sanitize_text(str(item.get("source") or ""), secrets).strip()
-                if title:
-                    hit_lines.append(f"{title} · {source}" if source else title)
-            if note:
-                hit_lines.append(f"说明：{sanitize_text(note, secrets)}")
-            text, clipped = _bounded("\n".join(hit_lines), TOOL_DETAIL_TEXT_CHARS)
-            return ToolOutcomeView(
-                kind="web",
-                target=_optional_sanitized(payload.get("query"), secrets),
-                summary=sanitize_text(summary, secrets),
-                text=text or None,
-                total=len(hits),
-                truncated=clipped or bool(payload.get("truncated")),
-            )
-
-        # web_fetch：正文本身就是最有用的东西，摘要只说体积。
-        if not isinstance(payload.get("url"), str) or not isinstance(payload.get("text"), str):
-            return None
-        total_chars = _int_of(payload.get("total_chars"))
-        summary = f"{total_chars if total_chars is not None else len(str(payload.get('text') or ''))} 字符"
-        if _optional_str(payload.get("final_url")):
-            summary = f"{summary} · 已跟随重定向"
-        parts = [sanitize_text(str(payload.get("text") or ""), secrets)]
-        if note:
-            parts.append(f"说明：{sanitize_text(note, secrets)}")
-        text, clipped = _bounded("\n\n".join(parts), TOOL_DETAIL_TEXT_CHARS)
-        return ToolOutcomeView(
-            kind="web",
-            target=_optional_sanitized(payload.get("title"), secrets)
-            or _optional_sanitized(payload.get("url"), secrets),
-            summary=sanitize_text(summary, secrets),
-            text=text or None,
-            total=total_chars,
-            truncated=clipped or bool(payload.get("truncated")),
-        )
+        return web_outcome(tool_name, payload, secrets, note)
 
     # `execute_code` 与 `run_shell` 共用同一张终端卡（2026-10-22）：它本质也是"跑一段东西"，
     # 退出码/输出/超时/后台的展示口径完全一致，没必要再造一种卡片。
@@ -1018,64 +905,7 @@ def _tool_outcome(
         )
 
     if tool_name == "delegate_research":
-        # 自主委派（§18.7）：把每个子 Agent 的结局摊成一行行，而不是让用户读一段 JSON。
-        # 字段与参照实现的任务面板对齐（状态 / 工具调用次数 / token 预留），另加证据条数与失败原因。
-        children: list[DelegationChildView] = []
-        for item in _mappings(payload.get("children")):
-            scope = _optional_sanitized(item.get("scope"), secrets)
-            if scope is None:
-                continue
-            child_error = sanitize_text(str(item.get("error") or ""), secrets)[:TOOL_DETAIL_TEXT_CHARS]
-            children.append(
-                DelegationChildView(
-                    scope=scope,
-                    status="completed" if item.get("status") == "completed" else "failed",
-                    tool_calls=_int_of(item.get("tool_calls")) or 0,
-                    model_calls=_int_of(item.get("model_calls")) or 0,
-                    evidence_count=_int_of(item.get("evidence_count")) or 0,
-                    changed_files=_int_of(item.get("changed_files")) or 0,
-                    # 缺失时给 None 而不是 0：0 毫秒是个断言（"它瞬间跑完了"），而"这台机器没记"
-                    # 是另一件事，页面该区别对待。
-                    elapsed_ms=_int_of(item.get("elapsed_ms")),
-                    error=child_error or None,
-                )
-            )
-        # 逐路的工具链（2026-11-04）：子事件没有并进 Checkpoint（`delegation_audit` 那条链
-        # 没打通），所以从进程内实时表按目录回填——它是同一份数据的"跑完之后"形态，
-        # 保留 30 分钟。过期就留空，让页面如实说"没有记录到工具调用"，不编造。
-        lanes = delegation_live.lanes_for([child.scope for child in children])
-        for child in children:
-            lane = lanes.get(child.scope)
-            child.goal = lane.goal if lane is not None else ""
-            steps = lane.steps if lane is not None else []
-            child.tools = [
-                DelegationToolStepView(
-                    name=step.name,
-                    # `list_dir` 的 path 常是 `.`（子任务的 cwd 就是这一路的目录），
-                    # 直接显示 `.` 等于没说；换成目录本身，用户才知道在哪儿列的。
-                    target=step.target if step.target not in {"", "."} else child.scope,
-                    status=step.status,
-                )
-                for step in steps
-                # `task_control` 是收尾信号，不是调查动作——它出现在链路里只会让人以为查了东西。
-                if step.name not in _HIDDEN_DELEGATION_STEPS
-            ]
-
-        done = sum(1 for child in children if child.status == "completed")
-        summary = f"{len(children)} 个子任务 · {done} 个已完成"
-        if note:
-            summary = f"{summary} · {sanitize_text(note, secrets)[:120]}"
-        text, clipped = _bounded(
-            sanitize_text(str(payload.get("report") or ""), secrets), TOOL_DETAIL_TEXT_CHARS
-        )
-        return ToolOutcomeView(
-            kind="delegation",
-            summary=summary,
-            text=text or None,
-            children=children,
-            truncated=clipped or bool(payload.get("truncated")),
-        )
-
+        return delegation_outcome(payload, secrets, note)
     return None
 
 
@@ -1278,13 +1108,6 @@ def _elapsed_ms(started: datetime | None, finished: datetime | None) -> int | No
     if started is None or finished is None:
         return None
     return max(int((finished - started).total_seconds() * 1000), 0)
-
-
-def _optional_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value)
-    return text or None
 
 
 def _tool_name_of(state: Mapping[str, Any], run_id: str, tool_call_id: str) -> str | None:

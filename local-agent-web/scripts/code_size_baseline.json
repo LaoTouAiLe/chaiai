@@ -16,8 +16,9 @@
     "function:application/artifacts.py::_scan": {
       "complexity": 23
     },
+
     "function:application/projection.py::_tool_outcome": {
-      "complexity": 40
+      "complexity": 28
     },
     "function:application/service.py::ApplicationService._turn_events": {
       "complexity": 29
