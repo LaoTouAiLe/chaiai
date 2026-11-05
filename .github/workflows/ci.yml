@@ -52,7 +52,18 @@ jobs:
         # 那等于"记忆系统的回归在 CI 里看不见"。
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[memory]" pytest pytest-asyncio
+          pip install -e ".[memory]" pytest pytest-asyncio ruff
+
+      - name: 环境诊断
+        shell: pwsh
+        # "本地全绿、CI 全红"这类差异必须先拿到事实再动代码（2026-11-05）：
+        # 平台、编码、沙箱可用性、ruff 是否安装，决定了大批用例能不能跑。
+        run: |
+          python -V
+          python -c "import sys, locale; print('platform=', sys.platform, 'fsenc=', sys.getfilesystemencoding(), 'pref=', locale.getpreferredencoding(False))"
+          python -c "from local_agent.security import win_sandbox as w; print('kernel32=', w._kernel32 is not None, 'supported=', w.is_supported())"
+          python -c "import importlib.util as u; print('ruff=', u.find_spec('ruff') is not None)"
+          whoami
 
       - name: 跑全部后端用例
         shell: pwsh
@@ -210,7 +221,7 @@ jobs:
       - name: 安装依赖（含 memory 可选组，与 Windows job 同口径）
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[memory]" pytest pytest-asyncio
+          pip install -e ".[memory]" pytest pytest-asyncio ruff
       - name: 跑后端用例（先看现状，不加 --maxfail）
         shell: bash
         run: |
@@ -222,7 +233,7 @@ jobs:
             {
               echo "## pytest 失败摘要（${{ matrix.os }}）"
               echo '```'
-              grep -E '^(FAILED|ERROR)' pytest.log | head -60
+              grep -E '^(FAILED|ERROR)' pytest.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             grep -E '^(FAILED|ERROR)' pytest.log | head -10 | while IFS= read -r line; do
