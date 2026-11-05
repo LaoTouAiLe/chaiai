@@ -14,8 +14,22 @@ def report():
     return comparison.run_comparison(2)
 
 
+def _detail(report) -> str:
+    """把"哪一次跑挂了、硬门是哪条没过"写进断言消息。
+
+    CI 上只拿得到这段文本（日志要仓库权限、annotation 会截断），只断言 ``is True``
+    除了"红了"说不出任何东西。
+    """
+    bad = [
+        f"{row.get('mode')}/{row.get('case_id')}: {row.get('failures') or row.get('status')}"
+        for row in report.get("runs", [])
+        if not row.get("passed")
+    ]
+    return f"hard_gates={report.get('hard_gates_passed')} bad_runs={bad[:4]}"
+
+
 def test_actual_paired_graph_runs_with_same_config_model_and_frozen_validator(report):
-    assert report["passed"] is True
+    assert report["passed"] is True, _detail(report)
     assert report["hard_gates_passed"] is True
     assert report["offline_subgraph_advantage_proven"] is True
     assert report["real_model_advantage_proven"] is False
@@ -111,7 +125,7 @@ def test_green_completion_without_per_pair_call_improvement_is_not_advantage(rep
     row["model_requests"] *= 6
     row["model_calls"] = 6
     result = comparison.summarize_comparison(rows, 2)
-    assert result["hard_gates_passed"] is True
+    assert result["hard_gates_passed"] is True, result
     assert result["passed"] is False
     assert result["offline_subgraph_advantage_proven"] is False
 

@@ -44,9 +44,23 @@ def observed() -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     return first, states
 
 
+def _failure_detail(report: dict[str, Any]) -> str:
+    """失败时把"哪一例、具体哪些问题"带进断言消息。
+
+    CI 上只拿得到这段文本（日志下载要仓库权限、annotation 还会截断），所以不能只断言
+    ``is True``——那除了"红了"什么也说不出来。
+    """
+    bad = [
+        f"{row.get('case_id')}: {row.get('failures')}"
+        for row in report.get("cases", [])
+        if not row.get("passed")
+    ]
+    return "passed=False -> " + " | ".join(bad)
+
+
 def test_baseline_runs_current_graph_and_real_tools(observed) -> None:
     report, states = observed
-    assert report["passed"] is True
+    assert report["passed"] is True, _failure_detail(report)
     code, readonly = report["cases"]
     assert (code["model_calls"], code["tool_calls"]) == (6, 6)
     assert (readonly["model_calls"], readonly["tool_calls"]) == (4, 4)
