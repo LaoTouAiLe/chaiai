@@ -96,9 +96,13 @@ def _require_sandboxed_node_traverse(tmp_path: Path, app_config, node: str) -> N
     """
     probe = tmp_path / "traverse-probe"
     probe.mkdir()
+    # 必须跑**磁盘上的脚本**而不是 `node -e`：`-e` 不需要从 cwd 解析模块，
+    # 也不会 lstat 工作目录，探测会假通过（第一版就是这么写的，CI 上一条都没跳过）。
+    script = probe / "probe.cjs"
+    script.write_text("console.log(process.cwd());\n", encoding="utf-8")
     policy = _policy(probe, app_config)
     outcome = policy.processes.run(
-        [node, "-e", "0"], cwd=probe, timeout_seconds=30,
+        [node, str(script)], cwd=probe, timeout_seconds=30,
         sandbox=policy.shell_sandbox_request(),
     )
     if outcome.exit_code != 0 and b"node:fs:2801" in outcome.stderr and b"lstat" in outcome.stderr:
