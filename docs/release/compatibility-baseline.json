@@ -1,5 +1,5 @@
 {
-  "api_version": "0.4.0",
+  "api_version": "0.3.0",
   "config_defaults_sha256": "76d6dea9cdf26824fb9c5e47f39b263d9d506f04589cda48369fcd745e70ba95",
   "config_schema_sha256": "e14f687b5a5e1f8dfc8be51e0fee7168a7281949dc089abc1a8ff650efb81b8c",
   "database_versions": {
@@ -48,8 +48,8 @@
     "task_cancelled"
   ],
   "manifest_version": 1,
-  "openapi_sha256": "7d21bb9fc13c5b3ab3153e746f485f727de48d3613a3ffa1ca75d68168e61b17",
-  "package_version": "0.2.0",
+  "openapi_sha256": "92d4d65936aad2d1de2e7d9cfe795ac4ee2379878773122886a6192c3a8c96e4",
+  "package_version": "0.3.0",
   "release_status": "candidate",
   "release_target": "1.0.0"
 }

@@ -55,7 +55,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = argparse.ArgumentParser(
         prog="python -m local_agent.api",
-        description="启动 local-agent-web 的本机 Web 服务（v0.4，单进程单 worker）",
+        description="启动 local-agent-web 的本机 Web 服务（v0.3，单进程单 worker）",
     )
     parser.add_argument(
         "--config",
@@ -129,7 +129,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not config_module.is_loopback_host(web.host):
         print(
             f"警告：web.allow_non_loopback=true，服务监听非回环地址 {web.host}；"
-            "v0.4 没有鉴权，只为本机使用设计。",
+            "v0.3 没有鉴权，只为本机使用设计。",
             file=sys.stderr,
         )
     if runtime.static_dir is not None:
@@ -157,7 +157,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"\n检测到旧数据目录：{legacy}（未自动迁移；需要的话手工搬内容到 {data_root}）"
         )
     print(
-        f"local-agent-web v0.4 已启动：http://{web.host}:{web.port}（单进程、单 worker）"
+        f"local-agent-web v0.3 已启动：http://{web.host}:{web.port}（单进程、单 worker）"
         f"\n{frontend}{data_hint}{setup_hint}",
         flush=True,
     )

@@ -15,7 +15,7 @@
 > cron jobs — most of the skeleton an agent needs is already running here, and the rest is being finished.
 > Everything follows one rule: implement it yourself, or you do not really understand it.
 >
-> v0.2.0 is still evolving: APIs will move and boundaries are being sharpened. **Not recommended as a production
+> v0.3.0 is still evolving: APIs will move and boundaries are being sharpened. **Not recommended as a production
 > dependency** — but it is **readable, inspectable and changeable**: the trade-offs are written down in
 > `ARCHITECTURE.md` and `docs/`, not hidden behind "internal implementation".
 >

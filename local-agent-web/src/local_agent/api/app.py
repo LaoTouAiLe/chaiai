@@ -34,10 +34,10 @@ from local_agent.application.cron import CronScheduler
 from local_agent.application.errors import ApplicationError
 from local_agent.application.maintenance import MemoryMaintenance
 
-#: OpenAPI 里的接口版本：跟着 v0.4 的契约走（不是包版本）。
-API_VERSION: Final[str] = "0.4.0"
+#: OpenAPI 里的接口版本：与包版本同步（发布 v0.3.0 时统一，避免文档与包各说各话）。
+API_VERSION: Final[str] = "0.3.0"
 
-DESCRIPTION = """v0.4 本机 Web 服务（单进程、单 worker）。
+DESCRIPTION = """v0.3 本机 Web 服务（单进程、单 worker）。
 
 - 业务契约：`ARCHITECTURE.md` §15；路由形态：`V0_4_DEVELOPMENT_PLAN.md` §6.2。
 - 所有响应体是应用层的 DTO（`local_agent.application.models`）；业务错误统一是

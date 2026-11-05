@@ -2330,6 +2330,8 @@ export interface components {
             message_id: string;
             /** Model Call Id */
             model_call_id?: string | null;
+            /** Presentation Phase */
+            presentation_phase?: ("process" | "response") | null;
             /** Reasoning */
             reasoning?: string | null;
             /**
@@ -4393,6 +4395,11 @@ export interface components {
              * @default null
              */
             model_call_id: string | null;
+            /**
+             * Presentation Phase
+             * @default null
+             */
+            presentation_phase: ("process" | "response") | null;
             /**
              * Reasoning
              * @default null
