@@ -219,7 +219,10 @@ def test_capacity_bounded_replay_exit_and_idle(terminal_api, monkeypatch):
     spawned[0].exit = 7
     with manager._lock:
         manager._get(live[1]["terminal_id"]).activity = 0
-    deadline = time.monotonic() + 3
+    # 3 秒在 CI 的 runner 上不够（2026-11-05 实测）：空闲回收是后台线程按周期扫，
+    # 负载高时一次扫描可能被推迟好几秒。等待窗口放宽到 15 秒——这里验的是"最终会回收"，
+    # 不是"回收有多快"。
+    deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
         view, data, cursor, truncated = manager.snapshot(live[0]["terminal_id"], 0)
         if view.status == "exited" and spawned[1].closed:
