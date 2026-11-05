@@ -1,5 +1,8 @@
 """用户2026-10-18裁定：模型控制收尾，移除执行配额与工作区逐次审批。"""
 
+import os
+
+import pytest
 from langchain_core.messages import AIMessage
 from test_t43_main_loop import LoopModel, _call, _run, _tools
 
@@ -15,6 +18,15 @@ from local_agent.security.shell_guard import prepare_shell
 from local_agent.tools import tool_registry, web_tools
 from local_agent.tools.file_tools import delete_file_target, edit_file_content, write_file_content
 from local_agent.tools.plan_tools import PlanUpdate
+
+#: 依赖 Windows 专有语义的用例：`taskkill` 命令、`.git` 受保护元数据（ACL）、
+#: `CREATE_NO_WINDOW`、受限令牌。非 Windows 上**跳过并如实标注**——不假装跑过
+#: （与 `test_process_guard.py` 的同名标记同一口径）。
+_WINDOWS_ONLY = pytest.mark.skipif(
+    os.name != "nt",
+    reason="依赖 Windows 专有语义（taskkill / ACL 受保护元数据 / CREATE_NO_WINDOW / 受限令牌）；"
+    "非 Windows 上未验证，如实跳过",
+)
 
 
 def complete(text="已完成"):
@@ -108,6 +120,7 @@ def test_external_cwd_is_free_but_external_write_needs_grant(tmp_path, app_confi
     assert not policy.classify_tool("delete_file", {"path": ".git"}).allowed
 
 
+@_WINDOWS_ONLY
 def test_taskkill_is_not_destructive_and_default_shell_has_no_deadline(tmp_path, app_config):
     policy = policy_for(tmp_path, app_config)
     decision = policy.classify_tool("run_shell", {"command": "taskkill /PID 123 /F"})
@@ -126,7 +139,11 @@ def test_shell_external_writes_follow_directory_grants_even_in_full_mode(tmp_pat
     target = outside / "written.txt"
     (outside / "read.txt").write_text("EXTERNAL_READ_OK", encoding="utf-8")
     policy = policy_for(workspace, app_config)
-    assert policy.shell_sandbox_active()
+    if not policy.shell_sandbox_active():
+        pytest.skip(
+            "该环境没有可用的写侧沙箱（容器化 runner 常禁用 unprivileged user namespace，"
+            "bwrap 起不来），无法验证写入边界；普通 Linux / macOS 上会真跑"
+        )
     read = run_shell_command('python -c "from pathlib import Path; print(Path(\'read.txt\').read_text())"',
                              cwd=str(outside), policy=policy)
     assert read.exit_code == 0 and "EXTERNAL_READ_OK" in read.stdout
@@ -139,6 +156,7 @@ def test_shell_external_writes_follow_directory_grants_even_in_full_mode(tmp_pat
     assert allowed.exit_code == 0 and target.read_text() == "authorized"
 
 
+@_WINDOWS_ONLY
 def test_writable_shell_can_rename_and_remove_its_files_but_not_protected_metadata(tmp_path, app_config):
     from local_agent.tools.shell_tools import run_shell_command
 
@@ -158,6 +176,7 @@ def test_web_count_budget_is_optional():
     assert web_limit_reason("web_search", {}, events=[], run_id="r", config=WebAccessConfig()) is None
 
 
+@_WINDOWS_ONLY
 def test_background_process_survives_successful_shell_runner_exit(tmp_path, app_config):
     import subprocess
     import time
@@ -185,6 +204,7 @@ def test_background_process_survives_successful_shell_runner_exit(tmp_path, app_
             subprocess.run(["taskkill", "/PID", str(child_pid), "/T", "/F"], capture_output=True, check=False)
 
 
+@_WINDOWS_ONLY
 def test_default_shell_can_run_longer_than_sixty_seconds(tmp_path, app_config):
     from local_agent.tools.shell_tools import run_shell_command
 
