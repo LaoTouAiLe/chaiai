@@ -21,7 +21,7 @@
 
 **技术栈**：Python 3.13 · FastAPI + SSE · LangGraph（工具循环与检查点）· SQLite / Chroma ·
 React 19 + Vite 8 + TypeScript · PyInstaller onedir + Inno Setup + WebView2 ·
-**3068 个后端测试、634 个前端测试**
+**3540 个后端测试、765 个前端测试**
 
 ![对话与工具执行](docs/assets/screenshots/conversation.png)
 

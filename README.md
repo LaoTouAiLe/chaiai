@@ -24,7 +24,7 @@
 
 **Stack**: Python 3.13 · FastAPI + SSE · LangGraph (tool loop and checkpoints) · SQLite / Chroma ·
 React 19 + Vite 8 + TypeScript · PyInstaller onedir + Inno Setup + WebView2 ·
-**3068 backend tests, 634 frontend tests**
+**3540 backend tests, 765 frontend tests**
 
 ![Chat with tool execution](docs/assets/screenshots/conversation.png)
 
