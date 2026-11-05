@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -14,6 +15,13 @@ import uvicorn
 
 from local_agent import app_paths
 from local_agent.api import __main__ as api_main
+
+#: 依赖 Windows 数据目录约定（``%LOCALAPPDATA%``）的用例。macOS / Linux 上
+#: 冻结形态走 XDG / Library 路径，断言 ``LOCALAPPDATA/chaiai`` 必然不成立。
+_WINDOWS_ONLY = pytest.mark.skipif(
+    os.name != "nt",
+    reason="冻结形态的数据目录按 %LOCALAPPDATA% 解析；非 Windows 上用的是 XDG / Library",
+)
 
 
 def test_source_mode_uses_the_project_directory(
@@ -98,6 +106,7 @@ def test_frozen_without_local_appdata_falls_back(monkeypatch: pytest.MonkeyPatch
     assert app_paths.default_env_path() == Path(".env")
 
 
+@_WINDOWS_ONLY
 def test_entry_point_writes_everything_into_the_data_dir_when_frozen(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

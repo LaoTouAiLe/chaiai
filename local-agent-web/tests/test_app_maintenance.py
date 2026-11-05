@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import urllib.error
@@ -29,6 +30,13 @@ from local_agent import __version__, app_maintenance, app_paths
 from local_agent.api.app import create_app
 from local_agent.api.container import open_runtime
 from local_agent.application.errors import UNINSTALL_UNAVAILABLE
+
+#: 依赖 Windows 安装形态的用例：卸载交接要起 `cmd.exe` 跑批处理，函数本身在
+#: 非 Windows 上就抛 ``RuntimeError``。如实跳过，不把"平台不适用"报成"功能坏了"。
+_WINDOWS_ONLY = pytest.mark.skipif(
+    os.name != "nt",
+    reason="卸载交接只在 Windows 安装版上有意义（起 cmd.exe 跑批处理）",
+)
 from local_agent.config import AppConfig
 
 LOCAL_BASE_URL = "http://127.0.0.1"
@@ -272,6 +280,7 @@ def test_uninstall_script_escapes_percent_and_refuses_quotes() -> None:
         )
 
 
+@_WINDOWS_ONLY
 def test_schedule_uninstall_hands_a_detached_batch_to_cmd(tmp_path: Path) -> None:
     """交接的动作是"起一个 cmd 跑脚本"，不是自己删文件——函数里不能有删除调用。"""
     calls: list[dict[str, Any]] = []
