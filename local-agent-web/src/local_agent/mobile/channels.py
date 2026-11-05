@@ -15,13 +15,13 @@ import ipaddress
 import json
 import shutil
 import socket
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
 from local_agent.config import AppConfig, MobileChannelConfig
 from local_agent.mobile.certs import ensure_certificates
+from local_agent.security.process_guard import run_process
 
 #: 本版已实现的通道。与 ``config.SUPPORTED_MOBILE_CHANNELS`` 的差集就是"能写但还不能用"。
 IMPLEMENTED_CHANNELS: Final[tuple[str, ...]] = ("lan", "tailscale")
@@ -106,20 +106,19 @@ def tailscale_dns_name(executable: str | None = None) -> str:
     """
     exe = executable or tailscale_executable()
     try:
-        completed = subprocess.run(
-            [exe, "status", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=_TAILSCALE_TIMEOUT,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        # 走统一执行出口（架构 §20.1）：超时与取消按进程树终止，与其他子进程同一套手段。
+        outcome = run_process([exe, "status", "--json"], timeout_seconds=_TAILSCALE_TIMEOUT)
+    except OSError as exc:
         raise ChannelNotReady(f"调不通 tailscale：{exc}") from exc
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()[:200]
+    stdout = outcome.stdout.decode("utf-8", "replace")
+    stderr = outcome.stderr.decode("utf-8", "replace")
+    if outcome.timed_out:
+        raise ChannelNotReady(f"tailscale status 超过 {_TAILSCALE_TIMEOUT:.0f} 秒没有返回")
+    if outcome.exit_code != 0:
+        detail = (stderr or stdout or "").strip()[:200]
         raise ChannelNotReady(f"tailscale status 失败：{detail or '没有输出'}")
     try:
-        data = json.loads(completed.stdout or "{}")
+        data = json.loads(stdout or "{}")
     except json.JSONDecodeError as exc:
         raise ChannelNotReady("tailscale status 的输出不是 JSON，版本可能不兼容") from exc
     state = str(data.get("BackendState", ""))

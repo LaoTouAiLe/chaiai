@@ -179,13 +179,12 @@ def test_lan_port_must_differ_from_gateway_port() -> None:
 
 
 def _fake_status(payload: str, *, returncode: int = 0):  # type: ignore[no-untyped-def]
-    class _Result:
-        def __init__(self) -> None:
-            self.returncode = returncode
-            self.stdout = payload
-            self.stderr = ""
+    """替身：`tailscale status` 走统一执行出口（`run_process`）之后的返回值形状。"""
+    from local_agent.security.process_guard import ProcessOutcome
 
-    return lambda *args, **kwargs: _Result()
+    return lambda *args, **kwargs: ProcessOutcome(
+        exit_code=returncode, stdout=payload.encode(), stderr=b""
+    )
 
 
 def _fail_not_logged_in(*args: object, **kwargs: object) -> str:
@@ -195,7 +194,7 @@ def _fail_not_logged_in(*args: object, **kwargs: object) -> str:
 def test_tailscale_dns_name_strips_the_trailing_dot(monkeypatch: pytest.MonkeyPatch) -> None:
     """`status --json` 给的 DNSName 带尾点；直接用会拼出 `xxx.ts.net./` 这种地址。"""
     monkeypatch.setattr(
-        "local_agent.mobile.channels.subprocess.run",
+        "local_agent.mobile.channels.run_process",
         _fake_status('{"BackendState": "Running", "Self": {"DNSName": "box.tail1234.ts.net."}}'),
     )
     assert tailscale_dns_name("tailscale") == "box.tail1234.ts.net"
@@ -203,7 +202,7 @@ def test_tailscale_dns_name_strips_the_trailing_dot(monkeypatch: pytest.MonkeyPa
 
 def test_tailscale_not_logged_in_is_reported(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "local_agent.mobile.channels.subprocess.run",
+        "local_agent.mobile.channels.run_process",
         _fake_status('{"BackendState": "NeedsLogin"}'),
     )
     with pytest.raises(ChannelNotReady, match="登录"):

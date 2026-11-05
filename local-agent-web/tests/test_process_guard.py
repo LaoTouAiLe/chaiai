@@ -271,6 +271,16 @@ def test_platform_termination_units_are_declared() -> None:
 #: 源码守卫允许直连 `subprocess` 的唯一文件：登记表自己（以及它调用的 `taskkill`）。
 _REGISTRY_MODULE = "process_guard.py"
 
+#: 例外：文件 → 为什么不能用统一出口。每条都要说得清，不接受"暂时这么写"。
+_ALLOWED_SPAWNS: dict[str, str] = {
+    "mobile/supervisor.py": (
+        "移动网关是**独立进程**：ProcessRegistry 的语义是'随本轮收尾把本轮起的进程全杀干净'，"
+        "与'主服务退出后网关仍在、生死由 Job / 新会话决定'直接冲突，两者不能共用一套登记。"
+        "这里必须用 Popen + CREATE_NEW_PROCESS_GROUP / start_new_session；主动终止走 "
+        "supervisor.stop()，其中 taskkill 那条已经改成走 run_process。"
+    ),
+}
+
 #: 起进程的写法（都算绕过统一出口）：`subprocess` 家族、`os` 的几个入口、asio 的子进程 API。
 _SPAWN_CALL = re.compile(
     r"subprocess\.(run|Popen|call|check_output|check_call)\s*\("
@@ -298,6 +308,8 @@ def test_only_the_registry_may_spawn_processes() -> None:
     offenders: list[str] = []
     for path in sorted(root.rglob("*.py")):
         if path.name == _REGISTRY_MODULE:
+            continue
+        if path.relative_to(root).as_posix() in _ALLOWED_SPAWNS:
             continue
         for index, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             if _SPAWN_CALL.search(line):

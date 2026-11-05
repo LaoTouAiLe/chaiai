@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Final
 
 from local_agent.config import AppConfig
+from local_agent.security.process_guard import run_process
 
 #: 打包形态下启动网关的参数。主服务的入口见到它就把进程整体交给网关（见 ``api/__main__``）。
 GATEWAY_FLAG: Final[str] = "--mobile-gateway"
@@ -83,10 +84,9 @@ class GatewayProcess:
             return
         if os.name == "nt":
             # 只 terminate 父进程会留下隧道子进程占着端口——那是"关不掉的服务"这类投诉的来源。
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
-                capture_output=True,
-                check=False,
+            # 终止命令本身也走统一执行出口（§20.1），只是它不需要（也不该）被登记成本轮进程。
+            run_process(
+                ["taskkill", "/F", "/T", "/PID", str(self.process.pid)], timeout_seconds=15,
             )
         else:
             killpg = getattr(os, "killpg", None)

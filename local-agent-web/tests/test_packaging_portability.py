@@ -13,6 +13,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 SCRIPT = (
     Path(__file__).resolve().parents[1] / "scripts" / "build_windows_package.py"
 )
@@ -76,6 +78,9 @@ def test_the_example_config_does_not_ship_a_stranger_drive_letter() -> None:
 
 
 def test_mcp_credentials_are_rejected_by_the_actual_package_scan(tmp_path, monkeypatch) -> None:
+    # 打包脚本顶层 `import pefile`（它随 PyInstaller 安装，不是运行依赖）。CI 的 backend job
+    # 只装 `.[memory]`，不装构建工具链；这里跳过并说明，而不是把"环境缺构建依赖"报成"扫描失效"。
+    pytest.importorskip("pefile", reason="pefile 随 PyInstaller 安装；backend job 不装构建工具链")
     import runpy
     module = runpy.run_path(str(SCRIPT))
     scan = module["_scan_package"]

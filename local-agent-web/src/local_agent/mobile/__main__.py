@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import subprocess
 import sys
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -44,6 +43,7 @@ from local_agent.mobile.proxy import ADMIN_PREFIX, build_client
 from local_agent.mobile.qr import terminal_qr
 from local_agent.mobile.settings import effective_mobile
 from local_agent.mobile.supervisor import is_listening
+from local_agent.security.process_guard import run_process
 
 #: 网关状态目录名（``data_root/mobile``）。配对记录、设备授权与证书都在这下面。
 STATE_DIR_NAME = "mobile"
@@ -72,23 +72,22 @@ def _run_command(argv: tuple[str, ...]) -> str | None:
     第一版直接返回 ``str(TimeoutExpired)``，把这段吞掉了，日志里只剩\"启动失败：timed out\"——
     用户完全不知道该去点什么。超时时 ``TimeoutExpired.stdout`` 抓着已读到的部分，用它。
     """
+    # 走统一执行出口（§20.1）：超时按进程树终止，且**已打印的内容照样带回来**——
+    # `tailscale funnel` 挂住前打印的那句"Funnel is not enabled"是唯一的可执行线索。
     try:
-        completed = subprocess.run(
-            argv, capture_output=True, text=True, timeout=EXTERNAL_COMMAND_TIMEOUT, check=False
-        )
-    except subprocess.TimeoutExpired as exc:
-        partial = exc.stdout or exc.stderr or ""
-        if isinstance(partial, bytes):
-            partial = partial.decode("utf-8", "replace")
-        detail = str(partial).strip()[:400]
+        outcome = run_process(argv, timeout_seconds=EXTERNAL_COMMAND_TIMEOUT)
+    except OSError as exc:
+        return str(exc)
+    stdout = outcome.stdout.decode("utf-8", "replace")
+    stderr = outcome.stderr.decode("utf-8", "replace")
+    if outcome.timed_out:
+        detail = (stdout or stderr or "").strip()[:400]
         if detail:
             return f"命令 {EXTERNAL_COMMAND_TIMEOUT:.0f} 秒未返回，它说：{detail}"
         return f"命令 {EXTERNAL_COMMAND_TIMEOUT:.0f} 秒未返回（没有任何输出）"
-    except OSError as exc:
-        return str(exc)
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout or "").strip()[:400]
-        return detail or f"退出码 {completed.returncode}"
+    if outcome.exit_code != 0:
+        detail = (stderr or stdout or "").strip()[:400]
+        return detail or f"退出码 {outcome.exit_code}"
     return None
 
 

@@ -11,6 +11,8 @@ from collections import OrderedDict
 from pathlib import Path
 from threading import BoundedSemaphore, Lock
 
+from local_agent.security.process_guard import run_process
+
 MAX_BYTES = 32 * 1024 * 1024
 OFFICE = frozenset({".doc", ".docx", ".ppt", ".pptx", ".xls"})
 _slots = BoundedSemaphore(2)
@@ -49,15 +51,16 @@ def render_pdf(target: Path) -> bytes:
             original.write_bytes(source)
             environment = dict(os.environ)
             environment.pop("SSLKEYLOGFILE", None)
-            try:
-                result = subprocess.run(
-                    [node, str(runtime / "render.mjs"), str(original), str(output)],
-                    cwd=runtime, env=environment, capture_output=True, timeout=110, check=False,
-                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
-                )
-            except subprocess.TimeoutExpired:
-                raise ValueError("文档转换超时，请使用打开方式查看。") from None
-            if result.returncode or not output.is_file():
+            # 走统一执行出口（架构 §20.1）：转换要能被超时与取消按**进程树**终止，
+            # node 自己还会再起 LibreOffice 子进程，直接 subprocess.run 只杀得掉第一个。
+            outcome = run_process(
+                [node, str(runtime / "render.mjs"), str(original), str(output)],
+                cwd=runtime, env=environment, timeout_seconds=110,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            )
+            if outcome.timed_out:
+                raise ValueError("文档转换超时，请使用打开方式查看。")
+            if outcome.exit_code not in (0, None) or not output.is_file():
                 raise ValueError("文档转换失败，文件可能损坏、加密或格式不受支持。")
             if output.stat().st_size > MAX_BYTES:
                 raise ValueError("转换后的文档超过预览上限，请使用打开方式查看。")
