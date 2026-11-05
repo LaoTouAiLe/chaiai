@@ -527,11 +527,15 @@ def test_non_windows_runs_without_an_os_boundary_but_says_so(tmp_path, monkeypat
     此前这里是 fail-closed（非 Windows 直接拒绝执行）。改成照常跑之后，静默跑掉就等于假装
     有边界——那是 dsh 移植笔记里点名的 fail-open 坑，所以配了 `sandbox_boundary_note()`。
     """
+    from local_agent import platform_caps
     from local_agent.config import ExternalPathsConfig, SecurityConfig, WorkspaceConfig
     from local_agent.security import win_sandbox
     from local_agent.security.policy import SecurityPolicy
 
+    # 沙箱请求走 win_sandbox，边界说明走 platform_caps（2026-11-05 下沉后的两条路径），
+    # 只 patch 前者会让 `sandbox_boundary_note()` 仍报告"有边界"。
     monkeypatch.setattr(win_sandbox, "is_supported", lambda: False)
+    monkeypatch.setattr(platform_caps, "writable_sandbox_available", lambda: False)
     policy = SecurityPolicy(
         workspace_root=tmp_path,
         security=SecurityConfig(),

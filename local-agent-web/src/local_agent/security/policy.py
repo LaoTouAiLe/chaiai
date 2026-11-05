@@ -31,6 +31,10 @@ from local_agent.config import (
     redact_secrets,
 )
 from local_agent.exceptions import FileOperationError, SecurityError, WorkspaceBoundaryError
+from local_agent.platform_caps import (
+    SANDBOX_BOUNDARY_NOTE,  # noqa: F401 - 本模块不再自用，但测试与外部仍从这里取
+    sandbox_boundary_note,
+)
 from local_agent.security import posix_sandbox, win_sandbox
 from local_agent.security.command_registry import CommandRegistry
 from local_agent.security.diff_guard import count_changed_lines, edit_input_mode, parse_patch
@@ -228,20 +232,11 @@ _HARDLINE_WORDS: tuple[str, ...] = (
 
 #: 没有 OS 级写边界时要说的话（2026-11-02）。
 #:
-#: 这句话此前**只存在于一个从未被调用的方法里**（`SecurityPolicy.sandbox_boundary_note`），于是
-#: 非 Windows 上"命令照常跑、但没有内核强制边界"这件事是静默的——用户不知道，模型也不知道。现在改成
-#: 模块级常量：策略、权限视图、系统提示三处共用同一句，避免各写一遍后互相漂移。
-SANDBOX_BOUNDARY_NOTE = (
-    "当前平台没有 OS 级写边界（写侧沙箱目前只在 Windows 上实现）：路径工具受档位策略限制，"
-    "但命令内部的文件访问不由路径工具约束，**不是内核强制**。"
-    "要求必须在内核级边界内执行时，把 `security.require_sandbox` 设为 true——那样命令会被直接拒绝，"
-    "而不是在看起来有边界的情况下运行。"
-)
-
-
-def sandbox_boundary_note() -> str | None:
-    """这一轮"OS 级写边界到底有没有"；没有时返回给用户与模型看的说明。"""
-    return None if win_sandbox.is_supported() else SANDBOX_BOUNDARY_NOTE
+#: 平台能力判断与这句文案已下沉到 :mod:`local_agent.platform_caps`（2026-11-05）：
+#: `application/models.py` 是纯契约层，不能为了回答"有没有写边界"而 import 整个安全层
+#: （ctypes + Win32 DLL），那是 §15.1 分层图破的一边——`test_events` 的分层守卫抓到的正是它。
+#: 这里保持 re-export，既让既有的 ``from local_agent.security.policy import SANDBOX_BOUNDARY_NOTE``
+#: 继续可用，也保证策略、权限视图、系统提示读到的仍是同一份实现。
 
 
 class SecurityPolicy:

@@ -37,7 +37,7 @@ from local_agent.capabilities import CapabilityReason
 # 只借**任务状态的类型别名**（叶子模块，与索引闭集同源）：契约模块不得依赖持久化层，见该模块
 # docstring 与 `tests/test_events.py::test_pure_contract_modules_do_not_import_runtime_layers`。
 from local_agent.job_state import JobState
-from local_agent.security.policy import sandbox_boundary_note
+from local_agent.platform_caps import sandbox_boundary_note
 
 #: 契约版本。任何破坏性改名都要提升它，并在 API 层显式声明。
 SCHEMA_VERSION: Final[int] = 1

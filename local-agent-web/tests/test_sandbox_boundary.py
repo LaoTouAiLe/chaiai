@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 
+from local_agent import platform_caps
 from local_agent.config import AppConfig
 from local_agent.context.prompt_context import build_stable_system_prompt
 from local_agent.security import policy as policy_module
@@ -52,6 +53,7 @@ def _prompt(policy: SecurityPolicy, tmp_path: Path) -> str:
 
 def test_note_is_one_shared_string(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(policy_module.win_sandbox, "is_supported", lambda: False)
+    monkeypatch.setattr(platform_caps, "writable_sandbox_available", lambda: False)
 
     policy = _policy(tmp_path, require_sandbox=False)
 
@@ -64,6 +66,7 @@ def test_note_is_one_shared_string(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
 def test_default_still_runs_the_command(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """默认行为不变：没有边界照常跑（2026-10-15 的裁定），只是现在会被说出来。"""
     monkeypatch.setattr(policy_module.win_sandbox, "is_supported", lambda: False)
+    monkeypatch.setattr(platform_caps, "writable_sandbox_available", lambda: False)
 
     policy = _policy(tmp_path, require_sandbox=False)
 
@@ -72,6 +75,7 @@ def test_default_still_runs_the_command(monkeypatch: pytest.MonkeyPatch, tmp_pat
 
 def test_require_sandbox_refuses_instead_of_running(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(policy_module.win_sandbox, "is_supported", lambda: False)
+    monkeypatch.setattr(platform_caps, "writable_sandbox_available", lambda: False)
 
     policy = _policy(tmp_path, require_sandbox=True)
 
@@ -88,6 +92,7 @@ def test_from_config_reads_the_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     这条守的是"开关接好了但没人读"——上一轮真机验收里 `workflows.enabled` 就是这样被我漏掉的。
     """
     monkeypatch.setattr(policy_module.win_sandbox, "is_supported", lambda: False)
+    monkeypatch.setattr(platform_caps, "writable_sandbox_available", lambda: False)
     config = AppConfig.model_validate({
         "workspace": {"root": str(tmp_path)},
         "security": {"require_sandbox": True},
@@ -105,6 +110,7 @@ def test_from_config_reads_the_flag(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
 def test_prompt_states_the_missing_boundary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(policy_module.win_sandbox, "is_supported", lambda: False)
+    monkeypatch.setattr(platform_caps, "writable_sandbox_available", lambda: False)
 
     text = _prompt(_policy(tmp_path, require_sandbox=False), tmp_path)
 
@@ -117,6 +123,7 @@ def test_prompt_is_byte_identical_when_a_boundary_exists(
 ) -> None:
     """有边界时不加任何字节：Windows 上的稳定前缀（缓存基线）必须逐字不变。"""
     monkeypatch.setattr(policy_module.win_sandbox, "is_supported", lambda: True)
+    monkeypatch.setattr(platform_caps, "writable_sandbox_available", lambda: True)
 
     text = _prompt(_policy(tmp_path, require_sandbox=False), tmp_path)
 
