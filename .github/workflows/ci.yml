@@ -55,7 +55,21 @@ jobs:
           pip install -e ".[memory]" pytest pytest-asyncio
 
       - name: 跑全部后端用例
-        run: python -m pytest -q
+        shell: pwsh
+        # 失败摘要写进 job summary（2026-11-05）：默认日志要仓库权限才能下载，摘要区
+        # 在 Actions 首页就能看，省掉"再找维护者要日志"这一跳。
+        run: |
+          python -m pytest -q -rf 2>&1 | Tee-Object -FilePath pytest.log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## pytest 失败摘要"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
+            Get-Content pytest.log |
+              Select-String -Pattern '^(FAILED|ERROR)' |
+              ForEach-Object { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $_.Line }
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value '```'
+          }
+          exit $code
 
       - name: 沙箱冒烟（真实机器上确认写边界物化出来了）
         # 单测测的是"我们打算怎么做"，这一步测的是"这台机器的内核真的拦不拦"。
@@ -122,8 +136,39 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
 
+      - name: 环境诊断
+        shell: bash
+        # 沙箱冒烟失败时，"哪条后端可用、依赖在不在"比冒烟本身的输出更有用：
+        # 三个平台的失败原因完全不同（Windows 看受限令牌，Linux 看 bwrap/unshare，macOS 看 sandbox-exec）。
+        run: |
+          python -V
+          python - <<'PY' || true
+          from local_agent.security import posix_sandbox
+          print("posix.available =", posix_sandbox.available())
+          print("posix.backend   =", posix_sandbox.backend())
+          print("posix.reason    =", posix_sandbox.unavailable_reason())
+          PY
+          command -v bwrap || echo "bwrap: 不在 PATH"
+          command -v sandbox-exec || echo "sandbox-exec: 不在 PATH"
+
       - name: 冒烟
-        run: python scripts/sandbox_smoke.py
+        shell: bash
+        # 三平台共用 bash 是为了拿到 PIPESTATUS（pwsh 的 $LASTEXITCODE 在管道后不可靠），
+        # 同时把最后 40 行写进 job summary——冒烟失败时那几行就是全部证据。
+        run: |
+          set +e
+          python scripts/sandbox_smoke.py 2>&1 | tee smoke.log
+          code=${PIPESTATUS[0]}
+          set -e
+          if [ "$code" -ne 0 ]; then
+            {
+              echo "## 沙箱冒烟失败（${{ matrix.os }}）"
+              echo '```'
+              tail -40 smoke.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$code"
 
   portability:
     name: portability / pytest (${{ matrix.os }})
@@ -154,7 +199,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[memory]" pytest pytest-asyncio
       - name: 跑后端用例（先看现状，不加 --maxfail）
-        run: python -m pytest -q
+        shell: bash
+        run: |
+          set +e
+          python -m pytest -q -rf 2>&1 | tee pytest.log
+          code=${PIPESTATUS[0]}
+          set -e
+          if [ "$code" -ne 0 ]; then
+            {
+              echo "## pytest 失败摘要（${{ matrix.os }}）"
+              echo '```'
+              grep -E '^(FAILED|ERROR)' pytest.log | head -60
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$code"
 
   secrets:
     name: secrets / gitleaks
