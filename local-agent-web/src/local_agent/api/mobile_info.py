@@ -138,13 +138,42 @@ def _device_view(device: Device) -> MobileDeviceView:
     )
 
 
-def build_mobile_router(runtime: ApiRuntime) -> APIRouter:
-    """移动访问：状态（只读）+ 配对与设备管理（本机专用）。"""
-    router = APIRouter(prefix="/api")
-    service = runtime.service
+def _store_of(runtime: ApiRuntime) -> PairingStore:
+    """配对状态文件：网关与本服务读写的同一份，只存摘要。"""
+    return PairingStore(app_paths.data_root_of(runtime.service.app_config) / STATE_DIR_NAME)
 
-    def _store() -> PairingStore:
-        return PairingStore(app_paths.data_root_of(service.app_config) / STATE_DIR_NAME)
+
+def _device_count_of(runtime: ApiRuntime) -> int:
+    """设备数读的是落盘状态；文件被写坏时当 0，不让整张卡片跟着失败。"""
+    try:
+        return len(_store_of(runtime).list_devices())
+    except PairingError:
+        return 0
+
+
+def _effective_of(runtime: ApiRuntime) -> tuple[MobileConfig, int]:
+    """页面要显示的生效配置 + 设备数（设置库优先，config.yaml 是出厂默认）。"""
+    mobile, _from_store = runtime.service.effective_mobile_config()
+    return mobile, _device_count_of(runtime)
+
+
+def _action_view(
+    outcome: RuntimeOutcome,
+    mobile: MobileConfig,
+    device_count: int,
+    *,
+    detail: str | None = None,
+) -> MobileGatewayActionView:
+    return MobileGatewayActionView(
+        ok=outcome.ok,
+        detail=detail or outcome.detail,
+        running=mobile.enabled
+        and is_listening(mobile.gateway_host, mobile.gateway_port),
+        device_count=device_count,
+    )
+
+def _register_overview_routes(router: APIRouter, runtime: ApiRuntime) -> None:
+    service = runtime.service
 
     @router.get("/mobile/info", response_model=MobileInfoView, summary="移动访问状态（只读）")
     def mobile_info() -> MobileInfoView:
@@ -156,7 +185,7 @@ def build_mobile_router(runtime: ApiRuntime) -> APIRouter:
         config = service.app_config
         mobile = config.mobile
         try:
-            device_count = len(_store().list_devices())
+            device_count = len(_store_of(runtime).list_devices())
         except PairingError:
             # 状态文件被写坏时不让整张卡片跟着失败：数量当 0，界面上仍能进管理页修。
             device_count = 0
@@ -187,7 +216,7 @@ def build_mobile_router(runtime: ApiRuntime) -> APIRouter:
                 "并确认手机与这台电脑在同一个网络。",
             )
         try:
-            code = _store().issue_code("lan", float(config.mobile.pairing_ttl_seconds))
+            code = _store_of(runtime).issue_code("lan", float(config.mobile.pairing_ttl_seconds))
         except PairingError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         path = f"{ADMIN_PREFIX}/pair?code={code.code}"
@@ -203,30 +232,12 @@ def build_mobile_router(runtime: ApiRuntime) -> APIRouter:
             ],
         )
 
+
+
+def _register_gateway_routes(router: APIRouter, runtime: ApiRuntime) -> None:
+    service = runtime.service
+
     # ---- 紧急启停（2026-11-03：用户要"出问题后能操控关闭"）-------------------
-
-    def _action_view(
-        outcome: RuntimeOutcome,
-        mobile: MobileConfig,
-        device_count: int,
-        *,
-        detail: str | None = None,
-    ) -> MobileGatewayActionView:
-        return MobileGatewayActionView(
-            ok=outcome.ok,
-            detail=detail or outcome.detail,
-            running=mobile.enabled
-            and is_listening(mobile.gateway_host, mobile.gateway_port),
-            device_count=device_count,
-        )
-
-    def _effective() -> tuple[MobileConfig, int]:
-        mobile, _from_store = service.effective_mobile_config()
-        try:
-            count = len(_store().list_devices())
-        except PairingError:
-            count = 0
-        return mobile, count
 
     @router.post(
         "/mobile/gateway/start",
@@ -236,9 +247,9 @@ def build_mobile_router(runtime: ApiRuntime) -> APIRouter:
     def start_gateway_now(request: Request) -> MobileGatewayActionView:
         """立刻拉起网关，不等重启。已在跑就如实说"已在运行"。"""
         _require_local_write(request)
-        # 只读一次：启动前后设备数不会变，第二次 `_effective()` 是纯多余的磁盘访问，
+        # 只读一次：启动前后设备数不会变，第二次 `_effective_of(runtime)` 是纯多余的磁盘访问，
         # 而且两次调用之间还有状态窗口。
-        mobile, count = _effective()
+        mobile, count = _effective_of(runtime)
         effective = service.app_config.model_copy(update={"mobile": mobile})
         outcome = gateway_runtime().start(effective)
         return _action_view(outcome, mobile, count)
@@ -252,7 +263,7 @@ def build_mobile_router(runtime: ApiRuntime) -> APIRouter:
         """立刻停掉网关。**幂等**：没在跑也返回成功，方便"多按几次确保关掉"。"""
         _require_local_write(request)
         outcome = gateway_runtime().stop()
-        mobile, count = _effective()
+        mobile, count = _effective_of(runtime)
         return _action_view(outcome, mobile, count)
 
     @router.post(
@@ -273,14 +284,19 @@ def build_mobile_router(runtime: ApiRuntime) -> APIRouter:
         revoked = 0
         if payload.revoke_devices:
             try:
-                revoked = _store().revoke_all()
+                revoked = _store_of(runtime).revoke_all()
             except PairingError as exc:
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
-        mobile, count = _effective()
+        mobile, count = _effective_of(runtime)
         detail = str(outcome.detail)
         if revoked:
             detail += f" 同时撤销了 {revoked} 台设备的授权。"
         return _action_view(outcome, mobile, count, detail=detail)
+
+
+
+def _register_settings_routes(router: APIRouter, runtime: ApiRuntime) -> None:
+    service = runtime.service
 
     @router.get(
         "/mobile/settings",
@@ -347,11 +363,14 @@ def build_mobile_router(runtime: ApiRuntime) -> APIRouter:
             restarted = gateway_runtime().start(effective).ok
         return _settings_view(saved, from_store=from_store, restart_required=not restarted)
 
+
+
+def _register_device_routes(router: APIRouter, runtime: ApiRuntime) -> None:
     @router.get("/mobile/devices", response_model=MobileDevicesView, summary="已配对设备")
     def list_devices(request: Request) -> MobileDevicesView:
         _require_loopback_peer(request)
         try:
-            devices = _store().list_devices()
+            devices = _store_of(runtime).list_devices()
         except PairingError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         return MobileDevicesView(devices=[_device_view(item) for item in devices])
@@ -365,7 +384,7 @@ def build_mobile_router(runtime: ApiRuntime) -> APIRouter:
         """删记录即撤销：那台手机的下一次请求会被拒。"""
         _require_local_write(request)
         try:
-            removed = _store().revoke(device_id)
+            removed = _store_of(runtime).revoke(device_id)
         except PairingError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         if not removed:
@@ -381,13 +400,25 @@ def build_mobile_router(runtime: ApiRuntime) -> APIRouter:
         """改名只影响显示，不动授权。"""
         _require_local_write(request)
         try:
-            renamed = _store().rename(device_id, payload.label)
+            renamed = _store_of(runtime).rename(device_id, payload.label)
         except PairingError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         if renamed is None:
             raise HTTPException(status_code=404, detail="没有这台设备（可能已被删除）。")
         return _device_view(renamed)
 
+
+
+def build_mobile_router(runtime: ApiRuntime) -> APIRouter:
+    """移动访问：状态（只读）+ 配对与设备管理（本机专用）。
+
+    路由按业务分成四组注册：只读状态与配对码、紧急启停、配置读写、设备管理。
+    """
+    router = APIRouter(prefix="/api")
+    _register_overview_routes(router, runtime)
+    _register_gateway_routes(router, runtime)
+    _register_settings_routes(router, runtime)
+    _register_device_routes(router, runtime)
     return router
 
 
