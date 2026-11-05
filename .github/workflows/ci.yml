@@ -70,6 +70,14 @@ jobs:
 
       - name: 跑全部后端用例
         shell: pwsh
+        env:
+          # 沙箱用**受限令牌**起子进程，而 `%TEMP%`（`C:\Users\runneradmin\AppData\Local\Temp`）
+          # 是私有目录：ACL 只给 runneradmin / Administrators / SYSTEM，受限令牌去掉管理员
+          # SID 后连遍历父目录都做不到。失败形态是 node 的 `node:fs:2801`（lstat 直接崩），
+          # 而 IPC 组件缓存、预览转换都往临时目录写。连同 `--basetemp` 一起指到共享目录，
+          # 两条才盖住"pytest 自己的 tmp_path"与"被测代码自己调的 tempfile.mkdtemp()"。
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
         # 失败摘要写进 job summary（2026-11-05）：默认日志要仓库权限才能下载，摘要区
         # 在 Actions 首页就能看，省掉"再找维护者要日志"这一跳。
         run: |
@@ -79,7 +87,7 @@ jobs:
           # 那个令牌去掉管理员 SID 之后连遍历父目录都做不到，node 直接
           # `node:fs:2801`（lstat）崩掉。本地能过是因为 `%LOCALAPPDATA%\Temp`
           # 对 Users 组可读。`D:\a\_temp` 是 runner 上的共享目录，受限令牌能走。
-          python -m pytest -q -rf --basetemp=D:/a/_temp/pytest 2>&1 | Tee-Object -FilePath pytest.log
+          python -m pytest -q -rf --basetemp="${{ runner.temp }}/pytest" 2>&1 | Tee-Object -FilePath pytest.log
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## pytest 失败摘要"
