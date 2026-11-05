@@ -1,5 +1,6 @@
 """受保护普通文件无法修改 DACL 时，必须验证真实受限令牌的不可变更性。"""
 
+import ctypes
 import subprocess
 import sys
 
@@ -13,6 +14,26 @@ from local_agent.security.policy import SecurityPolicy
 from local_agent.security.process_guard import ProcessRegistry
 
 pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="Windows ACL 与 AccessCheck")
+
+
+def _is_elevated() -> bool:
+    """当前进程是不是以管理员（高完整性）运行。
+
+    这组用例的前提是"普通用户能改文件内容、但改不了它的 DACL"——`icacls` 把 WRITE_DAC
+    从 Users 组收回之后才成立。**管理员绕过 ACL**（持有相应特权），前提直接不成立，
+    用例会以"DID NOT RAISE SecurityError"的形态失败。GitHub 的 windows runner 以管理员
+    运行，本地开发机通常是普通用户，所以这里按身份跳过，并在 reason 里说清原因。
+    """
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return False
+
+
+_NOT_ELEVATED = pytest.mark.skipif(
+    _is_elevated(),
+    reason="管理员账户绕过 ACL，无法验证 DACL 写拒绝；用普通用户跑这组用例",
+)
 
 
 def policy_for(root, grants=None):
@@ -32,6 +53,7 @@ def protected_file(tmp_path):
     return root, marker
 
 
+@_NOT_ELEVATED
 def test_unmodifiable_but_already_read_only_file_does_not_block_commands(protected_file, tmp_path):
     root, marker = protected_file
     original = sandbox._dacl_sddl(str(marker))
@@ -74,6 +96,7 @@ def test_failed_deny_is_not_ignored_for_a_writable_file(tmp_path, monkeypatch):
         policy_for(tmp_path).shell_sandbox_request()
 
 
+@_NOT_ELEVATED
 def test_parent_delete_child_permission_blocks_fallback(protected_file):
     root, _marker = protected_file
     sid = sandbox.workspace_sid_text(str(root))
@@ -85,6 +108,7 @@ def test_parent_delete_child_permission_blocks_fallback(protected_file):
         policy_for(root).shell_sandbox_request()
 
 
+@_NOT_ELEVATED
 def test_all_granted_sids_are_checked_after_materialization(protected_file, tmp_path):
     root, _marker = protected_file
     other = tmp_path / "other"
@@ -99,6 +123,7 @@ def test_all_granted_sids_are_checked_after_materialization(protected_file, tmp_
         policy_for(root, {normalize_grant_path(other): "read_write"}).shell_sandbox_request()
 
 
+@_NOT_ELEVATED
 def test_cached_files_are_rechecked_without_rescanning(protected_file, monkeypatch):
     root, _marker = protected_file
     policy = policy_for(root)
@@ -114,6 +139,7 @@ def test_cached_files_are_rechecked_without_rescanning(protected_file, monkeypat
         policy.shell_sandbox_request()
 
 
+@_NOT_ELEVATED
 def test_access_check_failure_remains_closed(protected_file, monkeypatch):
     root, _marker = protected_file
 
