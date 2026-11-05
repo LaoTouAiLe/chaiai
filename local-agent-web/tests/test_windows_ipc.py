@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -72,6 +73,14 @@ def node() -> str:
     if executable is None:
         pytest.skip("Node.js not installed")
     return executable
+
+
+def _is_elevated() -> bool:
+    """当前进程是不是以管理员（高完整性）运行。"""
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return False
 
 
 def _require_sandboxed_node_traverse(tmp_path: Path, app_config, node: str) -> None:
@@ -314,6 +323,11 @@ if(r.error)throw r.error;console.log('child:'+r.stdout);
 
 @WINDOWS
 def test_ancestor_metadata_updates_only_the_object(tmp_path: Path, monkeypatch) -> None:
+    if _is_elevated():
+        pytest.skip(
+            "管理员创建的目录属主是 BUILTIN\\Administrators 而不是当前用户 SID，"
+            "_grant_ancestor_metadata 只在属主是当前用户时补 ACE；用普通用户跑这组"
+        )
     ancestor = tmp_path / "ancestor"
     workspace = ancestor / "workspace"
     workspace.mkdir(parents=True)
