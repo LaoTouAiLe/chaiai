@@ -73,7 +73,13 @@ jobs:
         # 失败摘要写进 job summary（2026-11-05）：默认日志要仓库权限才能下载，摘要区
         # 在 Actions 首页就能看，省掉"再找维护者要日志"这一跳。
         run: |
-          python -m pytest -q -rf 2>&1 | Tee-Object -FilePath pytest.log
+          # `--basetemp` 指到 runner 的共享临时目录（2026-11-05 实测）：默认的
+          # `C:\Users\runneradmin\AppData\Local\Temp` 是私有目录，ACL 只给
+          # runneradmin / Administrators / SYSTEM；沙箱用**受限令牌**起子进程，
+          # 那个令牌去掉管理员 SID 之后连遍历父目录都做不到，node 直接
+          # `node:fs:2801`（lstat）崩掉。本地能过是因为 `%LOCALAPPDATA%\Temp`
+          # 对 Users 组可读。`D:\a\_temp` 是 runner 上的共享目录，受限令牌能走。
+          python -m pytest -q -rf --basetemp=D:/a/_temp/pytest 2>&1 | Tee-Object -FilePath pytest.log
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "## pytest 失败摘要"
