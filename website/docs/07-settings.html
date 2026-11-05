@@ -71,6 +71,8 @@
       <a href="internals/06-browser-terminal.html">06 浏览器与持久进程</a>
       <a href="internals/07-frontend-data.html">07 前端数据流与轮次展示</a>
       <a href="internals/08-testing.html">08 测试与验收方式</a>
+      <a href="internals/09-mobile.html">09 移动访问与远程入口</a>
+      <a href="internals/10-screen.html">10 看屏幕与操作屏幕</a>
     </div>
     <div class="sidebar__foot"><a href="../site.html">← 返回官网</a></div>
   </nav>
@@ -104,6 +106,8 @@
       <a href="internals/06-browser-terminal.html">06 浏览器与持久进程</a>
       <a href="internals/07-frontend-data.html">07 前端数据流与轮次展示</a>
       <a href="internals/08-testing.html">08 测试与验收方式</a>
+      <a href="internals/09-mobile.html">09 移动访问与远程入口</a>
+      <a href="internals/10-screen.html">10 看屏幕与操作屏幕</a>
     </div>
     <div class="sidebar__foot"><a href="../site.html">← 返回官网</a></div>
   </nav>
@@ -127,14 +131,15 @@
           <tr><td rowspan="4">模型与权限</td><td>模型连接</td><td>默认连接与每条连接的端点、模型、窗口、流式与图片能力。</td></tr>
           <tr><td>权限</td><td>三档与「外部可写目录」。</td></tr>
           <tr><td>技能</td><td>本机发现的技能清单，可逐条开关；关掉不删文件，改完下一次提交生效。</td></tr>
-          <tr><td>能力</td><td>各项能力的开关与依赖状态（读取文件、联网等属「始终开启」，没有开关）；缺依赖时说明安装方法，改完下一轮生效、不用重启。</td></tr>
+          <tr><td>能力</td><td>各项能力的开关与依赖状态（读取文件、联网等属「始终开启」，没有开关）；缺依赖时说明安装方法，改完下一轮生效、不用重启。<strong>看屏幕与操作屏幕默认关闭</strong>，也在这里打开，且只在 Windows 可用。</td></tr>
           <tr><td rowspan="3">任务与工具</td><td>任务执行</td><td>每轮工具循环上限、命令超时、重复失败反馈阈值。</td></tr>
           <tr><td>自动代码检索</td><td>只控制任务开始前的那次检索，不控制模型主动调用的 grep / glob。</td></tr>
           <tr><td>联网检索</td><td>搜索服务与密钥变量名；联网是常态能力，出厂即开。</td></tr>
           <tr><td rowspan="3">记忆</td><td>长期记忆</td><td>置信度与重要度阈值、遗忘天数、是否允许跨项目的用户级事实。</td></tr>
           <tr><td>中期记忆</td><td>开关、召回条数、相似度阈值与时间衰减半衰期；启用前要先配好 Embedding。</td></tr>
           <tr><td>向量库与 Embedding</td><td>本地 ONNX 或兼容 API、缓存目录、离线模式、端点与密钥变量名。</td></tr>
-          <tr><td rowspan="2">通用</td><td>通用与外观</td><td>主题（浅色 / 深色 / 跟随系统）、文字大小、界面动画、发送快捷键、默认展开 Think。</td></tr>
+          <tr><td rowspan="3">通用</td><td>通用与外观</td><td>主题（浅色 / 深色 / 跟随系统）、文字大小、界面动画、发送快捷键、默认展开 Think。</td></tr>
+          <tr><td>移动访问</td><td>开关、通道（<code>lan</code> / <code>tailscale</code>）与已配对设备。默认关闭；打开后由独立进程承担远程入口，配对码 5 分钟有效且一次性。</td></tr>
           <tr><td>高级配置</td><td>只读展示压缩、历史保留与 AGENTS 规则，不开放修改。</td></tr>
         </tbody>
       </table>
@@ -188,7 +193,7 @@
       </a>
     </nav>
 
-    <p class="pagefoot">最后更新 2026-10-27 · 适用版本 v1.0</p>
+    <p class="pagefoot">最后更新 2026-11-05 · 适用版本 v0.3.0</p>
   </main>
 </div>
 

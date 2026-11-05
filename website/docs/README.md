@@ -30,7 +30,7 @@ website/
     07-settings.html       设置项与生效时机
     08-faq.html            常见问题与自检
     internals/                技术实现说明（面向开发者）
-      index.html              概览 + 8 章目录
+      index.html              概览 + 10 章目录
       01-architecture.html    架构总览：两层界面与一支执行链
       02-lifecycle.html       一轮请求的生命周期
       03-tools.html           工具层与安全判据
@@ -39,6 +39,8 @@ website/
       06-browser-terminal.html 浏览器与持久进程
       07-frontend-data.html    前端数据流与轮次展示
       08-testing.html         测试与验收方式
+      09-mobile.html          移动访问与远程入口
+      10-screen.html          看屏幕与操作屏幕
     assets/
       docs.css             唯一样式表
       img/                 截图与示意图
@@ -92,14 +94,14 @@ website/
   <div class="sidebar__group">
     <p class="sidebar__title">技术实现说明</p>
     <a href="internals/index.html">概览</a>
-    …其余 8 章…
+    …其余 10 章…
   </div>
   <div class="sidebar__foot"><a href="../site.html">← 返回官网</a></div>
 </nav>
 ```
 
 新增一章需要改：① 新建章节页；② `docs/index.html` 的章节列表与下一条 pager；③ 相邻两章的 pager；
-④ **所有页面（当前 18 个）的桌面侧栏与移动折叠目录**——首页也有完整目录，不再有"简化侧栏"的例外；⑤ 当前页的 `aria-current`。漏掉 ④ 会让别的页面或手机导航里少一条。
+④ **所有页面（当前 20 个）的桌面侧栏与移动折叠目录**——首页也有完整目录，不再有"简化侧栏"的例外；⑤ 当前页的 `aria-current`。漏掉 ④ 会让别的页面或手机导航里少一条。
 
 ## 5. 图与图注
 

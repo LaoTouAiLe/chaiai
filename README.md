@@ -58,12 +58,16 @@ Requirements: **Python 3.10+**, **Node 22.20+**, [uv](https://docs.astral.sh/uv/
 ```powershell
 cd local-agent-web
 uv sync                 # add `--extra memory` for vector memory (Chroma + local ONNX embedding)
-cd frontend
+cd preview-runtime      # Office → PDF conversion engine (bundled in the installer, install once from source)
+npm ci --omit=optional --ignore-scripts
+cd ../frontend
 npm ci
 npm run build
 cd ..
 uv run python -m local_agent.api
 ```
+
+Without `preview-runtime` everything still runs: document preview says the converter is not installed and the rest is unaffected.
 
 Open http://127.0.0.1:8731 . For development, run `npm run dev` in `frontend/` (5173, proxied to 8731).
 Prefer a desktop window over a browser tab: `uv run python -m local_agent.api --window`.
@@ -79,6 +83,12 @@ copy `config.yaml.example` / `.env.example` — **do not overwrite an existing `
 | Approvals and permissions | Writes and commands need a one-time approval; destructive operations need a two-stage confirmation |
 | Files and commands | Targeted reads/writes, full-text search, command execution, background jobs, persistent terminals |
 | Browser | A separate Edge/Chrome instance, 13 actions, screenshots can be fed back to the model |
+| Screen reading and control | `screenshot` / `read_ui` look at the foreground window only; click, type and key combos are opt-in, one approval per round, re-approval when the window changes |
+| File preview | Word / PPT / Excel / PDF rendered in the right panel with continuous scrolling; spreadsheets paged per sheet |
+| Open in app | Hand a workspace file to your own editor, terminal or Explorer; the app list is a compiled-in allowlist |
+| Sub-agent delegation | Fan out investigations with a scope per lane and live per-lane progress while they run |
+| Mobile access | Optional separate gateway process for phones: pairing code, device tokens, `lan` and `tailscale` channels |
+| Response rendering | Code blocks, tables, images, formulas and sources render as blocks; successful tool steps collapse into one "process" row |
 | Three-tier memory | Short-term compression, long-term facts, mid-term vector recall — all inspectable |
 | Web search | Tavily / DeepSeek search API / Bing–DuckDuckGo HTML, with local or remote page fetching |
 | Right-hand panel | File tree, search, git diff, change log, terminal, task center, session map |
@@ -216,7 +226,9 @@ Keys are write-only: the API only ever reports "configured / not configured".
 - **Approval is not optional**: writes and commands go through human approval. On Windows there is a write-side sandbox, but it constrains **writes only** — reads and network are not isolated
 - **Commands can reach the network on their own**; there are no CPU/memory limits and no network isolation
 - **The installer is not code-signed**: SmartScreen shows "Unknown publisher" — click **More info → Run anyway**
-- **Windows only**: the write-side sandbox, desktop window and system queries depend on Windows APIs
+- **Screen reading and control are off by default**: a screenshot can contain keys, private chats and unrelated windows; once enabled the model acts on the foreground window only, re-approval is required when the window changes, and actions per round are capped. Windows only
+- **Mobile access is off by default and runs as a separate process**: phones join with a pairing code; while disabled it starts no process, binds no port and writes no file
+- **Windows only**: the write-side sandbox, desktop window, screen capabilities and system queries depend on Windows APIs
 
 ## Where data lives
 
@@ -224,7 +236,8 @@ Keys are write-only: the API only ever reports "configured / not configured".
 | --- | --- |
 | Program | `%LOCALAPPDATA%\Programs\chaiai` |
 | Settings DB, conversations, memory, attachments | `%LOCALAPPDATA%\chaiai` (**source runs use the same place**, not the code directory) |
-| Runtime logs | `启动错误.log`, `模型调用失败.log` in the same directory |
+| Runtime logs | `启动错误.log`, `模型调用失败.log` in the same directory; the mobile gateway also writes `mobile/gateway.log` |
+| Mobile access state | `mobile/` in the same directory: `pairing.json` (device grants, hashes only) and `certs/` (self-signed LAN certificate) |
 
 The data root can be moved to any absolute path via `data_root` (config.yaml) or `CHAIAI_HOME`.
 Old data is not migrated automatically; the startup banner prints both locations.
@@ -239,13 +252,15 @@ Upgrading means running the new installer over the old one; the data directory i
 | Service | FastAPI + Uvicorn (single process, single worker), SSE for streaming events |
 | Storage | SQLite (conversations, settings, memory metadata), Chroma (optional, mid-term memory) |
 | UI | React 19 + Vite 8 + TypeScript, TanStack Query, Zustand |
+| Document preview | `pdfjs-dist` for PDF; a separate Node runtime under `preview-runtime/` drives the Office conversion |
+| Desktop capabilities | Pillow for foreground-window capture, uiautomation + comtypes for the control tree and synthetic input (Windows only) |
 | Packaging | PyInstaller (onedir) + Inno Setup; desktop window via WebView2 (pywebview) |
 
 ## Project layout
 
 ```
 chaiai/
-├─ local-agent-web/     main program: Python backend (src/) + frontend/ + tests/
+├─ local-agent-web/     main program: Python backend (src/) + frontend/ + preview-runtime/ + tests/
 ├─ docs/                design and records: plans / audits / lessons / benchmarks / archive
 ├─ packaging/           release material: Inno Setup script, usage notes, bundled binaries
 ├─ skills/              bundled skills

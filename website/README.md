@@ -8,7 +8,7 @@
 website/
   site.html            首页（宣传页）
   assets/              官网独立样式、渐进增强脚本、品牌图标与真实界面截图
-  docs/                文档站：入口 index.html + 操作手册 8 章 + internals/ 技术实现 8 章
+  docs/                文档站：入口 index.html + 操作手册 8 章 + internals/ 技术实现 10 章
     index.html         文档首页＝操作手册首页
     README.md          文档写作规范（维护者看，部署时可排除）
     assets/docs.css    文档站样式
@@ -36,6 +36,6 @@ website/
 ## 文档
 
 文档的写作口径、章节约定、页面骨架与自查清单见 [`docs/README.md`](docs/README.md)。
-两套材料：操作手册八章（`docs/index.html` 为首页，`docs/01…08-*.html` 为章节）与 `docs/internals/index.html`（面向开发者，8 个章节页），均已写完。
+两套材料：操作手册八章（`docs/index.html` 为首页，`docs/01…08-*.html` 为章节）与 `docs/internals/index.html`（面向开发者，10 个章节页），均已写完。
 左栏是全站统一的一棵树，不再需要"先进文档首页、再点操作手册"。
 文档与官网共用暖白、橙色与灰绿色的视觉方向。文档保留无 JavaScript 的静态结构：手机端使用原生折叠目录，表格在自身区域内横向滚动，正文、命令与翻页关系保持独立维护。

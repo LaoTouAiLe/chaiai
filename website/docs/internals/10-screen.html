@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>看屏幕与操作屏幕 · 技术实现说明 · chaiai</title>
+<meta name="description" content="chaiai 只截当前前台窗口，控件树给出可点击编号；点击与输入默认关闭、本轮一次授权、换窗口即失效，每轮动作有上限。" />
+<meta name="color-scheme" content="light" />
+<meta name="theme-color" content="#faf9f6" />
+<link rel="icon" type="image/svg+xml" href="../../assets/logo.svg" />
+<link rel="stylesheet" href="../assets/docs.css" />
+</head>
+<body>
+<a class="skip-link" href="#doc-content">跳到正文</a>
+
+<header class="topbar">
+  <div class="topbar__inner">
+    <a class="brand" href="../../site.html" aria-label="chaiai 官网">
+      <svg class="brand__mark" viewBox="0 0 64 64" width="24" height="24" aria-hidden="true">
+        <defs>
+          <linearGradient id="chaiaiWarm" x1="8" y1="4" x2="56" y2="62" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#F8B65C"/><stop offset="1" stop-color="#E77737"/>
+          </linearGradient>
+        </defs>
+        <rect width="64" height="64" rx="18" fill="url(#chaiaiWarm)"/>
+        <path d="m16 27-1-13c-.4-3 1.2-4 3.3-2.2l8.7 7.4a16 16 0 0 1 10 0l8.7-7.4c2.1-1.8 3.7-.8 3.3 2.2l-1 13c3 3.2 4 7.2 4 11 0 8.4-8.2 14-20 14-2.4 0-4.7-.2-7-.7L15 55l2.3-10.2C13.9 42.4 12 39.4 12 36c0-3.5 1.4-6.7 4-9Z" fill="#FFF7E9"/>
+        <path d="m19.3 16.8.8 8.4 5.1-3.5Zm25.4 0-.8 8.4-5.1-3.5Z" fill="#BF6A37"/>
+        <path d="M24 32.5v2M40 32.5v2" fill="none" stroke="#633E2B" stroke-width="3.6" stroke-linecap="round"/>
+        <path d="M29.2 38.1c-.7-.8-.2-2.1.9-2.1h3.8c1.1 0 1.6 1.3.9 2.1L33 40a1.4 1.4 0 0 1-2 0Z" fill="#633E2B"/>
+        <path d="M26.5 42.2c1.5 1.7 3.3 1.7 5.5-.3 2.2 2 4 2 5.5.3" fill="none" stroke="#633E2B" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>chaiai</span>
+      <span class="brand__divider" aria-hidden="true"></span>
+      <span class="brand__label">文档</span>
+    </a>
+    <nav class="topnav" aria-label="站点导航">
+      <a href="../index.html">文档首页</a>
+      <a href="index.html" class="topnav__section">技术实现</a>
+      <a class="topnav__out" href="../../site.html">返回官网</a>
+      <a class="topnav__out" href="https://github.com/LaoTouAiLe/chaiai" target="_blank" rel="noreferrer noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<details class="mobile-directory">
+  <summary><span class="directory-icon" aria-hidden="true">☷</span><span>文档导航</span><span class="directory-current">架构总览：两层界面与一支执行链</span><span class="directory-chevron" aria-hidden="true">⌄</span></summary>
+  <nav class="mobile-tree" aria-label="移动文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="../01-install.html">01 安装与第一次启动</a>
+      <a href="../02-model.html">02 连接一个模型</a>
+      <a href="../03-permissions.html">03 权限三档与目录授权</a>
+      <a href="../04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="../05-map.html">05 会话地图与分支追问</a>
+      <a href="../06-data.html">06 数据中台</a>
+      <a href="../07-settings.html">07 设置项与生效时机</a>
+      <a href="../08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="index.html">概览</a>
+      <a href="01-architecture.html">01 架构总览</a>
+      <a href="02-lifecycle.html">02 一轮请求的生命周期</a>
+      <a href="03-tools.html">03 工具层与安全判据</a>
+      <a href="04-sandbox.html">04 写侧沙箱与权限判定</a>
+      <a href="05-memory.html">05 记忆与上下文压缩</a>
+      <a href="06-browser-terminal.html">06 浏览器与持久进程</a>
+      <a href="07-frontend-data.html">07 前端数据流与轮次展示</a>
+      <a href="08-testing.html">08 测试与验收方式</a>
+      <a href="09-mobile.html">09 移动访问与远程入口</a>
+      <a href="10-screen.html" aria-current="page">10 看屏幕与操作屏幕</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+</details>
+
+<div class="layout layout--plain">
+  <nav class="sidebar" aria-label="文档目录">
+    <div class="sidebar__group">
+      <p class="sidebar__title">文档</p>
+      <a href="../index.html">概览</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">操作手册</p>
+      <a href="../01-install.html">01 安装与第一次启动</a>
+      <a href="../02-model.html">02 连接一个模型</a>
+      <a href="../03-permissions.html">03 权限三档与目录授权</a>
+      <a href="../04-rounds.html">04 聊天、Agent 与一轮任务</a>
+      <a href="../05-map.html">05 会话地图与分支追问</a>
+      <a href="../06-data.html">06 数据中台</a>
+      <a href="../07-settings.html">07 设置项与生效时机</a>
+      <a href="../08-faq.html">08 常见问题与自检</a>
+    </div>
+    <div class="sidebar__group">
+      <p class="sidebar__title">技术实现说明</p>
+      <a href="index.html">概览</a>
+      <a href="01-architecture.html">01 架构总览</a>
+      <a href="02-lifecycle.html">02 一轮请求的生命周期</a>
+      <a href="03-tools.html">03 工具层与安全判据</a>
+      <a href="04-sandbox.html">04 写侧沙箱与权限判定</a>
+      <a href="05-memory.html">05 记忆与上下文压缩</a>
+      <a href="06-browser-terminal.html">06 浏览器与持久进程</a>
+      <a href="07-frontend-data.html">07 前端数据流与轮次展示</a>
+      <a href="08-testing.html">08 测试与验收方式</a>
+      <a href="09-mobile.html">09 移动访问与远程入口</a>
+      <a href="10-screen.html" aria-current="page">10 看屏幕与操作屏幕</a>
+    </div>
+    <div class="sidebar__foot"><a href="../../site.html">← 返回官网</a></div>
+  </nav>
+
+  <main class="doc" id="doc-content">
+    <nav class="breadcrumbs" aria-label="当前位置"><a href="../index.html">文档</a><span aria-hidden="true">/</span><a href="index.html">技术实现</a><span aria-hidden="true">/</span><span aria-current="page">看屏幕与操作屏幕</span></nav>
+    <p class="kicker">INTERNALS · 第 10 章</p>
+    <h1>看屏幕与操作屏幕</h1>
+    <p class="lead">
+      先让模型"看见"当前窗口，再允许它在同一个窗口上点击与输入；两件事分开开关、分开审批。
+    </p>
+
+    <div class="prose">
+      <h2>1 只截前台窗口</h2>
+      <p>
+        整屏会把任务栏、通知与无关窗口一起拍进来，隐私面随窗口数量增长。所以只取当前前台窗口的矩形
+        （<code>screen_capture.py:97</code> 的 <code>_rect_and_title</code>）：取不到、窗口没有可见区域，
+        一律明确失败，<strong>不退回整屏</strong>。
+      </p>
+      <ul>
+        <li><strong>不落工作区。</strong>截图走系统临时目录，按条数滚动淘汰（<code>CACHE_LIMIT=20</code>，
+          <code>screen_capture.py:45</code>）。</li>
+        <li><strong>与看图分开。</strong><code>image_read</code> 的闸门是"这条连接能不能收图"，
+          截屏除此之外还有平台闸门与隐私面，所以单独登记成 <code>screen_read</code>。</li>
+      </ul>
+
+      <h2>2 控件树与编号</h2>
+      <p>
+        截图能"看见"，但拿不到"这个按钮叫什么、能不能点"。<code>read_ui</code> 把前台窗口的控件树压成一段
+        有界文本，可交互控件带编号，供 <code>click_element</code> 引用。
+      </p>
+      <p>
+        编号只对<strong>最近一次读数、同一个窗口</strong>有效。点击前会比对当前前台窗口，
+        窗口变了就要求重新读（<code>tools/screen_tools.py:294-301</code>），不会用旧坐标点到别的程序上。
+      </p>
+
+      <h2>3 动作只有五个</h2>
+      <div class="table-scroll" role="region" aria-label="屏幕工具表格，可横向滚动" tabindex="0">
+<table>
+        <thead><tr><th>工具</th><th>作用</th><th>能力开关</th></tr></thead>
+        <tbody>
+          <tr><td><code>screenshot</code></td><td>截当前前台窗口给模型看</td><td><code>screen_read</code></td></tr>
+          <tr><td><code>read_ui</code></td><td>读控件树，给出编号</td><td><code>screen_read</code></td></tr>
+          <tr><td><code>click_screen</code> / <code>click_element</code></td><td>按坐标或编号单击</td><td><code>screen_control</code></td></tr>
+          <tr><td><code>type_text</code> / <code>press_keys</code></td><td>输入文本、按组合键</td><td><code>screen_control</code></td></tr>
+          <tr><td><code>focus_window</code></td><td>把某个窗口切到前台</td><td><code>screen_control</code>，且每次都要批</td></tr>
+        </tbody>
+      </table>
+</div>
+      <p>
+        不做拖拽、滚轮、右键菜单与多段宏。每个动作都要过审批、都要能在失败时收尾，动作越多收尾面越大。
+      </p>
+
+      <h2>4 授权粒度：本轮一次</h2>
+      <ul>
+        <li><strong>第一次动作弹一次卡</strong>，之后本轮内同类动作不再逐个询问（<code>security/policy.py:773-800</code>）。
+          策略实例随轮次重建，所以这不是"记住批准"。</li>
+        <li><strong>换窗口立即撤销。</strong>授权对象是"那个窗口"，不是"这台机器"
+          （<code>policy.py:806-812</code>）；下一次动作重新请求批准，卡片上是新窗口的标题。</li>
+        <li><strong>每轮有上限。</strong>最多 20 个动作（<code>screen_input.py:34</code>），数到顶就拒绝，
+          而不是无限连续点击。</li>
+        <li><strong>切前台单独批。</strong><code>focus_window</code> 改的是用户此刻的焦点，可能正打着字、开着菜单，
+          所以不并进上面那条"本轮一次"。</li>
+      </ul>
+
+      <h2>5 默认值与平台</h2>
+      <ul>
+        <li><code>screen_read</code> 与 <code>screen_control</code> <strong>出厂默认关闭</strong>，并且
+          <strong>不进任何内置档位</strong>——打开是用户的显式决定，不是档位的副产品。</li>
+        <li><code>screen_control</code> 还要求当前处于工作区可写档位：它会改动别的程序的状态。</li>
+        <li>只在 Windows 可用：截图走 Win32 与 Pillow，控件树与输入走 <code>uiautomation</code> +
+          <code>comtypes</code>；非 Windows 上 <code>available()</code> 直接返回不可用，不假装支持。</li>
+      </ul>
+    </div>
+
+    <nav class="pager" aria-label="翻页">
+      <a href="09-mobile.html">
+        <span class="pager__hint">上一篇</span>
+        <span class="pager__title">← 09 移动访问与远程入口</span>
+      </a>
+      <a class="pager__next" href="index.html">
+        <span class="pager__hint">下一篇</span>
+        <span class="pager__title">返回技术实现概览 →</span>
+      </a>
+    </nav>
+</main>
+</div>
+
+</body>
+</html>

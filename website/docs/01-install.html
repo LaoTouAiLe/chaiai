@@ -71,6 +71,8 @@
       <a href="internals/06-browser-terminal.html">06 浏览器与持久进程</a>
       <a href="internals/07-frontend-data.html">07 前端数据流与轮次展示</a>
       <a href="internals/08-testing.html">08 测试与验收方式</a>
+      <a href="internals/09-mobile.html">09 移动访问与远程入口</a>
+      <a href="internals/10-screen.html">10 看屏幕与操作屏幕</a>
     </div>
     <div class="sidebar__foot"><a href="../site.html">← 返回官网</a></div>
   </nav>
@@ -104,6 +106,8 @@
       <a href="internals/06-browser-terminal.html">06 浏览器与持久进程</a>
       <a href="internals/07-frontend-data.html">07 前端数据流与轮次展示</a>
       <a href="internals/08-testing.html">08 测试与验收方式</a>
+      <a href="internals/09-mobile.html">09 移动访问与远程入口</a>
+      <a href="internals/10-screen.html">10 看屏幕与操作屏幕</a>
     </div>
     <div class="sidebar__foot"><a href="../site.html">← 返回官网</a></div>
   </nav>
@@ -119,13 +123,16 @@
       <ul>
         <li>Windows 10/11（x64 / x86）。Linux 与 macOS 也能运行，但没有 OS 级写边界，界面与工具结果会如实说明这一点。</li>
         <li>源码安装需要 Python 与 Node；版本以 <code>pyproject.toml</code>、<code>frontend/package.json</code> 为准（前端要求 Node 22.20–22.x、npm 10.9+）。</li>
+        <li>文档的 Word / PPT / Excel 版式预览由 <code>preview-runtime/</code> 里的独立 Node 运行时驱动：安装包已内置，源码形态需要按下面的步骤装一次。</li>
         <li>不需要注册账号，也不需要事先写 <code>config.yaml</code>——模型连接在网页设置里填。</li>
       </ul>
 
       <h2>从源码启动</h2>
       <p>以下命令都在 <code>local-agent-web/</code> 目录执行：</p>
       <pre><code>uv sync
-cd frontend
+cd preview-runtime
+npm ci --omit=optional --ignore-scripts
+cd ../frontend
 npm ci
 npm run build
 cd ..
@@ -133,7 +140,11 @@ uv run python -m local_agent.api</code></pre>
       <p>
         首次启动会创建本机数据库，之后浏览器打开 <code>http://127.0.0.1:8731</code> 就能进界面。
         开发时也可以另开一个终端，在 <code>frontend/</code> 执行 <code>npm run dev</code>，
-        用 <code>http://127.0.0.1:5173</code> 访问（<code>/api</code> 会代理到 8000）。
+        用 <code>http://127.0.0.1:5173</code> 访问（<code>/api</code> 会代理到 8731）。
+      </p>
+      <p>
+        跳过 <code>preview-runtime</code> 不影响启动：文档预览会提示"转换组件未安装"，其余功能照常。
+        屏幕能力（<code>screenshot</code>、<code>read_ui</code>、点击与输入）只在 Windows 可用，且需要在设置里手动打开。
       </p>
 
       <h2>用发行包启动</h2>
@@ -175,7 +186,7 @@ uv run python -m local_agent.api</code></pre>
       </a>
     </nav>
 
-    <p class="pagefoot">最后更新 2026-10-27 · 适用版本 v1.0</p>
+    <p class="pagefoot">最后更新 2026-11-05 · 适用版本 v0.3.0</p>
   </main>
 </div>
 

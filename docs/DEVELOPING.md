@@ -22,12 +22,17 @@ uv sync
 # 首次启动可不建 config.yaml/.env，在网页设置中添加模型连接。
 # 需要自定义配置时才复制示例；已有 config.yaml 时不要覆盖：
 # Copy-Item config.yaml.example config.yaml
-cd frontend
+cd preview-runtime        # Office/PDF 版式预览的转换引擎；安装包已内置，源码形态装一次
+npm ci --omit=optional --ignore-scripts
+cd ../frontend
 npm ci
 npm run build
 cd ..
 uv run python -m local_agent.api
 ```
+
+缺少 `preview-runtime` 不影响启动：文档预览会返回"转换组件未安装"，其余功能照常。
+屏幕能力（`screenshot` / `read_ui` / 点击输入）另需 `pillow` 与 `uiautomation`，都在运行时依赖里，仅 Windows 生效。
 
 浏览器打开 http://127.0.0.1:8731。前端构建后刷新；后端更新后重启服务。没有产物时根路径提供构建提示，API 仍可用。Python/Node/npm 版本要求以 `pyproject.toml` 与 `frontend/package.json` 为准，精确依赖由锁文件确定。
 
