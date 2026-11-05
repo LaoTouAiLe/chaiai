@@ -8,9 +8,9 @@
     "ipc-loader-x86.exe": "900f0a9e1fad53e5837dac275f4177b99921ea71b9f432a1bd43c75b635a7fa4"
   },
   "sources": {
-    "ipc_common.c": "de4911a37553dc427df1ee64cd516bde88a27747dbbe997518318473a19a3e94",
+    "ipc_common.c": "fd4f5292312ffa05f3faabf6a7e1cc94535860e1460fcee402f7e993dc035e9a",
     "ipc_common.h": "3725c21a1a00b8cbdeb7d12ebb86668d2ad4926680209b8dbcdacc4a2a94c8f3",
-    "ipc_compat.c": "4031ddeca8a660dcc8f7d3b306ff7c12ec06498cf99f9d097c656773bef50810",
+    "ipc_compat.c": "c43ba5c44126b76977f3868e5256cf8884bd9f288a1c13387e2c1449f77853b8",
     "ipc_loader.c": "1552cdeafc0be0c344de4fdb06e1f815b5d26c90335ed8096499572fcd5ddb88"
   }
 }
