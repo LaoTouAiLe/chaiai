@@ -14,9 +14,9 @@
 .root :where(p, ul, ol, blockquote, table) { margin: 16px 0; }
 .root :where(h1, h2, h3) { margin: 32px 0 16px; font-weight: 700; }
 .root :where(h4, h5, h6) { margin: 16px 0; font-weight: 600; }
-.root h1 { font-size: calc(24px + var(--law-font-step) * 2px); line-height: calc(34px + var(--law-font-step) * 3px); }
-.root h2 { font-size: calc(22px + var(--law-font-step) * 2px); line-height: calc(32px + var(--law-font-step) * 3px); }
-.root h3 { font-size: calc(20px + var(--law-font-step) * 2px); line-height: calc(30px + var(--law-font-step) * 3px); }
+.root h1 { font-size: calc(21px + var(--law-font-step) * 2px); line-height: calc(30px + var(--law-font-step) * 3px); }
+.root h2 { font-size: calc(19px + var(--law-font-step) * 2px); line-height: calc(28px + var(--law-font-step) * 3px); }
+.root h3 { font-size: calc(18px + var(--law-font-step) * 2px); line-height: calc(26px + var(--law-font-step) * 3px); }
 .root :is(h4, h5, h6) { font-size: inherit; line-height: inherit; }
 .compact { font-size: var(--law-text-sm); line-height: var(--law-leading-md); color: var(--c-text-2); }
 .compact :where(p, ul, ol, blockquote) { margin: 8px 0; }
@@ -42,11 +42,28 @@
 .root blockquote > :first-child { margin-top: 0; }
 .root blockquote > :last-child { margin-bottom: 0; }
 .root hr { height: 1px; border: 0; margin: 32px 0; background: var(--c-line); }
-.root table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; font-size: var(--law-text-sm); line-height: var(--law-leading-md); }
-.root :is(th, td) { min-width: 96px; padding: 10px 16px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--c-line); }
-.root th { font-weight: 500; border-bottom-color: var(--c-line-strong); }
-.root :is(th, td):first-child { padding-left: 0; }
-.root :is(th, td):last-child { padding-right: 0; }
+.root table { font-size: inherit; line-height: inherit; }
+.root :where(h4, h5, h6):has(+ :is(ul, ol)) { margin-bottom: 8px; }
+.root :where(h4, h5, h6) + :is(ul, ol) { margin-top: 8px; }
+.root :where(h1, h2, h3, h4, h5, h6) code { font-size: .875em; font-weight: inherit; }
+.root :global(.katex-display) { max-width: 100%; margin: 20px 0; padding: 8px 0; overflow-x: auto; overflow-y: hidden; }
+.root :global(.katex) { font-size: 1.08em; }
+.root :global(.katex-error) { font: inherit; color: var(--c-text-2) !important; white-space: pre-wrap; overflow-wrap: anywhere; }
+.root :global(.footnotes) { margin-top: 24px; padding-top: 12px; border-top: .5px solid var(--c-line); color: var(--c-text-3); font-size: 12px; line-height: 20px; }
+.root :global(.footnotes) h2 { margin: 0 0 8px; font: inherit; font-weight: 600; }
+.root :global(.footnotes) ol { margin: 8px 0 0; }
+.compact :is(p, ul, ol, blockquote) { margin: 4px 0; }
+.compact li:not(:first-child) { margin-top: 2px; }
+.compact li > p { margin: 4px 0; }
+.compact :is(h1, h2, h3, h4, h5, h6) { margin: 8px 0 4px; }
+.compact blockquote { padding-left: 8px; }
+.compact hr { margin: 8px 0; }
+.compact :is(th, td) { padding-block: 4px; font-size: inherit; }
+.compact :global(.katex-display) { margin: 4px 0; padding-block: 4px; }
+.compact :global(.katex) { font-size: 1em; }
+.compact [data-answer-table], .compact [data-code-block] { margin: 4px 0; }
+.compact [data-code-block] pre { font-size: inherit; line-height: inherit; }
+.compact [data-code-block] pre :is(code, span) { color: inherit !important; }
 
 .inline { overflow-wrap: anywhere; padding: 0 5px; border: .5px solid var(--c-line); border-radius: 8px; background: var(--dsw-alias-markdown-inline-code); font-family: var(--font-mono-code); font-size: .875em; }
 .block { min-width: 0; margin: 16px 0; border: .5px solid var(--c-line); border-radius: 16px; overflow: hidden; }
@@ -63,6 +80,10 @@
 .fileLink > span:first-child { flex-shrink: 0; align-self: center; }
 .fileLink:focus-visible { outline-offset: 3px; border-radius: 6px; }
 .imagePlaceholder { color: var(--c-text-2); }
+.fileMention { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; vertical-align: baseline; color: var(--c-text-1); text-align: left; }
+.fileMention svg { flex: none; width: 13px; height: 13px; align-self: center; }
+.fileMention span { min-width: 0; overflow-wrap: anywhere; }
+.fileMention:hover { color: var(--c-accent); background: var(--c-accent-soft); }
 
 /* Trim only the document edges; preserve the internal block margins above. */
 .root > :first-child { margin-top: 0; }

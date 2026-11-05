@@ -512,3 +512,23 @@
   color: var(--law-text-caption);
   opacity: .85;
 }
+
+/* Match the quiet DSH detail surface; content scrolls inside its own card. */
+.card { min-width: 0; border-width: .5px; border-radius: 16px; background: var(--c-panel); }
+.header { min-width: 0; flex-wrap: wrap; gap: 6px 8px; padding: 8px 12px; background: transparent; border-bottom-width: .5px; }
+.title { flex: 1 1 120px; max-width: 100%; font-size: var(--law-text-sm); line-height: 20px; }
+.meta { flex: 0 1 auto; min-width: 0; max-width: 100%; flex-wrap: wrap; overflow-wrap: anywhere; }
+.cwd { min-width: 0; overflow-wrap: anywhere; }
+.resultActions { display: flex; flex: none; align-items: center; gap: 2px; margin-left: auto; }
+.resultActions button { padding: 3px 6px; border-radius: 6px; font-size: var(--law-text-xs); line-height: 20px; color: var(--c-text-3); }
+.resultActions button:hover { color: var(--c-text-1); background: var(--c-hover); }
+.resultActions button[aria-pressed='true'] { color: var(--c-accent); background: var(--c-accent-soft); }
+.codeRow, .matchRow, .terminal { font-family: var(--font-mono-code); font-size: calc(13px + var(--law-font-step) * 1px); line-height: calc(22px + var(--law-font-step) * 2px); }
+.terminal { max-height: 320px; padding: 12px 16px; overscroll-behavior: contain; }
+.stderr { border-left: 2px solid var(--law-state-error); background: color-mix(in srgb, var(--law-state-error-subtle) 45%, transparent); }
+.fileTarget { max-width: 100%; padding: 0; color: inherit; text-align: left; font: inherit; overflow: hidden; text-overflow: ellipsis; white-space: inherit; }
+.fileTarget:hover { color: var(--c-accent); text-decoration: underline; text-underline-offset: 3px; }
+.fileTarget span { color: var(--c-text-3); }
+.card[data-wrap='true'] :is(.codeRow, .matchRow) { min-width: 0; }
+.card[data-wrap='true'] .codeText { min-width: 0; flex: 1 1 auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.card[data-wrap='true'] .terminal { white-space: pre-wrap; overflow-wrap: anywhere; }

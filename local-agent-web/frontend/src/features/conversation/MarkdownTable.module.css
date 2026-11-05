@@ -1,0 +1,15 @@
+.frame { min-width: 0; max-width: 100%; margin: 16px 0; }
+.toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 28px; color: var(--c-text-3); font-size: 12px; line-height: 20px; }
+.toolbar button { flex: none; padding: 3px 6px; border-radius: 6px; }
+.toolbar button:hover { color: var(--c-text-1); background: var(--c-hover); }
+.scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; border-radius: 4px; }
+.scroll:focus-visible { outline: 2px solid var(--c-accent); outline-offset: 4px; }
+.scroll table { width: 100%; max-width: none; margin: 0; border-collapse: collapse; }
+.scroll[data-wide='true'] table { width: max-content; min-width: 100%; }
+.scroll :is(th, td) { min-width: 100px; max-width: 320px; padding: 10px 16px; text-align: start; vertical-align: top; border-bottom: .5px solid var(--c-line); font-size: inherit; line-height: inherit; overflow-wrap: anywhere; }
+.scroll th { border-bottom-color: var(--c-line-strong); font-weight: 600; color: var(--c-text-2); }
+.scroll :is(th, td):first-child { padding-left: 0; }
+.scroll :is(th, td):last-child { padding-right: 0; }
+.scroll tbody tr:hover { background: color-mix(in srgb, var(--c-hover) 45%, transparent); }
+@media (hover: hover) { .toolbar { opacity: 0; transition: opacity 120ms; } .frame:is(:hover, :focus-within) .toolbar { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .toolbar { transition: none; } }

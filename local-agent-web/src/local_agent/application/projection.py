@@ -537,6 +537,10 @@ def project_messages_view(state: Mapping[str, Any], *, secrets: Iterable[str] = 
                 AssistantMessageView(
                     message_id=message_id(message),
                     text=sanitize_text(_text_of(message), secrets),
+                    # task_control 是隐藏的收尾信号；带它的最终正文仍然是回答。
+                    presentation_phase="process" if any(
+                        call.get("name") != "task_control" for call in _tool_calls_of(message)
+                    ) else "response",
                     reasoning=reasoning,
                     reasoning_truncated=reasoning_truncated,
                     created_at=None,

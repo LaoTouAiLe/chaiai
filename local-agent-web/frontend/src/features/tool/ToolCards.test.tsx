@@ -1,7 +1,8 @@
 import type { ReactElement, ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render as baseRender, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render as baseRender, screen, waitFor } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+import { FileLinkContext } from '../conversation/fileLinkContext'
 import { toolsScenario } from '../../fixtures/scenarios'
 import type { ToolCardView, ToolRowView } from '../../fixtures/types'
 import { ToolCard } from './ToolCards'
@@ -42,6 +43,54 @@ function rowOf(index = 0): ToolRowView {
 }
 
 describe('ToolCard', () => {
+  it('copies the returned result beyond its display window and toggles wrapping', async () => {
+    const copy = vi.fn().mockResolvedValue(undefined)
+    const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: copy } })
+    const lines = Array.from({ length: 30 }, (_, index) => ({ number: index + 10, text: `result-${index}` }))
+    try {
+      render(<ToolCard card={{ ...cardOf('read'), lines, totalLines: 100 }} />)
+      expect(screen.queryByText('result-29')).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: '复制结果' }))
+      await waitFor(() => expect(copy).toHaveBeenCalledWith(lines.map(line => line.text).join('\n')))
+      const wrap = screen.getByRole('button', { name: '结果自动换行' })
+      fireEvent.click(wrap)
+      expect(wrap).toHaveAttribute('aria-pressed', 'true')
+    } finally {
+      if (original) Object.defineProperty(navigator, 'clipboard', original)
+      else Reflect.deleteProperty(navigator, 'clipboard')
+    }
+  })
+
+  it('opens a search hit as a file without guessing from its snippet', () => {
+    const open = vi.fn()
+    render(<FileLinkContext.Provider value={open}><ToolCard card={{ kind: 'search', shape: 'matches', total: 1,
+      paths: [], truncated: false, groups: [{ path: 'src/search.ts', matches: [{ line: 12, text: 'some code' }] }] }} /></FileLinkContext.Provider>)
+    fireEvent.click(screen.getByRole('button', { name: '打开文件 src/search.ts' }))
+    expect(open).toHaveBeenCalledWith('src/search.ts')
+  })
+
+  it('presents complete JSON as expandable values and leaves malformed text verbatim', () => {
+    const { container, rerender } = render(<ToolCard card={{ kind: 'generic', headline: 'MCP 结果', detail: JSON.stringify({ count: 2, files: ['app.ts', '<script>alert(1)</script>'] }) }} />)
+    expect(screen.getByText('count')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('files'))
+    expect(screen.getByText('app.ts')).toBeVisible()
+    expect(container.querySelector('script')).toBeNull()
+    rerender(<ToolCard card={{ kind: 'generic', headline: 'MCP 结果', detail: '{"未完成":' }} />)
+    expect(screen.getByText('{"未完成":')).toBeInTheDocument()
+    expect(screen.queryByLabelText('结构化结果')).not.toBeInTheDocument()
+  })
+  it('opens a tool file separately from expanding its result, and rejects URL targets', () => {
+    const open = vi.fn(), toggle = vi.fn()
+    const row = { ...rowOf(), name: 'read_file', target: 'src/app.ts:12', expanded: false }
+    const { container, rerender } = render(<FileLinkContext.Provider value={open}><ToolRow tool={row} onToggle={toggle} /></FileLinkContext.Provider>)
+    fireEvent.click(screen.getByRole('button', { name: '打开文件 src/app.ts' }))
+    expect(open).toHaveBeenCalledWith('src/app.ts')
+    expect(toggle).not.toHaveBeenCalled()
+    expect(container.querySelector('button button')).toBeNull()
+    rerender(<FileLinkContext.Provider value={open}><ToolRow tool={{ ...row, target: 'https://example.org/app.ts' }} /></FileLinkContext.Provider>)
+    expect(screen.queryByRole('button', { name: /打开文件/ })).not.toBeInTheDocument()
+  })
   it('shows document extraction limitations and page continuation hints', () => {
     render(<ToolCard card={{ ...cardOf('read'), note: '正文无法通过文本读取；传 start_page=6 继续读' }} />)
     expect(screen.getByLabelText('读取说明')).toHaveTextContent('正文无法通过文本读取')

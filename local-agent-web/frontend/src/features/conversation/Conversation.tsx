@@ -1,6 +1,7 @@
-﻿import { useEffect, useMemo, useRef, useState } from 'react'
+﻿import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 
+import { responsePresentation } from './responsePresentation'
 import { ConversationRail } from './ConversationRail'
 import type { RailQuestion } from './ConversationRail'
 import { Pencil, Quote as QuoteIcon } from '../../components/icons'
@@ -280,17 +281,17 @@ function AssistantIdentity() {
   )
 }
 
-function AssistantMessage({ text, reasoning, reasoningTruncated, reasoningRunning, streaming }:
+function AssistantMessage({ text, reasoning, reasoningTruncated, reasoningRunning, streaming, presentationPhase }:
   Extract<MessageView, { kind: 'assistant' }>) {
   return (
-    <div className={styles.assistantRow}>
+    <div className={styles.assistantRow} data-assistant-phase={presentationPhase}>
       {reasoning ? <ReasoningRow text={reasoning} running={reasoningRunning ?? false} truncated={reasoningTruncated} /> : null}
       {/* 正文按 Markdown 渲染（T30）：**不**解析原始 HTML，代码块自带复制。
           用 div 而不是 p：Markdown 会输出自己的块级元素，p 里嵌 p 是非法结构。 */}
       {/* `data-quotable`（2026-10-26）：拖选浮层只认这个标记内的选区——工具行、来源列表里
           选中的文字不属于"回答正文"，不该弹出追问。 */}
       {text !== '' ? <div className={styles.assistantText} data-streaming={streaming || undefined} data-quotable>
-        <MarkdownMessage text={text} />
+        <MarkdownMessage text={text} streaming={streaming} />
       </div> : null}
     </div>
   )
@@ -517,14 +518,20 @@ function needsAttention(row: MessageView): boolean {
 }
 
 /** Completed successful work can fold; active, failed and uncertain records stay exposed. */
-function TurnProcess({ children, count }: { children: ReactNode; count: number }) {
-  const [open, setOpen] = useState(false)
-  return <div className={styles.process}>
-    <button type="button" className={styles.processToggle} aria-expanded={open}
-      aria-label={`处理过程（${count} 项工具操作）`} onClick={() => setOpen(!open)}>
-      <span>处理过程 · {count} 项工具操作</span><span aria-hidden="true">{open ? '▾' : '▸'}</span>
-    </button>
-    <div className={styles.processBody} hidden={!open}>{children}</div>
+function TurnProcess({ children, count, foldable, active, summary }: {
+  children: ReactNode; count: number; foldable: boolean; active: boolean; summary: string
+}) {
+  const [manualOpen, setManualOpen] = useState<boolean | null>(null)
+  const open = !foldable || (manualOpen ?? false)
+  const bodyId = useId()
+  const label = <><span className={styles.processChevron} aria-hidden="true">{open ? '▾' : '▸'}</span>
+    <span>{active ? '正在处理' : foldable ? '处理过程' : '执行记录'} · {count} 项工具操作</span>
+    <span className={styles.processSummary}>{summary}</span></>
+  return <div className={styles.process} data-active={active || undefined}>
+    {foldable ? <button type="button" className={styles.processToggle} aria-expanded={open} aria-controls={bodyId}
+      aria-label={`处理过程（${count} 项工具操作）`} onClick={() => setManualOpen(!open)}>{label}</button>
+      : <div className={styles.processToggle}>{label}</div>}
+    <div id={bodyId} className={styles.processBody} hidden={!open} role="region" aria-label="执行过程记录">{children}</div>
   </div>
 }
 
@@ -570,21 +577,26 @@ function ToolGroup({
   onToggleTool?: (messageId: string) => void
   onDetachCommand?: (commandId: string) => Promise<boolean>
 }) {
-  const [open, setOpen] = useState(false)
+  const [manualOpen, setOpen] = useState<boolean | null>(null)
   const running = rows.some((row) => row.kind === 'tool' && row.tool.status === 'running')
+  const pending = rows.some((row) => row.kind === 'tool' && row.tool.status === 'pending')
   const failed = rows.filter((row) => row.kind === 'tool' && row.tool.status === 'failed').length
+  const uncertain = rows.filter((row) => row.kind === 'tool' && row.tool.status === 'uncertain').length
+  const open = manualOpen ?? (running || pending || failed > 0 || uncertain > 0)
   return (
     <div className={styles.toolGroup}>
       <button
         type="button"
         className={styles.toolGroupHead}
         aria-expanded={open}
-        onClick={() => { setOpen((current) => !current) }}
+        onClick={() => { setOpen(!open) }}
       >
         <span className={styles.toolGroupChevron} aria-hidden="true">{open ? '▾' : '▸'}</span>
         <span className={styles.toolGroupLabel}>{summarizeTools(rows)}</span>
         {running ? <span className={styles.toolGroupRunning}>执行中…</span> : null}
+        {!running && pending ? <span className={styles.toolGroupRunning}>等待执行…</span> : null}
         {failed > 0 ? <span className={styles.toolGroupFailed}>{failed} 个失败</span> : null}
+        {uncertain > 0 ? <span className={styles.toolGroupFailed}>{uncertain} 个结果未确认</span> : null}
       </button>
       {open ? (
         <div className={styles.toolGroupBody}>
@@ -814,17 +826,18 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
             {turns.map((turn, index) => {
               const stats = turnStats.get(turn.lastId) ?? (index === turns.length - 1 ? scenario.stats ?? undefined : undefined)
               const parentTurnId = index === 0 ? null : turns[index - 1].id
-              const groups = groupRows(turn.rows)
+              const presentation = responsePresentation(turn.rows)
+              const groups = groupRows(presentation.rows)
               const prompts = groups.filter((group) => group.kind === 'single' && group.row.kind === 'user')
               const replies = groups.filter((group) => !(group.kind === 'single' && group.row.kind === 'user'))
               const operationCount = turn.rows.filter((row) => row.kind === 'tool').length
               const assistants = turn.rows.filter((row): row is Extract<MessageView, { kind: 'assistant' }> => row.kind === 'assistant')
               const responseTime = assistants.filter(row => row.at !== '').at(-1)?.at ?? ''
-              const finalAssistant = assistants.filter(row => row.text.trim() !== '').at(-1)
+              const finalAssistant = presentation.answer
               const answerIndex = replies.findIndex(group => group.kind === 'single' && group.row.id === finalAssistant?.id)
               const lastTool = turn.rows.filter(row => row.kind === 'tool').at(-1)
               const active = index === turns.length - 1 && ['running', 'awaiting-approval', 'awaiting-input'].includes(scenario.session.status)
-              const safeProcess = turn.rows.every(row => !(needsAttention(row)))
+              const safeProcess = presentation.rows.every(row => !(needsAttention(row)))
               const foldProcess = operationCount > 0 && answerIndex > 0 && !active && safeProcess
                 && finalAssistant !== undefined && lastTool !== undefined
                 && turn.rows.indexOf(finalAssistant) > turn.rows.indexOf(lastTool)
@@ -837,11 +850,14 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
               return <div key={turn.id} data-turn-id={turn.id} className={styles.turn}>
                 {prompts.map(renderGroup)}
                 {replies.length === 0 ? null : <section className={styles.response} aria-label="智能体回复">
-                  <div className={styles.responseHead}><AssistantIdentity />{operationCount === 0 || foldProcess ? null : <span className={styles.operationCount}>{operationCount} 项工具操作</span>}</div>
+                  <AssistantIdentity />
                   <div className={styles.responseBody}>
-                    {foldProcess ? <>
-                      <TurnProcess key={`process:${turn.id}`} count={operationCount}>{replies.slice(0, answerIndex).map(renderGroup)}</TurnProcess>
-                      {replies.slice(answerIndex).map(renderGroup)}
+                    {operationCount > 0 ? <>
+                      <TurnProcess key={`process:${turn.id}`} count={operationCount} foldable={foldProcess} active={active}
+                        summary={summarizeTools(turn.rows.filter(row => row.kind === 'tool'))}>
+                        {(answerIndex < 0 ? replies : replies.slice(0, answerIndex)).map(renderGroup)}
+                      </TurnProcess>
+                      {answerIndex < 0 ? null : <div className={styles.finalAnswer} data-response-part="answer" role="region" aria-label={active ? '当前回复' : '最终回答'}>{replies.slice(answerIndex).map(renderGroup)}</div>}
                     </> : replies.map(renderGroup)}
                   </div>
                   <WebSources rows={turn.rows} answer={turn.answerParts.join('\n\n')} />
@@ -850,7 +866,7 @@ export function Conversation({ scenario, autoFollow = false, onToggleTool, focus
                     <div className={styles.footerMeta}>{stats === undefined ? null : <TurnStats stats={stats} />}
                       {responseTime === '' ? null : <span className={styles.assistantTime} aria-label="回复时间">{responseTime}</span>}
                     </div>
-                    <TurnActions text={turn.answerParts.join('\n\n')} onQuote={onQuote} />
+                    <TurnActions text={finalAssistant?.text ?? turn.answerParts.join('\n\n')} onQuote={onQuote} />
                   </div>}
                 </section>}
               </div>

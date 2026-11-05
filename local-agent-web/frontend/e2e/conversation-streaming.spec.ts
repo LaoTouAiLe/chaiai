@@ -17,6 +17,8 @@ test('命令运行时逐行显示输出，刷新后继续接收并保留完整�
   await expect(output).toContainText('step-1')
   await expect(output).toContainText('step-3')
   await expect(log.getByText(REPLY, { exact: true })).toHaveCount(1)
+  // Successful work is now folded separately from the final answer.
+  await log.getByRole('button', { name: /处理过程（/ }).click()
   await log.getByRole('button', { name: /运行命令.*command_progress_demo/ }).click()
   await expect(output).toContainText('step-5')
   await expect(log.getByText('退出码 0', { exact: true })).toBeVisible()

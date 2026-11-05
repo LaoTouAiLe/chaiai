@@ -82,18 +82,18 @@
   --font-mono-code: 'SF Mono', 'JetBrains Mono', 'Fira Code', Consolas,
     'Liberation Mono', Menlo, Courier, 'PingFang SC', 'Microsoft YaHei';
 
-  --fs-caption: 12px;
-  --lh-caption: 18px;
-  --fs-meta: 13px;
-  --lh-meta: 20px;
-  --fs-body: 14px;
-  --lh-body: 22px;
-  --fs-ui: calc(15px + var(--law-font-step) * 1px);
-  --lh-ui: 24px;
-  --fs-chat: calc(16px + var(--law-font-step) * 2px);
-  --lh-chat: calc(28px + var(--law-font-step) * 3px);
-  --fs-title: 18px;
-  --lh-title: 26px;
+  --fs-caption: 11px;
+  --lh-caption: 16px;
+  --fs-meta: 12px;
+  --lh-meta: 18px;
+  --fs-body: 13px;
+  --lh-body: 20px;
+  --fs-ui: calc(14px + var(--law-font-step) * 1px);
+  --lh-ui: 22px;
+  --fs-chat: calc(14px + var(--law-font-step) * 2px);
+  --lh-chat: calc(24px + var(--law-font-step) * 2px);
+  --fs-title: 16px;
+  --lh-title: 24px;
   --fs-heading: 22px;
   --lh-heading: 30px;
   --fs-display: 32px;
@@ -260,18 +260,18 @@
      2026-10-30 起改为**整 px 步进**：`基准 + step × 步长`。原来按 `.9 / 1.125` 乘，
      小档会把 15px 算成 13.5px、26px 行高算成 23.4px —— 半像素在 Windows 上会被取整到
      更糊的一侧。步长取整后每档都是整数，且行高与字号同向加减，比例不会走样。 */
-  --law-text-xxs: calc(12px + var(--law-font-step) * 1px);
-  --law-leading-xxs: calc(16px + var(--law-font-step) * 1px);
-  --law-text-xs: calc(13px + var(--law-font-step) * 1px);
-  --law-leading-xs: calc(20px + var(--law-font-step) * 2px);
-  --law-text-sm: calc(14px + var(--law-font-step) * 1px);
-  --law-leading-sm: calc(22px + var(--law-font-step) * 2px);
-  --law-text-md: calc(15px + var(--law-font-step) * 1px);
-  --law-leading-md: calc(24px + var(--law-font-step) * 2px);
-  --law-text-base: calc(16px + var(--law-font-step) * 2px);
-  --law-leading-base: calc(28px + var(--law-font-step) * 2px);
-  --law-text-lg: calc(18px + var(--law-font-step) * 2px);
-  --law-leading-lg: calc(30px + var(--law-font-step) * 3px);
+  --law-text-xxs: calc(11px + var(--law-font-step) * 1px);
+  --law-leading-xxs: calc(14px + var(--law-font-step) * 1px);
+  --law-text-xs: calc(12px + var(--law-font-step) * 1px);
+  --law-leading-xs: calc(18px + var(--law-font-step) * 2px);
+  --law-text-sm: calc(13px + var(--law-font-step) * 1px);
+  --law-leading-sm: calc(20px + var(--law-font-step) * 2px);
+  --law-text-md: calc(14px + var(--law-font-step) * 1px);
+  --law-leading-md: calc(22px + var(--law-font-step) * 2px);
+  --law-text-base: calc(14px + var(--law-font-step) * 2px);
+  --law-leading-base: calc(24px + var(--law-font-step) * 2px);
+  --law-text-lg: calc(16px + var(--law-font-step) * 2px);
+  --law-leading-lg: calc(28px + var(--law-font-step) * 3px);
   --law-text-xl: calc(20px + var(--law-font-step) * 2px);
   --law-leading-xl: calc(28px + var(--law-font-step) * 3px);
 
@@ -311,7 +311,7 @@
   --law-sidebar-width-collapsed: 48px;
   --law-header-height: 76px;
   /* 会话行高 34 → 28（2026-10-22）：对齐 hermes 侧栏行（26–28），一屏多看 3–4 条。 */
-  --law-session-row-height: 40px;
+  --law-session-row-height: 32px;
   /* 对话列宽（2026-10-22）：760 → 960。760 在 1440 屏上两边各留 340px 空白，太窄；
      1080 又显得散（正文与工具行拉得太开）。960 是两者折中，正文仍由 72ch 限制阅读宽度。 */
   --law-conversation-max-width: 920px;

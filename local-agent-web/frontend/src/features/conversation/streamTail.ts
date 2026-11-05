@@ -84,7 +84,7 @@ export function applyDelta(current: StreamTail | null, payload: MessageDeltaPayl
 /** `message_completed`：这条消息从此由快照负责，尾部立刻收掉（否则会重复显示）。 */
 export function applyCompleted(
   current: StreamTail | null,
-  payload: MessageCompletedPayload,
+  payload: Pick<MessageCompletedPayload, 'message_id' | 'role'>,
 ): StreamTail | null {
   if (current !== null && current.messageId === payload.message_id) return null
   return current

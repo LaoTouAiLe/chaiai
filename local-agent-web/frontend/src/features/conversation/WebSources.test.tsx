@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { MessageView } from '../../fixtures/types'
 import { WebSources } from './WebSources'
@@ -12,6 +12,15 @@ const tool = (id: string, kind: 'search' | 'read', url = 'https://docs.example.c
 })
 
 describe('WebSources', () => {
+  it('keeps a long source list short until the user expands it', () => {
+    const rows = Array.from({ length: 6 }, (_, index) => tool(`s-${index}`, 'search', `https://docs.example.com/${index}`))
+    render(<WebSources rows={rows} answer="参考结果。" />)
+    expect(screen.getAllByRole('link')).toHaveLength(3)
+    fireEvent.click(screen.getByRole('button', { name: '查看全部 6 个来源' }))
+    expect(screen.getAllByRole('link')).toHaveLength(6)
+    fireEvent.click(screen.getByRole('button', { name: '收起来源' }))
+    expect(screen.getAllByRole('link')).toHaveLength(3)
+  })
   it('deduplicates search and fetch and preserves the fact that the body was read', () => {
     const rows = [tool('search', 'search'), tool('fetch', 'read')]
     render(<WebSources rows={rows} answer="参考 [MCP](https://docs.example.com/mcp)。" />)

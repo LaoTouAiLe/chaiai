@@ -1,0 +1,24 @@
+.block { min-width: 0; max-width: 100%; margin: 16px 0; overflow: hidden; border-radius: 16px; background: var(--c-panel); border: .5px solid var(--c-line); }
+.bar { display: flex; align-items: center; gap: 12px; min-height: 38px; padding: 4px 12px 4px 16px; color: var(--c-text-3); font: 12px/20px var(--font-ui); }
+.language { flex: none; font-family: var(--font-mono-code); font-size: 11px; }
+.filename { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--c-text-2); }
+.filename:not(:disabled):hover { color: var(--c-accent); text-decoration: underline; }
+.actions { display: flex; flex: none; margin-left: auto; gap: 2px; }
+.actions button, .selection button { padding: 3px 6px; border-radius: 6px; white-space: nowrap; }
+.actions button:hover, .selection button:hover { color: var(--c-text-1); background: var(--c-hover); }
+.actions button[aria-pressed='true'] { color: var(--c-accent); background: var(--c-accent-soft); }
+.pre { margin: 0; padding: 10px 16px 16px; max-width: 100%; overflow: auto; font: calc(13px + var(--law-font-step) * 1px)/calc(22px + var(--law-font-step) * 2px) var(--font-mono-code); tab-size: 4; }
+.pre code { font: inherit; white-space: normal; }
+.line { display: block; min-width: max-content; min-height: 1lh; border-radius: 3px; }
+.pre[data-numbered='true'] .line { display: grid; grid-template-columns: 40px minmax(0, 1fr); }
+.source { white-space: pre; min-width: 0; }
+.pre[data-wrap='true'] .line { min-width: 0; }
+.pre[data-wrap='true'] .source { white-space: pre-wrap; overflow-wrap: anywhere; }
+.line[data-marked] { background: var(--c-accent-soft); box-shadow: inset 2px 0 var(--c-accent); }
+.number { align-self: start; padding: 0 10px 0 0; text-align: right; color: var(--c-text-3); font: inherit; font-variant-numeric: tabular-nums; user-select: none; }
+.number:hover { color: var(--c-accent); }
+.selection { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 4px 12px; background: var(--c-accent-soft); color: var(--c-text-2); font: 12px/20px var(--font-ui); }
+.selection > span { margin-right: auto; }
+.live { display: block; padding: 0 16px 10px; color: var(--c-text-3); font: 12px/18px var(--font-ui); }
+:global([data-theme='dark']) .source span { color: var(--shiki-dark, inherit) !important; }
+@media (max-width: 600px) { .bar { gap: 6px; padding-inline: 10px; flex-wrap: wrap; } .filename { max-width: 100%; flex: 1 1 100%; order: 3; } .pre { padding-inline: 10px; } }

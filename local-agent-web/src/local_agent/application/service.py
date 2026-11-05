@@ -4505,6 +4505,7 @@ class ApplicationService:
                         message_id=message.message_id,
                         role="assistant",
                         text=message.text,
+                        presentation_phase=message.presentation_phase,
                         reasoning=message.reasoning,
                         reasoning_truncated=message.reasoning_truncated,
                         complete=message.complete,

@@ -1,4 +1,6 @@
-import { useEffect, useState } from 'react'
+import { FileLinkContext } from '../conversation/fileLinkContext'
+import { filePathFromHref } from '../conversation/fileLinks'
+import { useContext, useEffect, useId, useState } from 'react'
 
 import { Check, ChevronRight, Cross, Doc, Pencil, WarningTriangle } from '../../components/icons'
 import type { ToolRowView } from '../../fixtures/types'
@@ -75,6 +77,9 @@ function lastOutputLine(text: string | undefined): string | null {
  * reach the generic renderer.
  */
 export function ToolRow({ tool, onToggle, onDetach }: ToolRowProps) {
+  const detailsId = useId()
+  const openFile = useContext(FileLinkContext)
+  const fileTarget = ['read_file', 'edit_file', 'write_file'].includes(tool.name) && tool.target ? filePathFromHref(tool.target) : null
   const [detachState, setDetachState] = useState<'idle' | 'pending' | 'done' | 'failed'>('idle')
   // 运行中每秒刷新一次"已跑多久"：这是用户判断"卡住了没有"的主要依据。
   const [nowTick, setNowTick] = useState(() => Date.now())
@@ -110,6 +115,8 @@ export function ToolRow({ tool, onToggle, onDetach }: ToolRowProps) {
         type="button"
         className={canDetach ? `${styles.row} ${styles.rowWithAction}` : styles.row}
         aria-expanded={tool.expanded}
+        aria-controls={detailsId}
+        title={[toolLabel(tool.name), tool.target, TOOL_STATUS_LABEL[tool.status]].filter(Boolean).join(' · ')}
         onClick={onToggle}
       >
         <span className={`${styles.status} ${STATUS_CLASS[tool.status]}`}>
@@ -141,6 +148,8 @@ export function ToolRow({ tool, onToggle, onDetach }: ToolRowProps) {
         <span className={styles.duration}>{elapsedLabel}</span>
       </button>
 
+      {fileTarget && openFile ? <button type="button" className={styles.openFile} aria-label={`打开文件 ${fileTarget}`} title={fileTarget} onClick={() => openFile(fileTarget)}>打开文件 ↗</button> : null}
+
       {/* 运行中的最后一行输出：让用户不用展开就能判断"它现在在干什么"。 */}
       {liveLine === null ? null : (
         <p className={styles.liveLine} title={liveLine}>└ {liveLine}</p>
@@ -166,7 +175,7 @@ export function ToolRow({ tool, onToggle, onDetach }: ToolRowProps) {
       ) : null}
 
       {tool.expanded ? (
-        <>
+        <div id={detailsId} className={styles.details}>
           {tool.card.kind === 'file-mutation' ? (
             <DiffCard diff={tool.card.diff} />
           ) : (
@@ -180,7 +189,7 @@ export function ToolRow({ tool, onToggle, onDetach }: ToolRowProps) {
               {tool.evidence.verified ? ' · 已核对' : ' · 未核对通过'}
             </p>
           )}
-        </>
+        </div>
       ) : null}
     </div>
   )

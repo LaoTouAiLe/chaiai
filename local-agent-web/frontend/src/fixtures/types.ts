@@ -897,6 +897,7 @@ export type MessageView =
   | { kind: 'user'; id: string; text: string; at: string; attachments?: readonly string[];
       files?: readonly UserFileRefView[] }
   | { kind: 'assistant'; id: string; text: string; at: string; reasoning?: string;
+      presentationPhase?: 'process' | 'response';
       reasoningTruncated?: boolean; streaming?: boolean; reasoningRunning?: boolean }
   | { kind: 'tool'; id: string; tool: ToolRowView }
   | { kind: 'error'; id: string; notice: ErrorNoticeView }

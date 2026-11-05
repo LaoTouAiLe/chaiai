@@ -1,3 +1,4 @@
+import { useId, useState } from 'react'
 import type { MessageView, WebSourceView } from '../../fixtures/types'
 import styles from './WebSources.module.css'
 
@@ -28,19 +29,23 @@ function sourcesForTurn(rows: readonly MessageView[]): WebSourceView[] {
 }
 
 export function WebSources({ rows, answer }: { rows: readonly MessageView[]; answer: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const listId = useId()
   const sources = sourcesForTurn(rows)
   if (sources.length === 0) return null
   const cited = new Set((answer.match(/https?:\/\/[^\s<>\])"'`]+/g) ?? [])
     .map(url => keyOf(url.replace(/[，。；！？]+$/, ''))).filter(key => key !== null))
   return (
     <section className={styles.root} aria-label="联网来源">
-      <h3>联网来源 · {sources.length}</h3>
-      <ul>
-        {sources.map(source => {
+      <div className={styles.head}><h3>联网来源 · {sources.length}</h3>
+        {sources.length > 3 ? <button type="button" aria-expanded={expanded} aria-controls={listId} onClick={() => setExpanded(value => !value)}>{expanded ? '收起来源' : `查看全部 ${sources.length} 个来源`}</button> : null}
+      </div>
+      <ul id={listId}>
+        {(expanded ? sources : sources.slice(0, 3)).map(source => {
           const date = source.retrievedAt ? new Date(source.retrievedAt) : null
           return (
             <li key={source.url}>
-              <a href={source.url} target="_blank" rel="noreferrer noopener">{source.title}</a>
+              <a href={source.url} target="_blank" rel="noreferrer noopener" title={source.title}>{source.title}</a>
               <span>{(source.cited ?? cited.has(keyOf(source.url) ?? '')) ? '回答引用 · ' : ''}{source.kind === 'read' ? '已读取' : '搜索结果'}</span>
               <small>{new URL(source.url).hostname}</small>
               {source.provider ? <small>检索：{source.provider}</small> : null}

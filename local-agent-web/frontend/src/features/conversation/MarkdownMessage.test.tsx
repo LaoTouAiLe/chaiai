@@ -23,6 +23,77 @@ afterEach(() => {
 })
 
 describe('MarkdownMessage', () => {
+  it('copies semantic table cells as TSV, preserving column alignment and source text', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    setClipboard(writeText)
+    render(<MarkdownMessage text={'| 模块 | 状态 |\n| :--- | ---: |\n| **正文** | `ready` |'} />)
+    expect(screen.getByRole('columnheader', { name: '状态' })).toHaveStyle({ textAlign: 'right' })
+    expect(screen.getByRole('region', { name: '表格内容，可横向滚动' })).toHaveAttribute('tabindex', '0')
+    fireEvent.click(screen.getByRole('button', { name: '复制表格' }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith('模块\t状态\n正文\tready'))
+  })
+
+  it('renders formulas without allowing resource commands and tolerates incomplete math', () => {
+    const { container, rerender } = render(<MarkdownMessage text={'行内 $a^2+b^2=c^2$。\n\n$$\n\\frac{1}{2}\\sum_{i=1}^n x_i\n$$\n\n$$\\includegraphics{https://example.org/track.png}$$'} />)
+    expect(container.querySelectorAll('.katex').length).toBeGreaterThanOrEqual(2)
+    expect(container.querySelector('.katex-display')).not.toBeNull()
+    expect(container.querySelector('img')).toBeNull()
+    expect(container.querySelector('script')).toBeNull()
+    rerender(<MarkdownMessage text={'未完成 $\\frac{1'} streaming />)
+    expect(container).toHaveTextContent('未完成')
+  })
+
+  it('keeps footnote IDs unique across messages and uses in-page reference links', () => {
+    const text = '正文[^1]。\n\n[^1]: 说明内容。'
+    const { container } = render(<><MarkdownMessage text={text} /><MarkdownMessage text={text} /></>)
+    const refs = container.querySelectorAll<HTMLAnchorElement>('a[data-footnote-ref]')
+    expect(refs).toHaveLength(2)
+    expect(refs[0]!.href).not.toBe(refs[1]!.href)
+    for (const reference of refs) {
+      expect(reference).not.toHaveAttribute('target')
+      expect(container.querySelector(`[id="${reference.getAttribute('href')!.slice(1)}"]`)).not.toBeNull()
+    }
+  })
+
+  it('loads remote images only on demand, allows retry and returns focus after zoom', () => {
+    render(<MarkdownMessage text={'![架构图](https://example.org/architecture.png)'} />)
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '加载图片' }))
+    const image = screen.getByRole('img', { name: '架构图' })
+    expect(image).toHaveAttribute('src', 'https://example.org/architecture.png')
+    expect(image).toHaveAttribute('referrerpolicy', 'no-referrer')
+    const zoom = screen.getByRole('button', { name: '放大图片：架构图' })
+    zoom.focus()
+    fireEvent.click(zoom)
+    fireEvent.keyDown(screen.getByRole('dialog', { name: '放大查看图片' }), { key: 'Escape' })
+    expect(zoom).toHaveFocus()
+    fireEvent.error(image)
+    expect(screen.getByText('图片加载失败：架构图')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '重试加载图片' }))
+    expect(screen.getByRole('img', { name: '架构图' })).toBeInTheDocument()
+  })
+
+  it('opens local Markdown images through the file panel and leaves unsafe destinations inert', () => {
+    const open = vi.fn()
+    const { rerender } = render(<FileLinkContext.Provider value={open}><MarkdownMessage text={'![本地结果](E:/project/plot.png)'} /></FileLinkContext.Provider>)
+    fireEvent.click(screen.getByRole('button', { name: '查看图片' }))
+    expect(open).toHaveBeenCalledWith('E:/project/plot.png')
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    rerender(<MarkdownMessage text={'![危险图片](javascript:alert%281%29)\n\n![错误地址](http://)'} />)
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /加载图片|查看图片/ })).not.toBeInTheDocument()
+  })
+
+  it('does not carry loading failures or consent to a different streamed image destination', () => {
+    const { rerender } = render(<MarkdownMessage text={'![结果](https://example.org/first.png)'} />)
+    fireEvent.click(screen.getByRole('button', { name: '加载图片' }))
+    fireEvent.error(screen.getByRole('img', { name: '结果' }))
+    rerender(<MarkdownMessage text={'![结果](https://example.org/second.png)'} />)
+    expect(screen.queryByRole('img')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '加载图片' })).toBeInTheDocument()
+    expect(screen.queryByText('图片加载失败：结果')).not.toBeInTheDocument()
+  })
+
   it('renders local file links with icons and opens them through the panel action without navigation', () => {
     const open = vi.fn()
     render(<FileLinkContext.Provider value={open}>
@@ -48,7 +119,7 @@ describe('MarkdownMessage', () => {
     </FileLinkContext.Provider>)
     expect(screen.getByRole('link', { name: '站点' })).toHaveAttribute('target', '_blank')
     expect(screen.queryByRole('link', { name: '恶意链接' })).not.toBeInTheDocument()
-    expect(screen.getByText('README.md').tagName).toBe('CODE')
+    expect(screen.getByRole('button', { name: 'README.md' })).toBeInTheDocument()
     expect(open).not.toHaveBeenCalled()
   })
 

@@ -7,10 +7,16 @@
 // 3. 复制失败要如实说：`navigator.clipboard` 在非安全上下文可能不存在，那时按钮显示"复制失败"，
 //    而不是假装成功（用户会去粘贴一个空内容，还以为是模型的问题）。
 
-import { useContext, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react'
-import Markdown, { defaultUrlTransform } from 'react-markdown'
+import { createContext, memo, useContext, useId, useState, type ComponentPropsWithoutRef, type ReactNode } from 'react'
+import Markdown, { defaultUrlTransform, type ExtraProps } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import 'katex/dist/katex.min.css'
 
+import { AnswerCodeBlock } from './AnswerCodeBlock'
+import { MarkdownTable } from './MarkdownTable'
+import { MarkdownImage } from './MarkdownImage'
 import { Copy } from '../../components/icons'
 import { copyText } from './clipboard'
 import { FileIcon } from '../panel/fileIcon'
@@ -93,23 +99,73 @@ function languageOf(node: ReactNode): string | null {
   return null
 }
 
+const StreamingContext = createContext(false)
+
+/** GFM's fixed label ID must also be scoped when several messages contain notes. */
+function scopeFootnotes({ labelId }: { labelId: string }) {
+  type Node = { properties?: Record<string, unknown>; children?: Node[] }
+  return (tree: Node) => {
+    const visit = (node: Node) => {
+      if (node.properties?.id === 'footnote-label') node.properties.id = labelId
+      const described = node.properties?.ariaDescribedBy
+      if (Array.isArray(described) && node.properties) node.properties.ariaDescribedBy = described.map(value => value === 'footnote-label' ? labelId : value)
+      node.children?.forEach(visit)
+    }
+    visit(tree)
+  }
+}
+
+type MarkdownNode = { type: string; value?: string; alt?: string | null; meta?: string | null; children?: MarkdownNode[]; data?: { hProperties?: Record<string, unknown> }; position?: { start: { offset?: number }; end: { offset?: number } } }
+function plainCell(node: MarkdownNode): string {
+  return node.value ?? node.alt ?? node.children?.map(plainCell).join('') ?? ''
+}
+function tsvCell(value: string): string {
+  return /[\t\n"]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value
+}
+/** Preserve standard fenced-code info strings through the Markdown AST. */
+function codeMetadata() {
+  return (tree: MarkdownNode, file: { value: unknown }) => {
+    const visit = (node: MarkdownNode) => {
+      if (node.type === 'table') {
+        node.data ??= {}
+        node.data.hProperties = { ...node.data.hProperties,
+          'data-table-columns': node.children?.[0]?.children?.length ?? 0,
+          'data-table-tsv': node.children?.map(row => row.children?.map(cell => tsvCell(plainCell(cell))).join('\t')).join('\n') ?? '',
+        }
+      }
+      if (node.type === 'code') {
+        node.data ??= {}
+        const raw = String(file.value).slice(node.position?.start.offset ?? 0, node.position?.end.offset)
+        const lines = raw.trimEnd().split('\n')
+        const fence = /`{3,}|~{3,}/.exec(lines[0] ?? '')?.[0]
+        const closing = /^\s*(`+|~+)\s*$/.exec(lines.at(-1) ?? '')?.[1]
+        const open = !!fence && !(lines.length > 1 && closing && closing[0] === fence[0] && closing.length >= fence.length)
+        node.data.hProperties = { ...node.data.hProperties, 'data-code-meta': node.meta ?? '', 'data-code-open': String(open) }
+      }
+      node.children?.forEach(visit)
+    }
+    visit(tree)
+  }
+}
+function codeProperty(node: ReactNode, key: string): string {
+  if (Array.isArray(node)) return node.map(child => codeProperty(child, key)).find(Boolean) ?? ''
+  if (node && typeof node === 'object' && 'props' in node) {
+    const props = node.props as { node?: { properties?: Record<string, unknown> }; children?: ReactNode }
+    return String(props.node?.properties?.[key] ?? '') || codeProperty(props.children, key)
+  }
+  return ''
+}
 function CodeBlock({ children }: ComponentPropsWithoutRef<'pre'>) {
-  // 语言标签**只做展示**：本期没有"切换高亮语言"的能力，所以不给它做成下拉（做成就得能改）。
-  const language = languageOf(children)
-  return (
-    <div className={styles.block}>
-      <div className={styles.bar}>
-        <span className={styles.language}>{language ?? 'Plain Text'}</span>
-        <CopyButton text={textOf(children)} label="复制代码" />
-      </div>
-      <pre className={styles.pre}>
-        {children}
-      </pre>
-    </div>
-  )
+  const streaming = useContext(StreamingContext)
+  return <AnswerCodeBlock code={textOf(children)} language={languageOf(children)} meta={codeProperty(children, 'data-code-meta')} streaming={streaming && codeProperty(children, 'data-code-open') === 'true'} />
 }
 
 function InlineCode({ children, className }: ComponentPropsWithoutRef<'code'>) {
+  const open = useContext(FileLinkContext)
+  const text = textOf(children)
+  const file = !className && !/\s/.test(text) && /(?:^|[\\/])[\w.@-]+\.[a-zA-Z\d]{1,10}(?::\d+(?::\d+)?)?$/.test(text)
+    ? filePathFromHref(text) : null
+  if (file && open) return <button type="button" className={`${styles.inline} ${styles.fileMention}`} title={`在右侧打开：${file}`} onClick={() => open(file)}><FileIcon path={file} /><span>{children}</span></button>
   return (
     <code className={className ?? styles.inline}>
       {children}
@@ -117,7 +173,7 @@ function InlineCode({ children, className }: ComponentPropsWithoutRef<'code'>) {
   )
 }
 
-function Link({ children, href, title }: ComponentPropsWithoutRef<'a'>) {
+function Link({ children, href, title, id, node, 'aria-describedby': describedBy, 'aria-label': label }: ComponentPropsWithoutRef<'a'> & ExtraProps) {
   const openFile = useContext(FileLinkContext)
   const path = href ? filePathFromHref(href) : null
   if (path !== null) {
@@ -129,6 +185,10 @@ function Link({ children, href, title }: ComponentPropsWithoutRef<'a'>) {
     </a>
   }
   if (!href) return <span>{children}</span>
+  if (href.startsWith('#')) return <a className={styles.link} href={href} title={title} id={id}
+    aria-describedby={describedBy} aria-label={label}
+    data-footnote-ref={node?.properties.dataFootnoteRef ? '' : undefined}
+    data-footnote-backref={node?.properties.dataFootnoteBackref ? '' : undefined}>{children}</a>
   // 外链在新标签打开并摘掉 referrer：本页面是没有鉴权的本机页面，不该把地址泄露给目标站点。
   return (
     <a className={styles.link} href={href} title={title} target="_blank" rel="noreferrer noopener">
@@ -137,26 +197,24 @@ function Link({ children, href, title }: ComponentPropsWithoutRef<'a'>) {
   )
 }
 
-/** 模型正文不可信：图片 URL 不得在用户未操作时触发浏览器请求。 */
-function InertImage({ alt }: ComponentPropsWithoutRef<'img'>) {
-  return <span className={styles.imagePlaceholder}>[图片未自动加载{alt ? `：${alt}` : ''}]</span>
-}
-
-export function MarkdownMessage({ text, compact = false }: { text: string; compact?: boolean }) {
+export const MarkdownMessage = memo(function MarkdownMessage({ text, compact = false, streaming = false }: { text: string; compact?: boolean; streaming?: boolean }) {
+  const identity = useId()
   return (
     // 自带一层容器：Markdown 的块级元素样式（外边距复位）只作用于自己的后代，
     // 不去猜外层组件的类名。
-    <div className={compact ? `${styles.root} ${styles.compact}` : styles.root}>
+    <StreamingContext.Provider value={streaming}><div data-markdown-message className={compact ? `${styles.root} ${styles.compact}` : styles.root}>
       {/* GFM 扩展：表格、删除线、任务列表。`react-markdown` 默认只解析 CommonMark，缺了它模型
           输出的 Markdown 表格会退化成一行带竖线的普通文本（实测：表格是本项目架构回答的主要
           呈现形式）。`remark-gfm` 只增加语法解析，不改变上面第 1 条"不解析原始 HTML"的口径。 */}
       <Markdown
-        remarkPlugins={[remarkGfm]}
-        urlTransform={(url, key) => key === 'href' && filePathFromHref(url) !== null ? url : defaultUrlTransform(url)}
-        components={{ pre: CodeBlock, code: InlineCode, a: Link, img: InertImage }}
+        remarkPlugins={[remarkGfm, remarkMath, codeMetadata]}
+        rehypePlugins={[[scopeFootnotes, { labelId: `answer-${identity}-notes` }], [rehypeKatex, { trust: false, strict: 'ignore', maxExpand: 1000, maxSize: 20 }]]}
+        remarkRehypeOptions={{ clobberPrefix: `answer-${identity}-`, footnoteLabel: '注释', footnoteBackLabel: '返回正文' }}
+        urlTransform={(url, key) => (key === 'href' || key === 'src') && filePathFromHref(url) !== null ? url : defaultUrlTransform(url)}
+        components={{ pre: CodeBlock, code: InlineCode, a: Link, img: MarkdownImage, table: MarkdownTable }}
       >
         {text}
       </Markdown>
-    </div>
+    </div></StreamingContext.Provider>
   )
-}
+})

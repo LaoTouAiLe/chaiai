@@ -1040,6 +1040,8 @@ class AssistantMessageView(_Dto):
     kind: Literal["assistant"] = "assistant"
     message_id: str = Field(min_length=1)
     text: str
+    #: 展示用途来自消息的真实工具调用关系；旧客户端忽略，旧记录由投影重新派生。
+    presentation_phase: Literal["process", "response"] | None = None
     #: 只投影供应商实际返回的 reasoning_content；不合成、不回写模型历史。
     reasoning: str | None = None
     reasoning_truncated: bool = False

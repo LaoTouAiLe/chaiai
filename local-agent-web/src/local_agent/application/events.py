@@ -245,6 +245,7 @@ class MessageDeltaPayload(MessageRefPayload):
 
 class MessageCompletedPayload(MessageRefPayload):
     text: str
+    presentation_phase: Literal["process", "response"] | None = None
     reasoning: str | None = None
     reasoning_truncated: bool = False
     model_call_id: str | None = None

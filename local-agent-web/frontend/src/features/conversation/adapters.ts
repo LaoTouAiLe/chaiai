@@ -581,6 +581,7 @@ export function mapMessages(snapshot: Snapshot, tail: StreamTail | null = null):
         mapped.push({
           kind: 'assistant',
           id: message.message_id,
+          presentationPhase: message.presentation_phase ?? undefined,
           text: !message.complete && tail?.messageId === message.message_id && tail.text !== ''
             ? tail.text
             : message.text ?? '',

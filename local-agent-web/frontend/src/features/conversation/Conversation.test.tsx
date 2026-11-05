@@ -33,6 +33,21 @@ function formatTokens(value: number): string {
 }
 
 describe('Conversation 复制与编辑（2026-10-21）', () => {
+  it('exposes grouped running and failed read operations without requiring an extra expansion', () => {
+    const source = toolsScenario.messages.find(row => row.kind === 'tool')!
+    if (source.kind !== 'tool') throw new Error('Missing tool fixture')
+    const messages = [
+      { ...source, id: 'first-read', tool: { ...source.tool, name: 'read_file', target: 'first.ts', status: 'running' as const, expanded: false } },
+      { ...source, id: 'second-read', tool: { ...source.tool, name: 'read_file', target: 'second.ts', status: 'failed' as const, expanded: false } },
+    ]
+    const { rerender } = render(<Conversation scenario={{ ...shellScenario, messages, stats: null }} />)
+    expect(screen.getByRole('button', { name: /读取文件 2 次/ })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('first.ts')).toBeVisible()
+    expect(screen.getByText('second.ts')).toBeVisible()
+    rerender(<Conversation scenario={{ ...shellScenario, messages: messages.map((message, index) => ({ ...message, tool: { ...message.tool, status: index === 0 ? 'uncertain' as const : 'succeeded' as const } })), stats: null }} />)
+    expect(screen.getByText('first.ts')).toBeVisible()
+    expect(screen.getByText('1 个结果未确认')).toBeVisible()
+  })
   const messages = [
     { kind: 'user' as const, id: 'u1', text: '第一问', at: '' },
     { kind: 'assistant' as const, id: 'a1', text: '第一答', at: '' },
@@ -343,9 +358,9 @@ describe('Conversation', () => {
       { kind: 'assistant' as const, id: 'b', text: '继续查阅', at: '' },
       { ...tool, id: 't2' },
     ]
-    const { container } = render(<Conversation scenario={{ ...shellScenario, messages, stats: null }} />)
+    render(<Conversation scenario={{ ...shellScenario, messages, stats: null }} />)
     expect(screen.getAllByRole('button', { name: '思考' })).toHaveLength(1)
-    const text = container.textContent ?? ''
+    const text = screen.getByRole('region', { name: '执行过程记录' }).textContent ?? ''
     const label = '读取文件'
     expect(text.indexOf(label)).toBeGreaterThan(text.indexOf('开始查阅'))
     expect(text.lastIndexOf(label)).toBeGreaterThan(text.indexOf('继续查阅'))

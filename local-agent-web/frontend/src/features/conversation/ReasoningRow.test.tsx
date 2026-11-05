@@ -3,11 +3,11 @@ import { describe, expect, it } from 'vitest'
 import { ReasoningRow } from './ReasoningRow'
 
 describe('ReasoningRow', () => {
-  it('defaults to folded, follows the latest line while running, and preserves expansion', () => {
+  it('defaults to folded, previews completed lines while running, and preserves expansion', () => {
     const { rerender } = render(<ReasoningRow text={'第一行\n当前思考'} running />)
     const button = screen.getByRole('button', { name: '思考中' })
     expect(button).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.getByText('当前思考')).toBeInTheDocument()
+    expect(screen.getByText('第一行')).toBeInTheDocument()
     expect(screen.queryByRole('region', { name: '思考内容' })).not.toBeInTheDocument()
     fireEvent.click(button)
     rerender(<ReasoningRow text={'第一行\n当前思考\n补充思考'} running={false} />)

@@ -10,7 +10,7 @@ display: flex; flex-direction: column; gap: 8px; width: calc(100% - 2 * var(--wo
 .composer {
 container-name: composer;
 container-type: inline-size;
-position: relative; display: flex; flex-direction: column; gap: 12px; padding: 12px 14px; border: .5px solid var(--c-line); border-radius: 28px; background: var(--dsw-specific-input-major); box-shadow: var(--sh-composer);
+position: relative; display: flex; flex-direction: column; gap: 12px; padding: 8px 10px; border: .5px solid var(--c-line); border-radius: 28px; background: var(--dsw-specific-input-major); box-shadow: var(--sh-composer);
 }
 
 /* `@` 引用候选（2026-10-30）：贴在卡片上沿，最多 6 条、超出滚动。
@@ -120,7 +120,7 @@ position: relative; display: flex; flex-direction: column; gap: 12px; padding: 1
 }
 
 .input {
-display: block; width: 100%; min-height: 58px; padding: 8px 6px 0; border: 0; background: transparent; font-size: var(--fs-chat); line-height: var(--lh-chat); resize: none;
+display: block; width: 100%; min-height: 36px; padding: 4px 6px 0; border: 0; background: transparent; font-size: var(--fs-chat); line-height: var(--lh-chat); resize: none;
 }
 
 .input::placeholder {
@@ -144,7 +144,7 @@ display: inline-flex; align-items: center; gap: 2px; min-width: 0; padding: 2px;
 }
 
 .modeOption {
-  height: 28px;
+  height: 24px;
   min-width: 0;
   overflow: hidden;
   padding: 0 6px;
@@ -235,13 +235,13 @@ display: flex; align-items: center; justify-self: start; gap: 4px; height: 28px;
 
 
 .send {
-display: inline-flex; align-items: center; justify-content: center; flex: none; width: 40px; height: 40px; border-radius: 50%; background: var(--c-accent); color: var(--c-text-inverse); transition: background 150ms ease;
+display: inline-flex; align-items: center; justify-content: center; flex: none; width: 34px; height: 34px; border-radius: 50%; background: var(--c-accent); color: var(--c-text-inverse); transition: background 150ms ease;
 }
 
 /* 「停止生成」（§17.4，2026-10-13 起有真实语义）：与发送同一个位置、同一套尺寸与配色——
    它是**同一个主按钮的另一种状态**，不是新加的一个控件。 */
 .stop {
-display: inline-flex; align-items: center; justify-content: center; flex: none; width: 40px; height: 40px; border-radius: 50%; background: var(--c-accent); color: var(--c-text-inverse); transition: background 150ms ease;
+display: inline-flex; align-items: center; justify-content: center; flex: none; width: 34px; height: 34px; border-radius: 50%; background: var(--c-accent); color: var(--c-text-inverse); transition: background 150ms ease;
 }
 
 .stop:hover:not(:disabled) {
@@ -559,7 +559,7 @@ display: flex; flex-direction: column; gap: 8px; margin: 0 12px -12px; padding: 
 @media (pointer: coarse) { .input { font-size: max(16px, var(--law-text-base)); } }
 @media (max-width: 600px) {
   .stack { width: calc(100% - 24px); padding-inline: 0; }
-  .composer { padding: 10px 12px 12px; border-radius: 24px; }
+  .composer { padding: 8px 10px; border-radius: 24px; }
   /* 32px 的圆钮在手机上稳定点不中（iOS HIG 建议触摸目标 ≥44px）。只放大可点区域，
      图标本身不变——否则发送键会比文字大一圈，看起来像坏了。 */
   .send { width: 40px; height: 40px; }

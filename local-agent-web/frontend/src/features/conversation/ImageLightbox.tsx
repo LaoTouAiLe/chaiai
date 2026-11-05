@@ -53,7 +53,7 @@ export function ImageLightbox({ src, onClose }: { src: string; onClose: () => vo
           }
         }}
       >
-        <img className={styles.image} src={src} alt="放大查看的图片" />
+        <img className={styles.image} src={src} alt="放大查看的图片" referrerPolicy="no-referrer" />
         <button
           ref={close}
           type="button"

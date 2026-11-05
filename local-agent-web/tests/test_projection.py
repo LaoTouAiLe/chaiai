@@ -1988,3 +1988,34 @@ def test_reasoning_display_limit_and_missing_field_do_not_modify_model_history()
     assert "private_metadata" not in canonical_json(_snapshot(state))
     missing = proj.project_messages_view(_state(messages=[AIMessage(content="回答", id="b")]))[0]
     assert missing.reasoning is None and not missing.reasoning_truncated
+
+
+def test_assistant_presentation_phase_comes_from_tool_calls_without_mutating_state() -> None:
+    state = _state(messages=[
+        HumanMessage(content="检查代码", id="phase-user"),
+        AIMessage(content="先读取文件", id="phase-process", tool_calls=[
+            {"name": "read_file", "args": {"path": "app.py"}, "id": "phase-tool"}
+        ]),
+        AIMessage(content="检查完成", id="phase-answer"),
+        AIMessage(content="完成后的答复", id="phase-finish", tool_calls=[
+            {"name": "task_control", "args": {"action": "complete", "message": "完成后的答复"}, "id": "phase-control"}
+        ]),
+        AIMessage(content="继续检查", id="phase-mixed", tool_calls=[
+            {"name": "read_file", "args": {"path": "app.py"}, "id": "phase-more"},
+            {"name": "task_control", "args": {"action": "complete", "message": "继续检查"}, "id": "phase-mixed-control"},
+        ]),
+    ], tool_events=[], tool_results=[])
+    before = copy.deepcopy(state)
+    views = proj.project_messages_view(state)
+    assistants = [view for view in views if view.kind == "assistant"]
+    assert [view.presentation_phase for view in assistants] == ["process", "response", "response", "process"]
+    assert [view.text for view in assistants] == ["先读取文件", "检查完成", "完成后的答复", "继续检查"]
+    assert state == before
+
+
+def test_legacy_assistant_payload_remains_readable_without_presentation_phase() -> None:
+    from local_agent.application.models import AssistantMessageView
+    from local_agent.application.events import MessageCompletedPayload
+
+    assert AssistantMessageView(message_id="legacy", text="历史回答").presentation_phase is None
+    assert MessageCompletedPayload(message_id="legacy", role="assistant", text="历史回答").presentation_phase is None

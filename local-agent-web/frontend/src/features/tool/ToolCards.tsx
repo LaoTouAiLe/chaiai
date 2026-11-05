@@ -1,9 +1,12 @@
-import { useState, type ReactNode } from 'react'
+import { useContext, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { getDelegationLive, type DelegationLiveLaneDto } from '../../api/client'
 import { Check, ChevronDown, ChevronRight, Copy, Doc } from '../../components/icons'
 import type { ToolCardView } from '../../fixtures/types'
 import { copyText } from '../conversation/clipboard'
+import { FileLinkContext } from '../conversation/fileLinkContext'
+import { filePathFromHref } from '../conversation/fileLinks'
+import { StructuredResult } from './StructuredResult'
 import { useLineWindow, windowOf, type LineWindow } from './lineWindow'
 import styles from './ToolCards.module.css'
 
@@ -12,6 +15,7 @@ interface CardShellProps {
   meta: ReactNode
   children: ReactNode
   label: string
+  copyBody?: string
 }
 
 /**
@@ -21,17 +25,23 @@ interface CardShellProps {
  * explicit truncation note when the body was capped — never a silent cut
  * (ARCHITECTURE §15.8).
  */
-function CardShell({ title, meta, children, label }: CardShellProps) {
+function CardShell({ title, meta, children, label, copyBody }: CardShellProps) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const [bodyCopied, setBodyCopied] = useState<boolean | null>(null)
+  const [wrap, setWrap] = useState(false)
   const copyLabel = copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : `复制 ${title}`
   return (
-    <section className={styles.card} aria-label={label}>
+    <section className={styles.card} aria-label={label} data-wrap={wrap}>
       <header className={styles.header}>
         <span className={styles.icon} aria-hidden="true">
           <Doc />
         </span>
-        <span className={styles.title}>{title}</span>
+        <span className={styles.title} title={title}>{title}</span>
         <span className={styles.meta}>{meta}</span>
+        {copyBody ? <div className={styles.resultActions}>
+          <button type="button" aria-label="结果自动换行" aria-pressed={wrap} onClick={() => setWrap(value => !value)}>换行</button>
+          <button type="button" aria-label="复制结果" title="复制本次工具返回的预览原文" onClick={() => { void copyText(copyBody).then(setBodyCopied) }}>{bodyCopied === null ? '复制结果' : bodyCopied ? '已复制结果' : '复制失败'}</button>
+        </div> : null}
         <button type="button" className={styles.copy} aria-label={copyLabel} title={copyLabel} onClick={() => {
           void copyText(title).then((ok) => setCopyState(ok ? 'copied' : 'failed'))
         }}>
@@ -41,6 +51,13 @@ function CardShell({ title, meta, children, label }: CardShellProps) {
       {children}
     </section>
   )
+}
+
+function ResultFile({ path }: { path: string }) {
+  const openFile = useContext(FileLinkContext)
+  const safePath = filePathFromHref(path)
+  return safePath && openFile ? <button type="button" className={styles.fileTarget} title={path}
+    aria-label={`打开文件 ${path}`} onClick={() => openFile(safePath)}>{path}<span aria-hidden="true"> ↗</span></button> : <span>{path}</span>
 }
 
 /**
@@ -74,6 +91,7 @@ function ReadCard({ card }: { card: Extract<ToolCardView, { kind: 'read' }> }) {
       label="读取结果"
       title={card.path}
       meta={`第 ${String(first)}–${String(last)} 行 / 共 ${String(card.totalLines)} 行`}
+      copyBody={card.lines.map(line => line.text).join('\n')}
     >
       {card.note ? <p className={styles.note} aria-label="读取说明">{card.note}</p> : null}
       <div className={styles.code}>
@@ -116,12 +134,13 @@ function SearchCard({ card }: { card: Extract<ToolCardView, { kind: 'search' }> 
       label="搜索结果"
       title={card.shape === 'matches' ? '按内容匹配' : '按路径匹配'}
       meta={`显示 ${String(shown)} ${unit} / 共 ${String(card.total)}${countsMatches ? ` 处匹配 · ${String(card.groups.length)} 个文件` : ''}`}
+      copyBody={card.shape === 'matches' ? card.groups.map(group => [group.path, ...group.matches.map(match => `${match.line}: ${match.text}`)].join('\n')).join('\n\n') : card.paths.join('\n')}
     >
       {card.shape === 'matches' ? (
         <ul className={styles.groups}>
           {groups.map((group) => (
             <li key={group.path} className={styles.group}>
-              <div className={styles.groupPath}>{group.path}</div>
+              <div className={styles.groupPath}><ResultFile path={group.path} /></div>
               {group.matches.map((match) => (
                 <div key={`${group.path}:${String(match.line)}`} className={styles.matchRow}>
                   <span className={styles.codeGutter}>{match.line}</span>
@@ -135,7 +154,7 @@ function SearchCard({ card }: { card: Extract<ToolCardView, { kind: 'search' }> 
         <ul className={styles.paths}>
           {paths.map((path) => (
             <li key={path} className={styles.pathRow}>
-              {path}
+              <ResultFile path={path} />
             </li>
           ))}
         </ul>
@@ -176,6 +195,7 @@ function TerminalCard({ card }: { card: Extract<ToolCardView, { kind: 'terminal'
     <CardShell
       label="终端输出"
       title={card.command}
+      copyBody={hasStreams ? [card.stdout, card.stderr].filter(value => value !== undefined).join('\n') : card.output}
       meta={
         <>
           <span className={styles.cwd}>{card.cwd}</span>
@@ -195,7 +215,7 @@ function TerminalCard({ card }: { card: Extract<ToolCardView, { kind: 'terminal'
           {showStderr ? (
             <>
               <p className={styles.note}>标准错误输出：</p>
-              <pre className={styles.terminal}>{visibleStderr.join('\n')}</pre>
+              <pre className={`${styles.terminal} ${styles.stderr}`}>{visibleStderr.join('\n')}</pre>
             </>
           ) : null}
         </>
@@ -233,6 +253,7 @@ function ResultCard({ card }: { card: Extract<ToolCardView, { kind: 'result' }> 
       label="工具结果"
       title={card.target === '' ? '工具结果' : card.target}
       meta={card.summary}
+      copyBody={card.body}
     >
       {card.body === ''
         ? null
@@ -260,6 +281,7 @@ function WebCard({ card }: { card: Extract<ToolCardView, { kind: 'web' }> }) {
       label="网页结果"
       title={card.target === '' ? '网页结果' : card.target}
       meta={card.summary}
+      copyBody={card.body}
     >
       {card.body === ''
         ? null
@@ -279,6 +301,7 @@ function TodoCard({ card }: { card: Extract<ToolCardView, { kind: 'todo' }> }) {
       label="任务清单"
       title="任务清单"
       meta={`${String(done)}/${String(card.items.length)} 已完成`}
+      copyBody={card.items.map(item => `${item.status === 'completed' ? '[x]' : '[ ]'} ${item.text}`).join('\n')}
     >
       <ul className={styles.todos}>
         {card.items.map((item) => (
@@ -484,9 +507,8 @@ function GenericCard({ card }: { card: Extract<ToolCardView, { kind: 'generic' }
   const lines = card.detail.split('\n')
   const lineWindow = useLineWindow(lines.length)
   return (
-    <CardShell label="工具结果" title={card.headline} meta="结果详情">
-      <p className={styles.generic}>{windowOf(lines, lineWindow.shown).join('\n')}</p>
-      <MoreLines lineWindow={lineWindow} />
+    <CardShell label="工具结果" title={card.headline} meta="结果详情" copyBody={card.detail}>
+      <StructuredResult text={card.detail} fallback={<><p className={styles.generic}>{windowOf(lines, lineWindow.shown).join('\n')}</p><MoreLines lineWindow={lineWindow} /></>} />
     </CardShell>
   )
 }
