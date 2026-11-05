@@ -74,6 +74,31 @@ def node() -> str:
     return executable
 
 
+def _require_sandboxed_node_traverse(tmp_path: Path, app_config, node: str) -> None:
+    """前置探测：受限令牌起的 node 能不能 lstat 自己的工作目录。
+
+    CI 的 runner 上目录 ACL 由 runner 决定；沙箱用**受限令牌**（去掉 Administrators）
+    起子进程，某些 runner 的权限设置会让它连遍历父目录都做不到——node 以
+    ``node:fs:2801 ... lstat`` 直接退出。这是**环境前提**，不是产品行为：
+    "沙箱到底有没有物化出写边界"由 ``sandbox / smoke (windows)`` 单独验证（那个是绿的）。
+
+    探测用与正式用例相同的形状（工作区是 tmp_path 下的子目录、cwd 指向它）。
+    **只有**拿到 2801/lstat 才跳过；其他任何失败照常让用例红。
+    """
+    probe = tmp_path / "traverse-probe"
+    probe.mkdir()
+    policy = _policy(probe, app_config)
+    outcome = policy.processes.run(
+        [node, "-e", "0"], cwd=probe, timeout_seconds=30,
+        sandbox=policy.shell_sandbox_request(),
+    )
+    if outcome.exit_code != 0 and b"node:fs:2801" in outcome.stderr and b"lstat" in outcome.stderr:
+        pytest.skip(
+            "该环境的目录 ACL 让受限令牌无法 lstat 工作目录（node:fs:2801）；"
+            "普通 Windows 机器上不出现，沙箱本身由 sandbox/smoke 单独验证"
+        )
+
+
 def _policy(root: Path, app_config, mode="workspace-write", grants=None) -> SecurityPolicy:
     return SecurityPolicy.from_config(
         app_config, workspace_root=root,
@@ -86,6 +111,7 @@ def test_powershell_startup_and_native_child_keep_write_boundary(tmp_path: Path,
     pwsh = shutil.which("pwsh")
     if pwsh is None:
         pytest.skip("PowerShell 7 not installed")
+    _require_sandboxed_node_traverse(tmp_path, app_config, node)
     work, outside = tmp_path / "work", tmp_path / "outside"
     work.mkdir(); outside.mkdir()
     inside, forbidden = work / "allowed.txt", outside / "forbidden.txt"
@@ -134,6 +160,7 @@ process.exit(r.status===7?0:1);
 def test_fork_ipc_and_grandchild_keep_external_write_boundary(tmp_path: Path, app_config, node: str, granted: bool) -> None:
     work, outside = tmp_path / "work", tmp_path / "outside"
     work.mkdir(); outside.mkdir()
+    _require_sandboxed_node_traverse(tmp_path, app_config, node)
     # Materialize an old grant first: denial must survive an existing external ACE.
     win_sandbox.grant_write(str(outside), win_sandbox.workspace_sid_text(str(outside)))
     target = outside / "written.txt"
@@ -189,6 +216,7 @@ def test_x64_x86_x64_process_chain(tmp_path: Path, app_config, node: str) -> Non
 def test_cache_cannot_be_written_even_under_an_authorized_parent(tmp_path: Path, app_config, monkeypatch, node: str) -> None:
     work, allowed = tmp_path / "work", tmp_path / "allowed"
     work.mkdir(); allowed.mkdir()
+    _require_sandboxed_node_traverse(tmp_path, app_config, node)
     cache = allowed / "components"
     monkeypatch.setattr(win_ipc, "_BUNDLES", {})
 
