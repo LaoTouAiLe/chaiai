@@ -158,15 +158,6 @@ def lanes_for(scopes: Any) -> dict[str, LiveLane]:
         }
 
 
-def clear_lanes(child_ids: Any) -> None:
-    """整批清掉（一次委派结束时调用）。"""
-    if not isinstance(child_ids, (list, tuple, set)):
-        return
-    with _LOCK:
-        for child_id in child_ids:
-            _LANES.pop(str(child_id), None)
-
-
 def reset() -> None:
     """清空全部（测试用）。"""
     with _LOCK:
@@ -177,7 +168,6 @@ __all__ = [
     "RETENTION_SECONDS",
     "LiveLane",
     "LiveStep",
-    "clear_lanes",
     "finish_lane",
     "lanes_for",
     "reset",
