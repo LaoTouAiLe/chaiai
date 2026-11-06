@@ -5,7 +5,7 @@
 **跑在你自己电脑上的 AI Agent。** 会话、记忆、文件、工具执行全在本机，模型端点由你自己填。
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Python](https://img.shields.io/badge/python-3.13%2B-blue)
 ![Node](https://img.shields.io/badge/node-22.20%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
@@ -48,7 +48,7 @@ chaiai 反过来——**它就是一个装在你电脑上的程序**：
 
 ### 方式二：从源码跑
 
-前置：**Python 3.10+**、**Node 22.20+**、[uv](https://docs.astral.sh/uv/)。
+前置：**Python 3.13+**、**Node 22.20+**、[uv](https://docs.astral.sh/uv/)。
 
 ```powershell
 cd local-agent-web
@@ -296,7 +296,7 @@ uv run python -m local_agent.api
 
 | 层 | 用了什么 |
 | --- | --- |
-| 内核 | Python 3.10+、LangGraph（工具循环与检查点）、Pydantic |
+| 内核 | Python 3.13+、LangGraph（工具循环与检查点）、Pydantic |
 | 服务 | FastAPI + Uvicorn（单进程单 worker），SSE 推送流式事件 |
 | 存储 | SQLite（会话、设置、记忆元数据）、Chroma（可选，中期记忆） |
 | 界面 | React 19 + Vite 8 + TypeScript，TanStack Query、Zustand |

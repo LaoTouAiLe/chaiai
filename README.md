@@ -5,7 +5,7 @@
 **An AI agent that runs on your own computer.** Conversations, memory, files and tool execution all stay local — you bring your own model endpoint.
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Python](https://img.shields.io/badge/python-3.13%2B-blue)
 ![Node](https://img.shields.io/badge/node-22.20%2B-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 
@@ -53,7 +53,7 @@ Install / uninstall / data location / fallbacks: see [packaging/使用说明.txt
 
 ### Option 2: from source
 
-Requirements: **Python 3.10+**, **Node 22.20+**, [uv](https://docs.astral.sh/uv/).
+Requirements: **Python 3.13+**, **Node 22.20+**, [uv](https://docs.astral.sh/uv/).
 
 ```powershell
 cd local-agent-web
@@ -248,7 +248,7 @@ Upgrading means running the new installer over the old one; the data directory i
 
 | Layer | Used |
 | --- | --- |
-| Core | Python 3.10+, LangGraph (tool loop + checkpoints), Pydantic |
+| Core | Python 3.13+, LangGraph (tool loop + checkpoints), Pydantic |
 | Service | FastAPI + Uvicorn (single process, single worker), SSE for streaming events |
 | Storage | SQLite (conversations, settings, memory metadata), Chroma (optional, mid-term memory) |
 | UI | React 19 + Vite 8 + TypeScript, TanStack Query, Zustand |

@@ -8,7 +8,9 @@ version = "0.3.0"
 description = "Local learning-oriented web Agent"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10,<4"
+# 3.13+（2026-11-06）：声明改成 CI 实际验证过的那个版本。此前写 3.10+，但代码用了
+# `enum.StrEnum`（3.11+ 才有），在 3.10 上根本无法导入——"支持 3.10"从来没被验证过。
+requires-python = ">=3.13,<4"
 dependencies = [
   "langchain-core>=1.0,<2",
   "langchain-openai>=1.0,<2",
@@ -37,7 +39,7 @@ dependencies = [
   # pdf/docx。图片仍走 base64 JSON——那份 2 MB 上限下 33% 的开销无所谓，文档则不是。
   "python-multipart>=0.0.20,<1",
   # 文档提取（2026-10-29）：`read_file` 直接读 docx / xlsx / pptx / pdf。
-  # 为什么不学 hermes 用 firecrawl-anydoc：它要求 python_version >= 3.14，我们声明 >=3.10；
+  # 为什么不学 hermes 用 firecrawl-anydoc：它要求 python_version >= 3.14，我们声明 >=3.13；
   # 而且它要进 PyInstaller 目录包，能否被正确收集没有验证过。这四个都是纯 Python 或
   # 只依赖 lxml（环境里本来就有，python-pptx 会带进 Pillow/XlsxWriter）。
   # 版本按 2026-10-29 实测通过的具体版本锁定上界：解析行为与输出格式都被用例按现状约束。
@@ -105,9 +107,9 @@ line-length = 100
 target-version = "py310"
 
 [tool.mypy]
-# 与运行/测试使用的解释器一致。项目声明支持 3.10+，但传递依赖 numpy 2.x 的类型存根
-# 使用 PEP 695 语法（需 py3.12+），py3.10 目标下无法解析；语法层面的 3.10 兼容
-# 由 ruff 的 target-version = "py310" 把关。
+# 与运行/测试使用的解释器一致（CI 与发布包都只跑 3.13，pyproject 也声明 >=3.13）。
+# ruff 的 target-version 仍留 py310，是**有意的保守**：不因为声明放宽就去用新版语法
+# （`enum.StrEnum` 这类库特性不受 target-version 约束，本来就要求 3.11+）。
 python_version = "3.13"
 disallow_untyped_defs = true
 warn_redundant_casts = true
