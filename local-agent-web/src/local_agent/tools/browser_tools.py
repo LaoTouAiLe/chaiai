@@ -90,6 +90,48 @@ def _is_stale_session_error(message: str) -> bool:
     return any(fragment in message for fragment in _STALE_SESSION_FRAGMENTS)
 
 
+#: 启动失败后的冷却时间（秒；2026-11-06）。
+#:
+#: 为什么要有它：启动失败时我们抛出的异常会被模型读走，而它通常会**立刻换成另一种方式再试**
+#: （真实案例：CDP 超时 → 改用命令行直接起 Edge → 又崩，桌面上连弹"应用程序错误"，
+#: 一轮卡十几分钟）。每次重试都会再拉起一个浏览器进程，所以在冷却期内直接拒绝，
+#: 并把上一次的真实原因原样摆出来——让模型没有"再试一次"的余地。
+_START_FAILURE_COOLDOWN_SECONDS = 120.0
+
+_START_FAILURES: dict[str, tuple[float, str]] = {}
+_START_FAILURES_LOCK = threading.Lock()
+
+
+def _remember_start_failure(workspace_root: Path, reason: str) -> None:
+    with _START_FAILURES_LOCK:
+        _START_FAILURES[str(workspace_root)] = (time.monotonic(), reason[-2000:])
+
+
+def _start_failure_reason(workspace_root: Path) -> str | None:
+    """冷却期内返回"别再试"的说明；过期就清掉记录、允许重新启动。"""
+    key = str(workspace_root)
+    with _START_FAILURES_LOCK:
+        record = _START_FAILURES.get(key)
+        if record is None:
+            return None
+        started, reason = record
+        age = time.monotonic() - started
+        if age >= _START_FAILURE_COOLDOWN_SECONDS:
+            _START_FAILURES.pop(key, None)
+            return None
+    return (
+        f"浏览器上次启动失败（{int(age)} 秒前）：{reason or '子进程没有输出'}。"
+        "这次不再重试：每次重试都会再启动一个浏览器进程，Windows 上还可能弹崩溃对话框。"
+        f"请先解决上面的原因，或等 {int(_START_FAILURE_COOLDOWN_SECONDS)} 秒后再试。"
+    )
+
+
+def reset_start_failures() -> None:
+    """清掉失败记录（测试用；生产路径靠冷却时间自然过期）。"""
+    with _START_FAILURES_LOCK:
+        _START_FAILURES.clear()
+
+
 class BrowserSession:
     """当前对话独占的浏览器宿主与 CDP 连接。"""
     capability = "page_control"
@@ -98,6 +140,9 @@ class BrowserSession:
     def __init__(self, policy: SecurityPolicy, *, visible: bool, timeout: float,
                  on_message: Callable[[dict[str, Any]], None] | None = None) -> None:
         """用独立配置启动浏览器；启动异常或取消时关闭进程。"""
+        blocked = _start_failure_reason(policy.workspace_root)
+        if blocked is not None:
+            raise RuntimeError(blocked)
         available, hint = browser_availability()
         if not available:
             raise RuntimeError(hint)
@@ -113,6 +158,9 @@ class BrowserSession:
         self.downloads: dict[str, dict[str, Any]] = {}
         self.errors: list[str] = []
         self.on_message = on_message
+        #: 读 stderr 的线程。启动失败时先 join 它一下，否则 `errors` 还可能为空
+        #: （Chromium 崩溃是瞬间退出，输出线程来不及读）。
+        self._drain_thread: threading.Thread | None = None
         profile = self.directory / "profile"
         args = [str(browser_executable()), f"--user-data-dir={profile}",
                 "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
@@ -144,7 +192,10 @@ class BrowserSession:
                     time.sleep(.02)
                 stream.close()
 
-            threading.Thread(target=drain, daemon=True, name="browser-output").start()
+            self._drain_thread = threading.Thread(
+                target=drain, daemon=True, name="browser-output"
+            )
+            self._drain_thread.start()
         detach = with_cancellation(policy, self.close)
         try:
             deadline = time.monotonic() + timeout
@@ -153,9 +204,20 @@ class BrowserSession:
                 if policy.cancellation is not None and policy.cancellation.cancelled:
                     raise RuntimeError("浏览器启动已取消")
                 if self.process.handle.poll() is not None:
-                    raise RuntimeError(f"浏览器启动失败，退出码 {self.process.handle.returncode}；{''.join(self.errors)}")
+                    self._collect_output()
+                    raise RuntimeError(
+                        f"浏览器启动失败，退出码 {self.process.handle.returncode}"
+                        f"（程序 {args[0]}，配置目录 {profile}）："
+                        f"{''.join(self.errors) or '子进程没有输出'}"
+                    )
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("浏览器尚未就绪；可增大 timeout_seconds 重试")
+                    # 文案里**不能**出现"重试"：模型会照做，每次重试都再起一个进程（见上方冷却说明）。
+                    self._collect_output()
+                    raise TimeoutError(
+                        f"浏览器在 {timeout:g} 秒内没有就绪，已放弃（先看原因，不要连续重试）；"
+                        f"配置目录 {profile}："
+                        f"{''.join(self.errors) or '子进程没有输出'}"
+                    )
                 time.sleep(.05)
             port, endpoint, *_ = port_file.read_text().splitlines()
             import websocket
@@ -165,11 +227,24 @@ class BrowserSession:
                 suppress_origin=True, http_no_proxy=["127.0.0.1"],
             )
             self.call("Browser.setDownloadBehavior", {"behavior": "deny"}, timeout=timeout)
-        except BaseException:
+        except BaseException as exc:
             self.close()
+            # 用户取消不算"启动失败"：那是正常路径，不该让他 120 秒内不能再用浏览器。
+            if "启动已取消" not in str(exc):
+                _remember_start_failure(policy.workspace_root, str(exc))
             raise
         finally:
             detach()
+
+    def _collect_output(self, wait: float = 0.3) -> None:
+        """等输出线程把子进程最后一段 stderr 读完（最多 ``wait`` 秒）。
+
+        为什么需要：Chromium 崩溃是**瞬间退出**的，不等这一下 ``errors`` 往往是空的，
+        于是调用方（尤其是模型）只能对着"退出码 xxx；"猜原因——真实事故里它猜成了 Temp 目录。
+        """
+        thread = self._drain_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=wait)
 
     def call(self, method: str, params: dict[str, Any] | None = None, *,
              session: str | None = None, timeout: float = 45) -> dict[str, Any]:
