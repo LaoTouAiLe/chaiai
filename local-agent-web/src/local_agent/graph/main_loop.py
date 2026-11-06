@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from langchain_core.messages import AIMessage
 
 from local_agent.graph.projection import current_turn_ai_message, message_id
-from local_agent.graph.routers import loop_limit_reached
 from local_agent.graph.state import (
     AgentState,
     EvidenceReference,
@@ -41,6 +40,19 @@ def decision_budget_instruction(state: AgentState, *, default_limit: int | None)
     return text
 
 
+def _nudge_budget_available(state: AgentState) -> bool:
+    """还剩**不止一格**决策额度时才允许提醒（2026-11-06）。
+
+    提醒会把本轮从"完成"改回"继续"，也就是**要多花一次模型调用**。所以只在
+    ``loop_count < max - 1`` 时提醒：正好在最后一格（``loop_count == max - 1``）提醒，下一轮
+    必然撞上限，完成路由会把一次正常收尾判成 failed——那正是这条提醒要避免的事。
+    """
+    limit = state.get("max_loop_count")
+    if not limit:
+        return True
+    return int(state.get("loop_count", 0)) < int(limit) - 1
+
+
 def checkpoint_main_loop(
     state: AgentState, *, trust: EvidenceLevel, anomalies: Sequence[str],
     evidence: Sequence[EvidenceReference], pending_uncertain: Sequence[str], max_retries: int,
@@ -51,14 +63,15 @@ def checkpoint_main_loop(
     收尾前可能有一次**验证提醒**（``verify_on_stop``，见
     :mod:`local_agent.graph.verification_stop`）：改过代码却没跑通任何验证时，把这一版回答存为
     兜底、本轮改成"继续"，让模型再看一眼。它**不是拦截**——任务状态不变、回答不丢、次数有上限，
-    而且只在"还没撞到循环上限"时发生（撞上限时提醒会把正常收尾变成 failed，见 ``completion_route``）。
+    而且只在**还剩不止一格决策额度**时发生（2026-11-06）：正好在最后一格提醒会把它用掉，下一轮
+    撞上限，完成路由反而把一次正常收尾判成 failed（见 ``completion_route`` / ``_nudge_budget_available``）。
     """
     action = state.get("model_next_action", "continue")
     finished = action in {"finish", "ask_user"}
     completed = action == "finish"
 
     nudge: str | None = None
-    if completed and verify_on_stop and not loop_limit_reached(state):
+    if completed and verify_on_stop and _nudge_budget_available(state):
         nudge = build_verification_nudge(state)
     if nudge is not None:
         # 提醒期间这一轮**不算结束**：状态仍 running，模型下一轮会带着提醒重新决策。

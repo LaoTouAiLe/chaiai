@@ -7,7 +7,7 @@ T43 第一版那种"任务做完了却判 blocked"的形态（见 ``docs/archive
 - 次数用完就不再提；
 - 只对代码文件触发；
 - 已经有退出码为 0 的验证就不再提；
-- 撞到循环上限时不提（否则正常收尾会被 ``completion_route`` 改成 failed）。
+- 撞到循环上限时不提，只剩最后一格额度时也不提（否则正常收尾会被 ``completion_route`` 改成 failed）。
 
 全部用构造出来的 State，不联网、不调用模型、不碰真实工作区。
 """
@@ -182,6 +182,31 @@ def test_checkpoint_completes_when_loop_budget_is_spent() -> None:
 
     assert result["task_status"] == "completed"
     assert result["reflection_result"].next_action == "finish"
+
+
+def test_no_nudge_on_the_last_decision_slot() -> None:
+    """只剩最后一格额度时不许提醒（2026-11-06）。
+
+    提醒会把本轮改回"继续"，正好用掉那最后一格；下一轮撞上限，``completion_route`` 把原本
+    正常的收尾判成 failed。所以边界要往前挪一格：``loop_count == max - 1`` 就当成没额度。
+    """
+    result = _checkpoint(
+        _state(tool_events=[_edit("src/a.py")], max_loop_count=3, loop_count=2)
+    )
+
+    assert result["task_status"] == "completed"
+    assert result["reflection_result"].next_action == "finish"
+    assert result["verification_nudge"] is None
+
+
+def test_nudge_still_fires_while_a_spare_slot_remains() -> None:
+    """额度还够再走一轮时提醒照旧：这条边界不能顺手把功能关掉。"""
+    result = _checkpoint(
+        _state(tool_events=[_edit("src/a.py")], max_loop_count=3, loop_count=1)
+    )
+
+    assert result["task_status"] == "running"
+    assert result["verification_nudge"]
 
 
 def test_checkpoint_keeps_first_candidate_answer() -> None:
