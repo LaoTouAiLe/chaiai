@@ -22,7 +22,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import RedirectResponse
 
-from local_agent import directory_picker
+from local_agent import data_migration, directory_picker
 from local_agent import workspaces as workspaces_module
 from local_agent.api.container import ApiRuntime
 from local_agent.api.schemas import (
@@ -63,6 +63,7 @@ from local_agent.api.schemas import (
     SkillRootRequest,
     SkillToggleRequest,
     StorageLocationRequest,
+    StorageMigrationRequest,
     SubmitMessageRequest,
     WebSearchKeyRequest,
 )
@@ -98,6 +99,7 @@ from local_agent.application.models import (
     SessionSnapshot,
     SessionSummaryView,
     SkillsView,
+    StorageMigrationView,
     StorageView,
     TaskCenterView,
     WebSearchKeyView,
@@ -594,6 +596,11 @@ def _register_session_command_routes(router: APIRouter, service: Any) -> None:
     )
     def submit_message(session_id: str, payload: SubmitMessageRequest) -> CommandResultView:
         """同步跑完这一轮，返回**稳定的命令结果引用**：结局不依赖 SSE（§15.3）。"""
+        # 数据搬迁期间拒绝新回合（2026-11-06）：正在复制库，此时放进来的写入要么复制不到，
+        # 要么让"用户以为已完成的内容"与复制结果对不上。已有回合不追（等它结束的时长不可控）。
+        reason = service.maintenance_reason()
+        if reason is not None:
+            raise HTTPException(status_code=409, detail=f"{reason}，请等它结束并重启后再试。")
         try:
             return service.submit_message(session_id, payload.text, payload.client_request_id,
                                           workflow=payload.workflow,
@@ -1029,6 +1036,35 @@ def _register_search_preference_routes(router: APIRouter, service: Any) -> None:
     def delete_storage_location() -> StorageView:
         """删掉指针文件，回到平台标准目录；同样要重启才生效。"""
         return service.reset_storage_location()
+
+    @router.post(
+        "/storage/migrate",
+        response_model=StorageMigrationView,
+        responses={
+            409: {"model": ErrorResponse, "description": "已有搬迁在进行中"},
+            422: {"model": ErrorResponse, "description": "目标不可用：不可写、互相包含、空间不足或已有同名数据"},
+        },
+        summary="把现有数据搬到新位置",
+    )
+    def migrate_storage_location(payload: StorageMigrationRequest) -> StorageMigrationView:
+        """复制 → 校验 → 切指针 → 清旧，后台执行；进度用 `GET /storage/migration` 轮询。
+
+        与 `PUT /storage` 的区别：那个只切指针，新位置是空的；这个真的把数据搬过去，
+        用户不需要自己复制任何文件。迁完必须重启才会用新位置启动。
+        """
+        try:
+            return service.start_storage_migration(payload.target)
+        except data_migration.MigrationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.get(
+        "/storage/migration",
+        response_model=StorageMigrationView,
+        summary="数据搬迁进度",
+    )
+    def storage_migration() -> StorageMigrationView:
+        """`stage="idle"` = 本次进程里没搬过；`done` = 已切指针、等重启。"""
+        return service.migration_view()
 
     @router.put("/preferences", response_model=PreferencesView, summary="保存应用偏好", responses={
         409: {"model": ErrorResponse, "description": "设置版本已更新，草稿未覆盖现有设置"},

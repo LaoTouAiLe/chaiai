@@ -1632,6 +1632,49 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/storage/migrate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * 把现有数据搬到新位置
+         * @description 复制 → 校验 → 切指针 → 清旧，后台执行；进度用 `GET /storage/migration` 轮询。
+         *
+         *     与 `PUT /storage` 的区别：那个只切指针，新位置是空的；这个真的把数据搬过去，
+         *     用户不需要自己复制任何文件。迁完必须重启才会用新位置启动。
+         */
+        post: operations["migrate_storage_location_api_storage_migrate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/storage/migration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 数据搬迁进度
+         * @description `stage="idle"` = 本次进程里没搬过；`done` = 已切指针、等重启。
+         */
+        get: operations["storage_migration_api_storage_migration_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/tasks": {
         parameters: {
             query?: never;
@@ -6258,6 +6301,64 @@ export interface components {
             data_root: string;
         };
         /**
+         * StorageMigrationRequest
+         * @description 把现有数据整体搬到新位置（2026-11-06）。
+         *
+         *     形状只挡空值：路径合法性、目标是否与源互相包含、空间够不够，都要真的去看文件系统，
+         *     判断在服务层做（`local_agent.data_migration.preflight`），失败给 422 与可执行文案。
+         */
+        StorageMigrationRequest: {
+            /** Target */
+            target: string;
+        };
+        /**
+         * StorageMigrationView
+         * @description 数据根搬迁的进度与结果（2026-11-06）。
+         *
+         *     状态机：``copying`` → ``verifying`` → ``switching`` → ``cleaning`` → ``done``；任一步失败停在
+         *     ``failed`` 并给出 ``error``（此时指针没动、旧数据还在）。``restart_required`` 恒为 `True`：
+         *     数据根在启动时解析，迁移完必须重启才会用新位置。
+         */
+        StorageMigrationView: {
+            /**
+             * Copied Bytes
+             * @default 0
+             */
+            copied_bytes: number;
+            /**
+             * Error
+             * @default
+             */
+            error: string;
+            /**
+             * Items
+             * @default []
+             */
+            items: string[];
+            /**
+             * Restart Required
+             * @default true
+             */
+            restart_required: boolean;
+            /**
+             * Stage
+             * @enum {string}
+             */
+            stage: "idle" | "copying" | "verifying" | "switching" | "cleaning" | "done" | "failed";
+            /** Target Root */
+            target_root: string;
+            /**
+             * Total Bytes
+             * @default 0
+             */
+            total_bytes: number;
+            /**
+             * Warnings
+             * @default []
+             */
+            warnings: string[];
+        };
+        /**
          * StorageView
          * @description 数据根（所有 SQLite、向量库、附件、日志的家）及其来源。
          *
@@ -10875,6 +10976,68 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    migrate_storage_location_api_storage_migrate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StorageMigrationRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageMigrationView"];
+                };
+            };
+            /** @description 已有搬迁在进行中 */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description 目标不可用：不可写、互相包含、空间不足或已有同名数据 */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+        };
+    };
+    storage_migration_api_storage_migration_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StorageMigrationView"];
                 };
             };
         };

@@ -2609,6 +2609,10 @@ def test_openapi_surface_is_controlled(api: tuple[TestClient, ApiRuntime]) -> No
         "/api/preferences/schema",
         # 2026-10-26：数据位置。不能存在设置库里（设置库自己就在数据根下），所以单列一组端点。
         "/api/storage",
+        # 2026-11-06：换数据目录时把现有数据整体搬过去（复制 → 校验 → 切指针 → 清旧），
+        # 进度用单独一条只读端点轮询——迁移在后台线程跑，不塞进请求里等。
+        "/api/storage/migrate",
+        "/api/storage/migration",
         "/api/preferences/memory/test",
         "/api/data-center/memories",
         # 2026-11-04：委派在跑时每一路的实时进度（只读旁路，让委派卡能在运行期间显示

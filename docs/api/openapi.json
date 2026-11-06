@@ -9288,6 +9288,87 @@
         "title": "StorageLocationRequest",
         "type": "object"
       },
+      "StorageMigrationRequest": {
+        "additionalProperties": false,
+        "description": "把现有数据整体搬到新位置（2026-11-06）。\n\n形状只挡空值：路径合法性、目标是否与源互相包含、空间够不够，都要真的去看文件系统，\n判断在服务层做（`local_agent.data_migration.preflight`），失败给 422 与可执行文案。",
+        "properties": {
+          "target": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "title": "StorageMigrationRequest",
+        "type": "object"
+      },
+      "StorageMigrationView": {
+        "description": "数据根搬迁的进度与结果（2026-11-06）。\n\n状态机：``copying`` → ``verifying`` → ``switching`` → ``cleaning`` → ``done``；任一步失败停在\n``failed`` 并给出 ``error``（此时指针没动、旧数据还在）。``restart_required`` 恒为 `True`：\n数据根在启动时解析，迁移完必须重启才会用新位置。",
+        "properties": {
+          "copied_bytes": {
+            "default": 0,
+            "title": "Copied Bytes",
+            "type": "integer"
+          },
+          "error": {
+            "default": "",
+            "title": "Error",
+            "type": "string"
+          },
+          "items": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "restart_required": {
+            "default": true,
+            "title": "Restart Required",
+            "type": "boolean"
+          },
+          "stage": {
+            "enum": [
+              "idle",
+              "copying",
+              "verifying",
+              "switching",
+              "cleaning",
+              "done",
+              "failed"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "target_root": {
+            "title": "Target Root",
+            "type": "string"
+          },
+          "total_bytes": {
+            "default": 0,
+            "title": "Total Bytes",
+            "type": "integer"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "stage",
+          "target_root"
+        ],
+        "title": "StorageMigrationView",
+        "type": "object"
+      },
       "StorageView": {
         "description": "数据根（所有 SQLite、向量库、附件、日志的家）及其来源。\n\n为什么**不能**存在设置库里：设置库自己就在数据根下。把数据根写进设置库，就等于让一个东西\n定义它自己的位置——改到新位置后新库是空的，那条偏好丢了，启动又回到旧位置。所以它走一个\n固定放在平台默认目录的**指针文件**，与 ``CODEX_HOME`` / ``HERMES_HOME`` 同一性质，\n只是可以在页面上改。",
         "properties": {
@@ -16663,6 +16744,74 @@
           }
         },
         "summary": "修改数据位置"
+      }
+    },
+    "/api/storage/migrate": {
+      "post": {
+        "description": "复制 → 校验 → 切指针 → 清旧，后台执行；进度用 `GET /storage/migration` 轮询。\n\n与 `PUT /storage` 的区别：那个只切指针，新位置是空的；这个真的把数据搬过去，\n用户不需要自己复制任何文件。迁完必须重启才会用新位置启动。",
+        "operationId": "migrate_storage_location_api_storage_migrate_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StorageMigrationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageMigrationView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "已有搬迁在进行中"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "目标不可用：不可写、互相包含、空间不足或已有同名数据"
+          }
+        },
+        "summary": "把现有数据搬到新位置"
+      }
+    },
+    "/api/storage/migration": {
+      "get": {
+        "description": "`stage=\"idle\"` = 本次进程里没搬过；`done` = 已切指针、等重启。",
+        "operationId": "storage_migration_api_storage_migration_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageMigrationView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "数据搬迁进度"
       }
     },
     "/api/tasks": {

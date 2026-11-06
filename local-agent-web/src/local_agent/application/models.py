@@ -293,6 +293,27 @@ class StorageView(_Dto):
     low_disk: bool = False
 
 
+class StorageMigrationView(_Dto):
+    """数据根搬迁的进度与结果（2026-11-06）。
+
+    状态机：``copying`` → ``verifying`` → ``switching`` → ``cleaning`` → ``done``；任一步失败停在
+    ``failed`` 并给出 ``error``（此时指针没动、旧数据还在）。``restart_required`` 恒为 `True`：
+    数据根在启动时解析，迁移完必须重启才会用新位置。
+    """
+
+    stage: Literal["idle", "copying", "verifying", "switching", "cleaning", "done", "failed"]
+    #: 已复制的字节数（``verifying`` 之后不再增长）。
+    copied_bytes: int = 0
+    total_bytes: int = 0
+    target_root: str
+    #: 这次要搬的项（展示给人看，让他知道"搬了哪些东西"）。
+    items: tuple[str, ...] = ()
+    #: 已成功搬迁、但需要告知用户的问题（例如旧数据删不掉）。
+    warnings: tuple[str, ...] = ()
+    error: str = ""
+    restart_required: bool = True
+
+
 # ---- 设置页字段清单（2026-10-26）-------------------------------------------
 
 class PreferenceFieldView(_Dto):

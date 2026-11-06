@@ -772,6 +772,16 @@ class StorageLocationRequest(_Request):
     data_root: str = Field(min_length=1, max_length=1024)
 
 
+class StorageMigrationRequest(_Request):
+    """把现有数据整体搬到新位置（2026-11-06）。
+
+    形状只挡空值：路径合法性、目标是否与源互相包含、空间够不够，都要真的去看文件系统，
+    判断在服务层做（`local_agent.data_migration.preflight`），失败给 422 与可执行文案。
+    """
+
+    target: str = Field(min_length=1, max_length=1024)
+
+
 class WebSearchKeyRequest(_Request):
     """录入 / 覆盖联网检索的服务凭据（哪一条由 query 的 ``provider`` 决定：Tavily / DeepSeek）。
 

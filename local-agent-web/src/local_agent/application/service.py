@@ -47,7 +47,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import TypeAdapter
 
 from local_agent import config as config_module
-from local_agent import desktop_apps
+from local_agent import data_migration, desktop_apps
 from local_agent.application import artifacts as artifacts_module
 from local_agent.application import (
     conversation,
@@ -111,6 +111,7 @@ from local_agent.application.models import (
     SkillEntryView,
     SkillRootView,
     SkillsView,
+    StorageMigrationView,
     StorageView,
     TaskCenterView,
     TaskView,
@@ -757,6 +758,10 @@ class ApplicationService:
         self._tool_streams: dict[str, ToolStream] = {}
         self._compressions: dict[str, CompressionProgress] = {}
         self._catalog_lock = threading.RLock()
+        #: 数据根搬迁（2026-11-06）：一次只允许一个，进度只在本进程里。迁移期间
+        #: `maintenance_reason()` 非空，写入口据此拒绝新回合。
+        self._migration_lock = threading.Lock()
+        self._migration: dict[str, Any] | None = None
         #: 后台任务运行时与任务索引（§17.2）。``None`` 表示**未装配任务索引**（只有不经过
         #: `api.container.open_runtime` 的单元测试会这样）：此时提交路径与 v0.5 完全一致，
         #: 既不记账也不改调度时机——它是"索引不可用"的回退，不是第二种生产模式。
@@ -1313,6 +1318,83 @@ class ApplicationService:
             "restart_required": True,
             "note": "已恢复默认位置，重启后端后生效。",
         })
+
+    # ---- 数据根搬迁（2026-11-06）------------------------------------------
+
+    def maintenance_reason(self) -> str | None:
+        """正在搬迁数据时返回原因字符串；写入口据此拒绝新回合。
+
+        为什么不等"在跑的那一轮"结束再搬：等的时长不可控（一次工具循环可能几分钟到十几分钟），
+        而用户在设置页点完按钮就在等结果。所以策略是**拒绝新回合**、已有回合不追。
+        """
+        state = self._migration
+        if state is None or state.get("finished"):
+            return None
+        return "正在搬迁数据目录"
+
+    def migration_view(self) -> StorageMigrationView:
+        """当前/最近一次搬迁的状态；从没搬过时 ``stage="idle"``。"""
+        state = self._migration
+        if state is None:
+            return StorageMigrationView(stage="idle", target_root="")
+        return StorageMigrationView(
+            stage=state["stage"],
+            copied_bytes=state["copied_bytes"],
+            total_bytes=state["total_bytes"],
+            target_root=state["target_root"],
+            items=tuple(state["items"]),
+            warnings=tuple(state["warnings"]),
+            error=state["error"],
+        )
+
+    def start_storage_migration(self, target: str) -> StorageMigrationView:
+        """把整个数据根搬到 ``target``（后台线程执行），立即返回初始进度。
+
+        搬完即清旧（走系统回收站），并把指针指向新位置——**必须重启**才会用新根启动。
+
+        Raises:
+            ApplicationError: 已经有一次搬迁在跑。
+            MigrationError: 预检不通过（目标不可写、与源互相包含、空间不足、已有同名数据）。
+        """
+        with self._migration_lock:
+            if self.maintenance_reason() is not None:
+                raise app_errors.model_settings_invalid(
+                    detail="已经有一次数据搬迁在进行中，请等它结束或重启后再试",
+                    occurred_at=_now(),
+                )
+            plan = data_migration.build_plan(self._app_config, Path(target))
+            data_migration.preflight(plan)
+            state: dict[str, Any] = {
+                "stage": "copying",
+                "copied_bytes": 0,
+                "total_bytes": plan.total_bytes,
+                "target_root": str(plan.target_root),
+                "items": [item.name for item in plan.items],
+                "warnings": [],
+                "error": "",
+                "finished": False,
+            }
+            self._migration = state
+        threading.Thread(
+            target=self._run_migration, args=(plan, state), daemon=True, name="data-migration"
+        ).start()
+        return self.migration_view()
+
+    def _run_migration(
+        self, plan: data_migration.MigrationPlan, state: dict[str, Any]
+    ) -> None:
+        def on_progress(stage: str, done: int) -> None:
+            state["stage"] = stage
+            state["copied_bytes"] = done
+
+        try:
+            state["warnings"] = data_migration.run(plan, progress=on_progress, delete_source=True)
+            state["stage"] = "done"
+        except (data_migration.MigrationError, OSError) as exc:
+            state["stage"] = "failed"
+            state["error"] = str(exc)
+        finally:
+            state["finished"] = True
 
     def preferences_view(self) -> PreferencesView:
         defaults = initial_preferences(self._app_config)
