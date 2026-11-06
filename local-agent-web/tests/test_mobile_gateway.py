@@ -149,6 +149,32 @@ def test_cookie_is_httponly_and_samesite_strict(tmp_path: Path) -> None:
     assert "secure" not in _cookie_attributes(raw)
 
 
+def test_forwarded_proto_from_a_lan_peer_is_ignored(tmp_path: Path) -> None:
+    """手机自己能伪造这个头，所以只有"本机隧道进程"说的话才算（2026-11-06）。
+
+    真实链路本来就有两个对端：本机浏览器签配对码 → 手机拿码换令牌。手机直连时对端是局域网
+    地址，它带上的 ``X-Forwarded-Proto: https`` 不该让 cookie 变 ``Secure``——那只会让它在明文
+    通道上失效（"配对成功但下一个请求还是 401"）。两个 client 必须共享同一个 app，配对码是内存态。
+    """
+    app = create_gateway(
+        _config(tmp_path),
+        state_dir=tmp_path / "mobile",
+        transport=_recording_transport([]),
+    )
+    with (
+        TestClient(app, base_url=GATEWAY_BASE, client=LOOPBACK) as admin,
+        TestClient(app, base_url=GATEWAY_BASE, client=("192.168.1.5", 40001)) as phone,
+    ):
+        issued = admin.post("/__mobile/pairing-code", json={"channel": "lan"}).json()
+        response = phone.post(
+            "/__mobile/pair",
+            json={"code": issued["code"], "label": "lan"},
+            headers={"x-forwarded-proto": "https"},
+        )
+    assert response.status_code == 200, response.text
+    assert "secure" not in _cookie_attributes(response.headers["set-cookie"].lower())
+
+
 def _cookie_attributes(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(";")]
 

@@ -71,6 +71,12 @@ def is_local_admin(scope: Scope) -> bool:
     return _host_name(_header_map(scope).get("host", "")) in LOOPBACK_HOSTS
 
 
+#: 会在本机把 TLS 解掉再转发明文的对端。tailscaled / cloudflared 都从回环连进来。
+#: 与 :func:`is_local_admin` 的 peer 判定同源，但那儿还要求 ``Host`` 是回环写法——隧道转发的
+#: ``Host`` 是 tailnet 域名，所以这条**不能**照抄那一整条，否则功能会被改没了。
+_TLS_TERMINATOR_PEERS = frozenset({"127.0.0.1", "::1"})
+
+
 def _is_secure_request(request: Request) -> bool:
     """这个请求是否来自 https 面——含"隧道在本机终结 TLS"的情形（2026-11-06）。
 
@@ -80,11 +86,18 @@ def _is_secure_request(request: Request) -> bool:
     是 http，只有 ``X-Forwarded-Proto`` 记得原始协议。不看它就等于公网可达的设备 cookie 缺
     ``Secure``。
 
-    只取第一段（多级代理时最靠近客户端的那一段才是原始协议）。客户端自己伪造这个头只会让
-    自己的 cookie 变成 ``Secure`` 而在明文通道上用不了，是自伤，不构成对他人的降级。
+    隧道那一支**只对回环对端生效**（照 hermes 的 ``trusted_proxies`` 口径：默认只信回环）：
+    手机直连局域网时对端是手机自己，它可以随便伪造这个头。信任它没有提权风险（伪造只会让自己
+    的 cookie 变 ``Secure`` 而在明文通道上用不了），但没有理由让远端决定我们的 cookie 属性。
+    本机隧道进程固定从回环连入，白名单都不需要配。
+
+    只取第一段：多级代理时最靠近客户端的那一段才是原始协议。
     """
     if request.url.scheme == "https":
         return True
+    client = request.client
+    if client is None or client.host not in _TLS_TERMINATOR_PEERS:
+        return False
     forwarded = request.headers.get("x-forwarded-proto", "")
     return forwarded.split(",")[0].strip().lower() == "https"
 
@@ -411,7 +424,7 @@ def create_gateway(
             samesite="strict",
             # 只在 HTTPS 下设 Secure：局域网 http 场景下带 Secure 的 cookie 会被浏览器直接丢弃，
             # 表现为"配对成功但下一个请求还是 401"。隧道终结 TLS（tailscale serve / cloudflared）
-            # 时 scheme 仍是 http，所以要看 X-Forwarded-Proto，见 _is_secure_request。
+            # 时 scheme 仍是 http，所以要看 X-Forwarded-Proto（且只信回环对端），见 _is_secure_request。
             secure=_is_secure_request(request),
             path="/",
         )
