@@ -144,6 +144,29 @@ def test_cookie_is_httponly_and_samesite_strict(tmp_path: Path) -> None:
     assert COOKIE_NAME in raw
     assert "httponly" in raw
     assert "samesite=strict" in raw
+    # 明文 http（局域网直连）下不能带 Secure：浏览器会直接丢弃这种 cookie，
+    # 表现是"配对成功但下一个请求还是 401"。
+    assert "secure" not in _cookie_attributes(raw)
+
+
+def _cookie_attributes(raw: str) -> list[str]:
+    return [part.strip() for part in raw.split(";")]
+
+
+def test_cookie_is_secure_behind_an_https_tunnel(tmp_path: Path) -> None:
+    """隧道终结 TLS 后网关只看到 http（2026-11-06）。
+
+    tailscale serve / funnel 与 cloudflared 都在本机把 https 解成明文再转发，对端是回环，
+    ``request.url.scheme`` 永远是 http。只看它的话，公网可达的设备 cookie 里没有 ``Secure``。
+    """
+    with _client(tmp_path) as client:
+        issued = client.post("/__mobile/pairing-code", json={"channel": "lan"}).json()
+        response = client.post(
+            "/__mobile/pair",
+            json={"code": issued["code"], "label": "tunnel"},
+            headers={"x-forwarded-proto": "https"},
+        )
+    assert "secure" in _cookie_attributes(response.headers["set-cookie"].lower())
 
 
 # ---- 配对码 --------------------------------------------------------------
