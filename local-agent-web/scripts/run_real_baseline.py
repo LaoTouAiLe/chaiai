@@ -411,7 +411,7 @@ def run(root: Path, port: int, output: Path, only: str | None) -> int:
                     **metrics,
                 }
                 save(root / "results" / f"{case['id']}.json", record)
-            except Exception as error:  # 单题失败不影响其余题目
+            except Exception as error:  # noqa: BLE001 - 单题失败不影响其余题目
                 record = {
                     "case_id": case["id"], "face": case["face"], "prompt": case["prompt"],
                     "wall_ms": int((time.monotonic() - started) * 1000),

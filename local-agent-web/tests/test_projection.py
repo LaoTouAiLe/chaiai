@@ -2014,8 +2014,8 @@ def test_assistant_presentation_phase_comes_from_tool_calls_without_mutating_sta
 
 
 def test_legacy_assistant_payload_remains_readable_without_presentation_phase() -> None:
-    from local_agent.application.models import AssistantMessageView
     from local_agent.application.events import MessageCompletedPayload
+    from local_agent.application.models import AssistantMessageView
 
     assert AssistantMessageView(message_id="legacy", text="历史回答").presentation_phase is None
     assert MessageCompletedPayload(message_id="legacy", role="assistant", text="历史回答").presentation_phase is None
