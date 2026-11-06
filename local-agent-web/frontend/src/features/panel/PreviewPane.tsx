@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useState } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 
 import { ApiError, previewArtifact } from '../../api/client'
 import { useArtifactsDetail } from '../../api/queries'
@@ -45,11 +45,17 @@ export function PreviewPane({ path, workspaceId, scope, onClose }: {
   const extension = path.split('.').pop()?.toLowerCase() ?? ''
   const rich = ['md', 'mdx', 'markdown', 'html', 'htm'].includes(extension)
 
+  // 在途分页请求的序号（2026-11-06）。`previewArtifact` 不带取消信号，所以用序号作废：
+  // 换文件（或刷新）时序号 +1，回来晚了的旧响应一律丢弃——否则 A 文件的第 2 页会被拼进 B 文件。
+  const requestSeq = useRef(0)
+
   // 换文件就把分页状态清空：上一份文件的字符偏移对新文件毫无意义。
   useEffect(() => {
+    requestSeq.current += 1
     setExtra([])
     setCursor(null)
     setMoreError(null)
+    setLoadingMore(false)
     setCopied(false)
     setSource(false)
     setZoom(1)
@@ -66,19 +72,23 @@ export function PreviewPane({ path, workspaceId, scope, onClose }: {
     const offset = extra.length === 0 ? (data?.next_offset ?? null) : cursor?.offset ?? null
     const page = extra.length === 0 ? (data?.next_page ?? null) : cursor?.page ?? null
     if (offset === null || page === null) return
+    const seq = ++requestSeq.current
+    const stale = () => seq !== requestSeq.current
     setLoadingMore(true)
     setMoreError(null)
     void previewArtifact(path, workspaceId ?? undefined, scope, offset, page)
       .then((next) => {
+        if (stale()) return
         setExtra((previous) => [...previous, next.text ?? ''])
         const nextOffset = next.next_offset ?? null
         const nextPage = next.next_page ?? null
         setCursor(nextOffset === null || nextPage === null ? null : { offset: nextOffset, page: nextPage })
       })
       .catch((cause: unknown) => {
+        if (stale()) return
         setMoreError(cause instanceof ApiError ? cause.message : '这一页没能读出来。')
       })
-      .finally(() => { setLoadingMore(false) })
+      .finally(() => { if (!stale()) setLoadingMore(false) })
   }
 
   const copy = () => {
@@ -102,7 +112,8 @@ export function PreviewPane({ path, workspaceId, scope, onClose }: {
           <button aria-pressed={source} onClick={() => setSource(true)}>源码</button>
         </div> : null}
         <button className={styles.tool} title="刷新文件" aria-label="刷新文件" onClick={() => {
-          setExtra([]); setCursor(null); setRevision(value => value + 1); void first.refetch()
+          requestSeq.current += 1
+          setExtra([]); setCursor(null); setLoadingMore(false); setRevision(value => value + 1); void first.refetch()
         }}>↻</button>
         {showCode ? <span className={styles.counter}>{lines} 行</span> : null}
         {showCode ? (
