@@ -28,8 +28,6 @@ import base64
 import binascii
 import json
 import logging
-import os
-import shutil
 import sqlite3
 import threading
 from collections import Counter, deque
@@ -47,7 +45,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from pydantic import TypeAdapter
 
 from local_agent import config as config_module
-from local_agent import data_migration, desktop_apps
+from local_agent import desktop_apps
 from local_agent.application import artifacts as artifacts_module
 from local_agent.application import (
     conversation,
@@ -59,6 +57,7 @@ from local_agent.application import (
     mcp_admin,
     session_export,
     side_chat,
+    storage_service,
     workspace_view,
 )
 from local_agent.application import cron as cron_module
@@ -603,48 +602,6 @@ class _StreamingAnswerSink:
             )
 
 
-def _directory_usage(root: Path) -> tuple[int | None, int | None]:
-    """数据根占用与所在卷剩余字节数（2026-10-26）。
-
-    两者都**不抛错**：统计失败（权限、路径刚被删）不能让整个设置页打不开——这只是
-    给用户一个"要不要换盘"的判断依据，拿不到就不显示。
-
-    遍历用 ``os.walk`` 而不是 ``Path.rglob``：后者要为每个条目建一个 ``Path`` 对象，
-    附件目录动辄几万个文件时差别很明显；这里只需要大小。
-
-    注意统计**包含**数据根下的一切（含 ``_archive-*`` 之类的手工归档）——它们确实占着盘，
-    把它排除掉会让"占用"这个数字说谎。
-    """
-    used = 0
-    try:
-        for dirpath, _dirnames, filenames in os.walk(root):
-            for name in filenames:
-                try:
-                    used += os.stat(os.path.join(dirpath, name)).st_size
-                except OSError:
-                    continue
-    except OSError:
-        return None, None
-    try:
-        free: int | None = shutil.disk_usage(root).free
-    except OSError:
-        free = None
-    return used, free
-
-
-#: 剩余空间低于这个值就提示换盘（2026-10-26）。5 GB 是**估算**：一个会话库实测 3.9 GB /
-#: 106 会话，留出一倍余量。它不是精确阈值，只是"该提醒了"的量级判断。
-_LOW_DISK_BYTES: Final[int] = 5 * 1024**3
-
-
-#: 数据根来源对应的说明（2026-10-26）。`environment` 那一档必须点明"页面改不生效"——
-#: 否则用户改完、重启、发现没变，会以为是这个功能坏了。
-_STORAGE_NOTES: dict[str, str] = {
-    "environment": "当前由环境变量 CHAIAI_HOME 决定：在页面上改不会生效，请改环境变量后重启。",
-    "settings": "位置由「设置 → 数据位置」保存的指针文件决定。",
-    "config": "当前由 config.yaml 的 data_root 决定；在页面上改会覆盖它。",
-    "default": "使用平台标准目录。",
-}
 
 
 class ApplicationService:
@@ -758,9 +715,7 @@ class ApplicationService:
         self._tool_streams: dict[str, ToolStream] = {}
         self._compressions: dict[str, CompressionProgress] = {}
         self._catalog_lock = threading.RLock()
-        #: 数据根搬迁（2026-11-06）：一次只允许一个，进度只在本进程里。迁移期间
-        #: `maintenance_reason()` 非空，写入口据此拒绝新回合。
-        self._migration_lock = threading.Lock()
+        #: 最近一次数据根搬迁的状态（2026-11-06）；None = 本次进程里没搬过。
         self._migration: dict[str, Any] | None = None
         #: 后台任务运行时与任务索引（§17.2）。``None`` 表示**未装配任务索引**（只有不经过
         #: `api.container.open_runtime` 的单元测试会这样）：此时提交路径与 v0.5 完全一致，
@@ -1261,158 +1216,32 @@ class ApplicationService:
         """立即触发一次，不等排期；排期本身不动。"""
         return cron_module.run_now(self, job_id)
 
-    # ---- 数据位置（2026-10-26）------------------------------------------------
+    # ---- 数据位置与搬迁（2026-11-06：实现搬到 storage_service）----------------
 
     def storage_location(self) -> StorageView:
-        """当前数据根、它的来源，以及"改了这一项要重启"这条事实。"""
-        from local_agent import app_paths
-
-        source = app_paths.data_root_source(self._app_config)
-        root = app_paths.data_root_of(self._app_config)
-        used, free = _directory_usage(root)
-        # 只在"默认位置 + 盘快满"时提示：已经换过盘的人不该再被劝一次（他多半是故意选的）。
-        low_disk = (
-            source == "default" and free is not None and free < _LOW_DISK_BYTES
-        )
-        return StorageView(
-            data_root=str(root),
-            default_root=str(app_paths.platform_default_root()),
-            source=source,  # type: ignore[arg-type]
-            note=_STORAGE_NOTES.get(source),
-            used_bytes=used,
-            disk_free_bytes=free,
-            low_disk=low_disk,
-        )
+        """当前数据根、来源，以及"改了这一项要重启"。"""
+        return storage_service.storage_location(self._app_config)
 
     def save_storage_location(self, data_root: str) -> StorageView:
-        """把数据根改到 ``data_root``；**重启后生效**。
-
-        路径就在这一步校验（绝对、能创建、能写），不等到启动：启动才失败意味着服务起不来，
-        用户只能去手改文件才救得回来。
-
-        Raises:
-            ApplicationError: 路径不合法/不可写，或当前由环境变量决定（页面改不生效）。
-        """
-        from local_agent import app_paths
-
-        if app_paths.data_root_source(self._app_config) == "environment":
-            raise app_errors.model_settings_invalid(
-                detail="当前数据位置由环境变量 CHAIAI_HOME 决定：请改那个变量后重启，页面设置不会生效",
-                occurred_at=_now(),
-            )
-        try:
-            app_paths.set_data_root_pointer(data_root)
-        except ValueError as exc:
-            raise app_errors.model_settings_invalid(detail=str(exc), occurred_at=_now()) from exc
-        return self.storage_location().model_copy(update={
-            "restart_required": True,
-            "note": "已保存，重启后端后生效。新位置是空的：旧数据不会自动搬过去。",
-        })
+        """把数据根改到 data_root；重启后生效（只切指针，不搬数据）。"""
+        return storage_service.save_storage_location(self._app_config, data_root)
 
     def reset_storage_location(self) -> StorageView:
         """恢复平台标准目录；同样要重启才生效。"""
-        from local_agent import app_paths
-
-        app_paths.reset_data_root_pointer()
-        return self.storage_location().model_copy(update={
-            "restart_required": True,
-            "note": "已恢复默认位置，重启后端后生效。",
-        })
-
-    # ---- 数据根搬迁（2026-11-06）------------------------------------------
+        return storage_service.reset_storage_location(self._app_config)
 
     def maintenance_reason(self) -> str | None:
-        """正在搬迁数据时返回原因字符串；写入口据此拒绝新回合。
-
-        为什么不等"在跑的那一轮"结束再搬：等的时长不可控（一次工具循环可能几分钟到十几分钟），
-        而用户在设置页点完按钮就在等结果。所以策略是**拒绝新回合**、已有回合不追。
-        """
-        state = self._migration
-        if state is None or state.get("finished"):
-            return None
-        return "正在搬迁数据目录"
+        """正在搬迁数据时返回原因；写入口据此拒绝新回合。"""
+        return storage_service.maintenance_reason(self._migration)
 
     def migration_view(self) -> StorageMigrationView:
-        """当前/最近一次搬迁的状态；从没搬过时 ``stage="idle"``。"""
-        state = self._migration
-        if state is None:
-            return StorageMigrationView(stage="idle", target_root="")
-        return StorageMigrationView(
-            stage=state["stage"],
-            copied_bytes=state["copied_bytes"],
-            total_bytes=state["total_bytes"],
-            target_root=state["target_root"],
-            items=tuple(state["items"]),
-            warnings=tuple(state["warnings"]),
-            error=state["error"],
-        )
+        """当前/最近一次搬迁的状态；没搬过时 stage="idle"。"""
+        return storage_service.migration_view(self._migration)
 
     def start_storage_migration(self, target: str) -> StorageMigrationView:
-        """把整个数据根搬到 ``target``（后台线程执行），立即返回初始进度。
-
-        搬完即清旧（走系统回收站），并把指针指向新位置——**必须重启**才会用新根启动。
-
-        Raises:
-            ApplicationError: 已经有一次搬迁在跑。
-            MigrationError: 预检不通过（目标不可写、与源互相包含、空间不足、已有同名数据）。
-        """
-        path = Path(target)
-        if not path.is_absolute():
-            raise app_errors.model_settings_invalid(
-                detail="新位置必须是绝对路径：相对路径会随启动目录漂移",
-                occurred_at=_now(),
-            )
-        with self._migration_lock:
-            if self.maintenance_reason() is not None:
-                raise app_errors.model_settings_invalid(
-                    detail="已经有一次数据搬迁在进行中，请等它结束或重启后再试",
-                    occurred_at=_now(),
-                )
-            state: dict[str, Any] = {
-                "stage": "preparing",
-                "copied_bytes": 0,
-                "total_bytes": 0,
-                "target_root": str(path),
-                "items": [],
-                "warnings": [],
-                "error": "",
-                "finished": False,
-            }
-            self._migration = state
-        threading.Thread(
-            target=self._run_migration, args=(path, state), daemon=True, name="data-migration"
-        ).start()
-        return self.migration_view()
-
-    def _run_migration(self, target: Path, state: dict[str, Any]) -> None:
-        def on_progress(stage: str, done: int) -> None:
-            state["stage"] = stage
-            state["copied_bytes"] = done
-
-        try:
-            # 建清单要统计总字节（6 GB 数据约 55 秒）：**不能**放在 HTTP 请求里做，否则用户点完
-            # 按钮半分钟收不到任何反馈（2026-11-06 端到端实测）。预检也一并挪到这里，失败通过
-            # `stage=failed` + `error` 回报。
-            plan = data_migration.build_plan(self._app_config, target)
-            state["total_bytes"] = plan.total_bytes
-            state["items"] = [item.name for item in plan.items]
-            data_migration.preflight(plan)
-            warnings = list(data_migration.run(plan, progress=on_progress, delete_source=True))
-            # workspace.root 用相对路径时，它的解析基准是**配置文件所在目录**：换数据根后默认工作区
-            # 会跟着挪到新位置，而旧工作区里的文件仍在原处（2026-11-06 用户实际撞到过：以为东西被写到了 C 盘）。
-            root_setting = str(self._app_config.workspace.root or "").strip()
-            if root_setting and not Path(root_setting).is_absolute():
-                warnings.append(
-                    f"workspace.root 仍是相对路径（{root_setting}）：默认工作区会跟着新数据目录一起变，"
-                    "旧工作区里的文件留在原处。要让它固定在某个盘，把它改成绝对路径。"
-                )
-            state["warnings"] = warnings
-            state["stage"] = "done"
-        except (data_migration.MigrationError, OSError) as exc:
-            state["stage"] = "failed"
-            state["error"] = str(exc)
-        finally:
-            state["finished"] = True
+        """把整个数据根搬到 target（后台线程执行），立即返回初始进度。"""
+        self._migration = storage_service.start(self._app_config, self._migration, target)
+        return storage_service.migration_view(self._migration)
 
     def preferences_view(self) -> PreferencesView:
         defaults = initial_preferences(self._app_config)

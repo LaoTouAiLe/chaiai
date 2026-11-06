@@ -1,7 +1,7 @@
 {
   "exceptions": {
     "file:application/service.py": {
-      "file_lines": 4780
+      "file_lines": 4709
     },
     "function:api/browsers.py::build_browser_router": {
       "complexity": 24
