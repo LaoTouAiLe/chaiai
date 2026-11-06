@@ -485,40 +485,14 @@ def _register_open_in_app_routes(router: APIRouter, service: Any) -> None:
             raise HTTPException(status_code=409, detail=f"没能启动这个应用：{exc}") from exc
 
 
-def build_router(runtime: ApiRuntime) -> APIRouter:
-    """构造业务路由（不含 SSE 与静态托管）。"""
-    router = APIRouter(prefix="/api")
-    service = runtime.service
-    @router.get("/delegation/live", response_model=DelegationLiveView, summary="正在跑的委派子任务")
-    def delegation_live() -> DelegationLiveView:
-        """委派在跑的时候，每一路"此刻在查什么"（2026-11-04）。
 
-        **只读旁路**，不参与事件流：子 Agent 在独立线程里跑，中间态原本不在任何可读的地方，
-        页面只能等全部结束。这里把子循环每步产生的工具事件摊出来，供委派卡在运行期间轮询。
 
-        不做权限判定，暴露的是**目录名、工具名、每次工具的定位串（路径 / 命令 / 正则 / 查询串，
-        各截断 200 字）与子任务目标 `goal`（提问原文，截断 200 字）**。也就是说这里确实会带出
-        用户输入的片段——2026-11-06 更正：原注释写"只暴露目录名与工具名"，与实现不符。
-        这些内容与本机页面正在显示的东西一致（委派卡的块头就显示 `goal`），且 `/api` 前缀本身
-        走 §15.3 的同源校验。
-        """
-        return DelegationLiveView(
-            lanes=[
-                DelegationLiveLaneView(
-                    child_id=lane.child_id,
-                    scope=lane.scope,
-                    goal=lane.goal,
-                    status=lane.status,
-                    steps=[
-                        DelegationLiveStepView(name=step.name, target=step.target, status=step.status)
-                        for step in lane.steps
-                    ],
-                    updated_at=lane.updated_at,
-                )
-                for lane in live_lanes_snapshot()
-            ]
-        )
+def _register_data_center_routes(router: APIRouter, service: Any) -> None:
+    """只读数据中台：记忆、用量、产物（§17 只读视图）。
 
+    与 ``_register_cron_routes`` 同一做法：``build_router`` 已贴着规模棘轮上限，
+    把整组端点原样搬出来（2026-11-06，B1）。
+    """
     @router.get("/data-center/memories", response_model=MemoryPageView, summary="只读记忆列表")
     def memory_page(workspace_id: str | None = None,
                     kind: Literal["all", "medium", "fact", "conclusion"] = "all",
@@ -604,6 +578,505 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (ValueError, OSError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _register_session_command_routes(router: APIRouter, service: Any) -> None:
+    """会话写入面：消息、导出、分支与审批（§15.3）。
+
+    与 ``_register_cron_routes`` 同一做法：``build_router`` 已贴着规模棘轮上限，
+    把整组端点原样搬出来（2026-11-06，B1）。
+    """
+    @router.post(
+        "/sessions/{session_id}/messages",
+        response_model=CommandResultView,
+        responses=_STATE_CONFLICT,
+        summary="提交消息",
+    )
+    def submit_message(session_id: str, payload: SubmitMessageRequest) -> CommandResultView:
+        """同步跑完这一轮，返回**稳定的命令结果引用**：结局不依赖 SSE（§15.3）。"""
+        try:
+            return service.submit_message(session_id, payload.text, payload.client_request_id,
+                                          workflow=payload.workflow,
+                                          # 随消息交给模型的图片引用（2026-10-16）：默认空 ⇒ 不带图的老路径不变。
+                                          attachments=payload.attachments,
+                                          # 文档引用（2026-10-29）：只解析成本机路径，交给模型自己读。
+                                          # 名字一并带上——它只用于展示，服务端会先净化。
+                                          files=[(item.id, item.name) for item in payload.files],
+                                          parent_turn_id=payload.parent_turn_id,
+                                          expected_branch_id=payload.expected_branch_id,
+                                          expected_snapshot_id=payload.expected_snapshot_id)
+        except AttachmentError as exc:
+            # 引用不存在 / 不属于本会话 / 形状不合法（2026-10-29 复审补上）。
+            # 此前这条路径会直接冒到 500——图片引用也有同一个缺口，这次一并收口：
+            # 这是**输入不合法**，不是服务故障，422 才能让调用方区分该重试还是该改参数。
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @router.get("/sessions/{session_id}/conversation-map", response_model=ConversationMapView,
+                responses=_STATE_CONFLICT, summary="会话地图")
+    def conversation_map(session_id: str, query: str = Query(default="", max_length=500)) -> ConversationMapView:
+        return service.get_conversation_map(session_id, query)
+
+    @router.get("/sessions/{session_id}/export", responses=_NOT_FOUND, summary="导出会话")
+    def export_session(
+        session_id: str,
+        fmt: Literal["markdown", "json"] = Query(default="markdown", alias="format"),
+    ) -> Response:
+        """把一个会话导出成人读的 Markdown 或机读的 JSON（2026-10-30）。
+
+        为什么要 `attachment`：浏览器要替用户填好"另存为"的文件名，内联打开还得多一步复制。
+        文件名用 RFC 5987（`filename*`）编码——会话标题几乎一定含中文，朴素的 `filename=`
+        在部分浏览器会变成乱码或整条被丢弃。
+        """
+        content, filename, media_type = service.export_session(session_id, fmt)
+        return Response(
+            content=content,
+            media_type=media_type,
+            headers={"content-disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+        )
+
+    @router.get("/sessions/{session_id}/turns/{turn_id}", response_model=SessionSnapshot,
+                responses=_STATE_CONFLICT, summary="单轮问答与执行详情")
+    def turn_detail(session_id: str, turn_id: str, include_ancestors: bool = False) -> SessionSnapshot:
+        return service.get_turn_snapshot(session_id, turn_id, include_ancestors=include_ancestors)
+
+    @router.post("/sessions/{session_id}/branches/{branch_id}/select", response_model=SessionSnapshot,
+                 responses=_STATE_CONFLICT, summary="切换会话分支")
+    def select_branch(session_id: str, branch_id: str) -> SessionSnapshot:
+        return service.select_branch(session_id, branch_id)
+
+    @router.patch("/sessions/{session_id}/branches/{branch_id}", response_model=ConversationMapView,
+                  responses=_STATE_CONFLICT, summary="分支改名与展示排序")
+    def arrange_branch(session_id: str, branch_id: str, payload: ArrangeBranchRequest) -> ConversationMapView:
+        return service.arrange_branch(session_id, branch_id, payload.title, payload.position)
+
+    @router.post(
+        "/sessions/{session_id}/approvals/{approval_id}",
+        response_model=CommandResultView,
+        responses=_STATE_CONFLICT,
+        summary="提交审批决定",
+    )
+    def resolve_approval(
+        session_id: str, approval_id: str, payload: ApprovalDecisionRequest
+    ) -> CommandResultView:
+        return service.resolve_approval(
+            session_id,
+            approval_id,
+            payload.decision,
+            payload.client_request_id,
+            edited_arguments=payload.edited_arguments,
+            reason=payload.reason,
+            confirm_recursive=payload.confirm_recursive,
+        )
+
+
+def _register_model_connection_routes(router: APIRouter, service: Any) -> None:
+    """模型连接设置（T29A；§6.8）。密钥只进凭据存储，读接口只报状态。
+
+    与 ``_register_cron_routes`` 同一做法：``build_router`` 已贴着规模棘轮上限，
+    把整组端点原样搬出来（2026-11-06，B1）。
+    """
+    # ---- 模型连接（T29A；§6.8）------------------------------------------------
+    # 这组接口只读写"连接设置"：密钥只进凭据存储，读接口只回"已配置 / 未配置 / 仅本次进程内"。
+    # 它们**不能**改安全策略、工具权限或 Graph 配置，也没有传入连接 id/版本的旁路。
+
+    @router.get(
+        "/model-connections",
+        response_model=list[ModelConnectionView],
+        summary="模型连接列表",
+    )
+    def list_model_connections() -> list[ModelConnectionView]:
+        """按创建顺序；默认连接带 `is_default`。停用的连接不在这里出现（历史仍在库里）。"""
+        return service.list_model_connections()
+
+    @router.post(
+        "/model-connections",
+        response_model=ModelConnectionView,
+        responses=_STATE_CONFLICT,
+        summary="新增模型连接",
+    )
+    def create_model_connection(payload: ModelConnectionRequest) -> ModelConnectionView:
+        """保存即可用（哪怕还没测）：未通过检测的连接标为"未验证"（§6.8）。"""
+        return service.save_model_connection(_connection_draft(payload), api_key=payload.api_key)
+
+    @router.patch(
+        "/model-connections/{connection_id}",
+        response_model=ModelConnectionView,
+        responses=_STATE_CONFLICT,
+        summary="编辑模型连接",
+    )
+    def update_model_connection(
+        connection_id: str, payload: ModelConnectionRequest
+    ) -> ModelConnectionView:
+        """编辑产生**新版本**；必须带 `expected_version`，否则拒绝（§6.1 的并发写入口径）。"""
+        return service.save_model_connection(
+            _connection_draft(payload, connection_id=connection_id),
+            api_key=payload.api_key,
+            expected_version=payload.expected_version,
+        )
+
+    @router.delete(
+        "/model-connections/{connection_id}",
+        response_model=ModelConnectionView,
+        responses=_STATE_CONFLICT,
+        summary="停用模型连接",
+    )
+    def delete_model_connection(
+        connection_id: str,
+        expected_version: int | None = Query(default=None, ge=1),
+    ) -> ModelConnectionView:
+        """删除是**停用**：历史模型标识与用量不删，也不物理清除凭据引用（§6.8）。"""
+        return service.retire_model_connection(connection_id, expected_version=expected_version)
+
+    @router.post(
+        "/model-connections/{connection_id}/test",
+        response_model=ModelConnectionView,
+        responses=_STATE_CONFLICT,
+        summary="测试模型连接",
+    )
+    def test_model_connection(connection_id: str) -> ModelConnectionView:
+        """用户主动触发的一次探测（会产生少量调用）：分项报告鉴权/聊天/工具/流式。
+
+        失败只写进这条连接的检测结果，**不改变当前选择**，也不回退到别的模型（§6.8）。
+        """
+        return service.test_model_connection(connection_id)
+
+    @router.put(
+        "/model-connections/default",
+        response_model=ModelConnectionView,
+        responses=_STATE_CONFLICT,
+        summary="设置默认连接",
+    )
+    def select_default_model(payload: SelectDefaultConnectionRequest) -> ModelConnectionView:
+        """新会话继承它；只影响**下一次新用户提交**（正在运行/等待审批的那一轮已固定，§6.8）。
+
+        必须带上你看到的**当前默认**（`expected_selection`）：库里已被别的页面改过就返回 409，
+        而不是把对方的改动覆盖掉（§6.1）。
+        """
+        return service.select_default_model(
+            payload.connection_id,
+            expected_version=payload.expected_version,
+            expected_selection=_selection_ref(payload.expected_selection),
+        )
+
+    @router.put(
+        "/sessions/{session_id}/model",
+        response_model=SessionSnapshot,
+        responses=_NOT_FOUND,
+        summary="选择会话下一轮模型",
+    )
+    def select_session_model(
+        session_id: str, payload: SelectSessionModelRequest
+    ) -> SessionSnapshot:
+        """为这个会话选下一轮用的连接；`connection_id=null` 表示恢复为跟随默认。
+
+        返回**新快照**：让页面直接看到"下一轮会用哪条"，而不用自己拼状态。
+        `expected_selection` 必填（"恢复跟随默认"也是一次写入，同样不能覆盖别人的选择）。
+        """
+        service.select_session_model(
+            session_id,
+            payload.connection_id,
+            expected_version=payload.expected_version,
+            expected_selection=_selection_ref(payload.expected_selection),
+        )
+        return service.get_session_snapshot(session_id)
+
+
+def _register_mcp_routes(router: APIRouter, service: Any) -> None:
+    """MCP 外部工具（契约 §6.13）。凭据永不出现在响应里。
+
+    与 ``_register_cron_routes`` 同一做法：``build_router`` 已贴着规模棘轮上限，
+    把整组端点原样搬出来（2026-11-06，B1）。
+    """
+    # ---- MCP 外部工具（2026-10-20；契约 §6.13）--------------------------------
+    # 这一组**必须显示工具名**（与能力面板§16.6 相反）：工具名是用户自己配的外部资产，
+    # 不显示出来他就没法核对"这个 server 到底暴露了什么"。凭据（``env``）永不出现在任何响应里。
+
+    @router.get("/mcp", response_model=McpView, summary="MCP Server、工具清单与规模统计")
+    def mcp() -> McpView:
+        """每台 server 的状态、工具与"多少按需检索"（**每次现算**）。
+
+        ``config_error`` 每次重读 ``mcp.json`` 现算：改坏文件后刷新页面就能看到第几行错了。
+        """
+        return service.mcp_view()
+
+    @router.post(
+        "/mcp/servers",
+        response_model=McpView,
+        responses=_MCP_WRITE_RESPONSES,
+        summary="新增一台 MCP Server",
+    )
+    def add_mcp_server(payload: McpServerCreateRequest) -> McpView:
+        """把一台 server 写进 ``mcp.json``（已存在的同名会被拒）；两种连接方式各自校验字段。
+        `stdio` 给 ``command``/``args``/``env``，``http`` 给 ``url``/``headers``；
+        `env`/`headers` 的凭据只写不回读（响应只有键名）。写完立即重载连接管理器。
+        """
+        return service.add_mcp_server(payload.model_dump())
+
+    @router.put(
+        "/mcp/servers/{name}",
+        response_model=McpView,
+        responses=_MCP_WRITE_RESPONSES,
+        summary="改一台 MCP Server 的开关或工具名单",
+    )
+    def set_mcp_server(name: str, payload: McpServerRequest) -> McpView:
+        """打开/关闭一台 server，或收窄它的工具名单：**保存即生效、作用于下一轮**。
+
+        只带本次动过的键；显式传 ``enabled_tools: null`` 表示"取消白名单"。响应是保存后的完整视图。
+        """
+        return service.set_mcp_server(name, payload.model_dump(exclude_unset=True))
+
+    @router.put("/mcp/servers/{name}/spec", response_model=McpView,
+                responses=_MCP_WRITE_RESPONSES, summary="编辑 MCP Server 连接方式")
+    def edit_mcp_server(name: str, payload: McpServerSpecRequest) -> McpView:
+        return service.edit_mcp_server(name, payload.model_dump(exclude_unset=True))
+
+    @router.delete("/mcp/servers/{name}", response_model=McpView,
+                   responses=_MCP_WRITE_RESPONSES, summary="删除 MCP Server")
+    def delete_mcp_server(name: str) -> McpView:
+        return service.delete_mcp_server(name)
+
+    @router.post(
+        "/mcp/reload",
+        response_model=McpView,
+        responses=_MCP_WRITE_RESPONSES,
+        summary="重读 mcp.json",
+    )
+    def reload_mcp() -> McpView:
+        """重读配置文件并让连接管理器换一份（"添加 server"之后走这里）。
+
+        与保存开关不同，这一步**会断开**新配置里已经不存在的 server，并清掉它的工具目录。
+        """
+        return service.reload_mcp()
+
+
+def _register_permission_routes(router: APIRouter, service: Any) -> None:
+    """工作区外路径的档位与授权条目（T38；§1.5）。
+
+    与 ``_register_cron_routes`` 同一做法：``build_router`` 已贴着规模棘轮上限，
+    把整组端点原样搬出来（2026-11-06，B1）。
+    """
+    # ---- 权限（T38；§1.5）------------------------------------------------------
+    # 这组接口只读写"工作区外路径"的档位与授权条目：档位存设置库（`config.yaml` 只是出厂默认），
+    # 授权条目存设置库的专用表。它们**不能**放宽四项硬约束（删除文件、覆盖已有文件、破坏性 Shell、
+    # 大范围编辑任何档位都要人工批准），因此这里没有"关闭审批"这类入口。
+
+    @router.get("/permissions", response_model=PermissionsView, summary="权限设置")
+    def get_permissions() -> PermissionsView:
+        """当前档位与授权条目。
+
+        没有可用设置库时**不报错**：返回出厂默认档位并置 `store_unavailable=true`——设置页要能
+        打开并如实说明"这里改了也存不下来"，而不是整页打不开。
+        """
+        return service.permissions()
+
+    @router.put(
+        "/permissions",
+        response_model=PermissionsView,
+        responses=_PERMISSION_WRITE_RESPONSES,
+        summary="切换外部路径档位",
+    )
+    def set_permissions_mode(payload: PermissionsModeRequest) -> PermissionsView:
+        """保存档位。改动**作用于下一轮**：正在跑或等待审批的那些运行已按当时的档位判定完。
+
+        `read-only` / `workspace-write` / `danger-full-access` 三档决定"能写到哪"：
+        只读档连工作区都不许写、命令以无写授权令牌运行；工作区外写一律只按逐条授权。
+        Windows 各档位均约束命令写入；可写档位允许工作区、专属临时目录及已授权目录。
+        """
+        return service.set_external_paths_mode(payload.mode)
+
+    @router.post(
+        "/permissions/grants",
+        response_model=PermissionsView,
+        responses=_PERMISSION_WRITE_RESPONSES,
+        summary="新增外部路径授权",
+    )
+    def grant_external_path(payload: ExternalPathGrantRequest) -> PermissionsView:
+        """为外部目录添加 `read_write` 写授权（覆盖其子目录）；只读档仍禁止写入。
+
+        三档均允许显式本机外部路径的读取、列目录与搜索，敏感目标除外。
+        `read` 保留旧记录兼容，不再扩大读取权限。写授权不代替覆盖、删除等逐次审批。
+
+        同一个目标重复授权是**改写**（刷新访问级别），不是加两行；返回授权后的完整视图，
+        让设置页直接渲染，不用再取一次。
+        """
+        return service.grant_external_path(payload.path, payload.access)
+
+    @router.delete(
+        "/permissions/grants",
+        response_model=PermissionsView,
+        responses=_PERMISSION_WRITE_RESPONSES,
+        summary="撤销外部路径授权",
+    )
+    def revoke_external_path(
+        path: str = Query(min_length=1, max_length=PATH_MAX_CHARS),
+    ) -> PermissionsView:
+        """移除目录记录；撤销写授权不影响默认读取，移除旧 `read` 记录也不禁止读取。
+
+        **不存在也算成功**（幂等），返回撤销后的完整视图。
+
+        路径走查询参数而不是请求体：它是这条记录的自然键（含层级分隔符），放 URL 里可以正常
+        URL 编码；重复调用同一条不会产生第二种结果。
+        """
+        return service.revoke_external_path(path)
+
+
+def _register_search_preference_routes(router: APIRouter, service: Any) -> None:
+    """联网检索凭据、应用偏好与存储位置（§6.8、§16）。
+
+    与 ``_register_cron_routes`` 同一做法：``build_router`` 已贴着规模棘轮上限，
+    把整组端点原样搬出来（2026-11-06，B1）。
+    """
+    # ---- 联网检索的服务凭据（Tavily）--------------------------------------------
+    # 与模型连接的密钥同一条口径（§6.8）：**只报"有没有"，不回读**；密钥只进设置库或进程内存。
+    # 数值型偏好（条数上限、域名策略等）走 `/preferences`，这里只有密钥这一件事。
+
+    @router.get("/web-search/credential", response_model=WebSearchKeyView, summary="联网检索凭据状态")
+    def get_web_search_credential(
+        provider: Literal["tavily", "deepseek"] = "tavily",
+    ) -> WebSearchKeyView:
+        """当前有没有可用的检索服务凭据，以及它来自设置库还是旧环境变量。
+
+        ``provider`` 缺省 ``tavily``（升级前只有这一个后端）：旧页面不传参时语义不变。
+        两个后端**各占一条密钥**，读哪条由这个参数决定。
+
+        返回值里**没有密钥**（连掩码都没有）：页面只需要知道"已配置 / 未配置"就能决定是提示录入
+        还是提示可以开始检索。
+        """
+        return service.web_search_key_view(provider)
+
+    @router.put(
+        "/web-search/credential",
+        response_model=WebSearchKeyView,
+        responses=_WEB_CREDENTIAL_WRITE_RESPONSES,
+        summary="保存联网检索凭据",
+    )
+    def set_web_search_credential(
+        payload: WebSearchKeyRequest,
+        provider: Literal["tavily", "deepseek"] = "tavily",
+    ) -> WebSearchKeyView:
+        """写入（覆盖）指定后端的密钥：**保存即生效**，下一轮检索就用它。
+
+        空白密钥被拒（422）："清空"用 DELETE 表达，两种意图不该共用一个入口。
+        """
+        return service.save_web_search_key(payload.api_key, provider)
+
+    @router.delete(
+        "/web-search/credential",
+        response_model=WebSearchKeyView,
+        responses=_WEB_CREDENTIAL_WRITE_RESPONSES,
+        summary="删除联网检索凭据",
+    )
+    def delete_web_search_credential(
+        provider: Literal["tavily", "deepseek"] = "tavily",
+    ) -> WebSearchKeyView:
+        """删除指定后端已保存的密钥；**不存在也算成功**（幂等）。
+
+        删掉之后旧环境变量仍然有效——如实报告由返回的 ``source`` 承担，本条路径不假装
+        "删了就一定没有凭据了"。
+        """
+        return service.clear_web_search_key(provider)
+
+    @router.get("/preferences", response_model=PreferencesView, summary="应用偏好与配置概览")
+    def get_preferences() -> PreferencesView:
+        return service.preferences_view()
+
+    @router.get(
+        "/preferences/schema",
+        response_model=PreferencesSchemaView,
+        summary="设置页可改字段清单",
+    )
+    def get_preferences_schema() -> PreferencesSchemaView:
+        """后端管得着的偏好字段、各自的输入类型与上下界。
+
+        与 `GET /preferences` 的分工：那个回答"现在是什么值"（随保存变化），这个回答
+        "能改哪些、各是什么形状"（只随代码变化）。混在一起会让元信息跟着每次保存抖动。
+
+        纯反射、不读运行时状态，所以直接在这里调用而不经 `service`——没有可注入的东西。
+
+        用途：前端测试拿它比对那份手写的字段表，**漏接一个字段就红**。此前缺这个机制，
+        后端加了可改字段、页面上没有输入框，测试仍然全绿。
+        """
+        return preferences_schema()
+
+    @router.get("/storage", response_model=StorageView, summary="数据位置")
+    def get_storage_location() -> StorageView:
+        """所有 SQLite、向量库、附件与日志的根目录，以及这个值**由谁决定**。
+
+        与 `/preferences` 分开是刻意的：数据根**不能**存在设置库里（设置库自己就在它下面），
+        改完必须重启；而偏好的语义是"下一次新任务生效"。两者混在一起会让"什么时候生效"说不清。
+        """
+        return service.storage_location()
+
+    @router.put(
+        "/storage",
+        response_model=StorageView,
+        responses={422: {"model": ErrorResponse, "description": "路径不合法、不可写，或当前由环境变量决定"}},
+        summary="修改数据位置",
+    )
+    def set_storage_location(payload: StorageLocationRequest) -> StorageView:
+        """改到指定目录：**重启后才生效**，且新位置是空的——旧数据不会自动搬过去。
+
+        路径在这里校验（绝对、能创建、能写），不等到启动：启动才失败意味着服务起不来。
+        """
+        return service.save_storage_location(payload.data_root)
+
+    @router.delete(
+        "/storage",
+        response_model=StorageView,
+        responses={422: {"model": ErrorResponse, "description": "无法恢复默认位置"}},
+        summary="恢复默认数据位置",
+    )
+    def delete_storage_location() -> StorageView:
+        """删掉指针文件，回到平台标准目录；同样要重启才生效。"""
+        return service.reset_storage_location()
+
+    @router.put("/preferences", response_model=PreferencesView, summary="保存应用偏好", responses={
+        409: {"model": ErrorResponse, "description": "设置版本已更新，草稿未覆盖现有设置"},
+        503: {"model": ErrorResponse, "description": "设置库不可用"},
+    })
+    def put_preferences(payload: PreferencesRequest) -> PreferencesView:
+        return service.save_preferences(payload)
+
+    @router.post("/preferences/memory/test", response_model=MemoryProbeResult,
+                 summary="测试 Embedding 与已有向量集合（不保存草稿、不写入记忆）",
+                 responses={409: {"model": ErrorResponse, "description": "设置版本已更新"}})
+    def test_memory_preferences(payload: MemoryProbeRequest) -> MemoryProbeResult:
+        return service.test_memory_preferences(payload)
+def build_router(runtime: ApiRuntime) -> APIRouter:
+    """构造业务路由（不含 SSE 与静态托管）。"""
+    router = APIRouter(prefix="/api")
+    service = runtime.service
+    @router.get("/delegation/live", response_model=DelegationLiveView, summary="正在跑的委派子任务")
+    def delegation_live() -> DelegationLiveView:
+        """委派在跑的时候，每一路"此刻在查什么"（2026-11-04）。
+
+        **只读旁路**，不参与事件流：子 Agent 在独立线程里跑，中间态原本不在任何可读的地方，
+        页面只能等全部结束。这里把子循环每步产生的工具事件摊出来，供委派卡在运行期间轮询。
+
+        不做权限判定，暴露的是**目录名、工具名、每次工具的定位串（路径 / 命令 / 正则 / 查询串，
+        各截断 200 字）与子任务目标 `goal`（提问原文，截断 200 字）**。也就是说这里确实会带出
+        用户输入的片段——2026-11-06 更正：原注释写"只暴露目录名与工具名"，与实现不符。
+        这些内容与本机页面正在显示的东西一致（委派卡的块头就显示 `goal`），且 `/api` 前缀本身
+        走 §15.3 的同源校验。
+        """
+        return DelegationLiveView(
+            lanes=[
+                DelegationLiveLaneView(
+                    child_id=lane.child_id,
+                    scope=lane.scope,
+                    goal=lane.goal,
+                    status=lane.status,
+                    steps=[
+                        DelegationLiveStepView(name=step.name, target=step.target, status=step.status)
+                        for step in lane.steps
+                    ],
+                    updated_at=lane.updated_at,
+                )
+                for lane in live_lanes_snapshot()
+            ]
+        )
+
+    _register_data_center_routes(router, service)
 
     # ---- 侧边会话（§21.7，2026-10-23）------------------------------------
     @router.post("/sessions/{session_id}/side-chats", response_model=SessionSummaryView,
@@ -952,193 +1425,10 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
     _register_changes_routes(router, service)
     _register_open_in_app_routes(router, service)
 
-    @router.post(
-        "/sessions/{session_id}/messages",
-        response_model=CommandResultView,
-        responses=_STATE_CONFLICT,
-        summary="提交消息",
-    )
-    def submit_message(session_id: str, payload: SubmitMessageRequest) -> CommandResultView:
-        """同步跑完这一轮，返回**稳定的命令结果引用**：结局不依赖 SSE（§15.3）。"""
-        try:
-            return service.submit_message(session_id, payload.text, payload.client_request_id,
-                                          workflow=payload.workflow,
-                                          # 随消息交给模型的图片引用（2026-10-16）：默认空 ⇒ 不带图的老路径不变。
-                                          attachments=payload.attachments,
-                                          # 文档引用（2026-10-29）：只解析成本机路径，交给模型自己读。
-                                          # 名字一并带上——它只用于展示，服务端会先净化。
-                                          files=[(item.id, item.name) for item in payload.files],
-                                          parent_turn_id=payload.parent_turn_id,
-                                          expected_branch_id=payload.expected_branch_id,
-                                          expected_snapshot_id=payload.expected_snapshot_id)
-        except AttachmentError as exc:
-            # 引用不存在 / 不属于本会话 / 形状不合法（2026-10-29 复审补上）。
-            # 此前这条路径会直接冒到 500——图片引用也有同一个缺口，这次一并收口：
-            # 这是**输入不合法**，不是服务故障，422 才能让调用方区分该重试还是该改参数。
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-    @router.get("/sessions/{session_id}/conversation-map", response_model=ConversationMapView,
-                responses=_STATE_CONFLICT, summary="会话地图")
-    def conversation_map(session_id: str, query: str = Query(default="", max_length=500)) -> ConversationMapView:
-        return service.get_conversation_map(session_id, query)
-
-    @router.get("/sessions/{session_id}/export", responses=_NOT_FOUND, summary="导出会话")
-    def export_session(
-        session_id: str,
-        fmt: Literal["markdown", "json"] = Query(default="markdown", alias="format"),
-    ) -> Response:
-        """把一个会话导出成人读的 Markdown 或机读的 JSON（2026-10-30）。
-
-        为什么要 `attachment`：浏览器要替用户填好"另存为"的文件名，内联打开还得多一步复制。
-        文件名用 RFC 5987（`filename*`）编码——会话标题几乎一定含中文，朴素的 `filename=`
-        在部分浏览器会变成乱码或整条被丢弃。
-        """
-        content, filename, media_type = service.export_session(session_id, fmt)
-        return Response(
-            content=content,
-            media_type=media_type,
-            headers={"content-disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
-        )
-
-    @router.get("/sessions/{session_id}/turns/{turn_id}", response_model=SessionSnapshot,
-                responses=_STATE_CONFLICT, summary="单轮问答与执行详情")
-    def turn_detail(session_id: str, turn_id: str, include_ancestors: bool = False) -> SessionSnapshot:
-        return service.get_turn_snapshot(session_id, turn_id, include_ancestors=include_ancestors)
-
-    @router.post("/sessions/{session_id}/branches/{branch_id}/select", response_model=SessionSnapshot,
-                 responses=_STATE_CONFLICT, summary="切换会话分支")
-    def select_branch(session_id: str, branch_id: str) -> SessionSnapshot:
-        return service.select_branch(session_id, branch_id)
-
-    @router.patch("/sessions/{session_id}/branches/{branch_id}", response_model=ConversationMapView,
-                  responses=_STATE_CONFLICT, summary="分支改名与展示排序")
-    def arrange_branch(session_id: str, branch_id: str, payload: ArrangeBranchRequest) -> ConversationMapView:
-        return service.arrange_branch(session_id, branch_id, payload.title, payload.position)
-
-    @router.post(
-        "/sessions/{session_id}/approvals/{approval_id}",
-        response_model=CommandResultView,
-        responses=_STATE_CONFLICT,
-        summary="提交审批决定",
-    )
-    def resolve_approval(
-        session_id: str, approval_id: str, payload: ApprovalDecisionRequest
-    ) -> CommandResultView:
-        return service.resolve_approval(
-            session_id,
-            approval_id,
-            payload.decision,
-            payload.client_request_id,
-            edited_arguments=payload.edited_arguments,
-            reason=payload.reason,
-            confirm_recursive=payload.confirm_recursive,
-        )
+    _register_session_command_routes(router, service)
 
     _register_question_routes(router, service)
-    # ---- 模型连接（T29A；§6.8）------------------------------------------------
-    # 这组接口只读写"连接设置"：密钥只进凭据存储，读接口只回"已配置 / 未配置 / 仅本次进程内"。
-    # 它们**不能**改安全策略、工具权限或 Graph 配置，也没有传入连接 id/版本的旁路。
-
-    @router.get(
-        "/model-connections",
-        response_model=list[ModelConnectionView],
-        summary="模型连接列表",
-    )
-    def list_model_connections() -> list[ModelConnectionView]:
-        """按创建顺序；默认连接带 `is_default`。停用的连接不在这里出现（历史仍在库里）。"""
-        return service.list_model_connections()
-
-    @router.post(
-        "/model-connections",
-        response_model=ModelConnectionView,
-        responses=_STATE_CONFLICT,
-        summary="新增模型连接",
-    )
-    def create_model_connection(payload: ModelConnectionRequest) -> ModelConnectionView:
-        """保存即可用（哪怕还没测）：未通过检测的连接标为"未验证"（§6.8）。"""
-        return service.save_model_connection(_connection_draft(payload), api_key=payload.api_key)
-
-    @router.patch(
-        "/model-connections/{connection_id}",
-        response_model=ModelConnectionView,
-        responses=_STATE_CONFLICT,
-        summary="编辑模型连接",
-    )
-    def update_model_connection(
-        connection_id: str, payload: ModelConnectionRequest
-    ) -> ModelConnectionView:
-        """编辑产生**新版本**；必须带 `expected_version`，否则拒绝（§6.1 的并发写入口径）。"""
-        return service.save_model_connection(
-            _connection_draft(payload, connection_id=connection_id),
-            api_key=payload.api_key,
-            expected_version=payload.expected_version,
-        )
-
-    @router.delete(
-        "/model-connections/{connection_id}",
-        response_model=ModelConnectionView,
-        responses=_STATE_CONFLICT,
-        summary="停用模型连接",
-    )
-    def delete_model_connection(
-        connection_id: str,
-        expected_version: int | None = Query(default=None, ge=1),
-    ) -> ModelConnectionView:
-        """删除是**停用**：历史模型标识与用量不删，也不物理清除凭据引用（§6.8）。"""
-        return service.retire_model_connection(connection_id, expected_version=expected_version)
-
-    @router.post(
-        "/model-connections/{connection_id}/test",
-        response_model=ModelConnectionView,
-        responses=_STATE_CONFLICT,
-        summary="测试模型连接",
-    )
-    def test_model_connection(connection_id: str) -> ModelConnectionView:
-        """用户主动触发的一次探测（会产生少量调用）：分项报告鉴权/聊天/工具/流式。
-
-        失败只写进这条连接的检测结果，**不改变当前选择**，也不回退到别的模型（§6.8）。
-        """
-        return service.test_model_connection(connection_id)
-
-    @router.put(
-        "/model-connections/default",
-        response_model=ModelConnectionView,
-        responses=_STATE_CONFLICT,
-        summary="设置默认连接",
-    )
-    def select_default_model(payload: SelectDefaultConnectionRequest) -> ModelConnectionView:
-        """新会话继承它；只影响**下一次新用户提交**（正在运行/等待审批的那一轮已固定，§6.8）。
-
-        必须带上你看到的**当前默认**（`expected_selection`）：库里已被别的页面改过就返回 409，
-        而不是把对方的改动覆盖掉（§6.1）。
-        """
-        return service.select_default_model(
-            payload.connection_id,
-            expected_version=payload.expected_version,
-            expected_selection=_selection_ref(payload.expected_selection),
-        )
-
-    @router.put(
-        "/sessions/{session_id}/model",
-        response_model=SessionSnapshot,
-        responses=_NOT_FOUND,
-        summary="选择会话下一轮模型",
-    )
-    def select_session_model(
-        session_id: str, payload: SelectSessionModelRequest
-    ) -> SessionSnapshot:
-        """为这个会话选下一轮用的连接；`connection_id=null` 表示恢复为跟随默认。
-
-        返回**新快照**：让页面直接看到"下一轮会用哪条"，而不用自己拼状态。
-        `expected_selection` 必填（"恢复跟随默认"也是一次写入，同样不能覆盖别人的选择）。
-        """
-        service.select_session_model(
-            session_id,
-            payload.connection_id,
-            expected_version=payload.expected_version,
-            expected_selection=_selection_ref(payload.expected_selection),
-        )
-        return service.get_session_snapshot(session_id)
+    _register_model_connection_routes(router, service)
 
     # ---- 能力开关（T56；§16.1、§16.6）------------------------------------------
 
@@ -1213,246 +1503,10 @@ def build_router(runtime: ApiRuntime) -> APIRouter:
         """只允许移除**用户自己添加**的根；随包与个人级根按契约不可删。"""
         return service.remove_skill_root(path)
 
-    # ---- MCP 外部工具（2026-10-20；契约 §6.13）--------------------------------
-    # 这一组**必须显示工具名**（与能力面板§16.6 相反）：工具名是用户自己配的外部资产，
-    # 不显示出来他就没法核对"这个 server 到底暴露了什么"。凭据（``env``）永不出现在任何响应里。
+    _register_mcp_routes(router, service)
 
-    @router.get("/mcp", response_model=McpView, summary="MCP Server、工具清单与规模统计")
-    def mcp() -> McpView:
-        """每台 server 的状态、工具与"多少按需检索"（**每次现算**）。
+    _register_permission_routes(router, service)
 
-        ``config_error`` 每次重读 ``mcp.json`` 现算：改坏文件后刷新页面就能看到第几行错了。
-        """
-        return service.mcp_view()
-
-    @router.post(
-        "/mcp/servers",
-        response_model=McpView,
-        responses=_MCP_WRITE_RESPONSES,
-        summary="新增一台 MCP Server",
-    )
-    def add_mcp_server(payload: McpServerCreateRequest) -> McpView:
-        """把一台 server 写进 ``mcp.json``（已存在的同名会被拒）；两种连接方式各自校验字段。
-        `stdio` 给 ``command``/``args``/``env``，``http`` 给 ``url``/``headers``；
-        `env`/`headers` 的凭据只写不回读（响应只有键名）。写完立即重载连接管理器。
-        """
-        return service.add_mcp_server(payload.model_dump())
-
-    @router.put(
-        "/mcp/servers/{name}",
-        response_model=McpView,
-        responses=_MCP_WRITE_RESPONSES,
-        summary="改一台 MCP Server 的开关或工具名单",
-    )
-    def set_mcp_server(name: str, payload: McpServerRequest) -> McpView:
-        """打开/关闭一台 server，或收窄它的工具名单：**保存即生效、作用于下一轮**。
-
-        只带本次动过的键；显式传 ``enabled_tools: null`` 表示"取消白名单"。响应是保存后的完整视图。
-        """
-        return service.set_mcp_server(name, payload.model_dump(exclude_unset=True))
-
-    @router.put("/mcp/servers/{name}/spec", response_model=McpView,
-                responses=_MCP_WRITE_RESPONSES, summary="编辑 MCP Server 连接方式")
-    def edit_mcp_server(name: str, payload: McpServerSpecRequest) -> McpView:
-        return service.edit_mcp_server(name, payload.model_dump(exclude_unset=True))
-
-    @router.delete("/mcp/servers/{name}", response_model=McpView,
-                   responses=_MCP_WRITE_RESPONSES, summary="删除 MCP Server")
-    def delete_mcp_server(name: str) -> McpView:
-        return service.delete_mcp_server(name)
-
-    @router.post(
-        "/mcp/reload",
-        response_model=McpView,
-        responses=_MCP_WRITE_RESPONSES,
-        summary="重读 mcp.json",
-    )
-    def reload_mcp() -> McpView:
-        """重读配置文件并让连接管理器换一份（"添加 server"之后走这里）。
-
-        与保存开关不同，这一步**会断开**新配置里已经不存在的 server，并清掉它的工具目录。
-        """
-        return service.reload_mcp()
-
-    # ---- 权限（T38；§1.5）------------------------------------------------------
-    # 这组接口只读写"工作区外路径"的档位与授权条目：档位存设置库（`config.yaml` 只是出厂默认），
-    # 授权条目存设置库的专用表。它们**不能**放宽四项硬约束（删除文件、覆盖已有文件、破坏性 Shell、
-    # 大范围编辑任何档位都要人工批准），因此这里没有"关闭审批"这类入口。
-
-    @router.get("/permissions", response_model=PermissionsView, summary="权限设置")
-    def get_permissions() -> PermissionsView:
-        """当前档位与授权条目。
-
-        没有可用设置库时**不报错**：返回出厂默认档位并置 `store_unavailable=true`——设置页要能
-        打开并如实说明"这里改了也存不下来"，而不是整页打不开。
-        """
-        return service.permissions()
-
-    @router.put(
-        "/permissions",
-        response_model=PermissionsView,
-        responses=_PERMISSION_WRITE_RESPONSES,
-        summary="切换外部路径档位",
-    )
-    def set_permissions_mode(payload: PermissionsModeRequest) -> PermissionsView:
-        """保存档位。改动**作用于下一轮**：正在跑或等待审批的那些运行已按当时的档位判定完。
-
-        `read-only` / `workspace-write` / `danger-full-access` 三档决定"能写到哪"：
-        只读档连工作区都不许写、命令以无写授权令牌运行；工作区外写一律只按逐条授权。
-        Windows 各档位均约束命令写入；可写档位允许工作区、专属临时目录及已授权目录。
-        """
-        return service.set_external_paths_mode(payload.mode)
-
-    @router.post(
-        "/permissions/grants",
-        response_model=PermissionsView,
-        responses=_PERMISSION_WRITE_RESPONSES,
-        summary="新增外部路径授权",
-    )
-    def grant_external_path(payload: ExternalPathGrantRequest) -> PermissionsView:
-        """为外部目录添加 `read_write` 写授权（覆盖其子目录）；只读档仍禁止写入。
-
-        三档均允许显式本机外部路径的读取、列目录与搜索，敏感目标除外。
-        `read` 保留旧记录兼容，不再扩大读取权限。写授权不代替覆盖、删除等逐次审批。
-
-        同一个目标重复授权是**改写**（刷新访问级别），不是加两行；返回授权后的完整视图，
-        让设置页直接渲染，不用再取一次。
-        """
-        return service.grant_external_path(payload.path, payload.access)
-
-    @router.delete(
-        "/permissions/grants",
-        response_model=PermissionsView,
-        responses=_PERMISSION_WRITE_RESPONSES,
-        summary="撤销外部路径授权",
-    )
-    def revoke_external_path(
-        path: str = Query(min_length=1, max_length=PATH_MAX_CHARS),
-    ) -> PermissionsView:
-        """移除目录记录；撤销写授权不影响默认读取，移除旧 `read` 记录也不禁止读取。
-
-        **不存在也算成功**（幂等），返回撤销后的完整视图。
-
-        路径走查询参数而不是请求体：它是这条记录的自然键（含层级分隔符），放 URL 里可以正常
-        URL 编码；重复调用同一条不会产生第二种结果。
-        """
-        return service.revoke_external_path(path)
-
-    # ---- 联网检索的服务凭据（Tavily）--------------------------------------------
-    # 与模型连接的密钥同一条口径（§6.8）：**只报"有没有"，不回读**；密钥只进设置库或进程内存。
-    # 数值型偏好（条数上限、域名策略等）走 `/preferences`，这里只有密钥这一件事。
-
-    @router.get("/web-search/credential", response_model=WebSearchKeyView, summary="联网检索凭据状态")
-    def get_web_search_credential(
-        provider: Literal["tavily", "deepseek"] = "tavily",
-    ) -> WebSearchKeyView:
-        """当前有没有可用的检索服务凭据，以及它来自设置库还是旧环境变量。
-
-        ``provider`` 缺省 ``tavily``（升级前只有这一个后端）：旧页面不传参时语义不变。
-        两个后端**各占一条密钥**，读哪条由这个参数决定。
-
-        返回值里**没有密钥**（连掩码都没有）：页面只需要知道"已配置 / 未配置"就能决定是提示录入
-        还是提示可以开始检索。
-        """
-        return service.web_search_key_view(provider)
-
-    @router.put(
-        "/web-search/credential",
-        response_model=WebSearchKeyView,
-        responses=_WEB_CREDENTIAL_WRITE_RESPONSES,
-        summary="保存联网检索凭据",
-    )
-    def set_web_search_credential(
-        payload: WebSearchKeyRequest,
-        provider: Literal["tavily", "deepseek"] = "tavily",
-    ) -> WebSearchKeyView:
-        """写入（覆盖）指定后端的密钥：**保存即生效**，下一轮检索就用它。
-
-        空白密钥被拒（422）："清空"用 DELETE 表达，两种意图不该共用一个入口。
-        """
-        return service.save_web_search_key(payload.api_key, provider)
-
-    @router.delete(
-        "/web-search/credential",
-        response_model=WebSearchKeyView,
-        responses=_WEB_CREDENTIAL_WRITE_RESPONSES,
-        summary="删除联网检索凭据",
-    )
-    def delete_web_search_credential(
-        provider: Literal["tavily", "deepseek"] = "tavily",
-    ) -> WebSearchKeyView:
-        """删除指定后端已保存的密钥；**不存在也算成功**（幂等）。
-
-        删掉之后旧环境变量仍然有效——如实报告由返回的 ``source`` 承担，本条路径不假装
-        "删了就一定没有凭据了"。
-        """
-        return service.clear_web_search_key(provider)
-
-    @router.get("/preferences", response_model=PreferencesView, summary="应用偏好与配置概览")
-    def get_preferences() -> PreferencesView:
-        return service.preferences_view()
-
-    @router.get(
-        "/preferences/schema",
-        response_model=PreferencesSchemaView,
-        summary="设置页可改字段清单",
-    )
-    def get_preferences_schema() -> PreferencesSchemaView:
-        """后端管得着的偏好字段、各自的输入类型与上下界。
-
-        与 `GET /preferences` 的分工：那个回答"现在是什么值"（随保存变化），这个回答
-        "能改哪些、各是什么形状"（只随代码变化）。混在一起会让元信息跟着每次保存抖动。
-
-        纯反射、不读运行时状态，所以直接在这里调用而不经 `service`——没有可注入的东西。
-
-        用途：前端测试拿它比对那份手写的字段表，**漏接一个字段就红**。此前缺这个机制，
-        后端加了可改字段、页面上没有输入框，测试仍然全绿。
-        """
-        return preferences_schema()
-
-    @router.get("/storage", response_model=StorageView, summary="数据位置")
-    def get_storage_location() -> StorageView:
-        """所有 SQLite、向量库、附件与日志的根目录，以及这个值**由谁决定**。
-
-        与 `/preferences` 分开是刻意的：数据根**不能**存在设置库里（设置库自己就在它下面），
-        改完必须重启；而偏好的语义是"下一次新任务生效"。两者混在一起会让"什么时候生效"说不清。
-        """
-        return service.storage_location()
-
-    @router.put(
-        "/storage",
-        response_model=StorageView,
-        responses={422: {"model": ErrorResponse, "description": "路径不合法、不可写，或当前由环境变量决定"}},
-        summary="修改数据位置",
-    )
-    def set_storage_location(payload: StorageLocationRequest) -> StorageView:
-        """改到指定目录：**重启后才生效**，且新位置是空的——旧数据不会自动搬过去。
-
-        路径在这里校验（绝对、能创建、能写），不等到启动：启动才失败意味着服务起不来。
-        """
-        return service.save_storage_location(payload.data_root)
-
-    @router.delete(
-        "/storage",
-        response_model=StorageView,
-        responses={422: {"model": ErrorResponse, "description": "无法恢复默认位置"}},
-        summary="恢复默认数据位置",
-    )
-    def delete_storage_location() -> StorageView:
-        """删掉指针文件，回到平台标准目录；同样要重启才生效。"""
-        return service.reset_storage_location()
-
-    @router.put("/preferences", response_model=PreferencesView, summary="保存应用偏好", responses={
-        409: {"model": ErrorResponse, "description": "设置版本已更新，草稿未覆盖现有设置"},
-        503: {"model": ErrorResponse, "description": "设置库不可用"},
-    })
-    def put_preferences(payload: PreferencesRequest) -> PreferencesView:
-        return service.save_preferences(payload)
-
-    @router.post("/preferences/memory/test", response_model=MemoryProbeResult,
-                 summary="测试 Embedding 与已有向量集合（不保存草稿、不写入记忆）",
-                 responses={409: {"model": ErrorResponse, "description": "设置版本已更新"}})
-    def test_memory_preferences(payload: MemoryProbeRequest) -> MemoryProbeResult:
-        return service.test_memory_preferences(payload)
+    _register_search_preference_routes(router, service)
 
     return router

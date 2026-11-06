@@ -7,8 +7,8 @@
       "complexity": 24
     },
     "function:api/routes.py::build_router": {
-      "complexity": 107,
-      "function_lines": 968
+      "complexity": 59,
+      "function_lines": 468
     },
     "function:api/terminals.py::build_terminal_router": {
       "complexity": 26
@@ -16,7 +16,6 @@
     "function:application/artifacts.py::_scan": {
       "complexity": 23
     },
-
     "function:application/projection.py::_tool_outcome": {
       "complexity": 28
     },
