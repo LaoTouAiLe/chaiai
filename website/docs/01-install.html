@@ -152,6 +152,11 @@ uv run python -m local_agent.api</code></pre>
         取得发行包后按随包说明安装并启动，入口同样是 <code>127.0.0.1:8731</code>。
         安装方式、版本要求与升级 / 卸载步骤以随包文档为准。
       </p>
+      <p>
+        <strong>安装包没有代码签名</strong>，所以 Windows SmartScreen 会先拦一下并显示「未知发布者」：
+        点「更多信息」→「仍要运行」即可继续。这是未购买代码签名证书的正常提示，不是文件损坏；
+        校验下载是否完整请看 Release 里的 <code>SHA256SUMS.txt</code>。
+      </p>
 
       <h2>跑完应该看到什么</h2>
       <ul>
