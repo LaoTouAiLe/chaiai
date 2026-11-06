@@ -13,6 +13,7 @@ from typing import Any
 
 from local_agent import app_paths
 from local_agent.config import AppConfig, ConfigError, load_config
+from local_agent.log_setup import log_path_of
 from local_agent.persistence.database_maintenance import verify_connection
 from local_agent.persistence.migrations import (
     CHAT_SCHEMA_VERSION,
@@ -74,6 +75,11 @@ def _inspect(config: AppConfig, base: Path, add: Callable[[str, str, str], None]
     # 同名会让两处语义糊在一起（mypy 直接报"expression has type Path, variable has type str"）。
     root_source = app_paths.data_root_source(config)
     add("data_root", "ok", f"数据根：{data_root}（来源：{_SOURCE_LABEL.get(root_source, root_source)}）")
+    # 日志路径也在这里说（2026-11-06）：服务起不来时，`--diagnose` 是唯一还能跑的命令，
+    # 而"日志到底写没写、写在哪"正是这时候最想知道的。**不创建目录、不写文件**，只报告位置。
+    log_file = log_path_of(data_root / "logs")
+    add("logs", "ok" if log_file.is_file() else "warning",
+        f"日志文件：{log_file}；" + ("已存在。" if log_file.is_file() else "尚未创建（服务启动后写入）。"))
     # 旧布局（2026-10-26 之前库在 `<某处>/data/` 下）要分两种说，**不能一律沉默**：
     #
     # - 有配置路径仍落在里面 → 那是"还在用旧布局"，而且是**混用**（另一部分已经到根级了）。

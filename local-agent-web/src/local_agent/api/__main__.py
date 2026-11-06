@@ -28,7 +28,7 @@ from pathlib import Path
 
 import uvicorn
 
-from local_agent import app_paths, browser_open, desktop_window, directory_picker
+from local_agent import app_paths, browser_open, desktop_window, directory_picker, log_setup
 from local_agent import config as config_module
 from local_agent.api.app import create_app
 from local_agent.api.container import open_runtime
@@ -86,12 +86,20 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return print_diagnosis(config_path)
 
+    log_file: Path | None = None
     try:
         config_module.load_dotenv_file(
             config_path.with_name(".env") if args.env is None else Path(args.env)
         )
         # 没有 config.yaml 也照常起来（§15.9 的初始设置模式）：设置页可用，提交会给出可执行提示。
         app_config = config_module.load_config(config_path, allow_missing=True)
+        # 日志先落盘再装配（2026-11-06）：双击 exe 的用户没有终端，装配失败时也只剩这一份证据。
+        # 写不了就继续启动——日志不该成为"起不来"的原因。
+        data_root = app_paths.data_root_of(app_config)
+        try:
+            log_file = log_setup.configure_logging(data_root / "logs")
+        except OSError as exc:
+            print(f"无法写日志文件（继续启动）：{exc}", file=sys.stderr)
         # **启动不再要求模型 Key**（§15.9）：客户端在提交边界按连接构造，缺连接或缺 Key 时
         # 设置页仍然可用，提交会得到 `MODEL_CONNECTION_REQUIRED` / `MODEL_AUTH_FAILED` 这类
         # 可执行提示——而不是"服务起不来，只能去翻终端"。
@@ -108,9 +116,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     web = app_config.web
-    # 数据根**总是**打出来（2026-10-26）：它是备份/迁移/排障的唯一锚点。这里先算出来，
-    # 因为拉起网关也要用它定位日志目录。
-    data_root = app_paths.data_root_of(app_config)
+    # 数据根**总是**打出来（2026-10-26）：它是备份/迁移/排障的唯一锚点。上面装配前已经算过一次
+    # （日志目录要用它），这里直接复用，避免两处解析出不同的根。
     # 移动网关随主服务一起起（2026-11-03，§24 用户选 A）：配了 `mobile.enabled` 就自动拉起，
     # 主服务退出时收掉。它**仍然是独立进程**——崩了不会带走主服务，主服务也不重启它。
     gateway = mobile_supervisor.start_gateway(
@@ -156,9 +163,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         data_hint += (
             f"\n检测到旧数据目录：{legacy}（未自动迁移；需要的话手工搬内容到 {data_root}）"
         )
+    # 日志路径写进横幅（2026-11-06）：报障时用户第一句该说的是"日志在哪"，而不是让对方猜。
+    log_hint = (
+        f"\n日志：{log_file}" if log_file is not None else "\n日志：未能落盘（见上方警告）"
+    )
     print(
         f"local-agent-web v0.3 已启动：http://{web.host}:{web.port}（单进程、单 worker）"
-        f"\n{frontend}{data_hint}{setup_hint}",
+        f"\n{frontend}{data_hint}{log_hint}{setup_hint}",
         flush=True,
     )
     show_ui = not args.no_open_browser
