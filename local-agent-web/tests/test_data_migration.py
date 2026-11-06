@@ -92,6 +92,25 @@ def test_wal_content_survives_the_copy(tmp_path: Path) -> None:
         connection.close()
 
 
+def test_build_plan_accepts_an_unresolved_config(tmp_path: Path) -> None:
+    """配置里的库路径可能是相对的：必须按数据根解析，不能静默漏掉。
+
+    线上链路拿到的是 `resolve_data_paths` 之后的绝对路径，但脚本与新的调用点未必。漏掉的
+    表现是"迁移成功、数据库一个没搬"——用户以为搬完了，重启后会话全空（2026-11-06 真机验证抓到）。
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    for name in ("checkpoints.sqlite", "memories.sqlite", "model_settings.sqlite"):
+        (root / name).write_text("x", encoding="utf-8")
+    (root / "attachments").mkdir()
+    from local_agent.config import AppConfig
+
+    plan = data_migration.build_plan(AppConfig(data_root=str(root)), tmp_path / "dst")
+
+    relatives = {item.relative for item in plan.items}
+    assert {"checkpoints.sqlite", "memories.sqlite", "model_settings.sqlite", "attachments"} <= relatives
+
+
 @pytest.mark.parametrize("nested", ["inside-source", "inside-target"])
 def test_refuses_nested_locations(tmp_path: Path, nested: str) -> None:
     source = tmp_path / "old"
@@ -136,7 +155,7 @@ def test_failure_leaves_no_residue_and_keeps_the_pointer(
     _source(source)
     data_migration.app_paths.set_data_root_pointer(source)
 
-    def boom(*_args: object) -> None:
+    def boom(*_args: object, **_kwargs: object) -> None:
         raise OSError("模拟磁盘写入失败")
 
     monkeypatch.setattr(data_migration, "_copy_sqlite", boom)
@@ -162,7 +181,30 @@ def test_reports_old_data_that_could_not_be_trashed(
 
     warnings = data_migration.run(_plan(source, target), delete_source=True)
 
-    assert len(warnings) == 2
+    # 一条汇总而不是 N 条零散错误：用户要的是"旧数据还在哪、我该做什么"
+    assert len(warnings) == 1
+    assert "没能移入回收站" in warnings[0]
+    assert "checkpoints.sqlite" in warnings[0] and "attachments" in warnings[0]
+    assert str(source) in warnings[0]
     # 清理失败不回滚：数据已经完整地在新位置，指针也已切换
     assert app_paths.read_data_root_pointer() == target
     assert (target / "checkpoints.sqlite").is_file()
+
+
+def test_sqlite_copy_reports_progress_while_it_runs(tmp_path: Path) -> None:
+    """6 GB 的库复制要几十秒：中途不报进度，界面就一直停在 0%。"""
+    source = tmp_path / "big.sqlite"
+    connection = sqlite3.connect(source)
+    connection.execute("CREATE TABLE t (x TEXT)")
+    connection.executemany("INSERT INTO t VALUES (?)", [(f"row-{i}",) for i in range(5000)])
+    connection.commit()
+    connection.close()
+
+    seen: list[int] = []
+    data_migration._copy_sqlite(
+        source, tmp_path / "copy.sqlite",
+        advance=seen.append, total_bytes=source.stat().st_size, pages=1,
+    )
+
+    assert seen, "复制过程中一次进度回调都没有"
+    assert seen[-1] > 0

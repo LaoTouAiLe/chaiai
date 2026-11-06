@@ -301,7 +301,9 @@ class StorageMigrationView(_Dto):
     数据根在启动时解析，迁移完必须重启才会用新位置。
     """
 
-    stage: Literal["idle", "copying", "verifying", "switching", "cleaning", "done", "failed"]
+    stage: Literal[
+        "idle", "preparing", "copying", "verifying", "switching", "cleaning", "done", "failed"
+    ]
     #: 已复制的字节数（``verifying`` 之后不再增长）。
     copied_bytes: int = 0
     total_bytes: int = 0

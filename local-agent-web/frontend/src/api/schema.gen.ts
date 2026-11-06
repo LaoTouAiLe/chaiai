@@ -6344,7 +6344,7 @@ export interface components {
              * Stage
              * @enum {string}
              */
-            stage: "idle" | "copying" | "verifying" | "switching" | "cleaning" | "done" | "failed";
+            stage: "idle" | "preparing" | "copying" | "verifying" | "switching" | "cleaning" | "done" | "failed";
             /** Target Root */
             target_root: string;
             /**

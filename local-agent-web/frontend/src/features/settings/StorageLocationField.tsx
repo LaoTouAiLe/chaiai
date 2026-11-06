@@ -29,6 +29,7 @@ const storageMigrationQueryKey = ['storage-migration'] as const
 
 /** 搬迁还在跑的几个阶段：只有它们需要轮询。 */
 const RUNNING_STAGES = new Set<StorageMigrationDto['stage']>([
+  'preparing',
   'copying',
   'verifying',
   'switching',
@@ -37,6 +38,8 @@ const RUNNING_STAGES = new Set<StorageMigrationDto['stage']>([
 
 const STAGE_LABEL: Record<StorageMigrationDto['stage'], string> = {
   idle: '未搬迁',
+  // 建清单要统计总字节，6 GB 数据约 55 秒：这段时间也在跑，必须说清"在干什么"
+  preparing: '正在统计要搬迁的内容',
   copying: '正在复制数据',
   verifying: '正在校验',
   switching: '正在切换位置',

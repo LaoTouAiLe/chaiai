@@ -1356,38 +1356,47 @@ class ApplicationService:
             ApplicationError: 已经有一次搬迁在跑。
             MigrationError: 预检不通过（目标不可写、与源互相包含、空间不足、已有同名数据）。
         """
+        path = Path(target)
+        if not path.is_absolute():
+            raise app_errors.model_settings_invalid(
+                detail="新位置必须是绝对路径：相对路径会随启动目录漂移",
+                occurred_at=_now(),
+            )
         with self._migration_lock:
             if self.maintenance_reason() is not None:
                 raise app_errors.model_settings_invalid(
                     detail="已经有一次数据搬迁在进行中，请等它结束或重启后再试",
                     occurred_at=_now(),
                 )
-            plan = data_migration.build_plan(self._app_config, Path(target))
-            data_migration.preflight(plan)
             state: dict[str, Any] = {
-                "stage": "copying",
+                "stage": "preparing",
                 "copied_bytes": 0,
-                "total_bytes": plan.total_bytes,
-                "target_root": str(plan.target_root),
-                "items": [item.name for item in plan.items],
+                "total_bytes": 0,
+                "target_root": str(path),
+                "items": [],
                 "warnings": [],
                 "error": "",
                 "finished": False,
             }
             self._migration = state
         threading.Thread(
-            target=self._run_migration, args=(plan, state), daemon=True, name="data-migration"
+            target=self._run_migration, args=(path, state), daemon=True, name="data-migration"
         ).start()
         return self.migration_view()
 
-    def _run_migration(
-        self, plan: data_migration.MigrationPlan, state: dict[str, Any]
-    ) -> None:
+    def _run_migration(self, target: Path, state: dict[str, Any]) -> None:
         def on_progress(stage: str, done: int) -> None:
             state["stage"] = stage
             state["copied_bytes"] = done
 
         try:
+            # 建清单要统计总字节（6 GB 数据约 55 秒）：**不能**放在 HTTP 请求里做，否则用户点完
+            # 按钮半分钟收不到任何反馈（2026-11-06 端到端实测）。预检也一并挪到这里，失败通过
+            # `stage=failed` + `error` 回报。
+            plan = data_migration.build_plan(self._app_config, target)
+            state["total_bytes"] = plan.total_bytes
+            state["items"] = [item.name for item in plan.items]
+            data_migration.preflight(plan)
             warnings = list(data_migration.run(plan, progress=on_progress, delete_source=True))
             # workspace.root 用相对路径时，它的解析基准是**配置文件所在目录**：换数据根后默认工作区
             # 会跟着挪到新位置，而旧工作区里的文件仍在原处（2026-11-06 用户实际撞到过：以为东西被写到了 C 盘）。

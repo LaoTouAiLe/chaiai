@@ -78,17 +78,28 @@ def _is_within(path: Path, base: Path) -> bool:
     return True
 
 
-def _size_of(path: Path) -> int:
+def _tree_stats(path: Path) -> tuple[int, int]:
+    """``(总字节, 文件数)``，一次遍历算完。
+
+    只在复制阶段算一次，校验阶段拿它比对目标——两次全树 rglob 在 6 GB 数据上要几十秒，
+    而这段时间用户只是在看进度条（2026-11-06 真机实测：校验占了总时长的一半）。
+    """
     if path.is_file():
-        return path.stat().st_size
-    total = 0
+        return path.stat().st_size, 1
+    size = 0
+    files = 0
     for item in path.rglob("*"):
         try:
             if item.is_file():
-                total += item.stat().st_size
+                size += item.stat().st_size
+                files += 1
         except OSError:
             continue
-    return total
+    return size, files
+
+
+def _size_of(path: Path) -> int:
+    return _tree_stats(path)[0]
 
 
 def _item_of(name: str, path: Path, root: Path) -> MigrationItem | None:
@@ -119,6 +130,11 @@ def build_plan(config: AppConfig, target: Path) -> MigrationPlan:
     seen: set[str] = set()
     for name, raw in candidates:
         path = Path(raw)
+        # 相对路径按数据根解析（与 `container.resolve_data_paths` 同一条规则）。
+        # **不依赖调用方先 resolve**：线上链路传的是解析过的配置，但脚本、新的调用点未必——
+        # 漏掉的表现是"迁移成功、数据库一个没搬"，这是最难发现的一种失败（2026-11-06 真机验证抓到）。
+        if not path.is_absolute():
+            path = root / path
         item = _item_of(name, path, root)
         if item is None:
             if str(raw).strip() and Path(raw).is_absolute():
@@ -187,37 +203,64 @@ def preflight(plan: MigrationPlan) -> None:
         )
 
 
-def _copy_sqlite(src: Path, dst: Path) -> None:
-    """用 SQLite 自己的备份接口复制：连同 ``-wal`` 里未落盘的事务一起，不需要先关服务。"""
+def _copy_sqlite(
+    src: Path,
+    dst: Path,
+    advance: Callable[[int], None] | None = None,
+    *,
+    total_bytes: int | None = None,
+    pages: int = 2000,
+) -> None:
+    """用 SQLite 自己的备份接口复制：连同 ``-wal`` 里未落盘的事务一起，不需要先关服务。
+
+    ``advance`` 收"已复制字节"：6 GB 的会话库单靠"整项复制完再报进度"会让界面停在 0%
+    好几十秒（2026-11-06 端到端实测），用户会以为卡死。这里按页回调折算成字节。
+    """
     dst.parent.mkdir(parents=True, exist_ok=True)
     with (
         closing(sqlite3.connect(src.resolve().as_uri() + "?mode=ro", uri=True)) as source,
         closing(sqlite3.connect(dst)) as target,
     ):
-        source.backup(target)
+        # 用调用方给的真实字节数折算，不再自己查 page_count：WAL 模式下的只读连接未必可靠，
+        # 而一旦算成 0，界面上就会一直显示 0%（2026-11-06 端到端实测撞到）。
+        expected = total_bytes if total_bytes else (src.stat().st_size or 1)
+
+        def progress(_status: int, remaining: int, total: int) -> None:
+            if advance is not None and total:
+                advance(int(expected * (total - remaining) / total))
+
+        source.backup(target, pages=pages, progress=progress)
 
 
 def _verify_sqlite(src: Path, dst: Path) -> None:
-    def probe(path: Path) -> tuple[int, int]:
+    """比对结构规模，并对**副本**做完整自检。
+
+    ``integrity_check`` 要读完整个库：6 GB 的会话库一次约 55 秒（2026-11-06 真机实测），
+    跑两遍纯属浪费。只查副本就够了——源库要是本来就坏，副本这一查同样会失败。
+    """
+
+    def probe(path: Path, *, integrity: bool) -> tuple[int, int]:
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
-            verdict = conn.execute("PRAGMA integrity_check").fetchone()
-            if not verdict or verdict[0] != "ok":
-                raise MigrationError(f"数据库自检失败：{path}")
+            if integrity:
+                verdict = conn.execute("PRAGMA integrity_check").fetchone()
+                if not verdict or verdict[0] != "ok":
+                    raise MigrationError(f"复制后的数据库自检失败：{path}")
             objects = conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
             pages = conn.execute("PRAGMA page_count").fetchone()[0]
         return objects, pages
 
-    if probe(src) != probe(dst):
+    if probe(src, integrity=False) != probe(dst, integrity=True):
         raise MigrationError(f"复制后的库与原库不一致：{dst}")
 
 
-def _verify_dir(src: Path, dst: Path) -> None:
-    if _size_of(src) != _size_of(dst):
-        raise MigrationError(f"复制后的目录与原始大小不一致：{dst}")
-    src_files = sum(1 for item in src.rglob("*") if item.is_file())
-    dst_files = sum(1 for item in dst.rglob("*") if item.is_file())
-    if src_files != dst_files:
-        raise MigrationError(f"复制后的文件数不一致（{dst_files} / {src_files}）：{dst}")
+def _verify_dir(dst: Path, expected: tuple[int, int]) -> None:
+    """目标目录的 ``(字节, 文件数)`` 必须与复制源时记下的完全一致。"""
+    actual = _tree_stats(dst)
+    if actual != expected:
+        raise MigrationError(
+            f"复制后的目录与原始不一致（目标 {actual[1]} 个文件 / {actual[0]} 字节，"
+            f"原始 {expected[1]} 个文件 / {expected[0]} 字节）：{dst}"
+        )
 
 
 def run(
@@ -237,6 +280,8 @@ def run(
     preflight(plan)
     created: list[Path] = []
     copied = 0
+    #: 复制源时记下 (字节, 文件数)，校验阶段直接比对，不再重算源侧。
+    expected: dict[str, tuple[int, int]] = {}
 
     def report(stage: str, done: int) -> None:
         if progress is not None:
@@ -247,13 +292,19 @@ def run(
         for item in plan.items:
             src = plan.source_root / item.relative
             dst = plan.target_root / item.relative
-            before = copied
+            stats = _tree_stats(src)
             if item.kind == "sqlite":
-                _copy_sqlite(src, dst)
+                _copy_sqlite(
+                    src, dst,
+                    # 用默认参数绑定当前进度：lambda 直接闭包循环变量会被 ruff B023 判为隐患
+                    advance=lambda done, base=copied: report("copying", base + done),
+                    total_bytes=stats[0],
+                )
             else:
                 shutil.copytree(src, dst)
+            expected[item.relative] = stats
             created.append(dst)
-            copied = before + _size_of(src)
+            copied += stats[0]
             report("copying", copied)
 
         report("verifying", copied)
@@ -263,7 +314,7 @@ def run(
             if item.kind == "sqlite":
                 _verify_sqlite(src, dst)
             else:
-                _verify_dir(src, dst)
+                _verify_dir(dst, expected[item.relative])
     except (OSError, sqlite3.Error, MigrationError) as exc:
         for path in reversed(created):
             _remove_quietly(path)
@@ -277,11 +328,19 @@ def run(
     warnings: list[str] = []
     if delete_source:
         report("cleaning", copied)
+        stuck: list[str] = []
         for item in plan.items:
             try:
                 move_to_trash(plan.source_root / item.relative)
-            except FileOperationError as exc:
-                warnings.append(f"{item.name}：{exc}")
+            except FileOperationError:
+                stuck.append(f"{item.name}（{item.relative}）")
+        if stuck:
+            # 一条汇总而不是 N 条零散错误：回收站对大文件会直接拒绝（实测 6 GB 的会话库报
+            # OLE error 0x80270027），这时唯一可执行的指引是"确认新位置能用后手工删"。
+            warnings.append(
+                f"以下旧数据没能移入回收站，仍在 {plan.source_root}：{'、'.join(stuck)}。"
+                "系统回收站对超过一定体积的文件会拒绝；确认新位置正常后，手工删掉这几项即可。"
+            )
     report("done", copied)
     return warnings
 
