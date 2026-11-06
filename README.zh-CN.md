@@ -268,6 +268,13 @@ uv run python -m local_agent.api
 
 ![右栏工作面板：改动与 diff](docs/assets/screenshots/changes.png)
 
+右栏的「浏览器」标签驱动的就是 agent 自己那个受控 Chromium——地址栏接受任意 http/https，所以**看本地前端
+效果**也走它：在 `frontend/` 跑 `npm run dev`，再在地址栏输入 `localhost:5173` 即可。
+
+- 不需要额外安装什么（本机有 Edge / Chrome / Chromium 任一即可，`page_control` 能力出厂开启）；
+- 它显示的是**截图流**而不是 iframe：能点、能滚、能输入，但不是浏览器原生的手感；
+- 打不开时先读标签里的错误：2026-11-06 起启动失败会带上浏览器自己的输出与它用的配置目录，并且**不会连着重试**。
+
 ## 安全边界（请先读）
 
 - **只监听回环地址**，没有账号体系，也没有登录页。想跨机器访问必须先自己做认证——现在把端口暴露到局域网等于把终端交给同网段所有人。

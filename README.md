@@ -219,6 +219,14 @@ Keys are write-only: the API only ever reports "configured / not configured".
 
 ![Right-hand panel: changes and diff](docs/assets/screenshots/changes.png)
 
+The **Browser** tab drives the agent's own controlled Chromium, and its address bar accepts any `http`/`https`
+URL — so previewing your frontend goes through the same tab: run `npm run dev` in `frontend/`, then enter
+`localhost:5173`.
+
+- Nothing extra to install (any local Edge / Chrome / Chromium works; `page_control` is on by default)
+- It streams screenshots instead of embedding an iframe: you can click, scroll and type, but it is not native browser feel
+- If it refuses to open, read the error in the tab: start-up failures now carry the browser's own output and its profile directory, and are not retried in a loop
+
 ## Security boundaries (read first)
 
 - **Binds to loopback only**; there is no account system and no login page. Exposing the port to a LAN means handing a terminal to everyone on that segment
