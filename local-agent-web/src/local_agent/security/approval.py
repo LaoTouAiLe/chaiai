@@ -200,12 +200,8 @@ def describe_impact(
     path_text = _normalized_path(policy, str(args.get("path") or "")) if "path" in args else ""
 
     if tool_name == "delete_file":
-        recursive = bool(args.get("recursive"))
         marker = _external_marker(policy, path_text)
-        return (
-            f"{marker}删除 {path_text}（{_delete_target_summary(path_text)}）"
-            f"{'，递归删除' if recursive else ''}"
-        )
+        return f"{marker}删除 {path_text}（{_delete_target_display(path_text)}）"
     if tool_name == "run_shell":
         cwd_text = _normalized_path(policy, str(args.get("cwd") or "."))
         marker = _external_marker(policy, cwd_text)
@@ -302,6 +298,51 @@ def _file_digest(path_text: str) -> str:
     except OSError:
         return "unreadable"
     return "missing"
+
+
+def _size_text(size: int) -> str:
+    """给人看的文件大小（审批卡上只需要量级）。"""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            shown = f"{value:.0f}" if unit == "B" else f"{value:.1f}"
+            return f"{shown} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _delete_target_display(path_text: str) -> str:
+    """审批卡上**给人看**的那一句：类型、规模、能不能还原。
+
+    与 :func:`_delete_target_summary` 分工不同：那个返回机器串（进动作指纹，目录内容一变旧批准
+    就失效），把它直接摆给用户的结果是「删除 E:/x（dir:4096:1699999999:parent-exists:True:
+    files:12,dirs:3）」——看不懂，只会更不敢点（2026-11-06 用户反馈：不敢让 agent 删东西）。
+    """
+    if not path_text:
+        return "路径缺失"
+    path = Path(path_text)
+    try:
+        if not path.exists():
+            return "目标已不存在"
+        if path.is_file():
+            return f"文件，{_size_text(path.stat().st_size)}；删除后可从系统回收站还原"
+        files = 0
+        dirs = 0
+        capped = False
+        for item in path.rglob("*"):
+            if item.is_dir():
+                dirs += 1
+            elif item.is_file():
+                files += 1
+            if files + dirs >= DELETE_SUMMARY_SCAN_LIMIT:
+                capped = True
+                break
+        scope = f"{files} 个文件、{dirs} 个子目录"
+        if capped:
+            scope += f"（超过 {DELETE_SUMMARY_SCAN_LIMIT} 项，只数到这里）"
+        return f"整个目录，含 {scope}；删除后可从系统回收站还原"
+    except OSError:
+        return "无法读取目标信息"
 
 
 def _delete_target_summary(path_text: str) -> str:
