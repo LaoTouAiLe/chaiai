@@ -279,10 +279,10 @@ jobs:
     name: portability / pytest (${{ matrix.os }})
     needs: detect
     if: needs.detect.outputs.python == 'true'
-    # **观察期**（2026-11-02 起）：Linux / macOS 的完整后端用例还没在 CI 里跑过，先收集信号，
-    # `continue-on-error` 让它红也不阻塞合并。等它连绿三轮，把这一行删掉即可变成必需闸门——
-    # 不要反过来做（先设必需再常年红，等于训练所有人忽略 CI）。
-    continue-on-error: true
+    # **必需闸门**（2026-11-06 起）：观察期（2026-11-02 起，`continue-on-error`）已连绿多轮，
+    # 这一路现在红就是真红，不再放行。当初的顺序是"先收集信号、连绿再转正"，不要反过来做
+    # （先设必需再常年红，等于训练所有人忽略 CI）；同理，任何时候想加回 `continue-on-error`，
+    # 都得先说明这次绿不了的具体原因。
     strategy:
       fail-fast: false
       matrix:
