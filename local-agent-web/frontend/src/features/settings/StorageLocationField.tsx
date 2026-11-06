@@ -15,14 +15,35 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 
 import {
   getStorageLocation,
+  getStorageMigration,
+  migrateStorage,
   pickWorkspaceDirectory,
   resetStorageLocation,
   setStorageLocation,
 } from '../../api/client'
-import type { StorageLocationDto } from '../../api/client'
+import type { StorageLocationDto, StorageMigrationDto } from '../../api/client'
 import styles from './PreferenceSection.module.css'
 
 export const storageLocationQueryKey = ['storage-location'] as const
+const storageMigrationQueryKey = ['storage-migration'] as const
+
+/** 搬迁还在跑的几个阶段：只有它们需要轮询。 */
+const RUNNING_STAGES = new Set<StorageMigrationDto['stage']>([
+  'copying',
+  'verifying',
+  'switching',
+  'cleaning',
+])
+
+const STAGE_LABEL: Record<StorageMigrationDto['stage'], string> = {
+  idle: '未搬迁',
+  copying: '正在复制数据',
+  verifying: '正在校验',
+  switching: '正在切换位置',
+  cleaning: '正在清理旧数据',
+  done: '搬迁完成，重启后端后生效',
+  failed: '搬迁失败，数据仍在原位置',
+}
 
 /**
  * 人类可读的字节数（2026-10-26）。
@@ -98,6 +119,28 @@ export function StorageLocationField() {
     onSuccess: apply,
     onError: (exc: Error) => setError(exc.message),
   })
+  // 搬迁是后台任务：只轮询进度，不在请求里等（附件可能几个 GB）。
+  const migration = useQuery({
+    queryKey: storageMigrationQueryKey,
+    queryFn: getStorageMigration,
+    refetchInterval: (query) => {
+      const stage = query.state.data?.stage
+      return stage !== undefined && RUNNING_STAGES.has(stage) ? 800 : false
+    },
+  })
+  const [confirming, setConfirming] = useState(false)
+  const migrate = useMutation({
+    mutationFn: (target: string) => migrateStorage(target),
+    onSuccess: (next) => {
+      setConfirming(false)
+      setError(null)
+      queryClient.setQueryData(storageMigrationQueryKey, next)
+    },
+    onError: (exc: Error) => {
+      setConfirming(false)
+      setError(exc.message)
+    },
+  })
 
   if (!view) {
     return <div role="status">{query.isError ? '读取数据位置失败。' : '正在读取数据位置…'}</div>
@@ -105,6 +148,12 @@ export function StorageLocationField() {
   // 环境变量在解析链最前面：这一档改指针文件不会生效，所以输入框锁住而不是假装能改。
   const locked = view.source === 'environment'
   const value = draft ?? view.data_root
+  const migrationState = migration.data
+  const running = migrationState !== undefined && RUNNING_STAGES.has(migrationState.stage)
+  const percent = migrationState === undefined || migrationState.total_bytes === 0
+    ? 0
+    : Math.min(100, Math.round((migrationState.copied_bytes / migrationState.total_bytes) * 100))
+  const canMigrate = !locked && draft !== null && draft !== view.data_root && !running
 
   return (
     <div className={styles.fields} aria-label="数据位置">
@@ -115,7 +164,8 @@ export function StorageLocationField() {
             所有会话、记忆、附件与日志都放在这里。当前来源：{SOURCE_LABEL[view.source] ?? view.source}。
             {view.used_bytes == null ? null : ` 当前占用 ${formatBytes(view.used_bytes)}。`}
             {view.disk_free_bytes == null ? null : `所在盘剩余 ${formatBytes(view.disk_free_bytes)}。`}
-            改完**要重启后端**才生效；新目录是空的，旧数据不会自动搬过去。
+            改完**要重启后端**才生效。「保存」只记下位置（新目录是空的）；要把现有数据一起搬过去，
+            用下面的「搬到这里」。
             默认位置：{view.default_root}
           </small>
         </div>
@@ -171,7 +221,39 @@ export function StorageLocationField() {
         >
           恢复默认位置
         </button>
+        {/* 搬迁（2026-11-06）：两段式确认，不弹 window.confirm——先让人看清"要搬什么"，再决定。
+            第一下进入确认态，第二下才真的开始；改路径会取消确认。 */}
+        <button
+          type="button"
+          disabled={!canMigrate || migrate.isPending}
+          onClick={() => {
+            if (!confirming) {
+              setConfirming(true)
+              return
+            }
+            migrate.mutate(value)
+          }}
+          onBlur={() => setConfirming(false)}
+        >
+          {migrate.isPending
+            ? '正在开始…'
+            : confirming
+              ? '确认搬迁（再点一次）'
+              : '搬到这里'}
+        </button>
       </div>
+      {migrationState !== undefined &&
+      (running || migrationState.stage === 'done' || migrationState.stage === 'failed') ? (
+        <p
+          className={migrationState.stage === 'failed' ? styles.error : styles.note}
+          role={migrationState.stage === 'failed' ? 'alert' : 'status'}
+        >
+          {STAGE_LABEL[migrationState.stage]}
+          {migrationState.stage === 'copying' ? `（${percent}%）` : ''}
+          {migrationState.error === '' ? '' : `：${migrationState.error}`}
+          {migrationState.warnings.length === 0 ? '' : `。另有提醒：${migrationState.warnings.join('；')}`}
+        </p>
+      ) : null}
     </div>
   )
 }

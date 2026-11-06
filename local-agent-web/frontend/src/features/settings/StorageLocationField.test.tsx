@@ -2,16 +2,26 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
-import type { StorageLocationDto } from '../../api/client'
+import type { StorageLocationDto, StorageMigrationDto } from '../../api/client'
 import { StorageLocationField, storageLocationQueryKey } from './StorageLocationField'
 
-const mock = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), reset: vi.fn(), pick: vi.fn() }))
+const mock = vi.hoisted(() => ({
+  get: vi.fn(),
+  save: vi.fn(),
+  reset: vi.fn(),
+  pick: vi.fn(),
+  // 搬迁（2026-11-06）：组件渲染时一定会查一次进度，所以每条用例都得有默认返回值。
+  migration: vi.fn(),
+  migrate: vi.fn(),
+}))
 vi.mock('../../api/client', async original => ({
   ...await original<typeof import('../../api/client')>(),
   getStorageLocation: mock.get,
   setStorageLocation: mock.save,
   resetStorageLocation: mock.reset,
   pickWorkspaceDirectory: mock.pick,
+  getStorageMigration: mock.migration,
+  migrateStorage: mock.migrate,
 }))
 
 function view(patch: Partial<StorageLocationDto> = {}): StorageLocationDto {
@@ -27,10 +37,25 @@ function view(patch: Partial<StorageLocationDto> = {}): StorageLocationDto {
   }
 }
 
-function host(data: StorageLocationDto = view()) {
+function migration(patch: Partial<StorageMigrationDto> = {}): StorageMigrationDto {
+  return {
+    stage: 'idle',
+    copied_bytes: 0,
+    total_bytes: 0,
+    target_root: '',
+    items: [],
+    warnings: [],
+    error: '',
+    restart_required: true,
+    ...patch,
+  }
+}
+
+function host(data: StorageLocationDto = view(), progress: StorageMigrationDto = migration()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   client.setQueryData(storageLocationQueryKey, data)
   mock.get.mockResolvedValue(data)
+  mock.migration.mockResolvedValue(progress)
   return render(
     <QueryClientProvider client={client}><StorageLocationField /></QueryClientProvider>,
   )
@@ -98,5 +123,41 @@ describe('数据位置（2026-10-26）', () => {
     // 已经是默认位置时不给这个按钮：点它等于"再写一遍默认值"，没有意义
     host(view({ source: 'default' }))
     expect(screen.getByRole('button', { name: '恢复默认位置' })).toBeDisabled()
+  })
+})
+
+describe('数据搬迁（2026-11-06）', () => {
+  it('分清楚「只记下位置」与「把数据搬过去」', () => {
+    host()
+
+    // 文案必须说清"保存不会搬数据"，否则用户以为点保存就够了
+    expect(screen.getByText(/新目录是空的/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '搬到这里' })).toBeInTheDocument()
+  })
+
+  it('要点两次才真的开始搬', async () => {
+    host()
+    fireEvent.change(screen.getByLabelText('数据目录'), { target: { value: 'D:/new-root' } })
+
+    fireEvent.click(screen.getByRole('button', { name: '搬到这里' }))
+    // 第一下只进确认态：误点不该开始搬几个 GB 的数据
+    expect(mock.migrate).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: /确认搬迁/ }))
+    await waitFor(() => expect(mock.migrate).toHaveBeenCalledWith('D:/new-root'))
+  })
+
+  it('运行中显示阶段与百分比', async () => {
+    host(view(), migration({ stage: 'copying', copied_bytes: 50, total_bytes: 100, target_root: 'D:/new-root' }))
+
+    expect(await screen.findByText(/正在复制数据（50%）/)).toBeInTheDocument()
+  })
+
+  it('失败时说明数据仍在原位置', async () => {
+    host(view(), migration({ stage: 'failed', error: '新位置不可写（PermissionError）：D:/new-root' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert.textContent).toContain('数据仍在原位置')
+    expect(alert.textContent).toContain('新位置不可写')
   })
 })

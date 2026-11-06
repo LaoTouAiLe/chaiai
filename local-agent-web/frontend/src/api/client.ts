@@ -1020,6 +1020,26 @@ export function resetStorageLocation(): Promise<StorageLocationDto> {
   return request<StorageLocationDto>('/api/storage', { method: 'DELETE' })
 }
 
+export type StorageMigrationDto = components['schemas']['StorageMigrationView']
+
+/**
+ * 把现有数据整体搬到新位置（2026-11-06）：复制 → 校验 → 切指针 → 清旧（进回收站）。
+ *
+ * 后台执行，所以这里只拿到初始进度；后续用 `getStorageMigration` 轮询。目标不可用时 422，
+ * 已有搬迁在跑时 409。
+ */
+export function migrateStorage(target: string): Promise<StorageMigrationDto> {
+  return request<StorageMigrationDto>('/api/storage/migrate', {
+    method: 'POST',
+    body: JSON.stringify({ target }),
+  })
+}
+
+/** 搬迁进度。`stage="idle"` 表示这次进程里没搬过。 */
+export function getStorageMigration(): Promise<StorageMigrationDto> {
+  return request<StorageMigrationDto>('/api/storage/migration')
+}
+
 // ---- 应用身份与维护（2026-10-27，「关于」页）--------------------------------
 
 export type AppInfoDto = components['schemas']['AppInfoView']
