@@ -1388,7 +1388,16 @@ class ApplicationService:
             state["copied_bytes"] = done
 
         try:
-            state["warnings"] = data_migration.run(plan, progress=on_progress, delete_source=True)
+            warnings = list(data_migration.run(plan, progress=on_progress, delete_source=True))
+            # workspace.root 用相对路径时，它的解析基准是**配置文件所在目录**：换数据根后默认工作区
+            # 会跟着挪到新位置，而旧工作区里的文件仍在原处（2026-11-06 用户实际撞到过：以为东西被写到了 C 盘）。
+            root_setting = str(self._app_config.workspace.root or "").strip()
+            if root_setting and not Path(root_setting).is_absolute():
+                warnings.append(
+                    f"workspace.root 仍是相对路径（{root_setting}）：默认工作区会跟着新数据目录一起变，"
+                    "旧工作区里的文件留在原处。要让它固定在某个盘，把它改成绝对路径。"
+                )
+            state["warnings"] = warnings
             state["stage"] = "done"
         except (data_migration.MigrationError, OSError) as exc:
             state["stage"] = "failed"
