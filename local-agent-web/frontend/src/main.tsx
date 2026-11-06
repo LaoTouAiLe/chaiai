@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './app/App'
+import { ErrorBoundary } from './components/ErrorBoundary'
 import { PreferencesProvider } from './features/settings/PreferencesProvider'
 import './styles/tokens.css'
 import './styles/base.css'
@@ -28,8 +29,11 @@ if (container === null) {
 
 createRoot(container).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <PreferencesProvider><App /></PreferencesProvider>
-    </QueryClientProvider>
+    {/* 兜底放在最外层（2026-11-06）：任一屏渲染抛错时显示可复制的错误，而不是白屏。 */}
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <PreferencesProvider><App /></PreferencesProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   </StrictMode>,
 )

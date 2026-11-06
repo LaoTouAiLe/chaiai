@@ -1,0 +1,8 @@
+.root { display: flex; flex-direction: column; gap: 12px; max-width: 720px; margin: 10vh auto; padding: 24px; color: var(--c-text-1); }
+.title { margin: 0; font-size: 20px; font-weight: 600; }
+.lead { margin: 0; color: var(--c-text-2); font-size: 14px; line-height: 1.6; }
+.detail { margin: 0; padding: 12px; border: 1px solid var(--c-line); border-radius: 8px; background: var(--c-sunken); color: var(--c-text-2); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.actions { display: flex; gap: 8px; }
+.primary, .secondary { padding: 6px 14px; border: 1px solid var(--c-line); border-radius: 8px; font-size: 13px; cursor: pointer; }
+.primary { background: var(--c-accent); border-color: transparent; color: var(--c-text-inverse); }
+.secondary { background: var(--c-raised); color: var(--c-text-1); }
