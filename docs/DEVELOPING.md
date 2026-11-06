@@ -221,6 +221,27 @@ Tavily 密钥从 [Tavily 控制台](https://app.tavily.com/) 注册获取，放�
 
 ## 质量命令与调试
 
+### CI 车道（2026-11-06）
+
+`.github/workflows/ci.yml` 先跑一个 `detect` 作业（十几秒），按**这次改动碰到的目录**决定后面
+哪些作业要跑。做法照 hermes 的 `detect` 门控，只分两条车道：
+
+| 车道 | 命中条件 | 跑什么 |
+| --- | --- | --- |
+| `python` | `local-agent-web/{src,tests,scripts}`、`pyproject.toml`、`uv.lock`、`.github/**` | backend（14 分钟）、portability |
+| `frontend` | `local-agent-web/frontend/**`、`.github/**` | frontend |
+| 常跑 | 无 | sandbox × 3（2 分钟）、secrets / gitleaks（7 秒） |
+
+所以只改 `README.md` / `docs/` / `website/` 的提交不再占后端全量，但**密钥扫描与沙箱冒烟照跑**——
+它们便宜，而且"文档里泄露密钥"这件事真实存在。
+
+两条边界要记住：
+
+- **改 `.github/**` 会强制两条车道全跑**：动 CI 配置本身就该验证全部。
+- 拿不到 base（`workflow_dispatch`、新分支首推、`before` 是全零）时**一律全跑**，宁可贵一点不放过。
+
+要"不信任最近一次结果、重跑全部"，用 `workflow_dispatch` 手动触发。
+
 ### 数据库自检、备份与恢复（v0.9 T79）
 
 聊天库启动会在迁移之前执行 `quick_check`；失败就停止，并提示保留原库及 `-wal`/`-shm`、从
