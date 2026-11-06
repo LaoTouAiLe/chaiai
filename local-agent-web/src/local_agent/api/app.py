@@ -35,7 +35,7 @@ from local_agent.application.errors import ApplicationError
 from local_agent.application.maintenance import MemoryMaintenance
 
 #: OpenAPI 里的接口版本：与包版本同步（发布 v0.3.0 时统一，避免文档与包各说各话）。
-API_VERSION: Final[str] = "0.3.0"
+API_VERSION: Final[str] = "0.3.1"
 
 DESCRIPTION = """v0.3 本机 Web 服务（单进程、单 worker）。
 

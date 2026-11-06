@@ -12109,7 +12109,7 @@
   "info": {
     "description": "v0.3 本机 Web 服务（单进程、单 worker）。\n\n- 业务契约：`ARCHITECTURE.md` §15；路由形态：`V0_4_DEVELOPMENT_PLAN.md` §6.2。\n- 所有响应体是应用层的 DTO（`local_agent.application.models`）；业务错误统一是\n  `{\"error\": ErrorView}`，传输层拒绝（403/413/422）是 `{\"detail\": ...}`。\n- 前端类型由这份 OpenAPI 生成（`npm run generate:api`），生成文件不得手改。\n",
     "title": "local-agent-web",
-    "version": "0.3.0"
+    "version": "0.3.1"
   },
   "openapi": "3.1.0",
   "paths": {

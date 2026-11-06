@@ -15,7 +15,7 @@
 > cron jobs — most of the skeleton an agent needs is already running here, and the rest is being finished.
 > Everything follows one rule: implement it yourself, or you do not really understand it.
 >
-> v0.3.0 is still evolving: APIs will move and boundaries are being sharpened. **Not recommended as a production
+> v0.3.1 is still evolving: APIs will move and boundaries are being sharpened. **Not recommended as a production
 > dependency** — but it is **readable, inspectable and changeable**: the trade-offs are written down in
 > `ARCHITECTURE.md` and `docs/`, not hidden behind "internal implementation".
 >
@@ -24,7 +24,7 @@
 
 **Stack**: Python 3.13 · FastAPI + SSE · LangGraph (tool loop and checkpoints) · SQLite / Chroma ·
 React 19 + Vite 8 + TypeScript · PyInstaller onedir + Inno Setup + WebView2 ·
-**3540 backend tests, 765 frontend tests**
+**3568 backend tests, 773 frontend tests**
 
 ![Chat with tool execution](docs/assets/screenshots/conversation.png)
 
