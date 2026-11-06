@@ -16,6 +16,8 @@ on:
     # 将来迁到 GitHub 时大概率会被改成 main。两个都列上，避免"推上去了但 CI 一直不跑"。
     branches: [main, master]
   pull_request:
+  # 手动触发：`detect` 拿不到 base 时会全跑，用来"不信任最近一次结果，重跑一遍全部"。
+  workflow_dispatch:
 
 # 只读权限：CI 不需要写仓库（发布走单独的 release workflow）
 permissions:
@@ -27,8 +29,68 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  detect:
+    name: detect / 改动范围
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      python: ${{ steps.classify.outputs.python }}
+      frontend: ${{ steps.classify.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: classify
+        shell: bash
+        # 按改动路径分流（照 hermes 的 detect 做法，只分两条车道）。
+        # 为什么值得：只改 README / docs / website 的提交不该占 14 分钟的后端全量；
+        # 而**密钥扫描与沙箱冒烟不受影响**——它们便宜，而且"文档里泄露密钥"真实存在。
+        # `workflow_dispatch`、拿不到 base（新分支/强推）时一律全跑，宁可贵一点不放过。
+        run: |
+          set -euo pipefail
+          base=""
+          head=""
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+          fi
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            changed="__ALL__"
+          else
+            changed="$(git diff --name-only "$base" "$head" || echo __ALL__)"
+          fi
+
+          python=false
+          frontend=false
+          if [ "$changed" = "__ALL__" ]; then
+            python=true
+            frontend=true
+          else
+            while IFS= read -r file; do
+              [ -z "$file" ] && continue
+              case "$file" in
+                local-agent-web/src/*|local-agent-web/tests/*|local-agent-web/scripts/*|local-agent-web/pyproject.toml|local-agent-web/uv.lock|.github/*) python=true ;;
+              esac
+              case "$file" in
+                local-agent-web/frontend/*|.github/*) frontend=true ;;
+              esac
+            done <<< "$changed"
+          fi
+
+          echo "python=$python"
+          echo "frontend=$frontend"
+          echo "--- 改动文件 ---"
+          printf '%s\n' "$changed"
+          echo "python=$python" >> "$GITHUB_OUTPUT"
+          echo "frontend=$frontend" >> "$GITHUB_OUTPUT"
+
   backend:
     name: backend / pytest
+    needs: detect
+    if: needs.detect.outputs.python == 'true'
     runs-on: windows-latest
     # 40 → 70（2026-11-05）：修掉那批"提前崩"的用例之后，测试真的在跑完整流程
     # （65 秒的长命令用例、真实子进程等待），跑到 79% 就撞上 40 分钟上限被取消，
@@ -111,6 +173,8 @@ jobs:
 
   frontend:
     name: frontend / typecheck + lint + build
+    needs: detect
+    if: needs.detect.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -213,6 +277,8 @@ jobs:
 
   portability:
     name: portability / pytest (${{ matrix.os }})
+    needs: detect
+    if: needs.detect.outputs.python == 'true'
     # **观察期**（2026-11-02 起）：Linux / macOS 的完整后端用例还没在 CI 里跑过，先收集信号，
     # `continue-on-error` 让它红也不阻塞合并。等它连绿三轮，把这一行删掉即可变成必需闸门——
     # 不要反过来做（先设必需再常年红，等于训练所有人忽略 CI）。
