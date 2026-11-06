@@ -60,3 +60,32 @@ def test_invalid_pdf_does_not_reach_reader(tmp_path):
     target.write_bytes(b"not a PDF")
     with pytest.raises(ValueError, match="有效的 PDF"):
         render_pdf(target)
+
+
+def test_pdf_and_workbook_share_the_same_two_slots(tmp_path):
+    """并发槽要同时护住 PDF 直通与表格解析（2026-11-06）。
+
+    从前槽只包住 Office 转换那一段：3 个 32 MB 的 PDF 能同时整份读进内存，大表格解析更是
+    完全不受限。这里把两格槽占满，断言两类预览立刻明确拒绝（非阻塞，不排队），释放后恢复。
+    """
+    from local_agent.application import document_preview
+
+    pdf = tmp_path / "ok.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    book = Workbook()
+    book.save(tmp_path / "book.xlsx")
+
+    occupied = [document_preview._slots.acquire(blocking=False) for _ in range(2)]
+    assert all(occupied)
+    try:
+        with pytest.raises(ValueError, match="正在预览其他文档"):
+            render_pdf(pdf)
+        with pytest.raises(ValueError, match="正在预览其他文档"):
+            document_preview.spreadsheet(tmp_path / "book.xlsx", sheet=None, offset=0)
+    finally:
+        for _ in occupied:
+            document_preview._slots.release()
+
+    # 释放之后照常出内容：证明上面被拒是因为槽满，不是别的
+    assert render_pdf(pdf).startswith(b"%PDF-")
+    assert document_preview.spreadsheet(tmp_path / "book.xlsx", sheet=None, offset=0)["kind"] == "spreadsheet"
