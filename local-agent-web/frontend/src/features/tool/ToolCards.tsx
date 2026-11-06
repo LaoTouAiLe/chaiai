@@ -409,19 +409,25 @@ function DelegationLaneCard({
 function DelegationCard({
   card,
   elapsed,
+  running,
 }: {
   card: Extract<ToolCardView, { kind: 'delegation' }>
   elapsed?: string | null
+  running: boolean
 }) {
   const lines = card.report === '' ? [] : card.report.split('\n')
   const lineWindow = useLineWindow(lines.length)
-  // 只在这张卡还在跑的时候轮询（2026-11-04）：跑完就以快照里的 `children` 为准。
+  // 只在这张卡**还在跑**的时候轮询（2026-11-04）：跑完就以快照里的 `children` 为准。
   // 轮询失败不升级成错误态——它只是增强，拿不到就退化成"进行中…"。
+  //
+  // 两条都要看（2026-11-06）：`pending` 取自工具入参，任务被取消/失败时它不会被清空，只看它
+  // 会让页面每 1.5 秒请求一次 `/api/delegation/live` 直到关掉页面。行的状态才是"结束了没有"。
+  const polling = card.pending.length > 0 && running
   const live = useQuery({
     queryKey: ['delegation-live'],
     queryFn: getDelegationLive,
-    enabled: card.pending.length > 0,
-    refetchInterval: 1500,
+    enabled: polling,
+    refetchInterval: polling ? 1500 : false,
     retry: false,
   })
   const liveLanes = new Map<string, DelegationLiveLaneDto>(
@@ -429,7 +435,7 @@ function DelegationCard({
   )
 
   // 每一路一张卡：在跑的排前面（上面在动、下面有结果），跑完的那一路立刻换成结果卡。
-  const running = card.pending
+  const inFlight = card.pending
     .filter((scope) => !card.children.some((child) => child.scope === scope))
     .map((scope) => {
       const lane = liveLanes.get(scope)
@@ -460,10 +466,10 @@ function DelegationCard({
     steps: (child.tools ?? []).map((tool) => ({ name: tool.name, target: tool.target ?? tool.summary })),
   }))
 
-  const lanes = [...running, ...finished]
+  const lanes = [...inFlight, ...finished]
   const done = finished.filter((lane) => lane.status === 'completed').length
   // 有在跑的才报等待时长：全都跑完还挂一个"已等待 45s"只会让人以为卡住了。
-  const waiting = running.length > 0 && typeof elapsed === 'string' && elapsed !== ''
+  const waiting = inFlight.length > 0 && typeof elapsed === 'string' && elapsed !== ''
 
   return (
     <div className={styles.delegationStack}>
@@ -523,10 +529,16 @@ function GenericCard({ card }: { card: Extract<ToolCardView, { kind: 'generic' }
 export function ToolCard({
   card,
   elapsed,
+  running = false,
 }: {
   card: ToolCardView
   /** 这一行已经跑了多久（只有运行中有值）。委派用它显示"已等待 N 秒"，其余卡片不看它。 */
   elapsed?: string | null
+  /**
+   * 这条调用是否还在跑。委派卡据此决定要不要轮询实时进度——默认 false（不轮询）：
+   * 拿不到"已结束"的信号就不该一直发请求（2026-11-06）。
+   */
+  running?: boolean
 }) {
   switch (card.kind) {
     case 'read':
@@ -542,7 +554,7 @@ export function ToolCard({
     case 'todo':
       return <TodoCard card={card} />
     case 'delegation':
-      return <DelegationCard card={card} elapsed={elapsed} />
+      return <DelegationCard card={card} elapsed={elapsed} running={running} />
     case 'generic':
       return <GenericCard card={card} />
     /* v8 ignore next 2 -- file mutations render through DiffCard in ToolRow */

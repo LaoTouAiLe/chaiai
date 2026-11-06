@@ -1,12 +1,19 @@
 import type { ReactElement, ReactNode } from 'react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { fireEvent, render as baseRender, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render as baseRender, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { FileLinkContext } from '../conversation/fileLinkContext'
 import { toolsScenario } from '../../fixtures/scenarios'
 import type { ToolCardView, ToolRowView } from '../../fixtures/types'
 import { ToolCard } from './ToolCards'
 import { ToolRow } from './ToolRow'
+
+/** 委派卡的实时进度请求：只替换这一条，其余客户端调用照旧走真实现。 */
+const delegationLive = vi.hoisted(() => ({ get: vi.fn() }))
+vi.mock('../../api/client', async original => ({
+  ...await original<typeof import('../../api/client')>(),
+  getDelegationLive: delegationLive.get,
+}))
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
 
@@ -512,5 +519,38 @@ describe('ToolRow', () => {
     expect(screen.queryByText(/机械/)).not.toBeInTheDocument()
     // 事实不能为了去术语被删掉：核对依据本身仍要在（用户据此核对结果）。
     expect(screen.getAllByText(/文件哈希与预期一致/).length).toBeGreaterThan(0)
+  })
+
+  /**
+   * 实时进度只在"还在跑"时轮询（2026-11-06）。
+   *
+   * `pending` 来自工具入参，任务被取消/失败时它不会被清空；只看它，页面会每 1.5 秒请求一次
+   * `/api/delegation/live` 直到用户关页。行的状态才是"结束了没有"。
+   */
+  it('stops asking for the live delegation feed once the row is no longer running', async () => {
+    const live = vi.fn().mockResolvedValue({ lanes: [] })
+    delegationLive.get.mockImplementation(live)
+    const card: ToolCardView = {
+      kind: 'delegation', children: [], pending: ['src/local_agent/tools'], report: '', truncated: false,
+    }
+    const row: ToolRowView = { ...rowOf(), name: 'delegate_research', expanded: true, card }
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const wrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    )
+
+    vi.useFakeTimers()
+    try {
+      const view = baseRender(<ToolRow tool={{ ...row, status: 'running' }} />, { wrapper })
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      expect(live).toHaveBeenCalledTimes(1)
+
+      // 取消/失败后 pending 仍在，但已经不该再问服务端了。
+      view.rerender(<ToolRow tool={{ ...row, status: 'failed' }} />)
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000) })
+      expect(live).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
