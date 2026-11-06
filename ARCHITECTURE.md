@@ -4266,3 +4266,34 @@ Node 同步/异步子进程可用，未授权磁盘写入仍拒绝。实现不�
   网关不启动时行为与本节不存在时**逐字节一致**；网关停止不影响正在运行的任务；用直连 `<web.port>` 加非法
   `Host` 仍得到 403（反证豁免没有被偷偷加）；通道故障在状态页如实呈现；`mobile.enabled=false` 时不起进程、
   不占端口、不写任何文件。
+
+---
+
+## 25. 数据根搬迁（2026-11-06 用户确认）
+
+设置页换数据目录时，由系统把现有数据整体搬过去，不再要求用户手工复制。
+
+**契约**
+
+- `POST /api/storage/migrate`，体 `{target}` → `StorageMigrationView`。目标不可用（不可写、与源互相包含、
+  空间不足、已有同名数据）返回 `422`；已有搬迁在跑返回 `409`。
+- `GET /api/storage/migration` → `StorageMigrationView`。`stage` 状态机：
+  `idle → copying → verifying → switching → cleaning → done`；失败停在 `failed` 并带 `error`。
+- 迁移期间写入口 `POST /api/sessions/{session_id}/messages` 返回 `409`；**不等待**在跑的那一轮
+  （等待时长不可控，而用户在设置页点完就在等结果）。
+- 完成后指针文件（`app_paths.data_root_pointer`）指向新位置，**必须重启**才生效；接口恒返回
+  `restart_required=true`。
+
+**四条硬约束**（每条对应一种会丢数据的做法）
+
+1. SQLite 一律用 `Connection.backup()` 复制，**不能** copy 文件：`-wal` 里可能有尚未 checkpoint 的事务。
+2. 目标与源不得互相包含：`D:/data` 搬到 `D:/data/new` 时，后面的"清旧"会把自己刚搬过去的内容删掉。
+3. 清旧只删**清单内的项**，且走系统回收站（`local_agent.trash.move_to_trash`）；绝不 `rmtree` 整个旧根
+   ——旧根里可能有用户自己放的文件。
+4. 任何一步失败都要零残留：清掉目标侧本模块建的项、指针不动、旧数据保留。
+
+**不搬**：`workspace.root`、`skills.user_dirs`、`web.static_dir`（用户内容，按配置文件目录解析），
+以及配置里指到数据根之外的记忆/设置库（那是用户自己指定的位置，列在 `external` 里如实告知）。
+
+**验收**：WAL 未 checkpoint 的库搬完内容不丢；目标非空/嵌套/空间不足一律拒绝且不动任何东西；
+中途失败后指针仍是旧值、旧数据仍在、目标无残留；旧数据删不掉时迁移仍算成功并给出提醒。

@@ -240,7 +240,7 @@ Keys are write-only: the API only ever reports "configured / not configured".
 | Mobile access state | `mobile/` in the same directory: `pairing.json` (device grants, hashes only) and `certs/` (self-signed LAN certificate) |
 
 The data root can be moved to any absolute path via `data_root` (config.yaml) or `CHAIAI_HOME`.
-Old data is not migrated automatically; the startup banner prints both locations.
+Settings can move the entire data directory for you (copy → verify → repoint → old data goes to the recycle bin); restart afterwards. If you only set `data_root` by hand, old data stays put and the startup banner prints both locations.
 **Uninstalling does not delete data** — unless you explicitly tick "also delete the data directory".
 Upgrading means running the new installer over the old one; the data directory is untouched.
 
